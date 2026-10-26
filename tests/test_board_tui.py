@@ -1,0 +1,247 @@
+"""T8 board_tui 模型层契约：build_rows 渲染模型＋handle_key 键位（纯函数，F10/F5）。
+
+curses 壳薄不可测，smoke 走 `--selftest` 一帧渲染（stub agorad 真进程）。
+"""
+import http.server
+import json
+import os
+import pty
+import select
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+from board_tui import Action, Row, build_rows, handle_key, rel_time
+
+ROOT = Path(__file__).resolve().parent.parent
+NOW = 1000.0
+
+
+def trow(state="running", disp="main", worker="w1", title="目标", last_seen=940.0):
+    return {"title": title, "state": state, "dispatcher_sid": disp,
+            "worker_sid": worker, "created": 0.0, "last_seen": last_seen,
+            "chain_depth": 1, "fail_streak": 0}
+
+
+def snap(**tasks):
+    return {"tasks": tasks, "chain": list(tasks)}
+
+
+def model(rows=(), sel=0, **kw):
+    m = {"rows": list(rows), "sel": sel, "view": "board", "confirm": None,
+         "input": None, "buf": "", "filter": ""}
+    m.update(kw)
+    return m
+
+
+def task_rows(rows):
+    return [r for r in rows if r.kind == "task"]
+
+
+class TestBuildRows(unittest.TestCase):
+    def test_chain_tree_indent(self):  # Req: F10
+        s = snap(t1=trow(disp="main", worker="w1"),
+                 t2=trow(disp="w1", worker="w2"),
+                 t3=trow(disp="w2", worker="w3"))
+        rows = build_rows(s, [], now=NOW)
+        self.assertEqual([(r.tid, r.depth) for r in task_rows(rows)],
+                         [("t1", 0), ("t2", 1), ("t3", 2)])
+
+    def test_five_bucket_rows(self):  # Req: F10
+        s = snap(t1=trow("merged"), t2=trow("closed"), t3=trow("verify_failed"),
+                 t4=trow("reopened"), t5=trow("dispatched"), t6=trow("done"),
+                 t7=trow("blocked"), t8=trow("cancelled"), t9=trow("todo"))
+        buckets = [r for r in build_rows(s, [], now=NOW) if r.kind == "bucket"]
+        self.assertEqual([r.title for r in buckets],
+                         ["已合并 2", "在飞 5", "失败 0", "阻塞 1", "已取消 1"])
+
+    def test_color_domain_verify_failed_reopened_in_flight(self):  # Req: F10
+        s = snap(t1=trow("verify_failed"), t2=trow("reopened"), t3=trow("running"),
+                 t4=trow("merged"), t5=trow("blocked"), t6=trow("cancelled"))
+        dom = {r.tid: r.domain for r in task_rows(build_rows(s, [], now=NOW))}
+        self.assertEqual(dom, {"t1": "fly", "t2": "fly", "t3": "fly",
+                               "t4": "merged", "t5": "blocked", "t6": "gone"})
+
+    def test_escalate_events_four_kinds_highlight(self):  # Req: F5
+        ev = [{"event": "escalate", "task": "t1", "kind": "quality"},
+              {"event": "escalate", "task": "t1", "kind": "dispatcher-dead"},
+              {"event": "dispatched", "task": "t1"},          # 非升级不亮
+              {"event": "escalate", "task": "t2", "kind": "no-such-kind"}]
+        rows = build_rows(snap(t1=trow(), t2=trow()), ev, now=NOW)
+        events = [r for r in rows if r.kind == "event"]
+        self.assertEqual([r.note for r in events], ["quality", "dispatcher-dead"])
+        self.assertTrue(all(r.domain == "warn" for r in events))
+        self.assertEqual(events[0].tid, "t1")  # 紧随其任务行
+
+    def test_last_seen_relative(self):  # Req: F5
+        self.assertEqual(rel_time(None, NOW), "-")
+        self.assertEqual(rel_time(NOW - 5, NOW), "5s")
+        self.assertEqual(rel_time(NOW - 90, NOW), "1m")
+        self.assertEqual(rel_time(NOW - 7200, NOW), "2h")
+        self.assertEqual(rel_time(NOW - 172800, NOW), "2d")
+        s = snap(t1=trow(last_seen=940.0))
+        self.assertEqual(task_rows(build_rows(s, [], now=NOW))[0].last_seen, "1m")
+
+    def test_filter_substring(self):  # Req: F10
+        s = snap(t1=trow(title="登录页"), t2=trow(title="支付网关", state="blocked"),
+                 t3=trow(title="账务"))
+        rows = build_rows(s, [], filt="支付", now=NOW)
+        self.assertEqual([r.tid for r in task_rows(rows)], ["t2"])
+        self.assertTrue(any(r.kind == "bucket" for r in rows))  # 桶行恒在
+        rows = build_rows(s, [], filt="t3", now=NOW)
+        self.assertEqual([r.tid for r in task_rows(rows)], ["t3"])
+
+
+class TestHandleKey(unittest.TestCase):
+    ROWS = [Row("bucket", title="在飞 1", domain="bucket"),
+            Row("task", "t1", 0, "running", "目标", "ses-9", "1m", "", "fly")]
+
+    def test_motion_jk_gG_clamped(self):  # Req: F10
+        m = model(self.ROWS, sel=0)
+        self.assertEqual(handle_key(m, "j").op, "move")
+        self.assertEqual(m["sel"], 1)
+        handle_key(m, "j")
+        self.assertEqual(m["sel"], 1)  # 底钳制
+        handle_key(m, "g")
+        self.assertEqual(m["sel"], 0)
+        self.assertEqual(handle_key(m, "G").op, "move")
+        self.assertEqual(m["sel"], 1)
+        handle_key(m, "k")
+        handle_key(m, "k")
+        self.assertEqual(m["sel"], 0)  # 顶钳制
+
+    def test_enter_l_detail_h_back(self):  # Req: F10
+        m = model(self.ROWS, sel=1)
+        a = handle_key(m, "\n")
+        self.assertEqual((a.op, a.task), ("detail", "t1"))
+        self.assertEqual(m["view"], "detail")
+        a = handle_key(m, "h")
+        self.assertEqual((a.op, m["view"]), ("back", "board"))
+        m = model(self.ROWS, sel=1)
+        self.assertEqual(handle_key(m, "l").op, "detail")
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "\n").op, "noop")
+
+    def test_L_tail_by_worker_sid(self):  # Req: F10
+        m = model(self.ROWS, sel=1)
+        a = handle_key(m, "L")
+        self.assertEqual((a.op, a.arg), ("tail", "ses-9"))
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "L").op, "noop")
+
+    def test_d_doctor_r_refresh_q_quit(self):  # Req: F10
+        m = model(self.ROWS)
+        self.assertEqual((handle_key(m, "d").op, m["view"]), ("doctor", "doctor"))
+        self.assertEqual(handle_key(m, "r").op, "refresh")
+        self.assertEqual(handle_key(m, "q").op, "quit")
+
+    def test_x_needs_confirm_then_y_cancels(self):  # Req: F11/F10
+        m = model(self.ROWS, sel=1)
+        a = handle_key(m, "x")
+        self.assertEqual(a.op, "confirm")          # 第一击不动手，只出确认行
+        self.assertEqual(m["confirm"], "t1")
+        a = handle_key(m, "y")
+        self.assertEqual((a.op, a.task), ("cancel", "t1"))
+        self.assertIsNone(m["confirm"])
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "x").op, "noop")
+
+    def test_confirm_n_aborts_and_stray_y_ignored(self):  # Req: F11/F10
+        m = model(self.ROWS, sel=1)
+        handle_key(m, "x")
+        self.assertEqual(handle_key(m, "n").op, "noop")
+        self.assertIsNone(m["confirm"])
+        self.assertEqual(handle_key(model(self.ROWS), "y").op, "noop")  # 无确认不动作
+
+    def test_slash_input_mode_enter_applies_esc_aborts(self):  # Req: F10
+        m = model(self.ROWS)
+        handle_key(m, "/")
+        self.assertIsNotNone(m["input"])
+        handle_key(m, "支")
+        self.assertEqual(handle_key(m, "j").op, "noop")  # 输入态下 j 是字符不是移动
+        self.assertEqual(m["buf"], "支j")
+        a = handle_key(m, "\r")
+        self.assertEqual(a.op, "apply")
+        self.assertEqual((m["filter"], m["input"]), ("支j", None))
+        m = model(self.ROWS)
+        handle_key(m, "/")
+        handle_key(m, "x")
+        self.assertEqual(handle_key(m, "\x1b").op, "noop")
+        self.assertEqual((m["filter"], m["input"]), ("", None))
+        m = model(self.ROWS)
+        handle_key(m, "/")
+        handle_key(m, "a")
+        handle_key(m, "b")
+        handle_key(m, "KEY_BACKSPACE")
+        self.assertEqual(m["buf"], "a")
+
+    def test_unknown_key_ignored(self):  # Req: F10
+        m = model(self.ROWS, sel=1)
+        self.assertEqual(handle_key(m, "z").op, "noop")
+        self.assertEqual(m["sel"], 1)
+
+
+class _StubBoard(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if "task" in body:
+            out = {"task": trow(), "events": [{"ts": NOW, "actor": "health",
+                                               "event": "escalate",
+                                               "task": body["task"],
+                                               "kind": "quality"}],
+                   "done_body": None}
+        else:
+            out = {"buckets": {}, "chain": ["t1"]}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class TestSmoke(unittest.TestCase):
+    def test_selftest_one_frame_against_stub_agorad(self):  # Req: F10/F5
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _StubBoard)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        home = Path(tempfile.mkdtemp())
+        mfd, sfd = pty.openpty()  # curses 需真 tty：pty 哑端
+        try:
+            (home / ".agora").mkdir(parents=True)
+            (home / ".agora" / "root.token").write_text("tok-smoke\n")
+            (home / ".agora" / "service.json").write_text(
+                json.dumps({"port": srv.server_address[1]}))
+            env = dict(os.environ, AGORA_HOME=str(home), TERM="xterm",
+                       AGORA_BOARD_INTERVAL="1")
+            p = subprocess.Popen(
+                [sys.executable, str(ROOT / "board_tui.py"), "--selftest"],
+                stdin=sfd, stdout=sfd, stderr=subprocess.PIPE, env=env,
+                cwd=str(ROOT))
+            _, errs = p.communicate(timeout=30)
+            out = b""
+            while select.select([mfd], [], [], 1.0)[0]:
+                try:
+                    chunk = os.read(mfd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            self.assertEqual(p.returncode, 0, errs.decode())
+            self.assertIn(b"selftest ok", out)
+            self.assertIn(b"rows=7", out)  # 5 桶行＋任务行＋升级事件行
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            os.close(mfd)
+            os.close(sfd)
+            shutil.rmtree(home, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
