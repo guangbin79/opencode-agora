@@ -69,6 +69,21 @@ class Store:
             out.append(fm)
         return out
 
+    def read_events(self, tid=None) -> list[dict]:
+        """events.jsonl 全量（tid 给定则按 task 过滤）按行序；断尾行丢弃同 load_state。"""
+        out = []
+        if not self._events.exists():
+            return out
+        with self._events.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if tid is None or ev.get("task") == tid:
+                    out.append(ev)
+        return out
+
     def write_ephemeral(self, name: str, data: dict) -> None:
         path = self.home / name
         path.parent.mkdir(parents=True, exist_ok=True)

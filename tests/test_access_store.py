@@ -69,6 +69,13 @@ class TestAccessStore(unittest.TestCase):
         self.st.write_ephemeral("tokens", {"tk": ["s1", "worker"]})
         self.assertEqual(self.st.read_ephemeral("tokens"), {"tk": ["s1", "worker"]})
 
+    def test_read_events_all_and_by_task(self):  # Req: F8
+        self.st.append_event({"e": 1, "task": "t1"})
+        self.st.append_event({"e": 2, "task": "t2"})
+        self.tmp.joinpath("events.jsonl").open("a").write('{"torn')
+        self.assertEqual([e["e"] for e in self.st.read_events()], [1, 2])
+        self.assertEqual([e["e"] for e in self.st.read_events("t1")], [1])
+
 
 if __name__ == "__main__":
     unittest.main()
