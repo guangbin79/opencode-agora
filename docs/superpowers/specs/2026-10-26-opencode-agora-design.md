@@ -1,6 +1,6 @@
 # opencode-agora 设计——opencode v2 插件 + 常驻服务
 
-- 日期：2026-10-26　状态：待用户批准（需求见 `docs/reqs/opencode-agora.md`）
+- 日期：2026-10-26　状态：已批准（用户 2026-10-26；需求见 `docs/reqs/opencode-agora.md`）
 - 取代：v1.x「git 事件账本 + bash 机械层 + cron/poll 自愈」架构（v1.40 为旧架构终版）
 
 ## 1. 意图与动机
