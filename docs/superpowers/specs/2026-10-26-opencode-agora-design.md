@@ -22,7 +22,7 @@ builder 裁决（待用户否决）：
 - B3 强制豁免面沿用现 enforcer 语义：非 git、`/tmp/opencode/`、显式 OFF（仅人经主会话可开、开/关写审计）；opencode-agora 自身仓不豁免
 - B4 客户端↔服务：`127.0.0.1` HTTP JSON（MCP 用 urllib、插件用 fetch）；`/view` 提供只读结果报告页（承接 agora_http.py 职责）
 - B5 服务生命周期：客户端惰性拉起（setsid+单实例锁+就绪探测），不依赖 systemd/cron
-- B6 隔离环境＝worktree 铁律形态：`../<REPO>__wt-task-<id>__<MMDDHHMM>` 主仓同级（每任务仓一个）；跨仓按依赖序拆单仓任务（甲案）；建/清/并归服务——回收＝merged/cancelled 即删（`worktree remove --force`＋`branch -d` 级联），blocked 保留，孤儿目录永不自动删（doctor 报告）；建环境含评审钩装配（hooks/插件），done 前置查 `.review-loop` 锚
+- B6 隔离环境＝worktree 铁律逐字适用（全局 AGENTS.md）：`../<REPO>__wt-task-<任务id>__<MMDDHHMM>` 主仓同级＋并发 4 位随机后缀、线性历史（rebase＋ff-only）、级联清理；跨仓按依赖序拆单仓任务（甲案）；建/清/并归服务——回收＝merged/cancelled 即删，blocked 保留，孤儿目录永不自动删（doctor 报告）；建环境含评审钩装配（hooks/插件），done 前置查 `.review-loop` 锚
 
 ## 3. 架构总览
 
@@ -35,7 +35,7 @@ opencode v2 共享服务（agent 运行时；会话持久化、可随时重启�
        状态权威 · 派发执行 · 消息路由 · 自上而下健康检查
        · verify 门与自动合并 · 恢复协调 · 审计 JSONL · /view
 数据：$AGORA_HOME（默认 ~/plaza）
- ├── state/tasks.json        权威状态（原子写）
+ ├── state/tasks.jsonl        权威状态（append 全量快照行，末行即权威）
  ├── state/messages/<id>.md  消息库（每条一文件）
  ├── events.jsonl            审计（只追加，只写不解析）
  ├── wiki/…                  知识层（git markdown，沿用 v1 格式）
@@ -45,13 +45,13 @@ opencode v2 共享服务（agent 运行时；会话持久化、可随时重启�
 依赖方向：插件/MCP → agorad → opencode API。agorad 挂：在跑 worker 代码在环境里不丢，工具调用排队重放；opencode 挂：会话自持久化，agorad 探测并协调恢复。
 
 **实现三层**：①插件层（TS，宿主进程内：拦截/注入接收/惰性拉起——闸与注入必须住在宿主内）②agorad 服务层（全部权威逻辑）③MCP 壳层（11 工具薄映射，零逻辑）。
-**agorad 内部＝域核心＋三访问层**：域核心（`state/task/msg/gate/health/recover/audit/report`，纯逻辑零 I/O；模块间不互调，经 `state` 串行；假 oc/store/gitx 注入即可纯内存单测）＋北向 `oc`（opencode API 唯一封装）＋南向 `store`（账本唯一磁盘接触点：atomic_write/append_only/load/flock 四原语，stdlib 文件 JSON；升级触发器＝千级任务/复杂查询/第二写者进程→sqlite3）＋`gitx`（worktree 建/清、ff-only 合并、回滚——共享资源，失败域独立于 store）＋`httpd`（入向 JSON 口，域核心的皮）。
+**agorad 内部＝域核心＋三访问层**：域核心（`state/task/msg/gate/health/recover/audit/report`，纯逻辑零 I/O；模块间不互调，经 `state` 串行；假 oc/store/gitx 注入即可纯内存单测）＋北向 `oc`（opencode API 唯一封装；启动/健康探测取 oc 服务接口版本记入 service.json，不匹配上报）＋南向 `store`（账本唯一磁盘接触点；**账本文本只追加、永不改写**：append_state（全量快照行）/append_only（events）/load（末行快照＋断尾容错）/write_ephemeral（service.json 等易失件）＋flock；stdlib 文件 JSON；升级触发器＝千级任务/复杂查询/第二写者进程→sqlite3）＋`gitx`（worktree 建/清、合并、回滚——共享资源，失败域独立于 store；**严格遵守全局 AGENTS.md worktree 铁律**：同级父目录签出、命名 `../<REPO>__wt-<TYPE>-<BRIEF>__<MMDDHHMM>`＋并发 4 位随机后缀、线性历史（rebase＋ff-only，禁 merge commit）、级联清理 `worktree remove --force`＋`branch -d`）＋`httpd`（入向 JSON 口，域核心的皮）。
 
 ## 4. agorad 规格
 
 ### 4.1 状态模型（F2）
-tasks.json：`{tasks: {<id>: {title, project_dir, env_dir, verify, state, dispatcher_sid?, worker_sid?, credential, chain_depth, fail_streak, created, updated}}}`。
-状态机（内存直接迁移，无推导）：`todo → dispatched → running → done → merged → closed`；分支 `blocked / cancelled / verify_failed / reopened`；verify_failed（附输出尾部）/reopened→通知 worker 续修、再 done 重走 verify 门，两者计同任务连败、连续 3 次→blocked。fail_streak：verify_failed/集成 verify 败 reopened 时 +1、verify 绿或对同任务再 dispatch 清零、≥3→blocked（持久化于 tasks.json，kill -9 不丢）。blocked 仅经 cancel（→cancelled）或对同任务再 dispatch（→dispatched，签新凭据、旧凭据即废）离开。merged→closed：环境回收完成时服务置位。board 与结果报告 = 状态视图函数。单写者使配额/TOCTOU 退化为内存计数。
+tasks.jsonl 快照行任务字段：`{title, project_dir, env_dir, verify{cmd,state,registered_by,registered_at}, state, dispatcher_sid?, worker_sid?, credential, chain_depth, fail_streak, last_seen, created, updated}`。
+状态机（内存直接迁移，无推导）：`todo → dispatched → running → done → merged → closed`；分支 `blocked / cancelled / verify_failed / reopened`；verify_failed（附输出尾部）/reopened→通知 worker 续修、再 done 重走 verify 门，两者计同任务连败、连续 3 次→blocked。fail_streak：verify_failed/集成 verify 败 reopened 时 +1、verify 绿或对同任务再 dispatch 清零、≥3→blocked（随快照行持久化，kill -9 不丢）。blocked 仅经 cancel（→cancelled）或对同任务再 dispatch（→dispatched，签新凭据、旧凭据即废）离开。merged→closed：环境回收完成时服务置位。board 与结果报告 = 状态视图函数。单写者使配额/TOCTOU 退化为内存计数。
 
 ### 4.2 派发（F3）
 task_create：建任务页（wiki/tasks/<id>.md，服务生成 frontmatter）→ 建环境（B6）→ 签发凭据。verify 创建时可空：worker 勘察后回填（agora_post），派发方校验（可执行＋需求覆盖）后经 task_update 登记；登记即锁定——修改权属派发方，worker 修改拒绝并审计；verify 未登记 done 拒收。
@@ -74,11 +74,12 @@ done：worker post(done, commit) → 服务在 env_dir 真跑 verify → 败：v
 events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` 页 + `board` 工具给出已合并/在飞/失败/阻塞/已取消汇总与明细（verify_failed/reopened 归在飞），按 dispatcher 可展开链级视图。
 
 ### 4.8 数据面格式与并发
-- 布局 `$AGORA_HOME`：`.agora/service.json`（{pid,port,started,version}；127.0.0.1 单机单人无 token）＋`state/tasks.json`＋`state/mail_read.json`（{sid: last_read_ts}）＋`state/messages/<msg-id>.md`（不可变；frontmatter：id/ts/task/kind=process|milestone/from/to）＋`events.jsonl`＋`wiki/`（git 仓，知识层）。
-- tasks.json：`{version:1, tasks:{<id>:{title,goal,project_dir,env_dir,verify:{cmd,state:pending|registered,registered_by,registered_at},state,dispatcher_sid?,worker_sid?,credential,chain_depth,fail_streak,last_seen,created,updated}}}`——version 为 schema 演进唯一伏笔；last_seen＝隐式心跳；全量原子写（数据小，不搞增量）。
-- 双源规则：wiki 任务页＝tasks.json 渲染视图（服务独占刷新），权威只在 tasks.json。
-- 并发三防线：flock 单实例（进程间无并发）；httpd 单线程串行＋长操作（verify/合并）转后台线程、状态迁移全过 `state.transition()` 一把锁（进程内）；原子写使文件读者永见完整快照（运行期无人读文件——视图出自内存，文件仅启动重载读一次）。
-- 账本不 git 化：events.jsonl 只追加自身即历史，git 化＝高频写放大＋崩溃推理变难（v1 账本推导已退役）；wiki/ 保持 git（人写低频内容）。
+- 布局 `$AGORA_HOME`：`.agora/service.json`（{pid,port,started,version,oc_version}；127.0.0.1 单机单人无 token；易失件，非账本）＋`state/tasks.jsonl`＋`state/messages/<msg-id>.md`（不可变；frontmatter：id/ts/task/kind=process|milestone/from/to）＋`events.jsonl`＋`wiki/`（git 仓，知识层）。
+- **账本文本只追加、永不改写**：tasks.jsonl 每次状态迁移 append 一行全量快照（含 mail_read 游标；数据小，写放大无感）；启动 load 取**末行完整快照＝权威**（非事件折叠，不触"禁重放推导"反需求；断尾回退上一行）；events.jsonl 只追加；messages 写完即不可变。
+- tasks 快照行：`{version:1, tasks:{<id>:{title,goal,project_dir,env_dir,verify:{cmd,state:pending|registered,registered_by,registered_at},state,dispatcher_sid?,worker_sid?,credential,chain_depth,fail_streak,last_seen,created,updated}}, mail_read:{<sid>:<ts>}}`——version 为 schema 演进唯一伏笔；last_seen＝隐式心跳。
+- 双源规则：wiki 任务页＝tasks 快照渲染视图（服务独占刷新），权威只在 tasks.jsonl；wiki_write 拒写 `wiki/tasks/` 前缀。
+- 并发三防线：flock 单实例（进程间无并发）；httpd 单线程串行＋长操作（verify/合并）转后台线程、状态迁移全过 `state.transition()` 一把锁（进程内）；append＋逐行 fsync＋断尾容错（读者永见完整行；运行期无人读文件——视图出自内存，仅启动重载读末行）。
+- 账本不 git 化：append 日志自身即历史，git 化＝写放大＋崩溃推理变难（v1 账本推导已退役）；wiki/ 保持 git（人写低频内容）。
 - `$AGORA_HOME` 默认 ~/plaza 保留（语义连贯、改名零收益）；改名通道＝环境变量。
 
 ## 5. opencode 插件规格（TS，plain-object 导出——Plugin.define 包裹形态静默失效，禁用）
