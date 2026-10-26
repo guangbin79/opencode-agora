@@ -62,9 +62,9 @@ out="$(AGORA_HOME="$1/nonexist-home" XDG_STATE_HOME="$d/state" timeout 10 python
 rm -rf "$d"
 [ "$rc" = 2 ] && echo "$out" | grep -q "AGORA_OC_URL"' _ "$A1"
 
-chk "冒烟 enforce off 审计在账 (Req: F1)" grep -q '"event": "enforce_off"' "$A1/events.jsonl"
-chk "冒烟 enforce on 审计在账 (Req: F1)"  grep -q '"event": "enforce_on"'  "$A1/events.jsonl"
-# doctor 200 由首装退出 0 蕴含（install 冒烟不过即非零）
+chk "冒烟不开 enforce OFF 窗（无 enforce_off 审计——复用实例安全，Req: F1）" bash -c '
+[[ ! -e "$1/events.jsonl" ]] || ! grep -q "\"event\": \"enforce_off\"" "$1/events.jsonl"' _ "$A1"
+# /health 只读冒烟可达由首装退出 0 蕴含（冒烟不过即非零）
 
 TOK1="$(cat "$A1/.agora/root.token")"
 

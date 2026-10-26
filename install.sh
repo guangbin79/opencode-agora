@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # agora 三部件装配＋root 牌接管（F1，T4）。幂等：连跑两遍落盘结果不变。
 # 流程：依赖检查→骨架→MCP 注册（合并不覆盖）→插件复制→root 牌接管→持牌冒烟→停。
+# 更新路径：git pull 后重跑本脚本——插件（~/.config/opencode/plugins/agora）与 agorad
+# 载荷（$AGORA_HOME/.agora/agorad）是拷贝不是引用，拉新代码不重跑不生效。
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
@@ -117,24 +119,18 @@ else
 fi
 [ -s "$ROOT_TOKEN" ] || fail "root.token 缺失（运行中实例无牌可接管）"
 
-# ---- 7) 冒烟：持 root 牌 doctor 可达＋enforce off→on ----
-# （resetLift 语义不在此验：插件进程内函数，插件测试已覆盖）
+# ---- 7) 冒烟：持 root 牌 /health 只读可达（不碰 enforce——复用既有实例的更新场景
+#      若做 off→on 写冒烟，会在真实例上开毫秒级 enforce OFF 窗；enforce 面由插件/e2e 覆盖）----
 python3 - "$SERVICE_JSON" "$ROOT_TOKEN" <<'PY'
 import json, sys, urllib.request
 port = json.load(open(sys.argv[1]))["port"]
 token = open(sys.argv[2]).read().strip()
-def call(path, obj=None):
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}",
-        data=None if obj is None else json.dumps(obj).encode(),
-        headers={"X-Agora-Token": token, "Content-Type": "application/json"},
-        method="GET" if obj is None else "POST")
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read() or b"{}")
-d = call("/health")  # doctor 同级查询面（may 矩阵）
-assert d.get("ok"), f"doctor 冒烟失败: {d}"
-assert call("/enforce", {"on": False})["enforce_on"] is False, "enforce off 失败"
-assert call("/enforce", {"on": True})["enforce_on"] is True, "enforce on 失败"
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}/health",
+    headers={"X-Agora-Token": token})
+with urllib.request.urlopen(req, timeout=10) as r:
+    d = json.loads(r.read() or b"{}")
+assert d.get("ok"), f"冒烟失败: {d}"
 PY
 
 # ---- 8) 停（只停本脚本拉起的实例）----
@@ -145,4 +141,5 @@ if [ -n "$AD_PID" ]; then
 fi
 
 echo "install: 完成（$AGORA_HOME）"
+echo "install: 更新＝git pull 后重跑本脚本（插件与 agorad 载荷是拷贝不是引用，不重跑不生效）"
 echo "install: lift 失败可重启会话或等 doctor；工具拒因携 resetLift 恢复指引"

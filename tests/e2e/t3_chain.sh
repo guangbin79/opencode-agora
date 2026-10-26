@@ -433,7 +433,7 @@ try:  # harness 自检：免费网关回退已根治（providerID 落在配置�
     _prov = (json.loads(_row[0]).get("model") or {}).get("providerID") if _row else None
 except Exception:
     _prov = None
-check(_prov == "zai-coding-plan", f"沙箱模型 provider=zai（实际 {_prov}）")
+check(_prov == PROV, f"沙箱模型 provider=配置值（实际 {_prov}）")
 
 agora("/post", {"task": tid1, "kind": "verify", "body": "test -f feature.md"}, wtok1)
 mail = agora("/check_mail")[1]["messages"]

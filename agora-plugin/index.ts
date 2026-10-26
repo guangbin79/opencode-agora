@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getCredential } from "./cred";
 import { onInject } from "./inject";
-import { ensureOnce, LIFT_RECOVER, type LiftResult } from "./lift";
+import { ensureOnce, resetLift, LIFT_RECOVER, type LiftResult } from "./lift";
 import { agoraHome, enforceRelevant, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
@@ -38,13 +38,23 @@ export function setEnforce(on: boolean | null): void {
   enforceOverride = on; // null＝清除显式旗，恢复服务持旗拉取
 }
 
+/** root 牌接管文件（F1 唯一落盘点，0600）；缺失/损坏返回 null（调用方按无牌走安全向）。 */
+function readRootToken(): string | null {
+  try {
+    return readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 /** 服务持旗拉取（设计 §5.1 核验面，lift/doctor 接线）：lift 定端口→doctor 查询面读
  * /health.enforce_on（root 牌接管文件授权）；服务不可达/异常一律 true＝默认拒（安全向）。 */
 async function pullEnforce(): Promise<boolean> {
   const lift = await ensureOnce();
   if (!lift.ok) return true;
   try {
-    const tok = readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim();
+    const tok = readRootToken();
+    if (tok === null) return true;
     const r = await fetch(`http://127.0.0.1:${lift.port}/health`, {
       headers: { "X-Agora-Token": tok },
       signal: AbortSignal.timeout(2000),
@@ -65,9 +75,16 @@ export default {
     ctx.tool.hook("execute.before", async (event) => {
       // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引。
       // 旗按需拉取（T6 评审）：预过滤先行——非引导类工具（MCP/grep 等）零开销直过。
+      const isAgora = /^agora_/.test(event.tool);
       const on = enforceOverride ?? (enforceRelevant(event.tool) ? await pullEnforce() : false);
       let lift: LiftResult | null = null;
       if (on) lift = await ensureOnce();
+      if (isAgora) {
+        // 冷启动（设计 §5.4）：首个 agora_* 调用即拉起 agorad；败态即复位 memo——
+        // 下轮 edit 重探自愈（免重启恢复，兑现 lift.ts LIFT_RECOVER 承诺）。
+        const l = lift ?? (await ensureOnce());
+        if (!l.ok) resetLift();
+      }
       const input = event.input ?? {};
       const target =
         (typeof input.filePath === "string" && input.filePath) ||
@@ -80,8 +97,12 @@ export default {
         // 会话读取失败按服务 cwd 兜底：envDir 含括判定走 deny 安全向
       }
       const cred = getCredential(event.sessionID);
-      // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token
-      if (cred?.token && /^agora_/.test(event.tool)) input._token = cred.token;
+      // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token——
+      // worker credential 消息优先，未命中回落 root 牌接管文件（主会话经 MCP 调任务面）。
+      if (isAgora) {
+        const token = cred?.token ?? readRootToken();
+        if (token) input._token = token;
+      }
       const hint = shouldBlock(event.tool, target, cwd, cred, on);
       if (hint) {
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);

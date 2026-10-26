@@ -269,8 +269,10 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     resetLift();
     try {
       await hooks["tool.execute.before"]({ tool: "grep", sessionID: "s-hot", input: { pattern: "x" } });
+      expect(hits).toBe(0); // 预过滤：grep 等非 agora 非引导类零 HTTP 直过
+      const before = hits;
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-hot", input: {} });
-      expect(hits).toBe(0); // 预过滤：非引导类工具不拉旗不探活（此前每调用收一次费）
+      expect(hits).toBe(before + 1); // agora_* 冷启动探活（终审修复：首个调用即拉起，设计 §5.4）——探活 1 次不拉旗
       const cold0 = performance.now();
       await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-hot", input: { filePath: join(plain, "x.md") } });
       const cold = performance.now() - cold0;
@@ -315,6 +317,64 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       ).rejects.toThrow(/resetLift/);
     } finally {
       setEnforce(false);
+      resetLift();
+    }
+  });
+
+  test("附牌回落：无 worker cred 的主会话调 agora_* → _token＝root.token；worker cred 命中优先；两路皆缺不附", async () => {
+    // Req: F1
+    const hooks = wire();
+    setEnforce(false); // 本例只验附牌面，不涉判定链
+    writeFileSync(join(home, ".agora", "root.token"), "tok-rootfile\n");
+    try {
+      const main: Record<string, unknown> = { task: "t-m" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-main", input: main });
+      expect(main._token).toBe("tok-rootfile"); // getCredential 未命中→回落 root 牌接管文件
+      cacheCredential({ token: "tok-worker", sid: "s-prio", role: "worker", envDir: "" });
+      const w: Record<string, unknown> = { task: "t-w" };
+      await hooks["tool.execute.before"]({ tool: "agora_task_create", sessionID: "s-prio", input: w });
+      expect(w._token).toBe("tok-worker"); // worker credential 消息优先级不变
+      rmSync(join(home, ".agora", "root.token"));
+      const none: Record<string, unknown> = { task: "t-n" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-nocred", input: none });
+      expect(none._token).toBeUndefined(); // 两路皆缺→不附牌（MCP 壳 -32001 安全向不变）
+    } finally {
+      rmSync(join(home, ".agora", "root.token"), { force: true });
+    }
+  });
+
+  test("lift 败态 memo 自愈：agora_* 调用复位 memo，下轮 edit 重探走活服务（免重启恢复）", async () => {
+    // Req: F4
+    const hooks = wire();
+    setEnforce(null); // 服务持旗拉取形态
+    const savedUrl = process.env.AGORA_OC_URL;
+    delete process.env.AGORA_OC_URL; // 无发现源→ensureService 快速拒＝败态 memo
+    resetLift();
+    try {
+      await expect(
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-heal", input: { filePath: join(repo, "a.md") } }),
+      ).rejects.toThrow(/resetLift/); // 先证败态：拒因携 memo 指引
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-heal", input: {} }); // agora 调用复位 memo
+      // 服务复活：stub /health＋service.json/发现源指向它
+      const srv = Bun.serve({
+        port: 0,
+        fetch(req) {
+          if (req.headers.get("x-agora-token") !== "tok-root") return new Response("{}", { status: 401 });
+          return Response.json({ ok: true, enforce_on: true });
+        },
+      });
+      writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+      writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+      process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`;
+      const err = await hooks["tool.execute.before"]({
+        tool: "edit", sessionID: "s-heal", input: { filePath: join(repo, "a.md") },
+      }).then(() => null, (e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("派发"); // enforce on 经活服务拉得（重探成功）
+      expect((err as Error).message).not.toContain("resetLift"); // 非败态 memo 默认拒——复位已生效
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
       resetLift();
     }
   });
