@@ -5,7 +5,7 @@
  */
 import { getCredential } from "./cred";
 import { onInject, type OcInject } from "./inject";
-import { ensureService } from "./lift";
+import { ensureOnce, LIFT_RECOVER, type LiftResult } from "./lift";
 import { shouldBlock } from "./hook";
 
 // opencode API 本地类型桩（真形状 T5 收紧，不引 @opencode 包）
@@ -24,13 +24,6 @@ export function setEnforce(on: boolean): void {
   enforceOn = on;
 }
 
-let lift: Promise<unknown> | null = null;
-// shortcut: 失败也 memo（每进程一次）——重试节奏 T4/doctor 接管；期间判定链按无凭据默认拒
-function ensureOnce(): Promise<unknown> {
-  lift ??= ensureService().catch(() => null);
-  return lift;
-}
-
 export default {
   inject: (msg: OcInject): void => {
     onInject(msg);
@@ -39,7 +32,9 @@ export default {
     input: OcBeforeInput,
     output: OcBeforeOutput,
   ): Promise<void> => {
-    if (enforceOn) await ensureOnce(); // 服务不可达默认拒：拉起失败静默，判定链按无凭据走引导
+    // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引
+    let lift: LiftResult | null = null;
+    if (enforceOn) lift = await ensureOnce();
     const args = output.args ?? {};
     const target =
       (typeof args.filePath === "string" && args.filePath) ||
@@ -48,6 +43,8 @@ export default {
       "";
     const cred = input.sessionID ? getCredential(input.sessionID) : undefined;
     const hint = shouldBlock(input.tool, target, output.cwd ?? process.cwd(), cred, enforceOn);
-    if (hint) throw new Error(hint);
+    if (hint) {
+      throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
+    }
   },
 };

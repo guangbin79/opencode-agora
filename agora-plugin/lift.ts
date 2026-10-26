@@ -69,3 +69,22 @@ export async function ensureService(
     await Bun.sleep(intervalMs);
   }
 }
+
+export type LiftResult = { ok: true; port: number } | { ok: false; reason: string };
+
+let memo: Promise<LiftResult> | null = null;
+
+/** 懒调 memo 版（失败同样 memo：每进程至多一跑，防每次工具调用重吃轮询）；resetLift 后重试。 */
+export function ensureOnce(): Promise<LiftResult> {
+  memo ??= ensureService()
+    .then((r): LiftResult => ({ ok: true, port: r.port }))
+    .catch((e: unknown): LiftResult => ({ ok: false, reason: e instanceof Error ? e.message : String(e) }));
+  return memo;
+}
+
+/** 复位失败 memo：用户救活 agorad 后恢复本会话（T4 doctor 接线）。 */
+export function resetLift(): void {
+  memo = null;
+}
+
+export const LIFT_RECOVER = "agorad 不可达已 memo（每进程一次）：救活服务后经 doctor resetLift 恢复，无需重启会话";

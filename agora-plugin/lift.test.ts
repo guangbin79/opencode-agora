@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 import { cacheCredential, getCredential, readCredential } from "./cred";
 import { onInject } from "./inject";
-import { ensureService, LiftTimeout } from "./lift";
+import { ensureOnce, ensureService, LiftTimeout, resetLift } from "./lift";
 
 const STUB = join(import.meta.dir, "tests", "stub_agorad.py");
 const PLACEHOLDER_OC = "http://127.0.0.1:59999"; // 占位：桩不消费，只为过必传门
@@ -106,6 +106,29 @@ describe("ensureService 拉起三路径", () => {
       ).rejects.toThrow(/AGORA_OC_URL/);
     } finally {
       process.env.AGORA_OC_URL = PLACEHOLDER_OC;
+    }
+  });
+});
+
+describe("ensureOnce memo/reset", () => {
+  test("失败 memo 复用同一结果；resetLift 后真执行可成功", async () => {
+    // Req: F4
+    resetLift();
+    rmSync(sjPath(), { force: true });
+    const saved = process.env.AGORA_OC_URL;
+    delete process.env.AGORA_OC_URL; // ensureOnce 走缺省 script：必传门快速拒，避免真拉 agorad
+    const bad = await ensureOnce();
+    process.env.AGORA_OC_URL = saved;
+    expect(bad.ok).toBe(false);
+    expect(await ensureOnce()).toBe(bad); // 未复位：memo 复用，不重跑
+    const srv = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 401 }) });
+    writeFileSync(sjPath(), JSON.stringify({ pid: 1, port: srv.port }));
+    try {
+      resetLift();
+      expect(await ensureOnce()).toEqual({ ok: true, port: srv.port }); // 复位后重新真执行
+    } finally {
+      srv.stop(true);
+      resetLift();
     }
   });
 });

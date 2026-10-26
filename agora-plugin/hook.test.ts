@@ -9,6 +9,7 @@ import { join } from "node:path";
 
 import { DISPATCH_HINT, READ_HINT, shouldBlock } from "./hook";
 import { attachToken, cacheCredential, readCredential, type Cred } from "./cred";
+import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
 
 let root: string; // 非豁免夹具根（/tmp 下但不在 /tmp/opencode 内）
@@ -166,6 +167,20 @@ describe("index 插件入口（plain-object）", () => {
       ).rejects.toThrow(/派发/); // 无 envDir：deny 安全向
     } finally {
       setEnforce(false);
+    }
+  });
+
+  test("lift 失败拒因携恢复指引（doctor resetLift）", async () => {
+    // Req: F4
+    resetLift();
+    setEnforce(true);
+    try {
+      await expect(
+        entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(repo, "a.md") }, cwd: plain }),
+      ).rejects.toThrow(/resetLift/);
+    } finally {
+      setEnforce(false);
+      resetLift();
     }
   });
 });
