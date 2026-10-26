@@ -30,15 +30,20 @@ def buckets(snap):
 
 
 def chain_view(snap, dispatcher_sid):
-    """链级视图：该会话直接派的任务＋其 worker 再派的下级（逐跳传递展开）。"""
-    out, frontier = [], [dispatcher_sid]
+    """链级视图：该会话直接派的任务＋其 worker 再派的下级（逐跳传递展开）。
+
+    seen 集合防环（账本行语义上无环，但环行入账时 /view 不得挂死）兼去重。
+    """
+    out, frontier, seen = [], [dispatcher_sid], {dispatcher_sid}
     while frontier:
         sid = frontier.pop(0)
         for tid, t in sorted(snap["tasks"].items()):
             if t.get("dispatcher_sid") == sid:
                 out.append(tid)
-                if t.get("worker_sid"):
-                    frontier.append(t["worker_sid"])
+                w = t.get("worker_sid")
+                if w and w not in seen:
+                    seen.add(w)
+                    frontier.append(w)
     return out
 
 

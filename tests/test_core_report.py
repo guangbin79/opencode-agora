@@ -38,6 +38,10 @@ class TestReport(unittest.TestCase):
         self.assertEqual(chain_view(s, "w2"), ["t3"])
         self.assertEqual(chain_view(s, "nobody"), [])
 
+    def test_chain_view_cycle_terminates(self):  # Req: F10
+        s = snap(t1=row(disp="d1", worker="w1"), t2=row(disp="w1", worker="d1"))
+        self.assertEqual(chain_view(s, "d1"), ["t1", "t2"])  # 环有界不挂死
+
     def test_detail_row_events_done_body(self):  # Req: F10
         tmp = Path(tempfile.mkdtemp())
         try:
