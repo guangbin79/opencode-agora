@@ -30,9 +30,10 @@ def _subprocess_runner(env_dir, cmd):
 class Gate:
     """accept_done 单写者串行受理；run 为后台线程体（httpd 包 Thread 调用）。"""
 
-    def __init__(self, state, gitx, router, oc, read_anchor, health, runner=None):
+    def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
+                 runner=None):
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
-        self._read_anchor, self._health = read_anchor, health
+        self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._runner = runner or _subprocess_runner
 
     # ---- done 受理（前置三拒，拒收附动作指引） ----
@@ -117,6 +118,10 @@ class Gate:
             self._state.transition(tid, "cancelled", **fields)
             if t.get("env_dir"):  # 同 T7 直路径口径：cancelled 即环境回收
                 self._gitx.remove_env(t["env_dir"])
+            if t.get("worker_sid"):  # 同 T7 直路径：终止通知＋凭据作废
+                self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
+                                  f"task {tid} cancelled at gate tail")
+                self._auth.revoke_session(t["worker_sid"])
         elif t["state"] == "merged":
             self._state.transition(tid, "closed", **fields)
         else:

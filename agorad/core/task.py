@@ -86,12 +86,18 @@ class TaskService:
             self._reject(tid, sid, f"can_spawn: {e}")
         self._revoke_worker(t.get("worker_sid"))  # 重派先废旧牌再签新牌
         token = self._auth.issue(wsid, "worker")
-        self._oc.inject(wsid, f"[agora] credential {tid}\ntoken: {token}")
         self._state.transition(tid, "dispatched", worker_sid=wsid, env_dir=env,
                                dispatcher_sid=sid)
         self._pages(self._store.home, tid, self._state.get(tid))
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": EV_DISPATCHED, "task": tid, "worker": wsid})
+        text = f"[agora] credential {tid}\ntoken: {token}"
+        try:
+            ok = self._oc.inject(wsid, text)
+        except Exception:  # oc 抖动同死会话口径：走落库兜底
+            ok = False
+        if not ok:  # 直投失败落库兜底：worker check_mail 补拉（§4.8 行先行后消息）
+            self._router.post(sid, ("down", tid), "credential", text)
         return token
 
     # ---- F11 中止 ----
@@ -172,9 +178,5 @@ class TaskService:
                 "contract: 只在 env 内工作；结论经 post(done) 回填；verify 待登记")
 
     def _revoke_worker(self, wsid):
-        if not wsid:
-            return
-        # shortcut: Auth API 只认 token，按 sid 扫 tokens 件作废；Auth 增枚举时可替换
-        for tok, v in (self._store.read_ephemeral("tokens") or {}).items():
-            if v[0] == wsid:
-                self._auth.revoke(tok)
+        if wsid:
+            self._auth.revoke_session(wsid)

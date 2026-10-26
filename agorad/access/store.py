@@ -87,10 +87,12 @@ class Store:
     def write_ephemeral(self, name: str, data: dict) -> None:
         path = self.home / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        os.replace(tmp, path)  # 原子覆写：读者（lift 解析 service.json）不见半写
 
     def read_ephemeral(self, name: str) -> dict | None:
         path = self.home / name

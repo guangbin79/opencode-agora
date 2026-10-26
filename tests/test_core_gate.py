@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agorad.access.store import Store
+from agorad.core.auth import Auth
 from agorad.core.gate import Gate
 from agorad.core.msg import Router
 from agorad.core.state import State
@@ -69,6 +70,7 @@ class TestCoreGate(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.store = Store(self.tmp)
         self.state = State(self.store)
+        self.auth = Auth(self.store)
         self.oc = FakeOc()
         self.router = Router(self.store, self.state, self.oc)
         self.health = FakeHealth()
@@ -84,7 +86,8 @@ class TestCoreGate(unittest.TestCase):
     def mk_gate(self, merge="ok", gate=False):
         self.gx = FakeGitx(merge=merge, gate=gate)
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
-                         lambda env: self.anchor, self.health, runner=self.runner)
+                         lambda env: self.anchor, self.health, self.auth,
+                         runner=self.runner)
 
     def seed(self, tid="t1", state="running", streak=0):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",

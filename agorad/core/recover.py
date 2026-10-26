@@ -4,9 +4,9 @@ startup：State 构造已恢复末行快照，此处对 in-flight 任务探活�
 dispatched/running 重建 worker 会话（终态/blocked/verify_failed 等续修态
 复查后一律不注入）。reinject：oc.create 同 BOOT 语义（任务页＋环境＋行为
 合同），新 sid 覆写 worker_sid；旧 worker 牌经 auth.rebind 改绑新 sid
-（token 本体不变、identify 归新会话）并随 dispatch 同形送达凭据；审计一行
-reinjected。任何失败返回 False 不抛：先 create 成功才覆写行，不半写。
-core 只 import stdlib，依赖全构造注入（store 供任务页路径与审计）。
+（token 本体不变、identify 归新会话）并随 dispatch 同形送达凭据（直投失败经
+注入的 router 落库兜底）；审计一行 reinjected。任何失败返回 False 不抛：先
+create 成功才覆写行，不半写。core 只 import stdlib，依赖全构造注入。
 """
 import time
 
@@ -18,9 +18,9 @@ EV_REINJECTED = "reinjected"
 class Recover:
     """startup 由 main 装配期调用一次；reinject 供 health.tick 与启动共用。"""
 
-    def __init__(self, state, oc, gitx, store, auth):
+    def __init__(self, state, oc, gitx, store, auth, router=None):
         self._state, self._oc, self._gitx = state, oc, gitx
-        self._store, self._auth = store, auth
+        self._store, self._auth, self._router = store, auth, router
 
     def startup(self):
         for tid, t in self._state.snapshot()["tasks"].items():
@@ -52,7 +52,14 @@ class Recover:
                                   "event": EV_REINJECTED, "task": tid,
                                   "worker": wsid})
         if tok:  # 凭据随 dispatch 同形送达（签牌文本 inject 进新会话）
-            self._oc.inject(wsid, f"[agora] credential {tid}\ntoken: {tok}")
+            text = f"[agora] credential {tid}\ntoken: {tok}"
+            try:
+                ok = self._oc.inject(wsid, text)
+            except Exception:  # oc 抖动同死会话口径：走落库兜底
+                ok = False
+            if not ok and self._router is not None:  # 直投失败落库：补拉可取回
+                self._router.post(t["dispatcher_sid"], ("down", tid),
+                                  "credential", text)
         return True
 
     def _boot(self, tid, t):

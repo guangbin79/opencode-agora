@@ -55,6 +55,15 @@ class Auth:
         self._persist()
         return True
 
+    def revoke_session(self, sid):
+        """按 sid 作废该会话全部牌（worker 单牌语义；cancel/重派/门尾取消共用）。"""
+        hit = [t for t, v in self._tokens.items() if v[0] == sid]
+        for t in hit:
+            del self._tokens[t]
+        if hit:
+            self._persist()
+        return bool(hit)
+
     def rotate_root(self):
         # doctor 一键轮换：全部旧 root 牌即废，新牌沿用最近 root 的 sid；其余角色不受累
         roots = [t for t, v in self._tokens.items() if v[1] == "root"]
