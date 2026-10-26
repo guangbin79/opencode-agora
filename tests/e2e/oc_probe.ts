@@ -172,10 +172,20 @@ async function main(): Promise<number> {
   const c3 = await j(await api.post("/session", { title: "probe-titled" }));
   step("p1_create_titled", { status: 200, data: c3?.data });
   const sid2 = c3?.data?.id;
+  const proj2 = join(SANDBOX, "proj2"); // 第二 location：前提③证据面（双 location 双 MCP 连接）
+  mkdirSync(proj2, { recursive: true });
+  // move 落定有延迟（紧随 GET 读旧值）：settle 后再读
   if (sid) {
     const mv = await api.post(`/session/${sid}/move`, { directory: join(SANDBOX, "proj") });
+    await Bun.sleep(1500);
     const after = await j(await api.get(`/session/${sid}`));
     step("p1_move_directory", { status: mv.status, locationAfter: after?.data?.location });
+  }
+  if (sid2) {
+    const mv2 = await api.post(`/session/${sid2}/move`, { directory: proj2 });
+    await Bun.sleep(1500);
+    const after2 = await j(await api.get(`/session/${sid2}`));
+    step("p1_move_directory_2", { status: mv2.status, locationAfter: after2?.data?.location });
   }
 
   // —— P3 alive/status：/session/active（idle 不出现）；GET 未知/已删 sid；prompt 未知 sid ——
@@ -185,9 +195,11 @@ async function main(): Promise<number> {
   step("p3_get_missing", { status: missGet.status, body: await j(missGet) });
   const missPrompt = await api.post("/session/ses_missing000000000000000000/prompt", { text: "x" });
   step("p3_prompt_missing", { status: missPrompt.status, body: await j(missPrompt) });
-  if (sid2) {
-    const del = await api.del(`/session/${sid2}`);
-    const delGet = await j(await api.get(`/session/${sid2}`));
+  const c4 = await j(await api.post("/session", { title: "probe-delete-me" })); // 一次性：删后取证
+  const sid4 = c4?.data?.id;
+  if (sid4) {
+    const del = await api.del(`/session/${sid4}`);
+    const delGet = await j(await api.get(`/session/${sid4}`));
     step("p3_after_delete", { deleteStatus: del.status, getAfter: delGet });
   }
 
@@ -217,14 +229,27 @@ async function main(): Promise<number> {
   });
 
   // —— P5/P6 tool.execute.before 对 MCP 工具的覆盖与改参；MCP spawn 拓扑 ——
+  // 前提③证据面：两 location 各自调用（sid 已在 proj；sid2 已在 proj2），proj 内重复调用证同 pid 共享
   let spawned = false;
   for (let i = 0; i < 40 && !spawned; i++) { spawned = existsSync(envSpawn) && rd(envSpawn).length > 0; if (!spawned) await Bun.sleep(500); }
   step("p6_mcp_spawn_wait", { spawned, log: rd(envSpawn) });
-  const p5 = await api.post(`/session/${sid}/prompt`,
-    { text: `Call the ${MCP_SERVER} echo tool with argument a set to exactly "original". Then reply DONE.` });
-  step("p5_prompt", { status: p5.status });
-  step("p5_settle", await waitIdle(api, sid, 180000));
+  const p5a = await api.post(`/session/${sid}/prompt`,
+    { text: `Call the ${MCP_SERVER} echo tool with argument a set to exactly "original" (call one). Then reply DONE.` });
+  step("p5_prompt_call1", { status: p5a.status });
+  step("p5_settle_call1", await waitIdle(api, sid, 180000));
+  const p5b = await api.post(`/session/${sid}/prompt`,
+    { text: `Call the ${MCP_SERVER} echo tool again with argument a set to exactly "original" (call two). Then reply DONE.` });
+  step("p5_prompt_call2", { status: p5b.status });
+  step("p5_settle_call2", await waitIdle(api, sid, 180000));
+  let p5c = null;
+  if (sid2) {
+    p5c = await api.post(`/session/${sid2}/prompt`,
+      { text: `Call the ${MCP_SERVER} echo tool with argument a set to exactly "original" (other location). Then reply DONE.` });
+    step("p5_prompt_loc2", { status: p5c.status });
+    step("p5_settle_loc2", await waitIdle(api, sid2, 180000));
+  }
   step("p5_mcp_calls", rd(envCalls));
+  step("p6_mcp_spawn_log", rd(envSpawn));
 
   // —— P7 inject 事件插件侧形状＋服务发现 ——
   const plog = rd(join(SANDBOX, "plugin-log.jsonl"));
@@ -244,14 +269,16 @@ async function main(): Promise<number> {
   step("p7_mcp_status_events", plog.filter((e: any) => e.eventType === "mcp.status.changed").slice(0, 6));
 
   // —— 清理：删临时会话→杀 serve→删沙箱（P5/P6 未过保留现场）——
-  for (const s of [sid, sid2].filter(Boolean)) { try { await api.del(`/session/${s}`); } catch {} }
+  for (const s of [sid, sid2, sid4].filter(Boolean)) { try { await api.del(`/session/${s}`); } catch {} }
   step("done", new Date().toISOString());
   writeFileSync(OUT, JSON.stringify(probe, null, 1));
   killServe(proc, svc);
-  const ok = spawned && rd(envCalls).length > 0 && muts.length > 0;
+  const calls = rd(envCalls);
+  const spawns = rd(envSpawn);
+  const ok = spawned && spawns.length >= 2 && calls.length >= 3 && muts.length > 0;
   if (ok) rmSync(SANDBOX, { recursive: true, force: true });
   else console.error(`[probe] P5/P6 未过——现场保留 ${SANDBOX}（plugin-log.jsonl／log 可查）`);
-  console.error(`[probe] 产物 ${OUT}`);
+  console.error(`[probe] 产物 ${OUT}；spawns=${spawns.length} calls=${calls.length} mutations=${muts.length}`);
   return ok ? 0 : 2;
 }
 

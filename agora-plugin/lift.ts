@@ -84,7 +84,7 @@ export async function ensureService(
   if (port !== null && (await probe(port))) return { port };
   if (!existsSync(script)) throw new LiftTimeout(`agorad 未安装：找不到 ${script}`);
   let ocUrl = process.env.AGORA_OC_URL;
-  const ocPassword = process.env.AGORA_OC_PASSWORD;
+  let ocPassword = process.env.AGORA_OC_PASSWORD;
   if (!ocUrl) {
     const found = discoverOc(opts.stateHome);
     if (!found) {
@@ -93,6 +93,7 @@ export async function ensureService(
       );
     }
     ocUrl = found.url;
+    ocPassword ??= found.password; // T5 修正：发现的 password 必须随 env 透传（缺它＝agorad 全 401）
   }
   const proc = Bun.spawn(["setsid", "python3", script], {
     env: {

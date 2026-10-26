@@ -41,6 +41,13 @@ class TestAccessOc(unittest.TestCase):
         with self.assertRaises(OcUnavailable):
             self.oc.create("/e", "B")
 
+    def test_non_json_200_raises_unavailable(self):  # Req: F3（T5 修正：200 text/html 同族面）
+        self.stub.poison_html = True
+        with self.assertRaises(OcUnavailable):
+            self.oc.probe()
+        with self.assertRaises(OcUnavailable):
+            self.oc.create("/e", "B")
+
     def test_injects_recorded_in_order(self):  # Req: F4
         sid = self.oc.create("/tmp/env", "BOOT")
         for i in range(3):

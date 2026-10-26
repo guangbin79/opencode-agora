@@ -51,6 +51,16 @@ chk "root.token 在位非空 (Req: F1)" [ -s "$A1/.agora/root.token" ]
 chk "root.token 0600 (Req: F1)"     [ "$(stat -c %a "$A1/.agora/root.token")" = 600 ]
 chk "AGORA_OC_URL 占位 env (Req: F1)" grep -q "AGORA_OC_URL" "$A1/.agora/env"
 chk "agorad 载荷随装（lift 独立安装解析位，Req: F4）" [ -f "$A1/.agora/agorad/main.py" ]
+chk "载荷含子包（漏包＝ModuleNotFoundError，Req: F4）" bash -c '
+for f in access/oc.py access/store.py core/app.py core/task.py transport/httpd.py; do
+  [ -f "$1/.agora/agorad/$f" ] || exit 1
+done
+[[ -z "$(find "$1/.agora/agorad" -name "__pycache__")" ]]' _ "$A1"
+chk "载荷可执行到 env 检查处（Req: F4）" bash -c '
+d="$(mktemp -d)"; mkdir -p "$d/state"  # 空 XDG_STATE_HOME：隔离真机 service.json（T5 发现源）
+out="$(AGORA_HOME="$1/nonexist-home" XDG_STATE_HOME="$d/state" timeout 10 python3 "$1/.agora/agorad/main.py" 2>&1)"; rc=$?
+rm -rf "$d"
+[ "$rc" = 2 ] && echo "$out" | grep -q "AGORA_OC_URL"' _ "$A1"
 
 chk "冒烟 enforce off 审计在账 (Req: F1)" grep -q '"event": "enforce_off"' "$A1/events.jsonl"
 chk "冒烟 enforce on 审计在账 (Req: F1)"  grep -q '"event": "enforce_on"'  "$A1/events.jsonl"

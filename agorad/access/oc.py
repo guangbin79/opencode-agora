@@ -51,7 +51,11 @@ class Oc:
 
     def create(self, cwd: str, boot: str) -> str:
         """建 worker 会话并绑任务 env 目录，boot 文本作首条注入；回 sid。"""
-        sid = self._post("/session", {})["data"]["id"]
+        data = self._post("/session", {})
+        try:
+            sid = data["data"]["id"]
+        except (KeyError, TypeError) as e:  # 应答形状错（含 200 非 JSON 信封）＝契约 OcUnavailable
+            raise OcUnavailable(f"/session 应答形状错: {data!r}") from e
         self._post(f"/session/{sid}/move", {"directory": cwd})  # 204；location 即任务 env
         self._post(f"/session/{sid}/prompt", {"text": boot})
         return sid
@@ -96,3 +100,5 @@ class Oc:
             raise u from e
         except OSError as e:  # URLError/socket.timeout＝网络故障
             raise OcUnavailable(f"{req.full_url}: {e}") from e
+        except ValueError as e:  # 200 但非 JSON（同族服务 SPA 兜底 200 text/html 同族面）
+            raise OcUnavailable(f"{req.full_url}: 非 JSON 应答") from e

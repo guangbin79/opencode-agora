@@ -21,6 +21,7 @@ class StubOpencode:
     def __init__(self):
         self.lock = threading.Lock()
         self.sessions = {}  # sid -> {"injects": [text, ...], "directory": str, "req": dict}
+        self.poison_html = False  # T5 修正：置 True 时 GET /api/info 回 200 text/html（SPA 兜底同族面）
         self.httpd = None
         self.thread = None
 
@@ -32,6 +33,14 @@ class StubOpencode:
                 pass
 
             def _json(self, code, obj):
+                if stub.poison_html:  # T5 修正：毒化＝全端点 200 text/html（SPA 兜底同族面）
+                    body = b"<!doctype html><html>spa-fallback</html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 body = json.dumps(obj).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")

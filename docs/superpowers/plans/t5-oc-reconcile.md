@@ -14,7 +14,7 @@
 | 3 | alive/status | `GET /session/{sid}/status→{alive}`；404 vs 200 | `GET /api/session/{sid}→200 {data:{...}}`／404；`GET /api/session/active→{data:{sid:{type}}}` 仅含 running（idle 不在 map，死＝404） | **偏离→双侧修**（alive＝GET 会话存在性） |
 | 4 | probe/health | `GET /health→{ok,version}` | 无 `/health`（SPA 兜底 200 text/html 冒充）；版本来源＝`GET /api/info→{version,pid,urls,paths}` | **偏离→双侧修**（probe 读 /info.version） |
 | 5 | tool.execute.before 覆盖 MCP＋改参（前提①②） | 假定覆盖＋可改参 | **成立**：钩子对 MCP 工具触发（tool 名＝`<server>_<tool>`，如 `agoraprobe_echo`）；改 `event.input` 直达 MCP 服务端（实测 echo 收到 `{"a":"hooked-1","_token":"tok-from-hook"}`） | **前提①② PASS** |
-| 6 | MCP spawn 拓扑（前提③） | 每实例一进程 vs 每会话 | **实例级（×location）**：serve 启动即 spawn（未等会话），pid 随 server；同一 location 的多会话共享一进程；两 location（server 根＋会话 moved 目录）各一进程 | **前提③ PASS**（非每会话，量级＝实例） |
+| 6 | MCP spawn 拓扑（前提③） | 每实例一进程 vs 每会话 | **实例级（×location）**：serve 启动即 spawn（未等会话），pid 随 server；同一 location 的多会话/多次调用共享一进程（修正版探针：同 location 两次调用同 pid）；双 location 各一进程（server 根＋moved 目录＋proj2 实证） | **前提③ PASS**（非每会话，量级＝实例×location） |
 | 7 | inject 事件插件侧＋端口发现 | 假定 inject 事件＋AGORA_OC_URL 来源待定 | 插件侧注入事件＝`ctx.session.hook("prompt", ev)`，ev `{sessionID, messageID, prompt:{text}, delivery}`；服务发现＝`$XDG_STATE_HOME/opencode/service.json`（serve --service 写 `{id,version,url,pid,password}`）；API＝`<url>/api/*`＋Basic `opencode:<password>` | **偏离→接线收紧**（lift/main/install 回填发现源） |
 
 ## 关键偏离与双侧修清单

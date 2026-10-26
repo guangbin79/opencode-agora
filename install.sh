@@ -67,9 +67,12 @@ for f in "$REPO"/agora-plugin/*.ts; do
 done
 
 # ---- 4b) agorad 载荷随装（T5 追加项：lift 不再假定与插件同仓——独立安装场景从
-#      $AGORA_HOME/.agora/agorad/main.py 解析；env AGORAD_SCRIPT 可覆写）----
-mkdir -p "$AGORA_HOME/.agora/agorad"
-cp -f "$REPO"/agorad/*.py "$AGORA_HOME/.agora/agorad"/
+#      $AGORA_HOME/.agora/agorad/main.py 解析；env AGORAD_SCRIPT 可覆写）。
+#      递归拷贝含 access/core/transport 子包（漏子包＝ModuleNotFoundError，lift 必超时）----
+mkdir -p "$AGORA_HOME/.agora"
+rm -rf "$AGORA_HOME/.agora/agorad"
+cp -r "$REPO/agorad" "$AGORA_HOME/.agora/"
+find "$AGORA_HOME/.agora/agorad" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---- 5) AGORA_OC_URL 发现结果落档（lift 运行时自发现同源；此处只留档不作为消费面）----
 cat > "$AGORA_HOME/.agora/env" <<EOF

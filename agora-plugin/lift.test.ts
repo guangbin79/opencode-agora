@@ -111,6 +111,29 @@ describe("ensureService 拉起三路径", () => {
       process.env.AGORA_OC_URL = PLACEHOLDER_OC;
     }
   });
+  test("T5 修正：discovery 命中→spawn env 带 url＋password（非仅 url）", async () => {
+    // Req: F4
+    rmSync(sjPath(), { force: true });
+    const stateHome = join(root, "state-oc");
+    mkdirSync(join(stateHome, "opencode"), { recursive: true });
+    writeFileSync(join(stateHome, "opencode", "service.json"),
+      JSON.stringify({ url: "http://127.0.0.1:49374", password: "pw-discovered" }));
+    delete process.env.AGORA_OC_URL;
+    delete process.env.AGORA_OC_PASSWORD;
+    const envDump = join(root, "env-dump.txt");
+    writeFileSync(join(root, "dump_env.py"),
+      `import os\nopen(${JSON.stringify(envDump)}, "w").write(os.environ.get("AGORA_OC_URL", "") + " " + os.environ.get("AGORA_OC_PASSWORD", ""))\n`);
+    try {
+      await expect(
+        ensureService({ script: join(root, "dump_env.py"), stateHome, timeoutMs: 1500, intervalMs: 50 }),
+      ).rejects.toBeInstanceOf(LiftTimeout); // dump 后即退：等 port 落空＝超时分类路径
+      const [url, password] = readFileSync(envDump, "utf8").split(" ");
+      expect(url).toBe("http://127.0.0.1:49374");
+      expect(password).toBe("pw-discovered");
+    } finally {
+      process.env.AGORA_OC_URL = PLACEHOLDER_OC;
+    }
+  });
 });
 
 describe("ensureOnce memo/reset", () => {
