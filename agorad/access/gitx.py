@@ -46,6 +46,9 @@ class Gitx:
         head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
         return "ok" if r.returncode == 0 and head == env_sha else "non-ff"
 
+    def head(self, repo_dir: str) -> str:
+        return self._git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
+
     def rollback(self, target: str, before_sha: str) -> None:
         self._git(["reset", "--hard", before_sha], cwd=target)
 
