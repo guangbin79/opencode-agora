@@ -23,6 +23,7 @@ builder 裁决（待用户否决）：
 - B4 客户端↔服务：`127.0.0.1` HTTP JSON（MCP 用 urllib、插件用 fetch）；`/view` 提供只读结果报告页（承接 agora_http.py 职责）
 - B5 服务生命周期：客户端惰性拉起（setsid+单实例锁+就绪探测），不依赖 systemd/cron
 - B6 隔离环境＝worktree 铁律（**唯一真源＝全局 AGENTS.md，本稿不复制条文**；语义约束：Repo 同级父目录保证 `../` 拓扑等价、线性历史、用毕级联清理）；agora 特化 TYPE=task、BRIEF=任务id；跨仓按依赖序拆单仓任务（甲案）；建/清/并归服务——回收＝merged/cancelled 即删，blocked 保留，孤儿目录永不自动删（doctor 报告）；建环境含评审钩装配（hooks/插件），done 前置查 `.review-loop` 锚
+- B7 甲案顺序的服务端硬拒（builder 裁决，待用户否决）：task_create 可选 `after: <前任务id>`（单前驱指针，非依赖图，不破平表）；task_dispatch 硬拒 after 任务未到终态的派发并报因；无 after＝纯纪律层语义不变
 
 ## 3. 架构总览
 
@@ -55,7 +56,7 @@ tasks.jsonl 快照行任务字段：`{title, goal, project_dir, env_dir, verify{
 
 ### 4.2 派发（F3）
 task_create：建任务页（wiki/tasks/<id>.md，服务生成 frontmatter）→ 建环境（B6）→ 签发凭据。verify 创建时可空：worker 勘察后回填（agora_post），派发方校验（可执行＋需求覆盖）后经 task_update 登记；登记即锁定——修改权属派发方，worker 修改拒绝并审计；verify 未登记 done 拒收。
-task_dispatch：opencode API `create` 会话 → 注入 BOOT（任务页路径+环境路径+凭据+行为合同）→ 登记 dispatcher_sid/worker_sid → 审计 dispatched。保险丝：can_spawn（名册）+ 链深（chain_depth<5）+ 并发配额（内存计数）。会话不复用——一任务一会话一环境一凭据。
+task_dispatch：opencode API `create` 会话 → 注入 BOOT（任务页路径+环境路径+凭据+行为合同）→ 登记 dispatcher_sid/worker_sid → 审计 dispatched。保险丝：can_spawn（名册）+ 链深（chain_depth<5）+ 并发配额（内存计数）+ after 前驱终态校验（B7）。会话不复用——一任务一会话一环境一凭据。
 task_cancel：人（任意在飞或 blocked 链）或 dispatcher（自己派出的子链）中止——级联停止在飞 worker（实时终止通知）、任务置 cancelled、环境即回收；已 merged 不回滚。cancelled 即凭据作废＋配额即释放；verify/合并门临界段内 cancel 排队、门走完生效；空链 cancel 幂等＋审计；不做会话强杀。
 
 ### 4.3 消息路由（F4）
@@ -76,6 +77,7 @@ events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` �
 ### 4.8 数据面格式与并发
 - 布局 `$AGORA_HOME`：`.agora/service.json`（{pid,port,started,version,oc_version}；127.0.0.1 单机单人无 token；易失件，非账本）＋`state/tasks.jsonl`＋`state/messages/<msg-id>.md`（不可变；frontmatter：id/ts/task/kind=process|milestone/from/to）＋`events.jsonl`＋`wiki/`（git 仓，知识层）。
 - **账本文本只追加、永不改写**：tasks.jsonl 每次状态迁移 append 一行全量快照（含 mail_read 游标；数据小，写放大无感）；启动 load 取**末行完整快照＝权威**（非事件折叠，不触"禁重放推导"反需求；断尾回退上一行）；events.jsonl 只追加；messages 写完即不可变。
+- msg-id＝全局单调整数：服务内存计数器（单写者零竞争），重启扫 messages/ 目录文件名 max＋1 恢复——目录即持久化计数器，文件名排序＝全局时间序（补拉游标与对账都依赖此性质）。
 - tasks 快照行：`{version:1, tasks:{<id>:{title,goal,project_dir,env_dir,verify:{cmd,state:pending|registered,registered_by,registered_at},state,dispatcher_sid?,worker_sid?,chain_depth,fail_streak,last_seen,created,updated}}, mail_read:{<sid>:<ts>}}`——version 为 schema 演进唯一伏笔；last_seen＝隐式心跳；**credential/token 不入快照行（见 §4.9）**。
 - 双源规则：wiki 任务页＝tasks 快照渲染视图（服务独占刷新），权威只在 tasks.jsonl；wiki_write 拒写 `wiki/tasks/` 前缀。
 - 并发三防线：flock 单实例（进程间无并发）；httpd 单线程串行＋长操作（verify/合并）转后台线程（进程内）；append＋逐行 fsync＋断尾容错（读者永见完整行；运行期无人读文件——视图出自内存，仅启动重载读末行）。**迁移写序**＝先 append 快照行、后写消息文件；消息按 msg-id 幂等去重（丢消息靠补拉/重发兜底，快照先行不可丢）。**锁两级**：状态迁移锁（短临界区，仅内存迁移＋append）＋任务级门闩（verify 执行期置 in-gate，cancel 到达登记 pending-cancel、门走完生效——不持全局锁）。last_seen/mail_read 为内存态、崩溃回退接受（配合幂等去重不产生重复投递）。
@@ -87,13 +89,16 @@ events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` �
 
 ## 5. opencode 插件规格（TS，plain-object 导出——Plugin.define 包裹形态静默失效，禁用）
 
-1. 强制钩子（F1）：`tool.execute.before` 拦 **edit/write**（bash 不拦——同机直写为已知接受面，兜底＝verify 门＋审计＋纪律层）——目标为本机 git 仓路径且无有效凭据（cwd ∈ 该任务 env_dir）→ 拒并引导 dispatch；豁免面 = B3。主会话对仓库代码写入同拦。读引导：tasks.jsonl/messages 直读引导走工具面（events.jsonl/wiki 裸读开放），主会话例外。凭据/enforce 旗标核验服务不可达时默认拒（安全方向）。
-2. 接收注入：inject 即投递，插件将消息以系统提示形态接入会话。
-3. 服务拉起（B5）：任何 agora 调用前探 service.json+health；未运行 setsid 拉起 agorad 等就绪。
+1. **hook**（强制钩子，F1）：`tool.execute.before` 拦 **edit/write**（bash 不拦——同机直写为已知接受面，兜底＝verify 门＋审计＋纪律层）——目标为本机 git 仓路径且无有效凭据（cwd ∈ 该任务 env_dir）→ 拒并引导 dispatch；豁免面 = B3。主会话对仓库代码写入同拦。读引导：tasks.jsonl/messages 直读引导走工具面（events.jsonl/wiki 裸读开放），主会话例外。凭据/enforce 旗标核验服务不可达时默认拒（安全方向）。
+2. **cred**（凭据管家）：读取 BOOT 注入的会话牌并缓存（§4.9），供 hook 核验（任务活动＋cwd∈环境）；牌随任务生死——cancel/重派即废。
+3. **inject**（消息接入）：inject 即投递，以系统提示形态接入会话——承载 S3 问答、里程碑回执（verify 输出尾部）、终止通知、失控拍人（主会话）。
+4. **lift**（服务拉起，B5）：任何 agora 调用前探 service.json＋health；未运行 setsid 拉起 agorad、等就绪后放行原调用（flock 防双实例）。
 
 ## 6. 部署与既有资产处置
 
-B2 处置；`install.sh` 重写：依赖检查（python3/git/opencode）→ 建 state 目录 → 注册 MCP+插件 → 冒烟自检。退役清单：v1 全部 22 个 bash 脚本、notify-opencode.sh、agora_http.py、LINE_RE 契约、4321 行旧 smoke（以新测试取代）、cron 条目（已停）。
+安装＝三部件三宿主：**插件层**（TS 文件）→ opencode 插件目录（全局 `~/.config/opencode/plugins/` 或仓内 `.opencode/plugins/`），随 opencode 启动加载，无需进程管理；**MCP 壳层**（agora_mcp.py）→ opencode 配置 `mcp` 段注册 stdio command（`python3 <repo>/agora_mcp.py`）；**agorad** → 不装为系统服务，lift 惰性拉起。更新＝`git pull` 本仓＋`opencode service restart`（TUI 重启不重载常驻 server，插件模块缓存持旧）。
+
+B2 处置；`install.sh` 重写：依赖检查（python3/git/opencode）→ 建 `$AGORA_HOME` 目录骨架 → 注册 MCP＋放插件 → 冒烟自检（调 doctor 验证 lift→拉起→health 全链）。退役清单：v1 全部 22 个 bash 脚本、notify-opencode.sh、agora_http.py、LINE_RE 契约、4321 行旧 smoke（以新测试取代）、cron 条目（已停）。
 
 ## 7. 测试与验收（分层用例，测试先行——用例带 `Req: F<n>` 锚，先于实现落盘）
 
