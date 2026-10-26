@@ -59,7 +59,7 @@ class Gitx:
         branch = env.name
         base = self._git(["merge-base", branch, "HEAD"], cwd=main).stdout.strip()
         out = self._git(["diff", "--name-only", base, branch], cwd=main).stdout
-        return out.split()
+        return out.splitlines()  # 换行分隔；split() 会把含空格文件名切碎
 
     @staticmethod
     def _main(env: Path) -> Path:

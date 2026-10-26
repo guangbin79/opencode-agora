@@ -54,8 +54,9 @@ class TestAccessGitx(unittest.TestCase):
             re.escape(self.repo.name) + r"__wt-task-gt-x1__\d{8}[0-9a-z]{4}$",
         )
         self._commit(self.repo, {"src.py": "v2"}, "advance main")  # 主干已推进
+        before = self._head(self.repo)
         self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "non-ff")
-        self.assertEqual(self._head(self.repo), self._head(self.repo))  # 主干未被污染
+        self.assertEqual(self._head(self.repo), before)  # 主干未被污染
 
     def test_merge_ok_fast_forward(self):  # Req: F7
         env = self.gx.build_env(self.repo, "gt-x2")
@@ -91,6 +92,13 @@ class TestAccessGitx(unittest.TestCase):
         env2 = self.gx.build_env(self.repo, "gt-x6")
         self._commit(Path(env2), {"src.py": "v9"}, "touch code only")
         self.assertFalse(self.gx.touches_gate(env2, ["Makefile", "pyproject.toml"]))
+
+
+    def test_touches_gate_handles_spaces_in_names(self):  # Req: F7
+        env = self.gx.build_env(self.repo, "gt-x7")
+        self._commit(Path(env), {"my file.conf": "k=v"}, "touch spaced name")
+        self.assertTrue(self.gx.touches_gate(env, ["my file.conf"]))
+        self.assertFalse(self.gx.touches_gate(env, ["file.conf"]))  # 碎片不得误报
 
 
 if __name__ == "__main__":
