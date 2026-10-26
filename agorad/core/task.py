@@ -131,6 +131,8 @@ class TaskService:
         t = self._state.get(tid)
         sid, _ = self._gate(actor_token, "task_update", tid, t,
                             owner=t.get("dispatcher_sid"))
+        if not cmd.strip():  # 空命令＝无质量闸：登记即拒（merge 仅经 verify 绿）
+            self._reject(tid, sid, "verify 命令为空——task_update 登记非空命令")
         self._state.set_fields(tid, verify={"cmd": cmd, "state": "registered",
                                             "registered_by": sid,
                                             "registered_at": time.time()})

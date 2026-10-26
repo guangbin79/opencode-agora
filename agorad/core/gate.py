@@ -44,6 +44,9 @@ class Gate:
             return (f"rejected:verify-unregistered: 任务 {tid} verify 未登记——"
                     "post 通知派发方 task_update 登记 verify 命令，"
                     "登记后重新 post(done, commit)")
+        if not t["verify"]["cmd"].strip():  # 兜底：空命令＝无质量闸，拒入门
+            return (f"rejected:verify-empty: 任务 {tid} verify 命令为空——"
+                    "task_update 登记非空命令后重新 post(done, commit)")
         a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
         if not a or a.get("head") != commit or not a.get("clean"):
             return (f"rejected:anchor: 任务 {tid} 评审环未绿或锚落后（.review-loop 锚"
@@ -110,6 +113,8 @@ class Gate:
             fields["pending_cancel"] = False
         if t.get("pending_cancel") and t["state"] != "merged":
             self._state.transition(tid, "cancelled", **fields)
+            if t.get("env_dir"):  # 同 T7 直路径口径：cancelled 即环境回收
+                self._gitx.remove_env(t["env_dir"])
         elif t["state"] == "merged":
             self._state.transition(tid, "closed", **fields)
         else:

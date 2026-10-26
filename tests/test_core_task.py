@@ -199,6 +199,15 @@ class TestVerify(TestCoreTask):
         with self.assertRaises(Rejected):  # R18：非该任务派发方亦拒
             self.svc.update_verify(tid, d2, "pytest -q")
 
+    def test_empty_verify_cmd_rejected(self):  # Req: F2
+        tid, disp, _ = self.dispatched_pair()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.update_verify(tid, disp, "   ")
+        self.assertIn("空", str(cm.exception))
+        self.assertTrue(any(e["event"] == "dispatch_rejected"
+                            and e.get("task") == tid for e in self.events()))
+        self.assertEqual(self.state.get(tid)["verify"]["state"], "pending")  # 未被登记
+
     def test_happy_path_post_then_register_locks(self):  # Req: F2
         tid, disp, worker = self.dispatched_pair()
         wsid, _, _ = self.oc.sessions[-1]

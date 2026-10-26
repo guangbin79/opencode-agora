@@ -126,6 +126,16 @@ class TestAcceptDone(TestCoreGate):
             self.assertIn("review-loop", r)  # 动作指引
         self.assertEqual(self.state.get("t1")["state"], "running")
 
+    def test_reject_empty_verify_cmd(self):  # Req: F7
+        self.seed()
+        self.state.set_fields("t1", verify={"cmd": "  ", "state": "registered",
+                                            "registered_by": "disp1",
+                                            "registered_at": 1.0})  # 绕过登记直改快照
+        r = self.gate.accept_done("t1", "s-w1", "abc123")
+        self.assertIn("rejected:verify-empty", r)
+        self.assertIn("task_update", r)  # 动作指引：登记非空命令
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
     def test_reject_non_running(self):  # Req: F7
         self.seed(state="dispatched")
         self.assertIn("rejected:state", self.gate.accept_done("t1", "s-w1", "abc123"))
@@ -221,6 +231,7 @@ class TestGateRun(TestCoreGate):
         self.state.set_fields("t1", pending_cancel=True)  # T7 门临界段排队
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "cancelled")  # 门走完生效
+        self.assertEqual(self.gx.removed, ["/envs/t1"])  # 同 T7 直路径：环境回收
 
     def test_pending_cancel_spares_merged(self):  # Req: F11
         self.in_gate()
