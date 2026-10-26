@@ -1,0 +1,97 @@
+"""T5 访问层契约：gitx worktree 建清/ff-only/回滚/闸体检测（真实 git，tmp 夹具，零 mock）。"""
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from agorad.access.gitx import Gitx
+
+
+class TestAccessGitx(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "proj"
+        self.repo.mkdir()
+        self._git(["init", "-b", "main"], cwd=self.repo)
+        self._git(["config", "user.email", "t@t"], cwd=self.repo)
+        self._git(["config", "user.name", "t"], cwd=self.repo)
+        self._commit(self.repo, {"src.py": "v1"}, "init")
+        self.gx = Gitx()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _git(args, cwd, check=True):
+        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def _commit(self, cwd, files, msg):
+        for name, content in files.items():
+            path = cwd / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self._git(["add", "-A"], cwd=cwd)
+        self._git(["commit", "-m", msg], cwd=cwd)
+        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+    def _head(self, cwd):
+        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+    def _worktrees(self, cwd):
+        out = self._git(["worktree", "list", "--porcelain"], cwd=cwd).stdout
+        return [line.split(" ", 1)[1] for line in out.splitlines() if line.startswith("worktree ")]
+
+    def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
+        env = self.gx.build_env(self.repo, "gt-x1")
+        self.assertEqual(Path(env).parent, self.repo.parent)  # repo 同级父目录，../ 拓扑等价
+        self.assertRegex(
+            Path(env).name,
+            re.escape(self.repo.name) + r"__wt-task-gt-x1__\d{8}[0-9a-z]{4}$",
+        )
+        self._commit(self.repo, {"src.py": "v2"}, "advance main")  # 主干已推进
+        self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "non-ff")
+        self.assertEqual(self._head(self.repo), self._head(self.repo))  # 主干未被污染
+
+    def test_merge_ok_fast_forward(self):  # Req: F7
+        env = self.gx.build_env(self.repo, "gt-x2")
+        env_sha = self._commit(Path(env), {"src.py": "v2\nfeature"}, "task work")
+        before = (self.repo / "src.py").read_bytes()
+        self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "ok")
+        self.assertEqual(self._head(self.repo), env_sha)  # ff：主干 HEAD＝env 分支头，无 merge commit
+        self.assertEqual((self.repo / "src.py").read_bytes(), b"v2\nfeature")
+        self.assertNotEqual(before, b"v2\nfeature")
+
+    def test_remove_env_cascades_branch(self):  # Req: F1
+        env = self.gx.build_env(self.repo, "gt-x3")
+        self._commit(Path(env), {"src.py": "dirty"}, "unmerged work")  # 未合并分支也须级联清掉
+        self.gx.remove_env(env)
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])  # worktree list 干净
+        self.assertEqual(self._git(["branch", "--list", Path(env).name], cwd=self.repo).stdout.strip(), "")
+
+    def test_rollback_restores_bytes_and_sha(self):  # Req: F7
+        env = self.gx.build_env(self.repo, "gt-x4")
+        before_sha = self._head(self.repo)
+        before_bytes = (self.repo / "src.py").read_bytes()
+        self._commit(Path(env), {"src.py": "changed", "extra.txt": "x"}, "task work")
+        self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "ok")
+        self.gx.rollback(str(self.repo), before_sha)
+        self.assertEqual(self._head(self.repo), before_sha)  # 字节级回退
+        self.assertEqual((self.repo / "src.py").read_bytes(), before_bytes)
+        self.assertFalse((self.repo / "extra.txt").exists())
+
+    def test_touches_gate_matches_task_diff(self):  # Req: F7
+        env = self.gx.build_env(self.repo, "gt-x5")
+        self._commit(Path(env), {"Makefile": "all:"}, "touch gate")
+        self.assertTrue(self.gx.touches_gate(env, ["Makefile"]))
+        env2 = self.gx.build_env(self.repo, "gt-x6")
+        self._commit(Path(env2), {"src.py": "v9"}, "touch code only")
+        self.assertFalse(self.gx.touches_gate(env2, ["Makefile", "pyproject.toml"]))
+
+
+if __name__ == "__main__":
+    unittest.main()
