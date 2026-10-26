@@ -58,6 +58,17 @@ class Store:
             return 0
         return max((int(p.stem) for p in self._messages.glob("*.md")), default=0)
 
+    def read_messages(self) -> list[dict]:
+        """全库消息按 msg-id 升序（补零文件名序＝id 序）；frontmatter 键＋id(int)＋body。"""
+        out = []
+        for p in sorted(self._messages.glob("*.md")):
+            head, _, body = p.read_text(encoding="utf-8").partition("\n\n")
+            fm = dict(line.split(": ", 1) for line in head.splitlines())
+            fm["id"] = int(fm["id"])
+            fm["body"] = body
+            out.append(fm)
+        return out
+
     def write_ephemeral(self, name: str, data: dict) -> None:
         path = self.home / name
         path.parent.mkdir(parents=True, exist_ok=True)
