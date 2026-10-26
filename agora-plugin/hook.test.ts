@@ -247,6 +247,47 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
+  test("热路径预过滤＋拉旗计时：非引导类零 HTTP；edit 冷/热拉取 <100ms（T6 评审②）", async () => {
+    // Req: F1
+    const hooks = wire();
+    setEnforce(null); // 生产形态：服务持旗拉取
+    let hits = 0;
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        hits++;
+        if (req.headers.get("x-agora-token") !== "tok-root") {
+          return new Response(JSON.stringify({ error: "无牌" }), { status: 401 });
+        }
+        return Response.json({ ok: true, enforce_on: true });
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`; // lift 直达探活
+    resetLift();
+    try {
+      await hooks["tool.execute.before"]({ tool: "grep", sessionID: "s-hot", input: { pattern: "x" } });
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-hot", input: {} });
+      expect(hits).toBe(0); // 预过滤：非引导类工具不拉旗不探活（此前每调用收一次费）
+      const cold0 = performance.now();
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-hot", input: { filePath: join(plain, "x.md") } });
+      const cold = performance.now() - cold0;
+      expect(hits).toBeGreaterThan(0); // 引导类工具拉旗（lift 探活＋/health）
+      expect(cold).toBeLessThan(100); // 冷路径预算：root.token 读＋HTTP RTT＋Bun.serve 往返
+      const warm0 = performance.now();
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-hot", input: { filePath: join(plain, "x.md") } });
+      const warm = performance.now() - warm0;
+      expect(warm).toBeLessThan(100);
+      console.log(`[t6-fix] pullEnforce 冷=${cold.toFixed(1)}ms 热=${warm.toFixed(1)}ms（预算 100ms）`);
+    } finally {
+      process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      srv.stop(true);
+    }
+  });
+
   test("附牌（T5 实证②改参直达）：agora_* 工具附 _token，其余工具不动 input", async () => {
     // Req: F1
     const hooks = wire();

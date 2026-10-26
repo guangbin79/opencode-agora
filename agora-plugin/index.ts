@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { getCredential } from "./cred";
 import { onInject } from "./inject";
 import { ensureOnce, LIFT_RECOVER, type LiftResult } from "./lift";
-import { agoraHome, shouldBlock } from "./hook";
+import { agoraHome, enforceRelevant, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -63,8 +63,9 @@ export default {
       onInject({ sessionID: event.sessionID, text: event.prompt?.text ?? "" });
     });
     ctx.tool.hook("execute.before", async (event) => {
-      // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引
-      const on = enforceOverride ?? (await pullEnforce());
+      // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引。
+      // 旗按需拉取（T6 评审）：预过滤先行——非引导类工具（MCP/grep 等）零开销直过。
+      const on = enforceOverride ?? (enforceRelevant(event.tool) ? await pullEnforce() : false);
       let lift: LiftResult | null = null;
       if (on) lift = await ensureOnce();
       const input = event.input ?? {};

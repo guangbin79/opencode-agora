@@ -54,6 +54,12 @@ function inGitRepo(p: string): boolean {
   }
 }
 
+/** 该工具是否落在判定链可能产出 hint 的类（write 引导面＋read/bash 账本读引导面）——
+ * enforce 旗按需拉取的预过滤（T6 评审：豁免类工具不付拉旗开销）。 */
+export function enforceRelevant(tool: string): boolean {
+  return WRITE_TOOLS.has(tool) || READISH_TOOLS.has(tool);
+}
+
 /**
  * 判定链（F1）：返回引导文案＝拒，null＝放行。
  * 凭据"活动"的本地代理＝持牌＋envDir＋cwd∈envDir；活动任务终审在服务侧（T5 接线对齐）。
