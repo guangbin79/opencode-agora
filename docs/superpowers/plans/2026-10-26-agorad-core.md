@@ -218,7 +218,7 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
 
 **Interfaces:**
 - Consumes: `State.snapshot`
-- Produces: `buckets(snap) -> dict`（五桶：已合并/在飞(含 verify_failed·reopened)/失败/阻塞/已取消）；`chain_view(snap, dispatcher_sid) -> list`；`doctor_view(snap, store_home) -> dict`（孤儿目录、任务年龄排行）；`view_html(snap) -> str`
+- Produces: `buckets(snap) -> dict`（五桶：已合并/在飞(含 verify_failed·reopened)/失败/阻塞/已取消）；`chain_view(snap, dispatcher_sid) -> list`；`detail(snap, store, tid) -> dict`（单任务明细＋事件链＋**done 消息正文＝结论取数**）；`doctor_view(snap, store_home) -> dict`（孤儿目录、任务年龄排行）；`view_html(snap) -> str`
 
 - [ ] **Step 1: 写失败测试** — 五桶分桶断言（reopened/verify_failed 归在飞）；链级按 dispatcher 展开。`Req: F10`
 - [ ] **Step 2-5:** 循环；commit `feat(agorad): core/report——五桶/链视图/doctor`
