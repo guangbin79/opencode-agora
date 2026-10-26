@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""agora MCP 壳：stdio newline-JSON-RPC ↔ agorad HTTP 薄代理（零自身逻辑）。
+
+独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
+stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
+11 工具→`POST /<tool_name>` 根级路由；arguments 内 `_token` 剥除→
+X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
+`$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
+错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
+404→-32004、409→-32009、500→-32603；未知工具/缺牌壳内直错；服务不可达→
+-32000（默认拒，安全方向）。
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PROTOCOL_VERSION = "2024-11-05"
+_VERSION = "0.1.0"
+
+_STR = {"type": "string"}
+_TOOLS = [
+    {"name": "task_create", "description": "登记任务（todo）",
+     "inputSchema": {"type": "object", "properties": {
+         "goal": _STR, "project_dir": _STR,
+         "after": {"type": "string", "description": "前驱任务 id（B7 链）"}},
+         "required": ["goal", "project_dir"]}},
+    {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
+     "inputSchema": {"type": "object", "properties": {"task": _STR},
+                     "required": ["task"]}},
+    {"name": "task_update", "description": "登记 verify 命令（派发方）",
+     "inputSchema": {"type": "object", "properties": {
+         "task": _STR, "verify_cmd": _STR},
+         "required": ["task", "verify_cmd"]}},
+    {"name": "task_cancel", "description": "中止任务（级联下级）",
+     "inputSchema": {"type": "object", "properties": {"task": _STR},
+                     "required": ["task"]}},
+    {"name": "post", "description": "链边发消息（kind: note/question/answer/"
+     "done；方向服务按角色定）",
+     "inputSchema": {"type": "object", "properties": {
+         "task": _STR, "kind": _STR, "body": _STR},
+         "required": ["task", "kind", "body"]}},
+    {"name": "check_mail", "description": "拉取本会话收件",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "board", "description": "看板快照（给 task 返回单任务详情）",
+     "inputSchema": {"type": "object", "properties": {"task": _STR}}},
+    {"name": "doctor", "description": "诊断视图（年龄排名＋环境残留）",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "wiki_read", "description": "读 wiki 页",
+     "inputSchema": {"type": "object", "properties": {"path": _STR},
+                     "required": ["path"]}},
+    {"name": "wiki_write", "description": "写 wiki 页（wiki/tasks/ 前缀服务独占）",
+     "inputSchema": {"type": "object", "properties": {"path": _STR,
+                                                      "text": _STR},
+                     "required": ["path", "text"]}},
+    {"name": "enforce", "description": "拨强制旗（仅 root；on 须布尔）",
+     "inputSchema": {"type": "object", "properties": {
+         "on": {"type": "boolean"}}, "required": ["on"]}},
+]
+_NAMES = frozenset(t["name"] for t in _TOOLS)
+_ERROR_CODES = {400: -32602, 401: -32001, 403: -32003, 404: -32004,
+                409: -32009, 500: -32603}
+# 测试锚（常量别名）；映射全档负数区且互异
+ERROR_CODES = _ERROR_CODES
+
+
+def _err(rid, code, message):
+    return {"jsonrpc": "2.0", "id": rid,
+            "error": {"code": code, "message": message}}
+
+
+def resolve_url():
+    """AGORAD_URL 优先；缺省读 $AGORA_HOME/.agora/service.json 的 port。"""
+    url = os.environ.get("AGORAD_URL")
+    if url:
+        return url.rstrip("/")
+    home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
+    path = Path(home) / ".agora" / "service.json"
+    try:
+        port = json.loads(path.read_text(encoding="utf-8")).get("port")
+    except (OSError, ValueError, AttributeError):
+        port = None
+    if not port:
+        raise OSError(f"agorad 未发现（{path} 无 port 且未设 AGORAD_URL）")
+    return f"http://127.0.0.1:{port}"
+
+
+def http_call(name, arguments):
+    """POST /<name>：_token 剥除→头；返回 (status, body)。HTTPError 亦为值。"""
+    args = dict(arguments)
+    token = args.pop("_token", None)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Agora-Token"] = token
+    req = urllib.request.Request(
+        f"{resolve_url()}/{name}",
+        data=json.dumps(args, ensure_ascii=False).encode(),
+        headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def handle(msg):
+    """一条请求→一条应答 dict；通知（无 id 的非 initialize 面）返回 None。"""
+    if not isinstance(msg, dict):
+        return _err(None, -32600, "请求须为 JSON 对象")
+    rid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        params = msg.get("params") or {}
+        return {"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "agora", "version": _VERSION}}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": _TOOLS}}
+    if method == "tools/call":
+        return _tools_call(rid, msg.get("params") or {})
+    if rid is None:  # 其余通知：静默
+        return None
+    if method is None:
+        return _err(rid, -32600, "缺 method")
+    return _err(rid, -32601, f"未知方法: {method}")
+
+
+def _tools_call(rid, params):
+    name = params.get("name")
+    if name not in _NAMES:
+        return _err(rid, -32602, f"未知工具: {name}")
+    args = params.get("arguments")
+    if not isinstance(args, dict) or not args.get("_token"):
+        return _err(rid, -32001, "缺 _token（未附牌）——服务不可达默认拒同方向")
+    try:
+        status, body = http_call(name, args)
+    except OSError as e:  # 连接拒/发现失败：lift 线索报因
+        return _err(rid, -32000, f"服务不可达: {e}")
+    print(f"[agora_mcp] {name} -> {status}", file=sys.stderr)
+    if status != 200:
+        return _err(rid, _ERROR_CODES.get(status, -32000),
+                    str(body.get("error", body)) if isinstance(body, dict)
+                    else str(body))
+    text = json.dumps(body, ensure_ascii=False)
+    return {"jsonrpc": "2.0", "id": rid,
+            "result": {"content": [{"type": "text", "text": text}]}}
+
+
+def serve(lines=None, out=None):
+    """stdio 主循环：一行一请求一应答；EOF 即退；坏行报 -32700 不死循环。"""
+    lines = sys.stdin if lines is None else lines
+    out = sys.stdout if out is None else out
+    while True:
+        line = lines.readline()
+        if not line:  # EOF
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            resp = handle(json.loads(line))
+        except ValueError:
+            resp = _err(None, -32700, f"坏 JSON 行: {line[:80]}")
+        except Exception as e:  # 壳内兜底：不让单请求杀进程
+            resp = _err(None, -32603, f"壳内错误: {e}")
+        if resp is not None:
+            out.write(json.dumps(resp, ensure_ascii=False) + "\n")
+            out.flush()
+
+
+def main():
+    serve()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
