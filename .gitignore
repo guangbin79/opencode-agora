@@ -1,0 +1,4 @@
+.review-loop/
+.omo/
+__pycache__/
+*.pyc
