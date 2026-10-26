@@ -14,6 +14,7 @@
 
 ```
 agora_mcp.py            # MCP 壳：stdio JSON-RPC＋11 工具→agorad HTTP 映射
+board_tui.py            # Agent View：curses 链树仪表盘（vi motion，独立命令）
 agora-plugin/
 ├── index.ts            # 插件入口（plain-object 导出，禁 Plugin.define）
 ├── hook.ts             # 拦截判定链（edit/write＋读引导＋默认拒）
@@ -146,6 +147,23 @@ tests/
 - 残留断言＋**反需求语义扫**（grep 无 cron/全局扫描/stalled 处置——t4-coverage F5 弱锚收口）
 
 - [ ] **Step 1-4:** 红跑→绿→残留断言→commit `test(e2e): T3 十二场景全链`。`Req: F3/F4/F6/F7/F11`
+
+---
+
+### Task 8: board_tui——Agent View（用户裁定追加，2026-10-26）
+
+**Files:**
+- Create: `board_tui.py`（根级独立命令，curses）
+- Test: `tests/test_board_tui.py`（渲染模型层纯函数，curses 壳薄不可测）
+
+**Interfaces:**
+- Consumes: agorad HTTP（board 五桶/chain_view/detail/doctor；root 牌自动读 `.agora/root.token`）；opencode 会话记录（worker_sid→`$XDG_STATE_HOME/opencode/` 会话文件，只读 tail）
+- Produces: 渲染模型纯函数 `build_rows(snap, events, filter) -> list[Row]`（链树缩进/状态着色域/last_seen 相对时间/升级事件高亮）＋`handle_key(model, key) -> Action`（vi 键位表：j/k 移动、g/G 跳顶底、Enter/l 明细、h 返回、L 会话 tail、d doctor、x cancel（y/n 确认）、/ 过滤（单行输入态，less 形态）、r 即刷、q 退出）；curses 主循环（5s 轮询可配 AGORA_BOARD_INTERVAL）
+- 边界：**无模式切换**（less 同款，非 vim 全模态）；破坏性动作（x）必须确认行；`:命令行` 不做（摩擦实证再加）
+
+- [ ] **Step 1: 红测（模型层）** — build_rows：多级链缩进/五桶计数行/reopened·verify_failed 归在飞着色/升级事件行（四类 kind 高亮）；handle_key：全键位映射＋x 无确认不动作＋过滤态回车退出输入。`Req: F10/F5`
+- [ ] **Step 2-4:** 实现→绿→全量回归（curses 壳 smoke：起 stub agorad＋`BOARD_INTERVAL` 短跑一帧即退）
+- [ ] **Step 5:** Commit `feat(board-tui): Agent View——链树/五桶/事件流/会话 tail，vi motion`
 
 ---
 
