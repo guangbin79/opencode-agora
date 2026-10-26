@@ -177,6 +177,16 @@ class TestHandleKey(unittest.TestCase):
         handle_key(m, "KEY_BACKSPACE")
         self.assertEqual(m["buf"], "a")
 
+    def test_pages_ignore_x_and_slash_guard(self):  # Req: F11/F10
+        m = model(self.ROWS, sel=1, view="detail")
+        self.assertEqual(handle_key(m, "x").op, "noop")  # 全屏页不武装确认
+        self.assertIsNone(m["confirm"])
+        self.assertEqual(handle_key(m, "y").op, "noop")  # y 盲发被拒
+        self.assertEqual(handle_key(model(self.ROWS, sel=1, view="doctor"), "x").op, "noop")
+        m = model(self.ROWS, sel=1, view="tail")
+        handle_key(m, "/")
+        self.assertIsNone(m["input"])
+
     def test_unknown_key_ignored(self):  # Req: F10
         m = model(self.ROWS, sel=1)
         self.assertEqual(handle_key(m, "z").op, "noop")

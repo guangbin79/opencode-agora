@@ -161,16 +161,17 @@ def handle_key(m, key):
         m["view"] = "doctor"
         return Action("doctor")
     if key == "x":
-        if r and r.kind == "task":
+        if m.get("view") == "board" and r and r.kind == "task":
             m["confirm"] = r.tid
             return Action("confirm", task=r.tid)
-        return Action("noop")
+        return Action("noop")                  # 全屏页不武装确认（旁路门）
     if key == "r":
         return Action("refresh")
     if key == "q":
         return Action("quit")
     if key == "/":
-        m["input"], m["buf"] = "", ""
+        if m.get("view") == "board":
+            m["input"], m["buf"] = "", ""
         return Action("noop")
     return Action("noop")                      # 非引导键忽略
 
