@@ -47,7 +47,7 @@ opencode v2 共享服务（agent 运行时；会话持久化、可随时重启�
 
 ### 4.1 状态模型（F2）
 tasks.json：`{tasks: {<id>: {title, project_dir, env_dir, verify, state, dispatcher_sid?, worker_sid?, credential, chain_depth, fail_streak, created, updated}}}`。
-状态机（内存直接迁移，无推导）：`todo → dispatched → running → done → merged → closed`；分支 `blocked / cancelled / verify_failed / reopened`；verify_failed（附输出尾部）/reopened→通知 worker 续修、再 done 重走 verify 门，两者计同任务连败、连续 3 次→blocked。fail_streak：verify_failed/集成 verify 败 reopened 时 +1、verify 绿清零、≥3→blocked（持久化于 tasks.json，kill -9 不丢）。blocked 仅经 cancel（→cancelled）或对同任务再 dispatch（→dispatched，签新凭据、旧凭据即废）离开。board 与结果报告 = 状态视图函数。单写者使配额/TOCTOU 退化为内存计数。
+状态机（内存直接迁移，无推导）：`todo → dispatched → running → done → merged → closed`；分支 `blocked / cancelled / verify_failed / reopened`；verify_failed（附输出尾部）/reopened→通知 worker 续修、再 done 重走 verify 门，两者计同任务连败、连续 3 次→blocked。fail_streak：verify_failed/集成 verify 败 reopened 时 +1、verify 绿或对同任务再 dispatch 清零、≥3→blocked（持久化于 tasks.json，kill -9 不丢）。blocked 仅经 cancel（→cancelled）或对同任务再 dispatch（→dispatched，签新凭据、旧凭据即废）离开。merged→closed：环境 GC 宽限届满回收完成时服务置位。board 与结果报告 = 状态视图函数。单写者使配额/TOCTOU 退化为内存计数。
 
 ### 4.2 派发（F3）
 task_create：建任务页（wiki/tasks/<id>.md，服务生成 frontmatter）→ 建环境（B6）→ 签发凭据。verify 创建时可空：worker 勘察后回填（agora_post），派发方校验（可执行＋需求覆盖）后经 task_update 登记；登记即锁定——修改权属派发方，worker 修改拒绝并审计；verify 未登记 done 拒收。
@@ -67,7 +67,7 @@ done：worker post(done, commit) → 服务在 env_dir 真跑 verify → 败：v
 启动：重载 tasks.json → 对每条 in-flight 链探活 → worker 死：先复查任务状态（cancelled/merged/closed/blocked 不重注入，blocked 等人处置），活动在跑则按任务页+环境现场重 create+inject（同一凭据）；dispatcher 死：通知父/根。常驻期周期探 opencode health，捕捉其中途重启走同一恢复路径。worker 侧调用失败本地排队、服务回来重放。
 
 ### 4.7 审计与结果报告（F8/F10）
-events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` 页 + `board` 工具给出已合并/在飞/失败/阻塞/已取消汇总与明细（reopened 归在飞），按 dispatcher 可展开链级视图。
+events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` 页 + `board` 工具给出已合并/在飞/失败/阻塞/已取消汇总与明细（verify_failed/reopened 归在飞），按 dispatcher 可展开链级视图。
 
 ## 5. opencode 插件规格（TS，plain-object 导出——Plugin.define 包裹形态静默失效，禁用）
 
