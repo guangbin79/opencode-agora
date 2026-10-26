@@ -20,6 +20,7 @@ let home: string; // $AGORA_HOME 夹具
 let tmpRepo: string; // /tmp/opencode 下带 .git 的目录——临时豁免压过 git 判定
 let savedEnv: string | undefined;
 let savedOc: string | undefined;
+let savedState: string | undefined;
 const worker: Cred = { token: "tok-w", sid: "s-worker", role: "worker", envDir: "" };
 const rootCred: Cred = { token: "tok-r", sid: "s-root", role: "root" };
 
@@ -47,6 +48,9 @@ beforeAll(() => {
   process.env.AGORA_HOME = home;
   savedOc = process.env.AGORA_OC_URL;
   delete process.env.AGORA_OC_URL; // ensureService 走必传快速拒：判定链测试不真拉 agorad
+  savedState = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state-home"); // T5：隔离服务发现源（真机有在跑的 opencode）
+  mkdirSync(join(root, "state-home"), { recursive: true });
 });
 
 afterAll(() => {
@@ -54,6 +58,8 @@ afterAll(() => {
   else process.env.AGORA_HOME = savedEnv;
   if (savedOc === undefined) delete process.env.AGORA_OC_URL;
   else process.env.AGORA_OC_URL = savedOc;
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = savedState;
   rmSync(root, { recursive: true, force: true });
   rmSync(tmpRepo, { recursive: true, force: true });
 });
@@ -143,28 +149,59 @@ describe("cred 凭据管家", () => {
   });
 });
 
-describe("index 插件入口（plain-object）", () => {
-  test("tool.execute.before：拦 edit 无凭据抛引导；豁免面静默", async () => {
+describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook）", () => {
+  /** 稳定运行时假 ctx：捕获注册的钩子；session.get 回夹具 cwd（plain）。 */
+  function wire() {
+    const hooks: Record<string, (ev: any) => Promise<void>> = {};
+    entry.setup({
+      tool: { hook: (name, fn) => { hooks[`tool.${name}`] = fn; } },
+      session: {
+        hook: (name, fn) => { hooks[`session.${name}`] = fn; },
+        get: async () => ({ location: { directory: plain } }),
+      },
+    } as any);
+    return hooks;
+  }
+
+  test("tool hook execute.before：拦 edit 无凭据抛引导；豁免面静默", async () => {
     // Req: F1
+    const hooks = wire();
     setEnforce(true);
     try {
       await expect(
-        entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(repo, "a.md") }, cwd: plain }),
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-x", input: { filePath: join(repo, "a.md") } }),
       ).rejects.toThrow(/派发/);
-      await entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(plain, "x.md") }, cwd: plain });
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-x", input: { filePath: join(plain, "x.md") } });
     } finally {
       setEnforce(false);
     }
   });
 
-  test("inject 事件：credential 消息入缓存，凭 sessionID 供判定链", async () => {
+  test("session.prompt hook：credential 消息入缓存，凭 sessionID 供判定链", async () => {
     // Req: F4
+    const hooks = wire();
     setEnforce(true);
     try {
-      entry.inject?.({ sessionID: "s-wired", text: "[agora] credential t-w\ntoken: tok-w" });
+      await hooks["session.prompt"]({ sessionID: "s-wired", prompt: { text: "[agora] credential t-w\ntoken: tok-w" } });
       await expect(
-        entry["tool.execute.before"]({ tool: "edit", sessionID: "s-wired" }, { args: { filePath: join(repo, "a.md") }, cwd: plain }),
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-wired", input: { filePath: join(repo, "a.md") } }),
       ).rejects.toThrow(/派发/); // 无 envDir：deny 安全向
+    } finally {
+      setEnforce(false);
+    }
+  });
+
+  test("附牌（T5 实证②改参直达）：agora_* 工具附 _token，其余工具不动 input", async () => {
+    // Req: F1
+    const hooks = wire();
+    setEnforce(true);
+    try {
+      const mcpIn: Record<string, unknown> = { task: "t-1" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-wired", input: mcpIn });
+      expect(mcpIn._token).toBe("tok-w"); // session.prompt 用例已缓存 s-wired 凭据
+      const plainIn: Record<string, unknown> = { filePath: join(plain, "x.md") };
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-wired", input: plainIn });
+      expect(plainIn._token).toBeUndefined();
     } finally {
       setEnforce(false);
     }
@@ -172,11 +209,12 @@ describe("index 插件入口（plain-object）", () => {
 
   test("lift 失败拒因携恢复指引（doctor resetLift）", async () => {
     // Req: F4
+    const hooks = wire();
     resetLift();
     setEnforce(true);
     try {
       await expect(
-        entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(repo, "a.md") }, cwd: plain }),
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-x", input: { filePath: join(repo, "a.md") } }),
       ).rejects.toThrow(/resetLift/);
     } finally {
       setEnforce(false);

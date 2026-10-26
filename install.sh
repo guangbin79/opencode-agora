@@ -5,7 +5,14 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 AGORA_HOME="${AGORA_HOME:-$HOME/plaza}"          # 与 agorad env_config 同缺省（设计 §3）
-OC_URL="${AGORA_OC_URL:-http://127.0.0.1:4096}"  # 占位：T5 服务发现回填；oc 不可达不挡服务
+STATE_OC="$HOME/.local/state/opencode/service.json"  # T5 实证：serve --service 写此处 {url,password}
+OC_URL="${AGORA_OC_URL:-}"
+OC_PASSWORD="${AGORA_OC_PASSWORD:-}"
+if [ -z "$OC_URL" ] && [ -r "$STATE_OC" ]; then  # T5 服务发现回填；读不到回落占位（oc 不可达不挡服务）
+  OC_URL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("url",""))' "$STATE_OC" 2>/dev/null || true)"
+  OC_PASSWORD="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("password",""))' "$STATE_OC" 2>/dev/null || true)"
+fi
+OC_URL="${OC_URL:-http://127.0.0.1:4096}"        # 占位：仅当 service.json 缺失
 OC_DIR="$HOME/.config/opencode"
 PLUGIN_DIR="$OC_DIR/plugins/agora"
 SERVICE_JSON="$AGORA_HOME/.agora/service.json"
@@ -59,9 +66,15 @@ for f in "$REPO"/agora-plugin/*.ts; do
   cp -f "$f" "$PLUGIN_DIR"/
 done
 
-# ---- 5) AGORA_OC_URL 占位（T5 服务发现回填）----
-cat > "$AGORA_HOME/.agora/env" <<'EOF'
-# AGORA_OC_URL= — opencode 服务地址（T5 服务发现回填；lift 拉起 agorad 需此 env）
+# ---- 4b) agorad 载荷随装（T5 追加项：lift 不再假定与插件同仓——独立安装场景从
+#      $AGORA_HOME/.agora/agorad/main.py 解析；env AGORAD_SCRIPT 可覆写）----
+mkdir -p "$AGORA_HOME/.agora/agorad"
+cp -f "$REPO"/agorad/*.py "$AGORA_HOME/.agora/agorad"/
+
+# ---- 5) AGORA_OC_URL 发现结果落档（lift 运行时自发现同源；此处只留档不作为消费面）----
+cat > "$AGORA_HOME/.agora/env" <<EOF
+# opencode 服务发现（T5 实证：\$XDG_STATE_HOME/opencode/service.json）
+# AGORA_OC_URL=$OC_URL
 EOF
 
 # ---- 6) root 牌接管 ----
@@ -81,7 +94,7 @@ if agorad_alive; then
 else
   mkdir -p /tmp/opencode
   CAP="$(mktemp /tmp/opencode/install-agorad.XXXXXX)"
-  AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL" \
+  AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL" ${OC_PASSWORD:+AGORA_OC_PASSWORD="$OC_PASSWORD"} \
       python3 "$REPO/agorad/main.py" >"$CAP" 2>&1 &
   AD_PID=$!
   ready=""

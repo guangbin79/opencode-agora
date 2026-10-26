@@ -1,5 +1,6 @@
 /**
- * hook 强制判定链（F1，设计 §5.1）：拦截判定纯函数，opencode 接线形状 T5 收紧。
+ * hook 强制判定链（F1，设计 §5.1）：拦截判定纯函数，opencode 接线形状 T5 已实证收紧
+ * （tool.execute.before 覆盖 MCP 工具＋改参直达；cwd＝会话 location，异步取）。
  * 语义与 agorad 服务侧一致：豁免面 B3（非 git、/tmp/opencode、enforce off）、
  * 读引导（state 账本经工具面，events/wiki 开放，主会话例外）、主会话对仓写入同拦。
  */

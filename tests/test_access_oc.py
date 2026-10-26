@@ -45,7 +45,12 @@ class TestAccessOc(unittest.TestCase):
         sid = self.oc.create("/tmp/env", "BOOT")
         for i in range(3):
             self.assertTrue(self.oc.inject(sid, f"m{i}"))
-        self.assertEqual(self.stub.sessions[sid]["injects"], ["m0", "m1", "m2"])
+        # boot 文本随 create 走同一 prompt 通道（真 shape），先于后续 inject
+        self.assertEqual(self.stub.sessions[sid]["injects"], ["BOOT", "m0", "m1", "m2"])
+
+    def test_create_binds_directory_via_move(self):  # Req: F3（T5：POST /session 无 cwd，move 绑 env）
+        sid = self.oc.create("/tmp/env-x", "BOOT")
+        self.assertEqual(self.stub.sessions[sid]["directory"], "/tmp/env-x")
 
 
 if __name__ == "__main__":

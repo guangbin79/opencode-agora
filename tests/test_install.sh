@@ -50,6 +50,7 @@ chk "测试件不随装（无 *.test.ts）(Req: F1)" bash -c '
 chk "root.token 在位非空 (Req: F1)" [ -s "$A1/.agora/root.token" ]
 chk "root.token 0600 (Req: F1)"     [ "$(stat -c %a "$A1/.agora/root.token")" = 600 ]
 chk "AGORA_OC_URL 占位 env (Req: F1)" grep -q "AGORA_OC_URL" "$A1/.agora/env"
+chk "agorad 载荷随装（lift 独立安装解析位，Req: F4）" [ -f "$A1/.agora/agorad/main.py" ]
 
 chk "冒烟 enforce off 审计在账 (Req: F1)" grep -q '"event": "enforce_off"' "$A1/events.jsonl"
 chk "冒烟 enforce on 审计在账 (Req: F1)"  grep -q '"event": "enforce_on"'  "$A1/events.jsonl"

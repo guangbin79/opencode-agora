@@ -15,7 +15,7 @@ if __package__ in (None, ""):  # 脚本直启（lift/T4 拉起形态）：补包
 
 from agorad.access import anchors
 from agorad.access.gitx import Gitx
-from agorad.access.oc import Oc
+from agorad.access.oc import Oc, discover
 from agorad.access.pages import write_task_page
 from agorad.access.store import Store
 from agorad.core import report
@@ -35,18 +35,25 @@ _SERVICE_JSON = ".agora/service.json"  # 设计 §4.8：lift/T4 消费面固定�
 
 
 def env_config():
-    """env 解析：AGORA_HOME 缺省 ~/plaza（设计 §3）；AGORA_OC_URL 必填（T5 回填发现来源）。"""
+    """env 解析：AGORA_HOME 缺省 ~/plaza（设计 §3）；OC 服务＝AGORA_OC_URL 显式优先，
+    缺省读 $XDG_STATE_HOME/opencode/service.json（T5 实证发现源，password 随取）。"""
     home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
-    return home, os.environ.get("AGORA_OC_URL")
+    url = os.environ.get("AGORA_OC_URL")
+    password = os.environ.get("AGORA_OC_PASSWORD")
+    if not url:
+        url, found = discover()
+        if password is None:
+            password = found
+    return home, url, password
 
 
-def assemble(home, oc_url=None, *, oc=None, gitx=None, read_anchor=None,
+def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, main_sid=_MAIN_SID, store=None):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
     auth = Auth(store)
-    oc = oc if oc is not None else Oc(oc_url)
+    oc = oc if oc is not None else Oc(oc_url, oc_password)
     gitx = gitx if gitx is not None else Gitx()
     router = Router(store, state, oc)
     task = TaskService(state, auth, gitx, oc, store, router, write_task_page)
@@ -93,16 +100,16 @@ def start_health_thread(app, interval):
 
 
 def main():
-    home, oc_url = env_config()
+    home, oc_url, oc_password = env_config()
     if not oc_url:
-        print("需要 AGORA_OC_URL（opencode 服务地址；T5 起由服务发现回填）",
+        print("需要 AGORA_OC_URL（或 $XDG_STATE_HOME/opencode/service.json 服务发现）",
               file=sys.stderr)
         return 2
     store = Store(Path(home))
     if not store.flock_singleton():
         print("agorad 已在运行", file=sys.stderr)
         return 1
-    app = assemble(home, oc_url=oc_url, store=store)
+    app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store)
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）

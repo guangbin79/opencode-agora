@@ -143,8 +143,11 @@ class TestHttpSmoke(HttpdTest):
         tid = self.create_task()
         wtok = self.dispatch_task(tid)
         wsid = self.app.state.get(tid)["worker_sid"]
-        self.assertEqual(self.stub.sessions[wsid]["injects"],
-                         [f"[agora] credential {tid}\ntoken: {wtok}"])
+        # T5 真形状：boot 随 create 走 prompt 通道，先于 dispatch 的 credential 注入
+        self.assertEqual(self.stub.sessions[wsid]["injects"][-1],
+                         f"[agora] credential {tid}\ntoken: {wtok}")
+        self.assertTrue(self.stub.sessions[wsid]["injects"][0].startswith(
+            f"[agora] BOOT task {tid}"))
         st, r = call(self.port, "POST", "/post",
                      {"task": tid, "kind": "done", "body": "abc123"}, wtok)
         self.assertEqual(st, 200)
@@ -433,7 +436,7 @@ class TestHealthThread(unittest.TestCase):
         self.assertTrue(wait_until(
             lambda: self.app.state.get("t9")["worker_sid"] != dead))
         new = self.app.state.get("t9")["worker_sid"]
-        self.assertTrue(self.stub.sessions[new]["alive"])
+        self.assertIn(new, self.stub.sessions)  # 新会话在册＝活（T5：死＝消失）
         self.assertTrue(any(e["event"] == "reinjected"
                             for e in self.app.store.read_events("t9")))
         self.assertTrue(wait_until(lambda: (

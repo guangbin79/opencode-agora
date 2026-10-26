@@ -22,17 +22,29 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class TestEnvConfig(unittest.TestCase):
     def test_home_defaults_to_plaza(self):  # Req: F6
-        with mock.patch.dict(os.environ, {}, clear=True):
-            home, _ = env_config()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("agorad.main.discover", return_value=(None, None)):
+            home, url, _pw = env_config()
         self.assertEqual(home, str(Path.home() / "plaza"))
+        self.assertIsNone(url)  # 无 service.json、无 env 显式 → None（main 报错）
 
     def test_explicit_home_wins(self):  # Req: F6
-        with mock.patch.dict(os.environ, {"AGORA_HOME": "/tmp/x"}):
-            home, _ = env_config()
+        with mock.patch.dict(os.environ, {"AGORA_HOME": "/tmp/x"}), \
+             mock.patch("agorad.main.discover", return_value=(None, None)):
+            home, _, _pw = env_config()
         self.assertEqual(home, "/tmp/x")
 
+    def test_oc_discovery_from_service_json(self):  # Req: F6（T5：AGORA_OC_URL 发现来源实证）
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("agorad.main.discover",
+                        return_value=("http://127.0.0.1:49374", "pw")):
+            url, password = env_config()[1:]
+        self.assertEqual(url, "http://127.0.0.1:49374")
+        self.assertEqual(password, "pw")
+
     def test_oc_url_missing_exits_2_and_names_it(self):  # Req: F6
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("agorad.main.discover", return_value=(None, None)):
             import io
             err = io.StringIO()
             with mock.patch("sys.stderr", err):

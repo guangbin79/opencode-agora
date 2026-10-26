@@ -3,11 +3,11 @@
  * ensureService：已运行直返／未运行拉起 stub→就绪／拉起失败 LiftTimeout（没装 vs 拉不起两态）。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { cacheCredential, getCredential, readCredential } from "./cred";
+import { cacheCredential, getCredential } from "./cred";
 import { onInject } from "./inject";
 import { ensureOnce, ensureService, LiftTimeout, resetLift } from "./lift";
 
@@ -15,21 +15,22 @@ const STUB = join(import.meta.dir, "tests", "stub_agorad.py");
 const PLACEHOLDER_OC = "http://127.0.0.1:59999"; // 占位：桩不消费，只为过必传门
 let root: string;
 let home: string;
-let sessDir: string;
 let savedHome: string | undefined;
 let savedOc: string | undefined;
+let savedState: string | undefined;
 const sjPath = () => join(home, ".agora", "service.json");
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "agora-lift-"));
   home = join(root, "plaza");
-  sessDir = join(root, "sess");
   mkdirSync(join(home, ".agora"), { recursive: true });
-  mkdirSync(sessDir);
   savedHome = process.env.AGORA_HOME;
   savedOc = process.env.AGORA_OC_URL;
   process.env.AGORA_HOME = home;
   process.env.AGORA_OC_URL = PLACEHOLDER_OC;
+  savedState = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state-home"); // T5：隔离服务发现源（真机有在跑的 opencode）
+  mkdirSync(join(root, "state-home"), { recursive: true });
 });
 
 afterAll(() => {
@@ -37,6 +38,8 @@ afterAll(() => {
   else process.env.AGORA_HOME = savedHome;
   if (savedOc === undefined) delete process.env.AGORA_OC_URL;
   else process.env.AGORA_OC_URL = savedOc;
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = savedState;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -160,15 +163,9 @@ describe("onInject credential 提取", () => {
     expect(getCredential("s-fresh")?.envDir).toBeUndefined();
   });
 
-  test("sessionDir 在→落盘 0600 且 readCredential 往返可读", () => {
+  test("T5 实证：v2.1.4 会话无插件可见目录——牌只入内存缓存，重派沿用 envDir", () => {
     // Req: F4
-    onInject({
-      sessionID: "s-disk",
-      text: "[agora] credential t-8\ntoken: tok-8",
-      sessionDir: sessDir,
-    });
-    const f = join(sessDir, ".agora-cred.json");
-    expect(statSync(f).mode & 0o777).toBe(0o600);
-    expect(readCredential(sessDir)?.token).toBe("tok-8");
+    onInject({ sessionID: "s-disk", text: "[agora] credential t-8\ntoken: tok-8" });
+    expect(getCredential("s-disk")?.token).toBe("tok-8"); // 无落盘：重启后由 recover 重发牌兜底
   });
 });

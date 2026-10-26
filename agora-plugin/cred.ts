@@ -30,12 +30,14 @@ export function readCredential(sessionDir: string): Cred | null {
   }
 }
 
-/** 落盘会话目录（0600：token 仅本用户可读）；已存在文件 mode 不改写——会话目录一次一牌。 */
+/** 落盘凭据（0600）；T5 实证 v2.1.4 无插件可见会话目录——inject 路径不落盘（内存缓存＋
+ * 服务侧 reinject 重发兜底），本函数留给未来选定落盘点（如 $AGORA_HOME）时复用。 */
 export function writeCredential(sessionDir: string, cred: Cred): void {
   writeFileSync(join(sessionDir, CRED_FILE), JSON.stringify(cred) + "\n", { mode: 0o600 });
 }
 
-// shortcut: 附牌形状假定 args._token=<token>，opencode 钩子改参能力 T5 探针实证后收紧
+// 附牌形状（T5 实证）：tool.execute.before 改 ev.input 直达 MCP——index.ts 对 agora_* 工具
+// 直接写 input._token；本函数保留纯函数形态供非钩子面复用与测试。
 export function attachToken(args: Record<string, unknown>, sid: string): Record<string, unknown> {
   const cred = cache.get(sid);
   if (cred) args._token = cred.token;

@@ -1,9 +1,14 @@
 /**
  * lift 服务拉起（F4/设计 §4.8）：探测 $AGORA_HOME/.agora/service.json→任意 HTTP 应答（含 401）
- ＝就绪；未运行则 setsid 拉起 agorad（env 带 AGORA_HOME＋AGORA_OC_URL）轮询至 10s 上限。
- * 超时拒因两态：没装（main.py 缺）vs 拉不起（起而不就绪／OC_URL 未设）。
+ ＝就绪；未运行则 setsid 拉起 agorad（env 带 AGORA_HOME＋AGORA_OC_URL[＋AGORA_OC_PASSWORD]）
+ 轮询至 10s 上限。超时拒因两态：没装（main.py 缺）vs 拉不起（起而不就绪／OC 发现落空）。
+ * T5 实证接线：AGORA_OC_URL 发现源＝$XDG_STATE_HOME/opencode/service.json（serve --service 写
+ {url,password,pid,version}）；API 需 Basic opencode:<password>（oc.py 消费，agorad 只透传）。
+ * script 解析序：opts.script → env AGORAD_SCRIPT → $AGORA_HOME/.agora/agorad/main.py（install
+ 载荷）→ 与插件同仓（dev 布局）——插件独立安装场景不再假定同仓。
  */
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { agoraHome } from "./hook";
 
@@ -12,6 +17,7 @@ export class LiftTimeout extends Error {}
 export interface LiftOpts {
   home?: string;
   script?: string;
+  stateHome?: string; // T5 发现源根（测试注入隔离）
   timeoutMs?: number; // 真值 10s；测试注入短化
   intervalMs?: number;
 }
@@ -43,17 +49,58 @@ async function probe(port: number): Promise<boolean> {
   }
 }
 
+/** opencode 服务发现（T5）：读 $XDG_STATE_HOME/opencode/service.json → {url,password}。 */
+export function discoverOc(
+  stateHome = process.env.XDG_STATE_HOME || join(homedir(), ".local/state"),
+): { url: string; password?: string } | null {
+  try {
+    const sj = JSON.parse(readFileSync(join(stateHome, "opencode", "service.json"), "utf8")) as {
+      url?: unknown;
+      password?: unknown;
+    };
+    return typeof sj.url === "string" && sj.url
+      ? { url: sj.url, password: typeof sj.password === "string" ? sj.password : undefined }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveScript(opts: LiftOpts, home: string): string {
+  return (
+    opts.script ||
+    process.env.AGORAD_SCRIPT ||
+    join(home, ".agora", "agorad", "main.py") || // install.sh 载荷位（独立安装）
+    DEFAULT_SCRIPT // dev 同仓布局兜底
+  );
+}
+
 export async function ensureService(
   opts: LiftOpts = {},
 ): Promise<{ port: number; proc?: Killable }> {
-  const { home = agoraHome(), script = DEFAULT_SCRIPT, timeoutMs = 10_000, intervalMs = 100 } = opts;
+  const { home = agoraHome(), timeoutMs = 10_000, intervalMs = 100 } = opts;
+  const script = resolveScript(opts, home);
   let port = readPort(home);
   if (port !== null && (await probe(port))) return { port };
   if (!existsSync(script)) throw new LiftTimeout(`agorad 未安装：找不到 ${script}`);
-  const ocUrl = process.env.AGORA_OC_URL;
-  if (!ocUrl) throw new LiftTimeout("agorad 拉起失败：AGORA_OC_URL 未设置（服务发现 T5 回填）");
+  let ocUrl = process.env.AGORA_OC_URL;
+  const ocPassword = process.env.AGORA_OC_PASSWORD;
+  if (!ocUrl) {
+    const found = discoverOc(opts.stateHome);
+    if (!found) {
+      throw new LiftTimeout(
+        "agorad 拉起失败：AGORA_OC_URL 未设置且服务发现落空（$XDG_STATE_HOME/opencode/service.json 不存在——opencode serve --service 在运行吗）",
+      );
+    }
+    ocUrl = found.url;
+  }
   const proc = Bun.spawn(["setsid", "python3", script], {
-    env: { ...process.env, AGORA_HOME: home, AGORA_OC_URL: ocUrl },
+    env: {
+      ...process.env,
+      AGORA_HOME: home,
+      AGORA_OC_URL: ocUrl,
+      ...(ocPassword ? { AGORA_OC_PASSWORD: ocPassword } : {}),
+    },
     stdio: ["ignore", "ignore", "ignore"],
   });
   const deadline = Date.now() + timeoutMs;
