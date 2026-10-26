@@ -11,6 +11,8 @@ stdlib，依赖全构造注入（runner 缺省为 subprocess 真跑）。
 """
 import subprocess
 
+from agorad.core.health import KIND_GATEFILES, KIND_QUALITY
+
 _TAIL = 2000
 # 闸体＝verify 依赖面（构建/测试配置）：任务 diff 触及即升级拍人
 _GATE_PATTERNS = ("Makefile", "*.mk", "pyproject.toml", "setup.py", "setup.cfg",
@@ -63,7 +65,7 @@ class Gate:
         self._state.set_fields(tid, in_gate=True)
         try:
             if self.gate_files_touched(tid):  # 闸体变更：拍人不拦门
-                self._health.escalate("gatefiles", tid)
+                self._health.escalate(KIND_GATEFILES, tid)
             rc, out = self._runner(env, cmd)
             if rc != 0:
                 self._quality_fail(tid, "verify_failed",
@@ -103,7 +105,7 @@ class Gate:
         self._post(tid, body)
         self._state.fail_streak_bump(tid)
         if self._state.get(tid)["state"] == "blocked":
-            self._health.escalate("quality", tid)
+            self._health.escalate(KIND_QUALITY, tid)
 
     def _tail(self, tid):
         """门走完：pending-cancel 生效（merged 不逆转历史）；merged 置 closed；清门闩。"""
