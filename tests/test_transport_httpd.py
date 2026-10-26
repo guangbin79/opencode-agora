@@ -191,10 +191,19 @@ class TestHttpSmoke(HttpdTest):
         st, _ = call(self.port, "GET", "/view", token="junk")
         self.assertEqual(st, 401)
         wtok = self.app.auth.issue("w8", "worker")
-        st, html_text = call(self.port, "GET", "/view", token=wtok)
-        self.assertEqual(st, 200)  # 查询面三角色皆可（裁定）
+        st, _ = call(self.port, "GET", "/view", token=wtok)
+        self.assertEqual(st, 403)  # may 矩阵：worker 白名单无查询面
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "auth_denied" and e.get("tool") == "board"
+              and e["actor"] == "w8"]
+        self.assertEqual(len(ev), 1)  # 越权审计行
+        st, _ = call(self.port, "GET", "/health", token=wtok)
+        self.assertEqual(st, 403)
+        dtok = self.app.auth.issue("d1", "dispatcher")
+        st, html_text = call(self.port, "GET", "/view", token=dtok)
+        self.assertEqual(st, 200)
         self.assertIn("<html>", html_text)
-        st, r = call(self.port, "GET", "/health", token=wtok)
+        st, r = call(self.port, "GET", "/health", token=dtok)
         self.assertEqual(st, 200)
         self.assertIn("enforce_on", r)
 

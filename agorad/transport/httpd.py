@@ -39,8 +39,10 @@ class _Handler(BaseHTTPRequestHandler):
         ident = self.app.auth.identify(self.headers.get("X-Agora-Token", ""))
         if ident is None:
             return self._json(401, {"error": "无牌或牌无效"})
-        # /view、/health＝board/doctor 同级查询面（裁定：三角色皆可——worker
-        # 白名单无查询面，故按裁定放行一切已认证角色，不走 may）
+        sid, role = ident
+        tool = "board" if name == "view" else "doctor"  # 查询面同级（may 矩阵）
+        if not self.app.auth.may(role, tool, None, None):
+            return self._deny(sid, role, tool, None)
         if name == "view":
             self._html(200, report.view_html(self.app.state.snapshot()))
         else:
@@ -69,10 +71,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except KeyError:
                     return self._json(404, {"error": f"task {tid} 不存在"})
             if not self.app.auth.may(role, name, tid, row):
-                self.app.store.append_event(
-                    {"ts": time.time(), "actor": sid, "event": EV_AUTH_DENIED,
-                     "tool": name, "task": tid, "note": f"role={role}"})
-                return self._json(403, {"error": f"{name} 拒绝（role={role}）"})
+                return self._deny(sid, role, name, tid)
             self.app.health.touch(sid)  # last_seen：每次工具调用即刷新
             if row and row["state"] == "dispatched" and row.get("worker_sid") == sid:
                 # worker 首次调用即开工：dispatched→running（里程碑迁移＋审计）
@@ -140,6 +139,13 @@ class _Handler(BaseHTTPRequestHandler):
             app.auth.set_enforce(on, role)
             return {"enforce_on": app.auth.enforce_on()}
         raise KeyError(name)
+
+    def _deny(self, sid, role, tool, tid):
+        """越权 403：POST/GET 共用（审计行同形）。"""
+        self.app.store.append_event(
+            {"ts": time.time(), "actor": sid, "event": EV_AUTH_DENIED,
+             "tool": tool, "task": tid, "note": f"role={role}"})
+        return self._json(403, {"error": f"{tool} 拒绝（role={role}）"})
 
     def _post(self, sid, body):
         app, tid, kind = self.app, body["task"], body["kind"]
