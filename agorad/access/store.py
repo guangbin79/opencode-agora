@@ -45,7 +45,7 @@ class Store:
         header = f"id: {mid}\n" + "".join(
             f"{k}: {fm[k]}\n" for k in sorted(fm)
         )
-        path = self._messages / f"{mid}.md"
+        path = self._messages / f"{mid:08d}.md"  # 补零保证文件名字典序＝msg-id 数值序
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as f:  # "x"＝已存在即拒，id 不可变
             f.write(f"{header}\n{body}")

@@ -54,6 +54,11 @@ class TestAccessStore(unittest.TestCase):
         self.assertEqual(fresh.scan_max_msg_id(), a)
         self.assertEqual(fresh.write_message({"task": "t2"}, "y"), a + 1)
 
+    def test_msg_filename_sort_equals_time_order(self):  # Req: F4
+        ids = [self.st.write_message({"task": "t"}, "") for _ in range(12)]
+        names = sorted(p.name for p in self.tmp.joinpath("state/messages").glob("*.md"))
+        self.assertEqual(names, [f"{i:08d}.md" for i in ids])
+
     def test_write_ephemeral_overwrites(self):  # Req: F6
         self.st.write_ephemeral("service.json", {"pid": 1})
         self.st.write_ephemeral("service.json", {"pid": 2})
