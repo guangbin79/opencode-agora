@@ -11,7 +11,9 @@ stdlib，依赖全构造注入（runner 缺省为 subprocess 真跑）。
 """
 import subprocess
 
-from agorad.core.health import KIND_GATEFILES, KIND_QUALITY
+# 升级 kind 与 health 的类别词汇对齐（core 禁 import 兄弟模块，字面量本地定义）
+KIND_QUALITY = "quality"
+KIND_GATEFILES = "gatefiles"
 
 _TAIL = 2000
 # 闸体＝verify 依赖面（构建/测试配置）：任务 diff 触及即升级拍人
