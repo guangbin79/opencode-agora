@@ -34,13 +34,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         name = self.path.strip("/").split("?")[0]
+        if name not in ("view", "health"):
+            return self._json(404, {"error": "not found"})
+        ident = self.app.auth.identify(self.headers.get("X-Agora-Token", ""))
+        if ident is None:
+            return self._json(401, {"error": "无牌或牌无效"})
+        # /view、/health＝board/doctor 同级查询面（裁定：三角色皆可——worker
+        # 白名单无查询面，故按裁定放行一切已认证角色，不走 may）
         if name == "view":
             self._html(200, report.view_html(self.app.state.snapshot()))
-        elif name == "health":
+        else:
             self._json(200, {"ok": True,
                              "enforce_on": self.app.auth.enforce_on()})
-        else:
-            self._json(404, {"error": "not found"})
 
     def do_POST(self):
         try:
@@ -129,7 +134,10 @@ class _Handler(BaseHTTPRequestHandler):
             p.write_text(str(body["text"]), encoding="utf-8")
             return {"ok": True}
         if name == "enforce":  # may() 已滤非 root；开/关审计在 Auth
-            app.auth.set_enforce(bool(body["on"]), role)
+            on = body["on"]
+            if not isinstance(on, bool):  # "false" 字符串得 True——语义反转拒收
+                raise ValueError("on 须为布尔")
+            app.auth.set_enforce(on, role)
             return {"enforce_on": app.auth.enforce_on()}
         raise KeyError(name)
 

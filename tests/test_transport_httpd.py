@@ -160,10 +160,10 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(r["chain"], [tid])
         st, r = call(self.port, "POST", "/board", {"task": tid}, self.root)
         self.assertEqual(r["done_body"], "abc123")  # 结论取自消息库 done 正文
-        st, html_text = call(self.port, "GET", "/view")
+        st, html_text = call(self.port, "GET", "/view", token=self.root)
         self.assertEqual(st, 200)
         self.assertIn("<html>", html_text)
-        st, r = call(self.port, "GET", "/health")
+        st, r = call(self.port, "GET", "/health", token=self.root)
         self.assertTrue(r["ok"])
         self.assertTrue(r["enforce_on"])
 
@@ -183,11 +183,35 @@ class TestHttpSmoke(HttpdTest):
                             and e.get("tool") == "enforce" and e["actor"] == "w9"
                             for e in ev))
 
+    def test_get_view_health_authed(self):  # Req: F1
+        st, _ = call(self.port, "GET", "/view")
+        self.assertEqual(st, 401)
+        st, _ = call(self.port, "GET", "/health")
+        self.assertEqual(st, 401)
+        st, _ = call(self.port, "GET", "/view", token="junk")
+        self.assertEqual(st, 401)
+        wtok = self.app.auth.issue("w8", "worker")
+        st, html_text = call(self.port, "GET", "/view", token=wtok)
+        self.assertEqual(st, 200)  # 查询面三角色皆可（裁定）
+        self.assertIn("<html>", html_text)
+        st, r = call(self.port, "GET", "/health", token=wtok)
+        self.assertEqual(st, 200)
+        self.assertIn("enforce_on", r)
+
+    def test_enforce_non_bool_on_rejected(self):  # Req: F1
+        st, _ = call(self.port, "POST", "/enforce", {"on": "false"}, self.root)
+        self.assertEqual(st, 400)  # 字符串 "false" 不得反转成 True
+        st, _ = call(self.port, "POST", "/enforce", {"on": 1}, self.root)
+        self.assertEqual(st, 400)
+        self.assertTrue(self.app.auth.enforce_on())  # 旗标未被拨动
+        self.assertEqual([e for e in self.app.store.read_events()
+                          if e["event"].startswith("enforce")], [])  # 无审计行
+
     def test_root_enforce_toggles_and_audits(self):  # Req: F1
         st, r = call(self.port, "POST", "/enforce", {"on": False}, self.root)
         self.assertEqual(st, 200)
         self.assertFalse(r["enforce_on"])
-        st, r = call(self.port, "GET", "/health")
+        st, r = call(self.port, "GET", "/health", token=self.root)
         self.assertFalse(r["enforce_on"])
         st, r = call(self.port, "POST", "/enforce", {"on": True}, self.root)
         self.assertTrue(r["enforce_on"])
