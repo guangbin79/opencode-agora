@@ -18,6 +18,7 @@ let envDir: string; // worker 任务环境夹具
 let home: string; // $AGORA_HOME 夹具
 let tmpRepo: string; // /tmp/opencode 下带 .git 的目录——临时豁免压过 git 判定
 let savedEnv: string | undefined;
+let savedOc: string | undefined;
 const worker: Cred = { token: "tok-w", sid: "s-worker", role: "worker", envDir: "" };
 const rootCred: Cred = { token: "tok-r", sid: "s-root", role: "root" };
 
@@ -43,11 +44,15 @@ beforeAll(() => {
   worker.envDir = envDir;
   savedEnv = process.env.AGORA_HOME;
   process.env.AGORA_HOME = home;
+  savedOc = process.env.AGORA_OC_URL;
+  delete process.env.AGORA_OC_URL; // ensureService 走必传快速拒：判定链测试不真拉 agorad
 });
 
 afterAll(() => {
   if (savedEnv === undefined) delete process.env.AGORA_HOME;
   else process.env.AGORA_HOME = savedEnv;
+  if (savedOc === undefined) delete process.env.AGORA_OC_URL;
+  else process.env.AGORA_OC_URL = savedOc;
   rmSync(root, { recursive: true, force: true });
   rmSync(tmpRepo, { recursive: true, force: true });
 });
@@ -138,12 +143,27 @@ describe("cred 凭据管家", () => {
 });
 
 describe("index 插件入口（plain-object）", () => {
-  test("tool.execute.before：拦 edit 无凭据抛引导；豁免面静默", () => {
+  test("tool.execute.before：拦 edit 无凭据抛引导；豁免面静默", async () => {
     // Req: F1
     setEnforce(true);
     try {
-      expect(() => entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(repo, "a.md") }, cwd: plain })).toThrow(/派发/);
-      expect(() => entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(plain, "x.md") }, cwd: plain })).not.toThrow();
+      await expect(
+        entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(repo, "a.md") }, cwd: plain }),
+      ).rejects.toThrow(/派发/);
+      await entry["tool.execute.before"]({ tool: "edit" }, { args: { filePath: join(plain, "x.md") }, cwd: plain });
+    } finally {
+      setEnforce(false);
+    }
+  });
+
+  test("inject 事件：credential 消息入缓存，凭 sessionID 供判定链", async () => {
+    // Req: F4
+    setEnforce(true);
+    try {
+      entry.inject?.({ sessionID: "s-wired", text: "[agora] credential t-w\ntoken: tok-w" });
+      await expect(
+        entry["tool.execute.before"]({ tool: "edit", sessionID: "s-wired" }, { args: { filePath: join(repo, "a.md") }, cwd: plain }),
+      ).rejects.toThrow(/派发/); // 无 envDir：deny 安全向
     } finally {
       setEnforce(false);
     }
