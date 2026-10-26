@@ -66,6 +66,15 @@ class Store:
             f.flush()
             os.fsync(f.fileno())
 
+    def read_ephemeral(self, name: str) -> dict | None:
+        path = self.home / name
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return None  # 断尾/损坏件视为缺席，同 load_state 容错口径
+
     def flock_singleton(self) -> bool:
         if self._lock_fd is not None:
             return True

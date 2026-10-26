@@ -1,0 +1,90 @@
+"""会话牌（token→sid/role）与 enforce 旗标：独立持久化＋角色判定矩阵（设计 §4.9）。
+
+牌不入 tasks 快照行与消息库，经 write_ephemeral("tokens") 独立落盘，kill -9 后
+新实例从盘恢复；enforce 旗标只内存持有、重启默认 on，开/关与拒绝均写审计
+（events.jsonl 经注入 store.append_event）。Store 构造注入，core 只 import stdlib。
+"""
+import secrets
+import time
+
+# worker 工具白名单＝矩阵唯一放行集；task_update/task_cancel/enforce 不在其中
+WORKER_TOOLS = {"post", "check_mail", "wiki_read", "wiki_write", "task_dispatch"}
+# dispatcher 通用面＝worker 面＋建任务/观测；task_update/task_cancel 为 task 域单列
+DISPATCHER_TOOLS = WORKER_TOOLS | {"task_create", "board", "doctor"}
+
+# 审计事件名常量
+EV_ENFORCE_ON = "enforce_on"
+EV_ENFORCE_OFF = "enforce_off"
+EV_AUTH_DENIED = "auth_denied"
+EV_ROOT_ROTATED = "root_rotated"
+
+
+class Auth:
+    """每会话一牌：root/dispatcher/worker；多主会话各持 root 牌（角色非单例）。"""
+
+    def __init__(self, store):
+        self._store = store
+        data = store.read_ephemeral("tokens") or {}
+        self._tokens = {t: list(v) for t, v in data.items()}  # token -> [sid, role]
+        self._enforce = True  # 重启默认 on（旗标不落盘）
+
+    def issue(self, sid, role):
+        token = secrets.token_hex()
+        self._tokens[token] = [sid, role]
+        self._persist()
+        return token
+
+    def identify(self, token):
+        v = self._tokens.get(token)
+        return (v[0], v[1]) if v else None
+
+    def revoke(self, token):
+        if token not in self._tokens:
+            return False
+        del self._tokens[token]
+        self._persist()
+        return True
+
+    def rotate_root(self):
+        # doctor 一键轮换：全部旧 root 牌即废，新牌沿用最近 root 的 sid；其余角色不受累
+        roots = [t for t, v in self._tokens.items() if v[1] == "root"]
+        sid = self._tokens[roots[-1]][0] if roots else "root"
+        for t in roots:
+            del self._tokens[t]
+        token = self.issue(sid, "root")
+        self._store.append_event({"ts": time.time(), "actor": "root",
+                                  "event": EV_ROOT_ROTATED, "note": f"revoked={len(roots)}"})
+        return token
+
+    def may(self, role, tool, tid, state):
+        """矩阵：root→任意；worker→白名单；dispatcher→通用面＋task 域（须有任务行）。
+
+        state＝目标任务快照行（State.snapshot()["tasks"][tid]），无行即非己任；
+        归属终审（dispatcher_sid==caller sid）由持 actor_token 的 TaskService 负责。
+        """
+        if role == "root":
+            return True
+        if role == "worker":
+            return tool in WORKER_TOOLS
+        if role == "dispatcher":
+            if tool in ("task_update", "task_cancel"):
+                return state is not None
+            return tool in DISPATCHER_TOOLS
+        return False
+
+    def set_enforce(self, on, role):
+        """仅 root 生效；开/关与非 root 拒绝均写 events 审计行。"""
+        if role != "root":
+            self._store.append_event({"ts": time.time(), "actor": role,
+                                      "event": EV_AUTH_DENIED, "note": "enforce"})
+            return False
+        self._enforce = bool(on)
+        self._store.append_event({"ts": time.time(), "actor": role,
+                                  "event": EV_ENFORCE_ON if self._enforce else EV_ENFORCE_OFF})
+        return True
+
+    def enforce_on(self):
+        return self._enforce
+
+    def _persist(self):
+        self._store.write_ephemeral("tokens", self._tokens)

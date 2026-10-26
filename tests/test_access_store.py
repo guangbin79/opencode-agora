@@ -64,6 +64,11 @@ class TestAccessStore(unittest.TestCase):
         self.st.write_ephemeral("service.json", {"pid": 2})
         self.assertEqual(json.loads(self.tmp.joinpath("service.json").read_text()), {"pid": 2})
 
+    def test_read_ephemeral_roundtrip(self):  # Req: F6
+        self.assertIsNone(self.st.read_ephemeral("tokens"))
+        self.st.write_ephemeral("tokens", {"tk": ["s1", "worker"]})
+        self.assertEqual(self.st.read_ephemeral("tokens"), {"tk": ["s1", "worker"]})
+
 
 if __name__ == "__main__":
     unittest.main()
