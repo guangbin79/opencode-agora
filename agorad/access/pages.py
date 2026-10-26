@@ -5,7 +5,8 @@
 """
 from pathlib import Path
 
-_FM_KEYS = ("id", "state", "chain_depth", "project_dir", "env_dir")
+_FM_KEYS = ("id", "state", "chain_depth", "project_dir", "env_dir",
+            "dispatcher_sid", "worker_sid")
 
 
 def write_task_page(home, tid, snap) -> Path:

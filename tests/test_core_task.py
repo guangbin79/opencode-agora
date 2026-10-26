@@ -215,6 +215,16 @@ class TestVerify(TestCoreTask):
 
 
 class TestCreateAndRedispatch(TestCoreTask):
+    def test_create_writes_task_page_and_dispatch_rerenders(self):  # Req: F2
+        disp = self.auth.issue("disp1", "dispatcher")
+        tid = self.svc.create("g", "/repo", None, disp)
+        page = self.tmp / "wiki" / "tasks" / f"{tid}.md"
+        self.assertTrue(page.exists())  # create 产出任务页（create→page 接线）
+        self.svc.dispatch(tid, disp)
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("state: dispatched", text)  # 重渲反映当前态
+        self.assertIn("disp1", text)  # 归属（dispatcher_sid）渲染
+
     def test_create_seeds_queryable_row(self):  # Req: F2
         tid = self.dispatchable("my goal", after=None)
         t = self.state.snapshot()["tasks"][tid]
