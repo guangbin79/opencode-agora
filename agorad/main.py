@@ -1,14 +1,17 @@
 """agorad 常驻入口（R2/R10）：唯一贯穿三层的装配文件。
 
 flock 单实例→装配 App（root 牌于此授予）→recover.startup 复查重注入→绑端口→
-service.json（pid/port/started/version/oc_version）→health 后台定时线程
-（默认 300s，AGORA_HEALTH_INTERVAL 可配）→serve_forever。
+service.json（$AGORA_HOME/.agora/ 下，pid/port/started/version/oc_version）→
+health 后台定时线程（默认 300s，AGORA_HEALTH_INTERVAL 可配）→serve_forever。
 """
 import os
 import sys
 import threading
 import time
 from pathlib import Path
+
+if __package__ in (None, ""):  # 脚本直启（lift/T4 拉起形态）：补包检索路径
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agorad.access import anchors
 from agorad.access.gitx import Gitx
@@ -28,6 +31,13 @@ from agorad.transport.httpd import make_server
 
 _VERSION = "0.1.0"
 _MAIN_SID = "main"
+_SERVICE_JSON = ".agora/service.json"  # 设计 §4.8：lift/T4 消费面固定路径
+
+
+def env_config():
+    """env 解析：AGORA_HOME 缺省 ~/plaza（设计 §3）；AGORA_OC_URL 必填（T5 回填发现来源）。"""
+    home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
+    return home, os.environ.get("AGORA_OC_URL")
 
 
 def assemble(home, oc_url=None, *, oc=None, gitx=None, read_anchor=None,
@@ -70,9 +80,9 @@ def health_loop(app, interval):
             probe = app.oc.probe()
         except Exception:  # oc 不可达：保留旧 oc_version
             continue
-        sj = app.store.read_ephemeral("service.json") or {}
+        sj = app.store.read_ephemeral(_SERVICE_JSON) or {}
         sj["oc_version"] = probe.get("oc_version")
-        app.store.write_ephemeral("service.json", sj)
+        app.store.write_ephemeral(_SERVICE_JSON, sj)
 
 
 def start_health_thread(app, interval):
@@ -83,10 +93,10 @@ def start_health_thread(app, interval):
 
 
 def main():
-    home = os.environ.get("AGORA_HOME")
-    oc_url = os.environ.get("AGORA_OC_URL")
-    if not home or not oc_url:
-        print("需要 AGORA_HOME 与 AGORA_OC_URL", file=sys.stderr)
+    home, oc_url = env_config()
+    if not oc_url:
+        print("需要 AGORA_OC_URL（opencode 服务地址；T5 起由服务发现回填）",
+              file=sys.stderr)
         return 2
     store = Store(Path(home))
     if not store.flock_singleton():
@@ -95,14 +105,14 @@ def main():
     app = assemble(home, oc_url=oc_url, store=store)
     tok = issue_root(app)
     if tok:
-        print(f"root token: {tok}", flush=True)  # 首启交付主会话（②期壳接管）
+        print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）
     app.recover.startup()
     try:
         oc_version = app.oc.probe().get("oc_version")
     except Exception:  # oc 未起不挡服务：health 线程补探
         oc_version = None
     server = make_server(app, int(os.environ.get("AGORA_PORT", "0")))
-    store.write_ephemeral("service.json", {
+    store.write_ephemeral(_SERVICE_JSON, {
         "pid": os.getpid(), "port": server.server_address[1],
         "started": time.time(), "version": _VERSION, "oc_version": oc_version})
     start_health_thread(app, float(os.environ.get("AGORA_HEALTH_INTERVAL",

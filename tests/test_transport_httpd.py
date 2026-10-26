@@ -437,7 +437,7 @@ class TestHealthThread(unittest.TestCase):
         self.assertTrue(any(e["event"] == "reinjected"
                             for e in self.app.store.read_events("t9")))
         self.assertTrue(wait_until(lambda: (
-            self.app.store.read_ephemeral("service.json") or {})
+            self.app.store.read_ephemeral(".agora/service.json") or {})
             .get("oc_version") == VERSION))
 
 
