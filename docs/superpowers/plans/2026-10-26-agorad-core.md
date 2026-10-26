@@ -47,6 +47,7 @@ tests/
 - 状态集：todo/dispatched/running/done/merged/closed/blocked/cancelled/verify_failed/reopened；迁移矩阵见 state 模块（设计 §4.1）
 - import 方向铁律：access→stdlib；core→stdlib（访问层经构造注入）；transport/httpd→core；main→全部
 - 每测试带 `Req: F<n>` 锚；线性历史 rebase＋ff-only
+- enforce 旗标重启默认 on；升级事件四类调用点＝质量连败/闸体（gate）、重注入失败（recover）、dispatcher 死亡（health）
 
 ## Review Focus（规格未点名、最可能咬人的五类输入——各钉进所属任务）
 
@@ -110,17 +111,19 @@ def test_fail_streak_blocks_at_3_and_resets_on_redispatch(self):  # Req: F7
 
 - [ ] **Step 2-5:** 同 Task 1 循环；commit `feat(agorad): core/state——迁移矩阵/fail_streak/审计事件`
 
-### Task 3: core/auth 会话牌
+### Task 3: core/auth 会话牌与 enforce 旗标
 
 **Files:**
+- Modify: `agorad/access/store.py`（补 `read_ephemeral(name) -> dict | None`，附一条 store 测试）
 - Create: `agorad/core/auth.py`
-- Test: `tests/test_core_auth.py`
+- Test: `tests/test_core_auth.py`、`tests/test_access_store.py`（追加 read_ephemeral 用例）
 
 **Interfaces:**
-- Produces: `class Auth`；`issue(sid: str, role: str) -> str`（role∈root/dispatcher/worker；token=secrets.token_hex）；`identify(token: str) -> tuple[str, str] | None`；`may(role: str, tool: str, tid: str | None, state) -> bool`（矩阵：root→enforce/任意；dispatcher→task_update(自己任务)/task_cancel(子链)；worker→post/check_mail/wiki_*/task_dispatch(嵌套)；worker 调 task_cancel/task_update/enforce 恒 False）；`rotate_root() -> str`
+- Consumes: `Store.write_ephemeral/read_ephemeral`（牌持久化）
+- Produces: `class Auth(store)`；`issue(sid, role) -> str`（role∈root/dispatcher/worker；token=secrets.token_hex；持久化经 write_ephemeral("tokens")）；`identify(token) -> tuple[str,str] | None`（kill -9 后新实例从盘恢复仍有效）；`revoke(token) -> bool`；`may(role, tool, tid, state) -> bool`（矩阵：root→enforce/任意；dispatcher→task_update(自己任务)/task_cancel(子链)；worker→post/check_mail/wiki_*/task_dispatch(嵌套)；worker 调 task_cancel/task_update/enforce 恒 False）；`rotate_root() -> str`；`set_enforce(on: bool, role: str) -> bool`＋`enforce_on() -> bool`（仅 root 生效＋写 events 审计；重启默认 on）
 
-- [ ] **Step 1: 写失败测试** — `may` 矩阵全叉乘（3 角色 × 11 工具，断言按设计 §4.9）。`Req: F1`
-- [ ] **Step 2-5:** 循环；commit `feat(agorad): core/auth——角色判定矩阵`
+- [ ] **Step 1: 写失败测试** — `may` 矩阵全叉乘（3 角色 × 11 工具，按设计 §4.9）；token 重启恢复；revoke 后 identify None；非 root set_enforce 返回 False 且 events 有审计行。`Req: F1/F6`
+- [ ] **Step 2-5:** 循环；commit `feat(agorad): core/auth——角色判定矩阵/牌持久化/enforce 旗标`
 
 ### Task 4: access/oc 访问层（含 stub）
 
@@ -152,7 +155,7 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
     self.assertEqual(self.gx.merge_ff(env, "main"), "non-ff")  # 主干已推进时
 ```
 
-另：remove_env 后 worktree list 干净；rollback 后目标分支字节级回退。
+另：remove_env 后 worktree list 干净；rollback 后目标分支字节级回退；merge 成功路径（"ok"）真 git 断言。
 
 - [ ] **Step 2-5:** 循环；commit `feat(agorad): access/gitx——worktree 建清/ff-only/回滚/闸体检测`
 
@@ -172,15 +175,15 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
 ### Task 7: core/task 生命周期
 
 **Files:**
-- Create: `agorad/core/task.py`
-- Test: `tests/test_core_task.py`（假 oc/gitx 注入）
+- Create: `agorad/core/task.py`、`agorad/access/pages.py`
+- Test: `tests/test_core_task.py`、`tests/test_access_pages.py`（薄断言 2-3 例）
 
 **Interfaces:**
-- Consumes: State/Auth/Gitx/Store/Oc
-- Produces: `class TaskService(state, auth, gitx, oc, store)`；`create(goal, project_dir, after: str | None, actor) -> str`；`dispatch(tid, dispatcher_token) -> str`（保险丝：链深<5、配额（活动任务计数）、can_spawn 名册、B7 after 前驱终态校验——违者拒且报因）；`cancel(tid, actor_token)`（级联下级、凭据作废、配额即释放、环境即回收、merged 不动、空链幂等）；`update_verify(tid, actor_token, cmd)`（登记即锁定；非派发方/worker 必拒＋审计）
+- Consumes: State/Auth/Gitx/Store/Oc/**Router**/**pages**
+- Produces: `pages.write_task_page(home, tid, snap) -> Path`（wiki/tasks/<id>.md 渲染视图，access 层）；`class TaskService(state, auth, gitx, oc, store, router, pages)`；`create(goal, project_dir, after: str | None, actor) -> str`（调 pages 写任务页）；`dispatch(tid, dispatcher_token) -> str`（保险丝：链深<5、配额（活动任务计数）、can_spawn 名册、B7 after 前驱终态校验——违者拒且报因；**重派先 revoke 旧牌**）；`cancel(tid, actor_token)`（级联下级、**经 router.post 发终止通知**、凭据作废、配额即释放、环境即回收、merged 不动、空链幂等＋审计行）；`update_verify(tid, actor_token, cmd)`（登记即锁定，registered_by/registered_at 落行；非派发方/worker 必拒＋审计）
 
-- [ ] **Step 1: 写失败测试** — 保险丝四拒绝各一例＋B7：after 未终态 dispatch 拒；cancel 两级级联断言；worker token update_verify 拒且 events 有拒绝行。`Req: F2/F3/F11`
-- [ ] **Step 2-5:** 循环；commit `feat(agorad): core/task——保险丝/级联中止/verify 登记`
+- [ ] **Step 1: 写失败测试** — 保险丝四拒绝各一例＋B7：after 未终态 dispatch 拒；cancel 两级级联断言＋**两级 worker 各收一条终止消息**；worker token update_verify 拒且 events 有拒绝行；**happy path：worker 回填经 post→dispatcher update_verify→verify.state=registered＋registered_by/registered_at**；**create 后 snapshot 可查 id/state/归属**；**重派后旧 token identify None**；**空链 cancel 幂等＋events 有行**；**create 产出任务页文件**。`Req: F2/F3/F11`
+- [ ] **Step 2-5:** 循环；commit `feat(agorad): core/task——保险丝/级联中止/verify 登记/任务页`
 
 ### Task 8: core/gate verify 门与自动合并
 
@@ -189,11 +192,11 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
 - Test: `tests/test_core_gate.py`（假 gitx/oc 注入）
 
 **Interfaces:**
-- Consumes: State/Gitx/Router/Oc
-- Produces: `class Gate(state, gitx, router, oc)`；`accept_done(tid, worker_sid, commit, anchor: dict | None) -> str`（"accepted"/"rejected:verify-unregistered"/"rejected:anchor"——anchor＝环境 `.review-loop` 末证据锚＝worktree 分支 HEAD 且无 blocker/high；拒收附动作指引文案）；`run(tid) -> None`（后台线程体：env 跑 verify→败 verify_failed＋输出尾部回 worker；绿→merge_ff→non-ff→reopened；集成 verify 败→rollback＋reopened；绿→merged＋环境回收；全程 in-gate 门闩＋pending-cancel 检查）；`gate_files_touched(tid) -> bool`
+- Consumes: State/Gitx/Router/Oc（anchor 读取经构造注入 `read_anchor(env_dir) -> dict | None`，默认实现归 access 层）
+- Produces: `class Gate(state, gitx, router, oc, read_anchor, health)`；`accept_done(tid, worker_sid, commit) -> str`（"accepted"/"rejected:verify-unregistered"/"rejected:anchor"——服务经 read_anchor 自取环境 `.review-loop` 锚＝worktree 分支 HEAD 且无 blocker/high；拒收附动作指引文案）；`run(tid) -> None`（后台线程体：env 跑 verify→败 verify_failed＋输出尾部回 worker；绿→merge_ff→non-ff→reopened 且 fail_streak 不变；集成 verify 败→rollback＋reopened；绿→`transition(merged, commit=sha)`（证据指针落快照行）＋环境回收＋尾部置 closed；全程 in-gate 门闩＋pending-cancel 检查；质量 3 连败→health.escalate；闸体变更→health.escalate；verify 绿→fail_streak_reset）；`gate_files_touched(tid) -> bool`
 
-- [ ] **Step 1: 写失败测试** — 三拒收分支；verify 败/绿全路径；非 ff→reopened 且无 merge commit；集成败→目标分支 sha 回退断言；门内 cancel→pending 生效、merged 任务不动。`Req: F7`
-- [ ] **Step 2-5:** 循环；commit `feat(agorad): core/gate——done 前置/verify 门/自动合并/回滚`
+- [ ] **Step 1: 写失败测试** — 三拒收分支；verify 败/绿全路径；非 ff→reopened 且无 merge commit 且 streak 不变；集成败→目标分支 sha 回退断言；merged 行含 commit 字段；终态 closed；3 连败触发 escalate 注入主会话一例；门内 cancel→pending 生效、merged 任务不动。`Req: F7`
+- [ ] **Step 2-5:** 循环；commit `feat(agorad): core/gate——done 前置/verify 门/自动合并/回滚/升级调用点`
 
 ### Task 9: core/health 与 core/recover
 
@@ -202,9 +205,9 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
 - Test: `tests/test_core_health.py`、`tests/test_core_recover.py`
 
 **Interfaces:**
-- Produces: `class Health(state, oc, router)`——`tick() -> None`（探直接下一跳：死→recover.reinject 或上报；`touch(sid)` 刷 last_seen）；`escalate(kind, tid) -> None`（正文服务权威合成，worker 文本不可信段携带）；`class Recover(state, oc, gitx)`——`startup() -> None`（load→in-flight 复查→死会话按状态重注入：终态/blocked 不注入）；`reinject(tid) -> bool`
+- Produces: `class Health(state, oc, router, recover)`——`tick() -> None`（探直接下一跳：死→recover.reinject，失败→escalate；`touch(sid)` 刷 last_seen；常驻期由 main 定时线程驱动，兼探 oc health）；`escalate(kind, tid) -> None`（正文服务权威合成，worker 文本不可信段携带；四类：dispatcher 死亡/质量连败/重注入失败/闸体变更）；`class Recover(state, oc, gitx)`——`startup() -> None`（load→in-flight 复查→死会话按状态重注入：终态/blocked 不注入）；`reinject(tid) -> bool`（失败→escalate）
 
-- [ ] **Step 1: 写失败测试** — tick 对死下级触发上报注入；escalate 正文含服务合成标记且 worker 文本转义；startup 对 cancelled 任务的死 worker 不重注入、running 任务重注入（同凭据）。`Req: F5/F6`
+- [ ] **Step 1: 写失败测试** — tick 对死下级触发上报注入；escalate 正文含服务合成标记且 worker 文本转义；四类升级事件各注入一例达主会话；startup 对 cancelled 任务的死 worker 不重注入、running 任务重注入（同凭据——牌持久化后重启仍有效）。`Req: F5/F6`
 - [ ] **Step 2-5:** 循环；commit `feat(agorad): core/health·recover——只管死/升级合成/状态复查重注入`
 
 ### Task 10: core/report 视图
@@ -228,10 +231,10 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
 
 **Interfaces:**
 - Consumes: 全部 core 模块＋access 件
-- Produces: `make_server(agora_home: Path, oc, gitx, port: int = 0) -> HTTPServer`（单线程；路由＝11 工具端点＋/view＋/health；鉴权从 `X-Agora-Token` 过 Auth；gate.run 转后台线程池 1 worker）；`main()`＝装配＋flock＋write_ephemeral(service.json 含 oc_version)＋serve_forever
+- Produces: `class App`（core/app.py：持 store/state/auth/router/task/gate/health/recover/report——由 main 装配）；`make_server(app, port: int = 0) -> HTTPServer`（单线程；路由＝11 工具端点＋/view＋/health；鉴权从 `X-Agora-Token` 过 Auth；gate.run 转后台线程池 1 worker）；`main()`＝装配 App（**root 牌于此授予**）＋flock＋write_ephemeral(service.json 含 oc_version)＋**health 后台定时线程（默认 300s 可配）**＋serve_forever
 
-- [ ] **Step 1: 写失败测试** — task_create→dispatch→post(done)（假 gate）全链 HTTP 冒烟；无牌 401；worker 牌调 enforce 403＋审计行；连续 10 条注入按序全到（stub 记录 inject 序）。`Req: F2-F4`
-- [ ] **Step 2-5:** 循环；commit `feat(agorad): transport/httpd＋main——单线程/鉴权/后台门/冒烟全链`
+- [ ] **Step 1: 写失败测试** — task_create→dispatch→post(done)（假 gate）全链 HTTP 冒烟；无牌 401；worker 牌调 enforce 403＋审计行；**root 牌调 enforce on/off 生效＋审计行**；连续 10 条注入按序全到（stub 记录 inject 序）；**health 定时线程按间隔驱动 tick（短间隔夹具）**。`Req: F2-F4/F5`
+- [ ] **Step 2-5:** 循环；commit `feat(agorad): transport/httpd＋main——单线程/鉴权/后台门/健康定时/冒烟全链`
 
 ### Task 12: 分层守卫（architecture test）
 
@@ -244,7 +247,7 @@ def test_env_sibling_of_repo_and_ff_only(self):  # Req: F1
 - [ ] **Step 1: 写失败测试**
 
 ```python
-def test_import_direction(self):  # Req: 设计§3 分层
+def test_import_direction(self):  # Req: F2
     assert_pkg_imports("agorad/access", allowed_local=[])          # 仅 stdlib
     assert_pkg_imports("agorad/core", allowed_local=[])            # 仅 stdlib（访问层经注入）
     assert_pkg_imports("agorad/transport", allowed_local=["agorad.core"])
@@ -256,4 +259,4 @@ def test_import_direction(self):  # Req: 设计§3 分层
 
 ---
 
-## 计划②（预告，另出）：MCP 壳 11 工具映射、插件四段（hook/cred/inject/lift）、install.sh 三部件宿主装配、T2 强制 e2e、T3 派发链 e2e（真 opencode）。
+## 计划②（预告，另出）：MCP 壳 11 工具映射、插件四段（hook/cred/inject/lift）、install.sh 三部件宿主装配、T2 强制 e2e、T3 派发链 e2e（真 opencode）。T4 验收对应表（需求 §4 每验收行 ↔ 用例）随①收尾落盘 `docs/superpowers/plans/t4-coverage.md`，②首任务核销。
