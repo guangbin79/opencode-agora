@@ -59,6 +59,15 @@ class TestAccessStore(unittest.TestCase):
         names = sorted(p.name for p in self.tmp.joinpath("state/messages").glob("*.md"))
         self.assertEqual(names, [f"{i:08d}.md" for i in ids])
 
+    def test_read_messages_skips_torn_files(self):  # Req: F4
+        """F-5：门中崩溃撕裂件（坏头/空文件）跳过，不拖垮全体 check_mail。"""
+        a = self.st.write_message({"task": "t1"}, "x")
+        msgs_dir = self.tmp / "state" / "messages"
+        (msgs_dir / "00000003.md").write_text("id: 3\ntorn", encoding="utf-8")  # 坏头
+        (msgs_dir / "00000004.md").write_text("", encoding="utf-8")  # 空文件
+        b = self.st.write_message({"task": "t2"}, "y")
+        self.assertEqual([m["id"] for m in self.st.read_messages()], [a, b])
+
     def test_write_ephemeral_overwrites(self):  # Req: F6
         self.st.write_ephemeral("service.json", {"pid": 1})
         self.st.write_ephemeral("service.json", {"pid": 2})

@@ -73,8 +73,9 @@ class _Handler(BaseHTTPRequestHandler):
             if not self.app.auth.may(role, name, tid, row):
                 return self._deny(sid, role, name, tid)
             self.app.health.touch(sid)  # last_seen：每次工具调用即刷新
-            if row and row["state"] == "dispatched" and row.get("worker_sid") == sid:
-                # worker 首次调用即开工：dispatched→running（里程碑迁移＋审计）
+            if (row and row["state"] in ("dispatched", "verify_failed", "reopened")
+                    and row.get("worker_sid") == sid):
+                # worker 调用即开工（含 verify_failed/reopened 续修边）：→running＋审计
                 self.app.state.transition(tid, EV_RUNNING)
                 self.app.store.append_event({"ts": time.time(), "actor": sid,
                                              "event": EV_RUNNING, "task": tid})
@@ -188,8 +189,15 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(app, port: int = 0):
-    """单线程 HTTPServer（串行口径 §4.8）＋后台门队列（1 worker 串行）。"""
+    """单线程 HTTPServer（串行口径 §4.8）＋后台门队列（1 worker 串行）。
+
+    装配即重排 done 残留（kill -9 门中崩溃）：重启后 verify 幂等重跑，
+    pending-cancel 与门闩照常由门体结算（F-4）。
+    """
     q = queue.Queue()
+    for tid, t in app.state.snapshot()["tasks"].items():
+        if t["state"] == "done":
+            q.put(tid)
 
     def consume():
         while True:

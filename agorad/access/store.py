@@ -59,13 +59,19 @@ class Store:
         return max((int(p.stem) for p in self._messages.glob("*.md")), default=0)
 
     def read_messages(self) -> list[dict]:
-        """全库消息按 msg-id 升序（补零文件名序＝id 序）；frontmatter 键＋id(int)＋body。"""
+        """全库消息按 msg-id 升序（补零文件名序＝id 序）；frontmatter 键＋id(int)＋body。
+
+        门中崩溃撕裂件（坏头/断尾/空文件）跳过——同 load_state 断尾容错口径。
+        """
         out = []
         for p in sorted(self._messages.glob("*.md")):
-            head, _, body = p.read_text(encoding="utf-8").partition("\n\n")
-            fm = dict(line.split(": ", 1) for line in head.splitlines())
-            fm["id"] = int(fm["id"])
-            fm["body"] = body
+            try:
+                head, _, body = p.read_text(encoding="utf-8").partition("\n\n")
+                fm = dict(line.split(": ", 1) for line in head.splitlines())
+                fm["id"] = int(fm["id"])
+                fm["body"] = body
+            except (ValueError, KeyError, OSError):
+                continue
             out.append(fm)
         return out
 

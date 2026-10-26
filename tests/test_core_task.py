@@ -133,6 +133,20 @@ class TestFuses(TestCoreTask):
         self.svc.dispatch(b, self.root)
         self.assertEqual(self.state.get(b)["state"], "dispatched")
 
+    def test_dispatch_wrong_state_rejected_and_audited(self):  # Req: F3
+        self.seed("t1", state="running")
+        with self.assertRaises(Rejected):
+            self.svc.dispatch("t1", self.root)
+        self.assertTrue(any(e["event"] == "dispatch_rejected"
+                            and e.get("task") == "t1" for e in self.events()))
+
+    def test_create_after_missing_rejected_and_audited(self):  # Req: F2
+        with self.assertRaises(Rejected):
+            self.svc.create("g", "/repo", "ghost", self.root)
+        ev = [e for e in self.events() if e["event"] == "dispatch_rejected"]
+        self.assertEqual(len(ev), 1)  # 直 raise 补审计行（F-2）
+        self.assertTrue(ev[0].get("task"))
+
 
 class TestCancel(TestCoreTask):
     def test_two_level_cascade_with_notifications(self):  # Req: F11

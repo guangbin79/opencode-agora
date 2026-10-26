@@ -39,11 +39,12 @@ class TaskService:
 
     def create(self, goal, project_dir, after, actor_token):
         sid, _ = self._gate(actor_token, "task_create", None, None)
+        tid = self._new_tid()
         if after is not None:
             try:
                 self._state.get(after)
             except KeyError:
-                raise Rejected(f"after: 前任务 {after} 不存在") from None
+                self._reject(tid, sid, f"after: 前任务 {after} 不存在")
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
         tid = self._new_tid()
@@ -67,7 +68,7 @@ class TaskService:
         sid, _ = self._gate(dispatcher_token, "task_dispatch", tid, t,
                             owner=t.get("dispatcher_sid"))
         if t["state"] not in ("todo", "blocked"):
-            raise Rejected(f"{tid}: {t['state']} 不可派发（仅 todo/blocked）")
+            self._reject(tid, sid, f"{t['state']} 不可派发（仅 todo/blocked）")
         if t["chain_depth"] >= _MAX_DEPTH:
             self._reject(tid, sid, f"chain_depth>={_MAX_DEPTH}")
         active = sum(1 for x in self._state.snapshot()["tasks"].values()
@@ -116,9 +117,7 @@ class TaskService:
         t = self._state.get(tid)
         total = 0
         if t["state"] not in _FROZEN:
-            if t["state"] == "done":  # 门临界段：排队待 gate 走完生效（T8 消费）
-                self._state.set_fields(tid, pending_cancel=True)
-            else:
+            if not self._state.queue_cancel(tid):  # done 在门内：原子排队，门尾消费
                 self._state.transition(tid, "cancelled")
                 if t.get("worker_sid"):  # 快照行先行后消息（§4.8 写序）
                     self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",

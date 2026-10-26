@@ -41,10 +41,10 @@ def assemble(home, oc_url=None, *, oc=None, gitx=None, read_anchor=None,
     router = Router(store, state, oc)
     task = TaskService(state, auth, gitx, oc, store, router, write_task_page)
     recover = Recover(state, oc, gitx, store, auth, router=router)
-    health = Health(state, oc, router, recover, main_sid)
+    health = Health(state, oc, router, recover, main_sid, store=store)
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
-                runner=runner)
+                store=store, runner=runner)
     return App(store=store, state=state, auth=auth, router=router, task=task,
                gate=gate, health=health, recover=recover, report=report,
                oc=oc, gitx=gitx, main_sid=main_sid)

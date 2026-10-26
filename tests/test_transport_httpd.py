@@ -107,7 +107,7 @@ class HttpdTest(unittest.TestCase):
                             gitx=FakeGitx(),
                             read_anchor=lambda env: {"head": "abc123",
                                                      "clean": True},
-                            runner=ok_runner)
+                            runner=getattr(self, "gate_runner", ok_runner))
         self.root = self.app.auth.issue("main", "root")
         self.httpd = make_server(self.app)
         threading.Thread(target=self.httpd.serve_forever,
@@ -263,6 +263,80 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(st, 200)
         self.assertEqual(len(r["age_rank"]), 1)
         self.assertEqual(r["env"], [])
+
+
+class SwitchRunner:
+    """首跑败后续绿：驱动 done→verify_failed→running→done→closed 续修循环。"""
+
+    def __init__(self):
+        self.n = 0
+
+    def __call__(self, cwd, cmd):
+        self.n += 1
+        return (1, "boom") if self.n == 1 else (0, "pass")
+
+
+class TestReworkLoop(HttpdTest):
+    """F-1：verify_failed/reopened→running 续修边（worker 任意工具调用即开工）。"""
+
+    def setUp(self):
+        self.gate_runner = SwitchRunner()
+        super().setUp()
+
+    def test_verify_failed_then_rework_reaches_closed(self):  # Req: F7
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": "abc123"}, wtok)
+        self.assertEqual(r, {"result": "accepted"})
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(tid)["state"] == "verify_failed"))
+        st, _ = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "fixed"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(tid)["state"], "running")  # 续修开工
+        self.gate_runner.n = 1  # 尾部修完：verify 转绿
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": "abc123"}, wtok)
+        self.assertEqual(r, {"result": "accepted"})
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(tid)["state"] == "closed"))
+        running = [e for e in self.app.store.read_events(tid)
+                   if e["event"] == "running"]
+        self.assertEqual(len(running), 2)  # 首跑＋续修两段开工均审计
+
+
+class TestStartupRequeue(unittest.TestCase):
+    """F-4：kill -9 门中残留（done＋in_gate）→ make_server 重排门队列，verify 幂等重跑。"""
+
+    def test_done_residue_requeued_and_gate_completes(self):  # Req: F6
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            app = assemble(tmp, oc=DeadInjectOc(), gitx=FakeGitx(),
+                           read_anchor=lambda env: {"head": "abc123",
+                                                    "clean": True},
+                           runner=ok_runner)
+            app.state.add("t1", {
+                "title": "t1", "goal": "g", "project_dir": "/repo",
+                "env_dir": "/envs/t1", "after": None,
+                "verify": {"cmd": "pytest -q", "state": "registered",
+                           "registered_by": "main", "registered_at": 1.0},
+                "state": "done", "commit": "abc123", "in_gate": True,
+                "dispatcher_sid": "main", "worker_sid": "w1",
+                "chain_depth": 1, "fail_streak": 0, "created": 0.0,
+                "updated": 0.0})
+            httpd = make_server(app)  # 装配即重排 done 残留
+            try:
+                self.assertTrue(wait_until(
+                    lambda: app.state.get("t1")["state"] == "closed"))
+                self.assertEqual(app.state.get("t1")["commit"], "abc123")
+                names = [e["event"] for e in app.store.read_events("t1")]
+                self.assertIn("merged", names)
+                self.assertIn("closed", names)
+            finally:
+                httpd.server_close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestGateTailCancel(unittest.TestCase):

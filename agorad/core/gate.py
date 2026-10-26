@@ -5,11 +5,14 @@
 env 跑 verify→败 verify_failed＋输出尾部（截 2000 字符）实时回 worker＋计连败；
 绿→ff-only 合并→non-ff 拒并 reopened（fail_streak 不动）→集成 verify 败→原子回滚
 （合并前 sha）＋reopened＋计连败；全绿→fail_streak_reset＋merged（commit 证据落行）
-＋环境回收＋尾部置 closed。全程 in-gate 门闩＋pending-cancel 门走完生效（merged 不
-逆转历史）。3 连败自动 blocked 与闸体变更经 health.escalate 拍人。core 只 import
+＋环境回收＋尾部置 closed。每处迁移落 events.jsonl 一行（F8 门段审计，事件名＝
+迁移后状态名，merged 带 commit）。全程 in-gate 门闩（accept 即置位）＋
+pending-cancel 门走完生效（结算经 State.gate_tail 原子完成，merged 不逆转历史）。
+3 连败自动 blocked 与闸体变更经 health.escalate 拍人。core 只 import
 stdlib，依赖全构造注入（runner 缺省为 subprocess 真跑）。
 """
 import subprocess
+import time
 
 # 升级 kind 与 health 的类别词汇对齐（core 禁 import 兄弟模块，字面量本地定义）
 KIND_QUALITY = "quality"
@@ -33,9 +36,10 @@ class Gate:
     """accept_done 单写者串行受理；run 为后台线程体（httpd 包 Thread 调用）。"""
 
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
-                 runner=None):
+                 store, runner=None):
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
+        self._store = store
         self._runner = runner or _subprocess_runner
 
     # ---- done 受理（前置三拒，拒收附动作指引） ----
@@ -58,6 +62,7 @@ class Gate:
                     "须＝分支 HEAD 且无 blocker/high）——跑 /review-loop 或待 idle "
                     "自动触发，绿后带锚重新 post(done, commit)")
         self._state.transition(tid, "done", commit=commit)
+        self._audit(tid, "done", commit=commit)
         return "accepted"
 
     # ---- 门体（后台线程体） ----
@@ -78,6 +83,7 @@ class Gate:
             before = self._gitx.head(target)  # 回滚点＝合并前目标分支 HEAD
             if self._gitx.merge_ff(env, target) != "ok":
                 self._state.transition(tid, "reopened")  # 拒并不计连败（R12）
+                self._audit(tid, "reopened")
                 self._post(tid, "non-ff 拒并：目标分支已推进——同步主干后重新"
                                 " post(done, commit)")
                 return
@@ -90,6 +96,7 @@ class Gate:
                 return
             self._state.fail_streak_reset(tid)  # 全绿清连败（R12）
             self._state.transition(tid, "merged", commit=t.get("commit"))
+            self._audit(tid, "merged", commit=t.get("commit"))
             self._gitx.remove_env(env)
             self._post(tid, f"merged @{t.get('commit')}——环境已回收")
         finally:
@@ -103,31 +110,33 @@ class Gate:
     # ---- 内部 ----
 
     def _quality_fail(self, tid, to, body):
-        """质量败（verify 败/集成败）：迁移＋实时回 worker＋计连败（3 连败拍人）。"""
+        """质量败（verify 败/集成败）：迁移＋审计＋实时回 worker＋计连败（3 连败拍人）。"""
         self._state.transition(tid, to)
+        self._audit(tid, to)
         self._post(tid, body)
         self._state.fail_streak_bump(tid)
         if self._state.get(tid)["state"] == "blocked":
+            self._audit(tid, "blocked")
             self._health.escalate(KIND_QUALITY, tid)
 
     def _tail(self, tid):
-        """门走完：pending-cancel 生效（merged 不逆转历史）；merged 置 closed；清门闩。"""
-        t = self._state.get(tid)
-        fields = {"in_gate": False}
-        if t.get("pending_cancel"):
-            fields["pending_cancel"] = False
-        if t.get("pending_cancel") and t["state"] != "merged":
-            self._state.transition(tid, "cancelled", **fields)
+        """门走完：pending-cancel 经 State.gate_tail 原子结算（merged 不逆转历史）；副作用随终态。"""
+        t = self._state.gate_tail(tid)
+        if t["state"] == "cancelled":
+            self._audit(tid, "cancelled")
             if t.get("env_dir"):  # 同 T7 直路径口径：cancelled 即环境回收
                 self._gitx.remove_env(t["env_dir"])
             if t.get("worker_sid"):  # 同 T7 直路径：终止通知＋凭据作废
                 self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                   f"task {tid} cancelled at gate tail")
                 self._auth.revoke_session(t["worker_sid"])
-        elif t["state"] == "merged":
-            self._state.transition(tid, "closed", **fields)
-        else:
-            self._state.set_fields(tid, **fields)
+        elif t["state"] == "closed":
+            self._audit(tid, "closed")
+
+    def _audit(self, tid, event, **extra):
+        """F8 门段审计：迁移即 events.jsonl 一行（事件名＝迁移后状态名）。"""
+        self._store.append_event({"ts": time.time(), "actor": "gate",
+                                  "event": event, "task": tid, **extra})
 
     def _post(self, tid, body):
         t = self._state.get(tid)

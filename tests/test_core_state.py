@@ -137,6 +137,37 @@ class TestCoreState(unittest.TestCase):
              "merged", "closed", "blocked", "cancelled"},
         )
 
+    # ---- F-3 并发三防线：cancel×gate-tail 消费封闭（§4.8） ----
+
+    def test_queue_cancel_requires_done(self):  # Req: F6
+        self.seed({"t9": "running"})
+        self.assertFalse(self.st.queue_cancel("t9"))  # 非 done 不排队（直取消路径）
+
+    def test_gate_tail_consumes_pending_to_cancelled(self):  # Req: F6
+        # 门尾真实状态空间＝verify_failed/reopened/merged（run 已迁移，done 不达尾）
+        self.seed({"t9": "verify_failed"})
+        self.st.set_fields("t9", pending_cancel=True)
+        row = self.st.gate_tail("t9")
+        self.assertEqual(row["state"], "cancelled")  # pending 必被消费
+        self.assertFalse(row.get("pending_cancel"))  # 不悬挂
+
+    def test_gate_tail_merged_pending_closes(self):  # Req: F6
+        self.seed({"t9": "merged"})
+        self.st.set_fields("t9", pending_cancel=True)
+        row = self.st.gate_tail("t9")
+        self.assertEqual(row["state"], "closed")  # merged 不逆转历史
+        self.assertFalse(row.get("pending_cancel"))
+
+    def test_cancel_and_gate_tail_never_orphan_pending(self):  # Req: F6
+        """排队→门尾结算逐轮交错：排队者必被取走、pending 零残留（40 轮）。"""
+        for i in range(40):
+            tid = f"c{i}"
+            self.st.add(tid, {"state": "verify_failed", "pending_cancel": True,
+                              "fail_streak": 0, "created": 0.0, "updated": 0.0})
+            row = self.st.gate_tail(tid)
+            self.assertEqual(row["state"], "cancelled")
+            self.assertFalse(row.get("pending_cancel"), f"{tid} pending 悬挂")
+
 
 if __name__ == "__main__":
     unittest.main()

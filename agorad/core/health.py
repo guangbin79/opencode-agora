@@ -5,7 +5,8 @@ board/doctor 与人工）；死下级→recover.reinject 自愈（静默），�
 死会话若正管着在飞链（dispatcher）→不代管、直接拍人。升级正文由服务权威
 合成；任务/worker 供给文本以"不可信原文"段携带（拍平换行，防伪造服务行）。
 escalate 沿 dispatcher_sid 上行至根任务（根 dispatcher＝main_sid，装配保证）
-经 router post——落库先行，注入即视为拍到。core 只 import stdlib，依赖全注入。
+经 router post——落库先行，注入即视为拍到；escalate 同时落 events.jsonl 审计行
+（F8）。core 只 import stdlib，依赖全注入。
 """
 import time
 
@@ -32,9 +33,10 @@ _KIND_NOTE = {
 class Health:
     """tick 由 main 定时线程驱动；单写者口径（httpd 串行调用）。"""
 
-    def __init__(self, state, oc, router, recover, main_sid):
+    def __init__(self, state, oc, router, recover, main_sid, store):
         self._state, self._oc, self._router = state, oc, router
         self._recover, self._main_sid = recover, main_sid
+        self._store = store
 
     def tick(self):
         """探每个活动任务的直接下跳：死→自愈/上报；只管死，不判僵。"""
@@ -73,6 +75,8 @@ class Health:
             body += f"\n{_UNTRUSTED}\n{flat[:_RAW_MAX]}"
         root = self._root(tid)
         rt = self._state.get(root)
+        self._store.append_event({"ts": time.time(), "actor": "health",
+                                  "event": "escalate", "task": tid, "kind": kind})
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body)
 
     def _root(self, tid):

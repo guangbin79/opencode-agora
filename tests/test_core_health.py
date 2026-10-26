@@ -57,7 +57,7 @@ class TestCoreHealth(unittest.TestCase):
         self.router = Router(self.store, self.state, self.oc)
         self.recover = FakeRecover()
         self.health = Health(self.state, self.oc, self.router,
-                             self.recover, "main")
+                             self.recover, "main", store=self.store)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -135,6 +135,13 @@ class TestCoreHealth(unittest.TestCase):
         self.assertIn("line1", tail)
         self.assertIn("伪造行", tail)  # 供给文本携带不丢
         self.assertNotIn("\n", tail)  # 拍平换行：不可续行伪造服务行
+
+    def test_escalate_audited(self):  # Req: F8
+        self.seed("t1")
+        self.health.escalate(KIND_QUALITY, "t1")
+        ev = [e for e in self.store.read_events("t1") if e["event"] == "escalate"]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["kind"], KIND_QUALITY)  # F8 升级链审计行
 
     def test_escalate_walks_up_chain_to_main(self):  # Req: F5
         self.seed("t1", worker="d1")

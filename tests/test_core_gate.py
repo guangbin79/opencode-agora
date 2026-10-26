@@ -87,7 +87,7 @@ class TestCoreGate(unittest.TestCase):
         self.gx = FakeGitx(merge=merge, gate=gate)
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
                          lambda env: self.anchor, self.health, self.auth,
-                         runner=self.runner)
+                         self.store, runner=self.runner)
 
     def seed(self, tid="t1", state="running", streak=0):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
@@ -244,6 +244,57 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo")])  # 照常合并
         self.assertEqual(t["state"], "closed")  # merged 不逆转历史，走完置 closed
         self.assertNotEqual(t["state"], "cancelled")
+
+    def test_cancel_during_gate_consumed_no_hang(self):  # Req: F11
+        """F-3 封闭性：cancel 在门内到达，门走完 pending 必被消费（不悬挂）。"""
+        self.in_gate()
+        self.state.set_fields("t1", pending_cancel=True)  # cancel×gate-tail 到达
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")  # merged 二择：closed
+        self.assertNotIn("pending_cancel", t)  # 不许悬挂
+
+
+class TestGateAudit(TestCoreGate):
+    """F-2：门段迁移逐点落 events.jsonl（F8 完整链：受理→门→合并→尾）。"""
+
+    def test_green_path_audits_done_merged_closed_with_commit(self):  # Req: F8
+        self.in_gate()
+        self.gate.run("t1")
+        evs = self.store.read_events("t1")
+        names = [e["event"] for e in evs]
+        for name in ("done", "merged", "closed"):
+            self.assertIn(name, names)
+        merged = next(e for e in evs if e["event"] == "merged")
+        self.assertEqual(merged["commit"], "abc123")  # merged 带 commit 证据
+
+    def test_fail_path_audits_verify_failed_and_blocked(self):  # Req: F8
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate()
+        self.in_gate(streak=2)
+        self.gate.run("t1")
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("verify_failed", names)
+        self.assertIn("blocked", names)  # 3 连败自动 blocked 亦审计
+
+    def test_non_ff_reopen_audited(self):  # Req: F8
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(merge="non-ff")
+        self.in_gate()
+        self.gate.run("t1")
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("done", names)
+        self.assertIn("reopened", names)
+
+    def test_gate_tail_cancel_audited(self):  # Req: F8
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate()
+        self.in_gate()
+        self.state.set_fields("t1", pending_cancel=True)
+        self.gate.run("t1")
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("verify_failed", names)
+        self.assertIn("cancelled", names)
 
 
 if __name__ == "__main__":
