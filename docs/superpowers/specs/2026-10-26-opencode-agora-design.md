@@ -47,26 +47,27 @@ opencode v2 共享服务（agent 运行时；会话持久化、可随时重启�
 
 ### 4.1 状态模型（F2）
 tasks.json：`{tasks: {<id>: {title, project_dir, env_dir, verify, state, dispatcher_sid?, worker_sid?, credential, chain_depth, created, updated}}}`。
-状态机（内存直接迁移，无推导）：`todo → dispatched → running → done → merged → closed`；分支 `blocked / cancelled / verify_failed / reopened`。board 与结果报告 = 状态视图函数。单写者使配额/TOCTOU 退化为内存计数。
+状态机（内存直接迁移，无推导）：`todo → dispatched → running → done → merged → closed`；分支 `blocked / cancelled / verify_failed / reopened`；reopened→通知 worker 续修、再 done 重走 verify 门，verify_failed/reopened 计同任务连败、连续 3 次→blocked。board 与结果报告 = 状态视图函数。单写者使配额/TOCTOU 退化为内存计数。
 
 ### 4.2 派发（F3）
-task_create：建任务页（wiki/tasks/<id>.md，服务生成 frontmatter）→ 建环境（B6）→ 签发凭据。
+task_create：建任务页（wiki/tasks/<id>.md，服务生成 frontmatter）→ 建环境（B6）→ 签发凭据。verify 缺失拒建；verify 修改权属派发方，worker 修改拒绝并审计。
 dispatch：opencode API `create` 会话 → 注入 BOOT（任务页路径+环境路径+凭据+行为合同）→ 登记 dispatcher_sid/worker_sid → 审计 dispatched。保险丝：can_spawn（名册）+ 链深（chain_depth<5）+ 并发配额（内存计数）。
+cancel：人（任意在飞链）或 dispatcher（自己派出的子链）中止——级联停止在飞 worker（实时终止通知）、任务置 cancelled、环境入 GC 宽限；已 merged 不回滚。
 
 ### 4.3 消息路由（F4）
 worker→dispatcher：`agora_post`（正文进消息库）→ 服务探对方活 → opencode API `inject` 实时投递（≤5s）；不活落库，对方恢复/拉取时补交。反向同构。里程碑同时迁移状态+审计；过程消息只进消息库。无 ack。
 
 ### 4.4 健康检查（F5）
-内置定时器（默认 5min）：对每个有在飞下级的 dispatcher 探直接下一跳（opencode API status）。warn(20min)→inject 提醒；crit(40min)→先重注入恢复下级，连续 3 次→blocked+实时通知 dispatcher。dispatcher 死→沿链上报，根链通知主会话。无任何全局巡检。
+内置定时器（默认 5min）：对每个有在飞下级的 dispatcher 探直接下一跳（opencode API status）。warn(20min)→inject 提醒；crit(40min)→先重注入恢复下级，连续 3 次→blocked+实时通知 dispatcher。dispatcher 死→沿链上报，根链通知主会话。升级性事件（verify/reopened 3 连败、重注入失败）同路径实时通知主会话。无任何全局巡检。
 
 ### 4.5 verify 门与自动合并（F7）
-done：worker post(done, commit) → 服务在 env_dir 真跑 verify → 败：verify_failed+输出尾部实时回 worker。绿：自动 ff-only 合并 → 目标仓集成 verify → 败：`reset --hard` 原子回滚（并发推进守卫）+reopened+通知；绿：merged、通知 worker、环境入 GC 宽限。
+done：worker post(done, commit) → 服务在 env_dir 真跑 verify → 败：verify_failed+输出尾部实时回 worker。绿：自动 ff-only 合并 → 目标仓集成 verify → 败：`reset --hard` 原子回滚（并发推进守卫）+reopened+实时通知 worker 续修（环境保留，再 done 重走本门；连败 3 次→blocked+通知主会话）；绿：merged、通知 worker、环境入 GC 宽限。
 
 ### 4.6 恢复协调（F6）
 启动：重载 tasks.json → 对每条 in-flight 链探活 → worker 死：按任务页+环境现场重 create+inject（同一凭据）；dispatcher 死：通知父/根。常驻期周期探 opencode health，捕捉其中途重启走同一恢复路径。worker 侧调用失败本地排队、服务回来重放。
 
 ### 4.7 审计与结果报告（F8/F10）
-events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` 页 + `board` 工具给出完成/已并/失败/阻塞汇总与明细。
+events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` 页 + `board` 工具给出已合并/在飞/失败/阻塞/已取消汇总与明细（reopened 归在飞），按 dispatcher 可展开链级视图。
 
 ## 5. opencode 插件规格（TS，plain-object 导出——Plugin.define 包裹形态静默失效，禁用）
 
@@ -91,4 +92,4 @@ B2 迁移；`install.sh` 重写：依赖检查（python3/git/opencode）→ 建 
 
 ## 9. 明确不做（防复辟）
 
-事件重放推导、多机同步、union merge 依赖、cron 自愈、全局看门狗、bash 机械层、注入式单行协议、ack 协议、人动手逃生门。
+事件重放推导、多机同步、union merge 依赖、cron 自愈、全局看门狗、bash 机械层、注入式单行协议、ack 协议、人动手逃生门、会话外通知通道（v2 注入主会话即拍到）。
