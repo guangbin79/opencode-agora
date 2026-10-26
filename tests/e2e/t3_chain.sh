@@ -45,6 +45,7 @@ trap cleanup EXIT
 
 # ---- 0) 模型凭据（本机自适应；无凭据 SKIP=3，同 T6）----
 mkdir -p "$SANDBOX" "$WORK"
+chmod 700 "$SANDBOX"   # 红跑留存（cleanup 跳过 rm）时沙箱内真实 API key 仅本机本用户可读
 CFG_JSON="$SANDBOX/ocfg.json"
 python3 - "$CFG_JSON" <<'PY' || { note "SKIP：本机无 opencode provider 配置/凭据（e2e 依赖真模型）"; exit 3; }
 import json, os, sqlite3, sys
@@ -133,12 +134,13 @@ mk_repo repoR; mk_repo repoX; mk_repo repoY
 note "夹具 8 仓就绪"
 
 # ---- 6) 十二场景（python 驱动）----
-T3_OC_KEY="$OC_KEY" python3 -u - "$SANDBOX" "$WORK" "$REPO" "$ROOT_TOKEN" \
+T3_OC_KEY="$OC_KEY" T3_PROV="$PROV" python3 -u - "$SANDBOX" "$WORK" "$REPO" "$ROOT_TOKEN" \
   "$SANDBOX/state/opencode/service.json" "$OC1_URL" "$OC1_PW" "$OC_BIN" "$STAMP" <<'PY'
 import base64, json, os, pathlib, sqlite3, subprocess, sys, time, urllib.error, urllib.request
 
 SANDBOX, WORK, REPO, ROOT, SVC, OC_URL, OC_PW, OC_BIN, STAMP = sys.argv[1:10]
 OC_KEY = os.environ["T3_OC_KEY"]
+PROV = os.environ["T3_PROV"]
 PLAZA = f"{SANDBOX}/plaza"
 AD_LOG = f"{SANDBOX}/agorad.log"
 AD_NAME = f"t3-ad-{STAMP}"
@@ -266,11 +268,13 @@ def start_serve(port):
 def seed_credential():
     """模型凭据注入沙箱凭据库：无凭据 provider 被 opencode 静默回退免费网关
     （big-pickle），配额 429 中途断链（run12 实证 provider.free-limit）。
-    ro 附读全局库（被本会话持锁）；全列拷贝（schema 不摸索，run13 实证 NOT NULL label）。"""
+    ro 附读全局库（被本会话持锁）；只拷目标 provider 一行（密钥最小面：红跑留存沙箱
+    不携带其他 provider 的 key），全列拷贝（schema 不摸索，run13 实证 NOT NULL label）。"""
     g = os.path.expanduser("~/.local/share/opencode/opencode.db")
     src = sqlite3.connect(f"file:{g}?mode=ro", uri=True, timeout=5)
     cols = [r[1] for r in src.execute("PRAGMA table_info(credential)")]
-    rows = src.execute(f"SELECT {','.join(cols)} FROM credential").fetchall()
+    rows = src.execute(f"SELECT {','.join(cols)} FROM credential WHERE integration_id=?",
+                       (PROV,)).fetchall()
     src.close()
     dst = sqlite3.connect(f"{SANDBOX}/data/opencode/opencode.db", timeout=5)
     ph = ",".join("?" * len(cols))
@@ -747,6 +751,31 @@ kill_from_json "$SANDBOX/plaza/.agora/service.json"
 sleep 1.5
 
 # ---- 8) 残留断言＋反需求语义扫（F5 弱锚收口）----
+# ---- 8a) 密钥最小面自检（cleanup 前沙箱＝红跑留存现场态）：mode=700＋非目标 provider key 零留存 ----
+if [ "$(stat -c %a "$SANDBOX")" = "700" ]; then
+  note "PASS 密钥面：沙箱 mode=700（红跑留存仅本机本用户可读）"
+else
+  note "FAIL 密钥面：沙箱 mode=$(stat -c %a "$SANDBOX")≠700"; RC=1
+fi
+if python3 - "$SANDBOX" "$PROV" <<'PY'
+import os, sqlite3, sys
+sandbox, prov = sys.argv[1:3]
+src = sqlite3.connect(f"file:{os.path.expanduser('~/.local/share/opencode/opencode.db')}?mode=ro", uri=True)
+others = [(i, v) for i, v in src.execute("SELECT integration_id, value FROM credential") if i != prov]
+src.close()
+db = f"{sandbox}/data/opencode/opencode.db"
+raw = open(db, "rb").read()
+dst = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+ints = {r[0] for r in dst.execute("SELECT integration_id FROM credential")}
+dst.close()
+bad = [i for i, v in others if i in ints or v.encode() in raw]
+if bad:
+    print(f" leak: {bad}")
+    sys.exit(1)
+sys.exit(0)
+PY
+then note "PASS 密钥面：非目标 provider key 零留存（表＋原始字节双查，留存沙箱即红跑现场）"
+else note "FAIL 密钥面：非目标 provider key 泄漏（见上）"; RC=1; fi
 if python3 - "$WORK" <<'PY'
 import subprocess, sys, glob
 ok = True
@@ -803,5 +832,5 @@ sys.exit(1 if hits else 0)
 PY
 then note "PASS 语义扫：无 cron/巡检/看门狗/stalled 处置代码路径 # Req: F5"; else note "FAIL 语义扫：反需求路径命中"; RC=1; fi
 
-if [ "$RC" -eq 0 ]; then note "ALL GREEN（十二场景＋残留＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
+if [ "$RC" -eq 0 ]; then note "ALL GREEN（十二场景＋残留＋密钥面＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
 exit "$RC"
