@@ -78,6 +78,19 @@ class TestCoreMsg(unittest.TestCase):
         self.assertFalse(self.r.dedup_key(999))  # 未投递过→False
         self.assertTrue(self.r.dedup_key(999))
 
+    def test_inject_error_persist_only(self):  # Req: F4
+        """inject 异常（凭据轮换 401/网络故障）＝失败口径：不抛、仅落库、补拉可取——
+        done 链路（httpd 同步 post）不得因投递面异常断裂。"""
+        def boom(sid, text):
+            raise RuntimeError("HTTP 401")
+
+        self.oc.inject = boom
+        mid = self.r.post("w1", ("up", "t1"), "done", "sha1")
+        (m,) = self.store.read_messages()
+        self.assertEqual((m["id"], m["kind"], m["body"]), (mid, "done", "sha1"))
+        self.assertEqual([x["id"] for x in self.r.check_mail("d1")], [mid])
+        self.assertTrue(self.r.dedup_key(mid))  # 补拉即送达：不再重交
+
     def test_offchain_post_raises(self):  # Req: F4
         n = len(self.store.read_messages())
         bad = [("w1", ("down", "t1")),      # 自发自收非边

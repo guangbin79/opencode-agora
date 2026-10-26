@@ -29,7 +29,11 @@ class Router:
             {"ts": time.time(), "task": tid, "kind": kind,
              "from": from_sid, "to": to_sid}, body)
         text = f"[agora] task {tid} {kind} from {from_sid}\n{body}"
-        if self._oc.inject(to_sid, text):
+        try:
+            ok = self._oc.inject(to_sid, text)
+        except Exception:  # oc 异常（凭据轮换 401/网络故障）同失败口径：落库兜底——
+            ok = False     # done 链路不得因投递面异常断裂（T7 e2e 实测：raise→门不排队）
+        if ok:
             self._delivered.add(mid)  # 在线送达一次；失败留库待补拉
         return mid
 
