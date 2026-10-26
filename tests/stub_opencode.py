@@ -80,6 +80,8 @@ class StubOpencode:
                             s["injects"].append(req.get("text", ""))
                             self._json(200, {"data": {"id": "msg_" + uuid.uuid4().hex[:8],
                                                       "delivery": "steer"}})
+                        elif not parts[1].startswith("ses_"):  # T6 实测：非 ses_ 形 sid→400（非 404）
+                            self._json(400, {"error": "Bad Request"})
                         else:
                             self._json(404, self._not_found(parts[1]))
                     else:

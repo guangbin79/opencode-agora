@@ -7,10 +7,12 @@
  * 会话 cwd＝ctx.session.get({sessionID}).location.directory（异步取，失败回落 process.cwd()）。
  * 语义与 agorad 服务侧一致：豁免面 B3、读引导、主会话例外、服务不可达默认拒。
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { getCredential } from "./cred";
 import { onInject } from "./inject";
 import { ensureOnce, LIFT_RECOVER, type LiftResult } from "./lift";
-import { shouldBlock } from "./hook";
+import { agoraHome, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -30,10 +32,28 @@ export interface OcCtx {
   };
 }
 
-let enforceOn = false; // shortcut: enforce 为服务持旗，插件侧拉取接线 T6 落（lift/doctor），装配前默认 off
+let enforceOverride: boolean | null = null; // 测试/特殊接线显式旗；生产置 null 走服务持旗拉取
 
-export function setEnforce(on: boolean): void {
-  enforceOn = on;
+export function setEnforce(on: boolean | null): void {
+  enforceOverride = on; // null＝清除显式旗，恢复服务持旗拉取
+}
+
+/** 服务持旗拉取（设计 §5.1 核验面，lift/doctor 接线）：lift 定端口→doctor 查询面读
+ * /health.enforce_on（root 牌接管文件授权）；服务不可达/异常一律 true＝默认拒（安全向）。 */
+async function pullEnforce(): Promise<boolean> {
+  const lift = await ensureOnce();
+  if (!lift.ok) return true;
+  try {
+    const tok = readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim();
+    const r = await fetch(`http://127.0.0.1:${lift.port}/health`, {
+      headers: { "X-Agora-Token": tok },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!r.ok) return true;
+    return ((await r.json()) as { enforce_on?: boolean }).enforce_on !== false;
+  } catch {
+    return true;
+  }
 }
 
 export default {
@@ -44,8 +64,9 @@ export default {
     });
     ctx.tool.hook("execute.before", async (event) => {
       // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引
+      const on = enforceOverride ?? (await pullEnforce());
       let lift: LiftResult | null = null;
-      if (enforceOn) lift = await ensureOnce();
+      if (on) lift = await ensureOnce();
       const input = event.input ?? {};
       const target =
         (typeof input.filePath === "string" && input.filePath) ||
@@ -60,7 +81,7 @@ export default {
       const cred = getCredential(event.sessionID);
       // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token
       if (cred?.token && /^agora_/.test(event.tool)) input._token = cred.token;
-      const hint = shouldBlock(event.tool, target, cwd, cred, enforceOn);
+      const hint = shouldBlock(event.tool, target, cwd, cred, on);
       if (hint) {
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
       }

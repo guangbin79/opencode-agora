@@ -108,6 +108,13 @@ chk "缺依赖退出非零 (Req: F1)" [ "$rc3" -ne 0 ]
 chk "缺依赖提示含缺件名 (Req: F1)" bash -c '[[ "$1" == *"缺依赖"* && "$1" == *"bun"* ]]' _ "$out3"
 chk "缺依赖早退（骨架未建）(Req: F1)" bash -c '[[ ! -e "$1/.agora" ]]' _ "$A3"
 
+# ---------- 场景 4：带 OC password 安装（展开值不作赋值前缀回归）----------
+newfix
+H4="$FIX/home"; A4="$FIX/plaza"; mkdir -p "$H4"
+run_install_pw() { HOME="$H4" AGORA_HOME="$A4" AGORA_OC_PASSWORD="pw has space" bash "$REPO/install.sh"; }
+run_install_pw >/dev/null 2>&1 || bad "带 password 安装退出 0 (Req: F1)"
+chk "带 password 安装 root.token 在位 (Req: F1)" [ -s "$A4/.agora/root.token" ]
+
 # ---------- 汇总 ----------
 echo "----------------------------------------"
 echo "pass=$PASS fail=$FAIL"

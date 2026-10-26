@@ -26,6 +26,11 @@ class TestAccessOc(unittest.TestCase):
         self.assertFalse(self.oc.inject(sid, "hello"))
         self.assertTrue(self.oc.inject(self.oc.create("/e", "B"), "hi"))  # 活会话对照 True
 
+    def test_inject_non_ses_shape_sid_false(self):  # Req: F3
+        # T6 实测：真 opencode 对非 ses_ 形 sid（如 agorad 主会话位 "main"）prompt→400（非 404），
+        # inject 契约同归 False（失败留库待补拉），cancel/通知链不因之 400。
+        self.assertFalse(self.oc.inject("main", "hello"))
+
     def test_alive_unknown_sid_false(self):  # Req: F5
         self.assertFalse(self.oc.alive("no-such-sid"))
 

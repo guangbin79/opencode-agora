@@ -150,14 +150,16 @@ describe("cred 凭据管家", () => {
 });
 
 describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook）", () => {
-  /** 稳定运行时假 ctx：捕获注册的钩子；session.get 回夹具 cwd（plain）。 */
+  /** 稳定运行时假 ctx：捕获注册的钩子；session.get 回夹具 cwd（s-boot 例外＝任务 env）。 */
   function wire() {
     const hooks: Record<string, (ev: any) => Promise<void>> = {};
     entry.setup({
       tool: { hook: (name, fn) => { hooks[`tool.${name}`] = fn; } },
       session: {
         hook: (name, fn) => { hooks[`session.${name}`] = fn; },
-        get: async () => ({ location: { directory: plain } }),
+        get: async ({ sessionID }: { sessionID: string }) => ({
+          location: { directory: sessionID === "s-boot" ? envDir : plain },
+        }),
       },
     } as any);
     return hooks;
@@ -188,6 +190,60 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       ).rejects.toThrow(/派发/); // 无 envDir：deny 安全向
     } finally {
       setEnforce(false);
+    }
+  });
+
+  test("BOOT 先行登记 envDir，credential 后至合流→cwd∈env 放行（dispatch 真序）", async () => {
+    // Req: F1
+    const hooks = wire();
+    await hooks["session.prompt"]({
+      sessionID: "s-boot",
+      prompt: { text: `[agora] BOOT task t-b\npage: p.md\nenv: ${envDir}\ncontract: x` },
+    });
+    await hooks["session.prompt"]({ sessionID: "s-boot", prompt: { text: "[agora] credential t-b\ntoken: tok-b" } });
+    setEnforce(true);
+    try {
+      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot", input: { filePath: join(repo, "a.md") } });
+    } finally {
+      setEnforce(false);
+    }
+  });
+
+  test("enforce 服务持旗拉取：/health on→拒；off→放行；root.token 缺失默认拒（T6 接线）", async () => {
+    // Req: F1
+    const hooks = wire();
+    setEnforce(null); // 清显式旗：前测 finally 的 false 残留会压过服务持旗拉取
+    let flag = true;
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (req.headers.get("x-agora-token") !== "tok-root") {
+          return new Response(JSON.stringify({ error: "无牌或牌无效" }), { status: 401 });
+        }
+        return Response.json({ ok: true, enforce_on: flag });
+      },
+    });
+    const port = srv.port;
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${port}`; // lift 直达探活
+    resetLift();
+    try {
+      await expect(
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-pull", input: { filePath: join(repo, "a.md") } }),
+      ).rejects.toThrow(/派发/); // on（缺省）→拒
+      flag = false;
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-pull", input: { filePath: join(repo, "a.md") } }); // off→放行
+      rmSync(join(home, ".agora", "root.token"));
+      flag = true;
+      await expect(
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-pull", input: { filePath: join(repo, "a.md") } }),
+      ).rejects.toThrow(/派发/); // 非授权 401→默认拒
+    } finally {
+      process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      srv.stop(true);
     }
   });
 

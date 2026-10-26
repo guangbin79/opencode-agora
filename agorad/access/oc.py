@@ -6,7 +6,7 @@
 - create：POST /session {}→{data:{id}}；POST /session/{sid}/move {directory}→204（绑任务 env）；
   boot 文本＝POST /session/{sid}/prompt {text}。
 - inject：POST /session/{sid}/prompt {text}→200 {data:{delivery:"steer"}}；busy 会话排队按序；
-  未知/已删 sid→404 SessionNotFoundError→False。
+  未知/已删 sid→404 SessionNotFoundError→False；非 ses_ 形 sid→400→False（T6 实测补）。
 - alive：GET /session/{sid}→200 {data:{...}}＝活；404＝死（不抛）。
 - probe：GET /info→{version,...}（无 /health 端点）。
 网络故障（连接拒绝/超时/网络类 URLError）→OcUnavailable；非 2xx→OcUnavailable（.status 带码）；
@@ -65,7 +65,7 @@ class Oc:
             self._post(f"/session/{sid}/prompt", {"text": text})
             return True
         except OcUnavailable as e:
-            if e.status == 404:  # 死/未知会话：契约 False 不抛
+            if e.status in (400, 404):  # 死/未知会话：契约 False 不抛（T6 实测：非 ses_ 形 sid→400、未知 ses_→404）
                 return False
             raise
 
