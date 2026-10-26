@@ -55,6 +55,17 @@ class State:
     def get(self, tid):
         return copy.deepcopy(self._tasks[tid])
 
+    def add(self, tid, row):
+        """播种新任务行（task_create；行构造归调用方）——迁移矩阵只管既有行。"""
+        self._tasks[tid] = dict(row)
+        self._persist()
+
+    def set_fields(self, tid, **fields):
+        """非迁移字段直改（verify 登记/pending-cancel）——不越迁移矩阵。"""
+        self._tasks[tid].update(fields)
+        self._tasks[tid]["updated"] = time.time()
+        self._persist()
+
     def snapshot(self):
         return {"version": 1, "tasks": copy.deepcopy(self._tasks),
                 "mail_read": dict(self._mail_read)}
