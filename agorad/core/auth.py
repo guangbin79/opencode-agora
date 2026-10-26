@@ -38,6 +38,16 @@ class Auth:
         v = self._tokens.get(token)
         return (v[0], v[1]) if v else None
 
+    def rebind(self, old_sid, new_sid):
+        """按 sid 改绑牌到新会话（值 [new_sid, role]，token 本体不变）——
+        重注入后旧牌即续用。返回牌文本（供 inject 送达），无牌 None。"""
+        for tok, v in self._tokens.items():
+            if v[0] == old_sid:
+                v[0] = new_sid
+                self._persist()
+                return tok
+        return None
+
     def revoke(self, token):
         if token not in self._tokens:
             return False

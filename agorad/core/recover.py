@@ -3,9 +3,10 @@
 startup：State 构造已恢复末行快照，此处对 in-flight 任务探活，仅
 dispatched/running 重建 worker 会话（终态/blocked/verify_failed 等续修态
 复查后一律不注入）。reinject：oc.create 同 BOOT 语义（任务页＋环境＋行为
-合同），新 sid 覆写 worker_sid；凭据不动——牌独立持久化、identify 仍有效；
-审计一行 reinjected。任何失败返回 False 不抛：先 create 成功才覆写行，
-不半写。core 只 import stdlib，依赖全构造注入（store 供任务页路径与审计）。
+合同），新 sid 覆写 worker_sid；旧 worker 牌经 auth.rebind 改绑新 sid
+（token 本体不变、identify 归新会话）并随 dispatch 同形送达凭据；审计一行
+reinjected。任何失败返回 False 不抛：先 create 成功才覆写行，不半写。
+core 只 import stdlib，依赖全构造注入（store 供任务页路径与审计）。
 """
 import time
 
@@ -17,9 +18,9 @@ EV_REINJECTED = "reinjected"
 class Recover:
     """startup 由 main 装配期调用一次；reinject 供 health.tick 与启动共用。"""
 
-    def __init__(self, state, oc, gitx, store):
+    def __init__(self, state, oc, gitx, store, auth):
         self._state, self._oc, self._gitx = state, oc, gitx
-        self._store = store
+        self._store, self._auth = store, auth
 
     def startup(self):
         for tid, t in self._state.snapshot()["tasks"].items():
@@ -45,10 +46,13 @@ class Recover:
             wsid = self._oc.create(t["env_dir"], self._boot(tid, t))
         except Exception:
             return False
-        self._state.set_fields(tid, worker_sid=wsid)  # 新 sid 覆写；凭据不动
+        self._state.set_fields(tid, worker_sid=wsid)  # 新 sid 覆写
+        tok = self._auth.rebind(t.get("worker_sid"), wsid)  # 旧牌改绑新会话
         self._store.append_event({"ts": time.time(), "actor": "agorad",
                                   "event": EV_REINJECTED, "task": tid,
                                   "worker": wsid})
+        if tok:  # 凭据随 dispatch 同形送达（签牌文本 inject 进新会话）
+            self._oc.inject(wsid, f"[agora] credential {tid}\ntoken: {tok}")
         return True
 
     def _boot(self, tid, t):

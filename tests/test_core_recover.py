@@ -12,6 +12,7 @@ from pathlib import Path
 from agorad.access.oc import OcUnavailable
 from agorad.access.store import Store
 from agorad.core.auth import Auth
+from agorad.core.msg import Router
 from agorad.core.recover import Recover
 from agorad.core.state import State
 
@@ -58,7 +59,7 @@ class TestCoreRecover(unittest.TestCase):
         self.auth = Auth(self.store)
         self.oc = FakeOc()
         self.gitx = FakeGitx()
-        self.rec = Recover(self.state, self.oc, self.gitx, self.store)
+        self.rec = Recover(self.state, self.oc, self.gitx, self.store, self.auth)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -99,7 +100,10 @@ class TestCoreRecover(unittest.TestCase):
         self.assertEqual(ev, [{"ts": ev[0]["ts"], "actor": "agorad",
                                "event": "reinjected", "task": "t1",
                                "worker": sid}])
-        self.assertEqual(self.auth.identify(tok), ("w1", "worker"))  # 同凭据仍有效
+        self.assertEqual(self.auth.identify(tok), (sid, "worker"))  # 牌重绑新 sid
+        cred = [i for i in self.oc.injected if "credential" in i[1]]
+        self.assertEqual(cred,  # 凭据随 dispatch 同形送达新会话
+                         [(sid, f"[agora] credential t1\ntoken: {tok}")])
 
     def test_startup_spares_dead_worker_of_non_inflight(self):  # Req: F6
         for i, st in enumerate(("cancelled", "blocked", "verify_failed",
@@ -145,6 +149,17 @@ class TestCoreRecover(unittest.TestCase):
         self.assertFalse(self.rec.reinject("t1"))  # 环境已失不盲注
         self.assertEqual(self.oc.sessions, [])
         self.assertEqual(self.state.get("t1")["worker_sid"], "w1")
+
+    def test_reinjected_worker_posts_over_chain_edge(self):  # Req: F6
+        self.seed("t1")
+        self.auth.issue("w1", "worker")
+        self.rec.reinject("t1")
+        new_sid = self.state.get("t1")["worker_sid"]
+        router = Router(self.store, self.state, self.oc)
+        mid = router.post(new_sid, ("up", "t1"), "process", "续跑中")  # 链边通
+        msgs = [m for m in self.store.read_messages() if m["to"] == "main"]
+        self.assertEqual([m["id"] for m in msgs], [mid])
+        self.assertIn("续跑中", msgs[0]["body"])
 
     def test_reinject_unknown_task_false(self):  # Req: F6
         self.assertFalse(self.rec.reinject("nope"))
