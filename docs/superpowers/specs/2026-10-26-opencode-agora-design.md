@@ -17,7 +17,7 @@ v1 为多机同步与并发写付出了巨大复杂度（时序推导三连 bug�
 
 builder 裁决（待用户否决）：
 - B1 MCP 工具面 13 件：`task_create/dispatch/post/check_mail/board/history/wiki_read/wiki_write/attach/merge/cancel/who/doctor`；死 `sync`、`redispatch`（恢复自动化接管，手动重派=对同任务再 dispatch）；`merge` 升格为工具（服务执行）
-- B2 迁移：`~/plaza` wiki 保留；`log/`+`board/` 原地归档；任务状态从零
+- B2 既有资产处置（无迁移）：`~/plaza` wiki 保留；`log/`+`board/` 原地归档；任务状态从零
 - B3 强制豁免面沿用现 enforcer 语义：非 git、`/tmp/opencode/`、显式 OFF；opencode-agora 自身仓不豁免
 - B4 客户端↔服务：`127.0.0.1` HTTP JSON（MCP 用 urllib、插件用 fetch）；`/view` 提供只读结果报告页（承接 agora_http.py 职责）
 - B5 服务生命周期：客户端惰性拉起（setsid+单实例锁+就绪探测），不依赖 systemd/cron
@@ -75,9 +75,9 @@ events.jsonl：`{ts, actor, event, task?, commit?, note?}` 只追加。`/view` �
 2. 接收注入：inject 即投递，插件将消息以系统提示形态接入会话。
 3. 服务拉起（B5）：任何 agora 调用前探 service.json+health；未运行 setsid 拉起 agorad 等就绪。
 
-## 6. 数据迁移与部署
+## 6. 部署与既有资产处置
 
-B2 迁移；`install.sh` 重写：依赖检查（python3/git/opencode）→ 建 state 目录 → 注册 MCP+插件 → 冒烟自检。退役清单：v1 全部 22 个 bash 脚本、notify-opencode.sh、agora_http.py、LINE_RE 契约、4321 行旧 smoke（以新测试取代）、cron 条目（已停）。
+B2 处置；`install.sh` 重写：依赖检查（python3/git/opencode）→ 建 state 目录 → 注册 MCP+插件 → 冒烟自检。退役清单：v1 全部 22 个 bash 脚本、notify-opencode.sh、agora_http.py、LINE_RE 契约、4321 行旧 smoke（以新测试取代）、cron 条目（已停）。
 
 ## 7. 测试与验收（对应需求场景）
 
