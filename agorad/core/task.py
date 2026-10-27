@@ -178,7 +178,8 @@ class TaskService:
                 "role: worker。可用: post/check_mail/wiki_read/wiki_write/task_dispatch(嵌套)/wait\n"
                 "不可用(403): task_update(预登记归派发方) / task_cancel / board / doctor / enforce\n"
                 "等待: Code Mode 无 setTimeout——用 agora.wait(seconds) 本地休眠后重试，勿轮询烧推理轮\n"
-                "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记")
+                "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记\n"
+                "done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；结论文本另发 post(kind=note)")
 
     def _revoke_worker(self, wsid):
         if wsid:
