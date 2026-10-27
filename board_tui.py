@@ -30,6 +30,24 @@ Row.__new__.__defaults__ = (None, 0, "", "", None, "", "", "")
 
 # ---------------- 渲染模型（纯函数） ----------------
 
+
+import unicodedata
+
+def _dw(s):
+    """Display width: CJK=2, others=1."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+def _pad(s, width):
+    """Truncate to display width then pad to width."""
+    out, w = [], 0
+    for c in s:
+        cw = 2 if unicodedata.east_asian_width(c) in "WF" else 1
+        if w + cw > width:
+            break
+        out.append(c)
+        w += cw
+    return "".join(out) + " " * (width - w)
+
 def _domain(state):
     """状态着色域：verify_failed/reopened 是续修态归在飞（同五桶口径）。"""
     if state in ("merged", "closed"):
@@ -315,8 +333,8 @@ def draw_board(stdscr, m, status="", err=None):
         if r.kind == "bucket":
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
             continue
-        text = (f"{'  ' * r.depth}{r.tid:9}: {r.title or '':32.32}"
-                f"  {r.state:13} {r.last_seen or ''}")
+        text = (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 34)}"
+                f" {_pad(r.state, 13)} {r.last_seen or ''}")
         if r.kind == "event":
             attr |= curses.A_BOLD
         if i == m["sel"]:
