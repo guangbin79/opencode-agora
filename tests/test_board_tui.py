@@ -108,12 +108,25 @@ class TestHandleKey(unittest.TestCase):
         handle_key(m, "j")
         self.assertEqual(m["sel"], 1)  # 底钳制
         handle_key(m, "g")
-        self.assertEqual(m["sel"], 0)
+        self.assertEqual(m["sel"], 1)  # g 跳顶落首任务行，不停桶头
         self.assertEqual(handle_key(m, "G").op, "move")
         self.assertEqual(m["sel"], 1)
         handle_key(m, "k")
         handle_key(m, "k")
         self.assertEqual(m["sel"], 0)  # 顶钳制
+
+    def test_jk_skip_bucket_headers(self):  # Req: F10
+        rows = self.ROWS + [Row("bucket", title="失败 0", domain="bucket"),
+                            Row("task", "t2", 0, "failed", "二", "ses-8", "2m", "", "fail")]
+        m = model(rows, sel=1)
+        handle_key(m, "j")                 # 越过"失败"桶头直达 t2
+        self.assertEqual(m["sel"], 3)
+        self.assertEqual(rows[m["sel"]].kind, "task")
+        handle_key(m, "k")                 # 回程同样越过桶头
+        self.assertEqual(m["sel"], 1)
+        m = model([self.ROWS[0]])          # 纯桶列表：无行动行，钳端点不越界
+        handle_key(m, "j")
+        self.assertEqual(m["sel"], 0)
 
     def test_enter_l_detail_h_back(self):  # Req: F10
         m = model(self.ROWS, sel=1)

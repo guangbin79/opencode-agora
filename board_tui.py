@@ -108,10 +108,20 @@ def _sel_row(m):
     return rows[m["sel"]] if 0 <= m.get("sel", 0) < len(rows) else None
 
 
+def _skip_bucket(m, down=True):
+    """桶头只作分隔：越过后滑到最近任务/事件行，全程无行动行则钳在端点。"""
+    rows = m.get("rows") or []
+    d = 1 if down else -1
+    while 0 <= m["sel"] < len(rows) and rows[m["sel"]].kind == "bucket":
+        if not 0 <= m["sel"] + d < len(rows):
+            break
+        m["sel"] += d
+
+
 def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
-    键位：j/k 移动 g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
+    键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
     x cancel（y/n 确认行） / 过滤（单行输入态） r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤单行输入态
@@ -133,12 +143,15 @@ def handle_key(m, key):
     r = _sel_row(m)
     if key in ("j", "KEY_DOWN"):
         m["sel"] = min(m["sel"] + 1, max(0, len(m.get("rows") or []) - 1))
+        _skip_bucket(m, down=True)
         return Action("move")
     if key in ("k", "KEY_UP"):
         m["sel"] = max(m["sel"] - 1, 0)
+        _skip_bucket(m, down=False)
         return Action("move")
     if key == "g":
         m["sel"] = 0
+        _skip_bucket(m, down=True)
         return Action("move")
     if key in ("G", "KEY_END"):
         m["sel"] = max(0, len(m.get("rows") or []) - 1)
@@ -355,6 +368,7 @@ def run(stdscr, base, token):
         nonlocal status, err
         m["rows"] = build_rows(snap, events, m["filter"])
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
+        _skip_bucket(m, down=True)
         err = None
         status = f"{len(m['rows'])} 行  轮询 {interval:g}s"
 
