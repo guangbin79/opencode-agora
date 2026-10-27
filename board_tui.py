@@ -315,8 +315,8 @@ def draw_board(stdscr, m, status="", err=None):
         if r.kind == "bucket":
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
             continue
-        text = f"{'  ' * r.depth}{r.tid}: {r.title or ''}  {r.state} {r.worker or ''}" \
-               f" {r.last_seen or ''} {r.note}".rstrip()
+        text = (f"{'  ' * r.depth}{r.tid:9}: {r.title or '':32.32}"
+                f"  {r.state:13} {r.last_seen or ''}")
         if r.kind == "event":
             attr |= curses.A_BOLD
         if i == m["sel"]:
