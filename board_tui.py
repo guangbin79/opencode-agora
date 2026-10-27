@@ -213,8 +213,9 @@ def handle_key(m, key):
 def _pointer_home():
     """~/.agora-home 指针回退（gt-32c051：MCP 壳/install 写入的统一发现桥）；缺失/空白＝无。"""
     try:
-        return (Path.home() / ".agora-home").read_text(encoding="utf-8").strip() or None
-    except OSError:
+        return ((Path.home() / ".agora-home").read_text(encoding="utf-8")
+                .split("\n", 1)[0].strip() or None)  # 首行：多行指针不内嵌换行进 home
+    except (OSError, ValueError):  # ValueError＝坏字节（UnicodeDecodeError 非 OSError 族）
         return None
 
 

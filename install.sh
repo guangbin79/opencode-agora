@@ -6,6 +6,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "${AGORA_HOME:-}" ] && [ -s "$HOME/.agora-home" ]; then  # 复跑保既有装（评审环）：env > 指针 > 缺省
+  AGORA_HOME="$(python3 -c 'import sys;print(open(sys.argv[1]).readline().strip())' "$HOME/.agora-home")"
+fi
 AGORA_HOME="${AGORA_HOME:-$HOME/plaza}"          # 与 agorad env_config 同缺省（设计 §3）
 printf '%s\n' "$AGORA_HOME" > "$HOME/.agora-home"  # gt-32c051 指针：无 env 组件统一发现（MCP 壳启动亦写）
 STATE_OC="$HOME/.local/state/opencode/service.json"  # T5 实证：serve --service 写此处 {url,password}

@@ -193,10 +193,13 @@ def write_pointer():
     MCP 壳是配置 env 的唯一必有进程，写指针供插件/agorad/board 无 env 时统一发现。
     桥面失败（HOME 只读等）不阻壳启动。"""
     home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
+    target = Path.home() / ".agora-home"
+    tmp = target.with_name(target.name + ".tmp")
     try:
-        (Path.home() / ".agora-home").write_text(home + "\n", encoding="utf-8")
-    except OSError:
-        pass
+        tmp.write_text(home + "\n", encoding="utf-8")
+        os.replace(tmp, target)  # 原子替换：并发读者不见 truncate 空窗（评审环 B3）
+    except (OSError, ValueError):  # ValueError＝env 含坏字节的 UnicodeEncodeError 同不阻壳
+        pass  # 残留 tmp 无害：下次启动覆盖
 
 
 def main():
