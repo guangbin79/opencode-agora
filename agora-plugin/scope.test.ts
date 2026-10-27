@@ -81,15 +81,13 @@ describe("isDormant 精确匹配（R26 缓存）", () => {
     expect(isDormant(repo + "/")).toBe(true); // 查询侧尾斜杠同样容错
   });
 
-  test("启动时缓存不热载：运行中改名册不生效，新会话（reset）后生效", () => {
+  test("名册热载：运行中改名册即时生效（去缓存后行为）", () => {
     // Req: F12
     writeFileSync(roster, repo + "\n");
     resetScope();
     expect(isDormant(repo)).toBe(true);
     writeFileSync(roster, ""); // 运行中清空名册
-    expect(isDormant(repo)).toBe(true); // 不热载
-    resetScope(); // 新会话
-    expect(isDormant(repo)).toBe(false);
+    expect(isDormant(repo)).toBe(false); // 即时生效（去缓存）
   });
 });
 

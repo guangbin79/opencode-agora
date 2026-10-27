@@ -1,13 +1,13 @@
 /**
  * scope 启用域（F12，R26/R29）：中央名册 $AGORA_HOME/.agora/inactive-repos 按仓休眠。
  * 名册＝仓根绝对路径一行一个（尾斜杠容错，空白/相对路径坏行跳过，缺失＝全员活跃）；
- * 启动时缓存＋每调用轻查（不热载；新会话生效）；isDormant 精确路径匹配（无前缀/模糊）。
+ * 每次调用重读名册（热载，即改即生效——去缓存后行为）；isDormant 精确路径匹配。
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { agoraHome } from "./hook";
 
-let cache: string[] | null = null;  // 兼容测试 API（resetScope）；生产路径已去缓存
+let cache: string[] | null = null;  // 测试兼容（resetScope 清缓存钩子）；生产已去缓存
 
 function norm(p: string): string {
   return p.replace(/\/+$/, "");

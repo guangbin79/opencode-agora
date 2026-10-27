@@ -147,7 +147,7 @@ class TaskService:
         wsid = t.get("worker_sid")
         if wsid:
             try:
-                self._router.post(wsid, ("down", tid), "process",
+                self._router.post(sid, ("down", tid), "process",
                                   f"[agora] verify 已登记: {cmd}")
             except Exception:
                 pass  # worker 不活则留库补拉（消息先落库铁则）
