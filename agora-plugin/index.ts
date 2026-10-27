@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { getCredential } from "./cred";
 import { onInject } from "./inject";
 import { ensureOnce, resetLift, LIFT_RECOVER, type LiftResult } from "./lift";
+import { isDormant } from "./scope";
 import { agoraHome, enforceRelevant, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
@@ -73,9 +74,21 @@ export default {
       onInject({ sessionID: event.sessionID, text: event.prompt?.text ?? "" });
     });
     ctx.tool.hook("execute.before", async (event) => {
+      // R29：休眠分支短路在 lift/pullEnforce/attach/readGuide 之前——休眠仓零 HTTP 零文件读（除名册缓存）。
+      const isAgora = /^agora_/.test(event.tool);
+      let cwd = process.cwd();
+      try {
+        cwd = (await ctx.session.get({ sessionID: event.sessionID }))?.location?.directory || cwd;
+      } catch {
+        // 会话读取失败按服务 cwd 兜底：envDir 含括判定走 deny 安全向
+      }
+      if (isDormant(cwd)) {
+        // F12 启用域：名册内休眠仓——普通工具直通；agora_* 直接拒（不 ensureOnce，零 HTTP）。
+        if (isAgora) throw new Error("此仓未启用 agora");
+        return;
+      }
       // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引。
       // 旗按需拉取（T6 评审）：预过滤先行——非引导类工具（MCP/grep 等）零开销直过。
-      const isAgora = /^agora_/.test(event.tool);
       const on = enforceOverride ?? (enforceRelevant(event.tool) ? await pullEnforce() : false);
       let lift: LiftResult | null = null;
       if (on) lift = await ensureOnce();
@@ -90,12 +103,6 @@ export default {
         (typeof input.filePath === "string" && input.filePath) ||
         (typeof input.path === "string" && input.path) ||
         "";
-      let cwd = process.cwd();
-      try {
-        cwd = (await ctx.session.get({ sessionID: event.sessionID }))?.location?.directory || cwd;
-      } catch {
-        // 会话读取失败按服务 cwd 兜底：envDir 含括判定走 deny 安全向
-      }
       const cred = getCredential(event.sessionID);
       // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token——
       // worker credential 消息优先，未命中回落 root 牌接管文件（主会话经 MCP 调任务面）。
