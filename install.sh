@@ -9,9 +9,9 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 if [ -z "${AGORA_HOME:-}" ] && [ -s "$HOME/.agora-home" ]; then  # 复跑保既有装（评审环）：env > 指针 > 缺省
   AGORA_HOME="$(python3 -c 'import sys
 try:
-    print(open(sys.argv[1], encoding="utf-8").readline().strip())
+    print(open(sys.argv[1], encoding="utf-8").read().split("\n", 1)[0].strip())
 except (OSError, ValueError):
-    pass' "$HOME/.agora-home" 2>/dev/null || true)"  # 坏指针严格解码失败→空→缺省（与 pointer_home 同契约，评审环）
+    pass' "$HOME/.agora-home" 2>/dev/null || true)"  # 坏指针严格解码失败→空→缺省（读全量取首行，与 pointer_home 同契约，评审环）
 fi
 AGORA_HOME="${AGORA_HOME:-$HOME/plaza}"          # 与 agorad env_config 同缺省（设计 §3）
 printf '%s\n' "$AGORA_HOME" > "$HOME/.agora-home"  # gt-32c051 指针：无 env 组件统一发现（MCP 壳启动亦写）
