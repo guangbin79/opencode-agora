@@ -22,5 +22,6 @@
 | F6 done 崩溃窗口 | T7：in_gate kill -9→重启重排→幂等重跑→单 done/merged/closed 零双死 | ✅ |
 | F11 门内 cancel 排队生效（真半边） | T7：pending_cancel 置位→门尾 cancelled＋env 回收＋旧凭据 401 | ✅ |
 | F3 can_spawn 名册语义 | 复核口径＝oc.create 失败熔断（T7 dispatch 全链实证）；名册实体语义无需求面 | ✅ 口径记录 |
+| F12 休眠仓直写放行＋agora_* 拒（启用域） | T1 bun：scope.test.ts 8 例（名册容错/精确匹配/worktree 不误伤/直通零 HTTP/agora_* 拒）＋install 名册骨架；真 opencode 会话层未单测——随实装冒烟核销（插件层证据已足，照实标注） | ✅ 插件层锚 |
 
 **红项：零。** 平台风险两项记档（serve password 轮换：msg.py 落库兜底＋运维重启；opencode v2.1.4 MCP spawn 间歇缺失：S3 走服务面绕开，对账锚职责）。

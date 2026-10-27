@@ -65,7 +65,7 @@ install.sh                     # skills 复制＋名册空骨架
 - Create: `skills/agora-ops/SKILL.md`
 
 **Interfaces:**
-- 内容：取消级联确认纪律（先 board 展链全景→向人确认级联范围→task_cancel——MCP 路径无 y/n 门，纪律由 skill 承载）／enforce 治理（root 权限＋审计提示）／启用域名册查看（inactive-repos 内容＋"休眠仓里 agora 不可用"）／doctor 快查解读（年龄排行/孤儿/账本体量）
+- 内容：取消级联确认纪律（先 board 展链全景→向人确认级联范围→task_cancel——MCP 路径无 y/n 门，纪律由 skill 承载）／enforce 治理（root 权限＋审计提示）／启用域名册查看（inactive-repos 内容＋"休眠仓里 agora 不可用"）／doctor 快查解读（年龄排行/孤儿/~~账本体量~~（无实现锚，T3 审计裁定略去））
 - 验收：同 T2 形态（逐节对锚 F11/F1/F12/设计 §5）
 
 - [ ] **Step 1-4:** 起草→审计→commit `feat(skill): agora-ops——取消确认与治理快操作`

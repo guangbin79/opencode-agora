@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agora 三部件装配＋root 牌接管（F1，T4）。幂等：连跑两遍落盘结果不变。
-# 流程：依赖检查→骨架→MCP 注册（合并不覆盖）→插件复制→root 牌接管→持牌冒烟→停。
+# 流程：依赖检查→骨架（含 F12 名册）→MCP 注册（合并不覆盖）→插件/skills 复制→root 牌接管→持牌冒烟→停。
 # 更新路径：git pull 后重跑本脚本——插件（~/.config/opencode/plugins/agora）与 agorad
 # 载荷（$AGORA_HOME/.agora/agorad）是拷贝不是引用，拉新代码不重跑不生效。
 set -euo pipefail
@@ -38,6 +38,8 @@ done
 
 # ---- 2) 骨架 ----
 mkdir -p "$AGORA_HOME/state/messages" "$AGORA_HOME/wiki" "$AGORA_HOME/.agora"
+# F12 名册空骨架：已有不覆盖（用户自录条目不可破坏）；0644 owner 可追加
+[ -e "$AGORA_HOME/.agora/inactive-repos" ] || (umask 022; : > "$AGORA_HOME/.agora/inactive-repos")
 
 # ---- 3) MCP 注册（mcp 段合并不覆盖；注册形状 T5 对账）----
 mkdir -p "$OC_DIR"
@@ -66,6 +68,12 @@ mkdir -p "$PLUGIN_DIR"
 for f in "$REPO"/agora-plugin/*.ts; do
   case "$f" in *.test.ts) continue ;; esac
   cp -f "$f" "$PLUGIN_DIR"/
+done
+
+# ---- 4a) skills 复制（主会话编排剧本；纯 md 整目录拷，同值覆写＝幂等）----
+mkdir -p "$OC_DIR/skills"
+for d in "$REPO"/skills/*/; do
+  cp -rf "${d%/}" "$OC_DIR/skills/"
 done
 
 # ---- 4b) agorad 载荷随装（T5 追加项：lift 不再假定与插件同仓——独立安装场景从

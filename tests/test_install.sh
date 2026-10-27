@@ -47,6 +47,15 @@ done' _ "$REPO" "$H1/.config/opencode"
 chk "测试件不随装（无 *.test.ts）(Req: F1)" bash -c '
 [[ -z "$(find "$1/plugins/agora" -name "*.test.ts")" ]]' _ "$H1/.config/opencode"
 
+chk "skills 复制 dispatch＋ops (Req: F12)" bash -c '
+for s in agora-dispatch agora-ops; do
+  cmp -s "$1/skills/$s/SKILL.md" "$2/skills/$s/SKILL.md" || exit 1
+done' _ "$REPO" "$H1/.config/opencode"
+chk "inactive-repos 骨架在位且空 (Req: F12)" bash -c '
+f="$1/.agora/inactive-repos"; [ -f "$f" ] && [ ! -s "$f" ]' _ "$A1"
+chk "inactive-repos owner 可写 (Req: F12)" [ -w "$A1/.agora/inactive-repos" ]
+chk "inactive-repos 0644 (Req: F12)" [ "$(stat -c %a "$A1/.agora/inactive-repos")" = 644 ]
+
 chk "root.token 在位非空 (Req: F1)" [ -s "$A1/.agora/root.token" ]
 chk "root.token 0600 (Req: F1)"     [ "$(stat -c %a "$A1/.agora/root.token")" = 600 ]
 chk "AGORA_OC_URL 占位 env (Req: F1)" grep -q "AGORA_OC_URL" "$A1/.agora/env"
@@ -79,6 +88,8 @@ EOF
 run_install "$H2" "$A2" >/dev/null 2>&1 || bad "二装场景首跑退出 0 (Req: F1)"
 cp "$OCJ2" "$FIX/oc-run1.json"
 cp "$A2/.agora/root.token" "$FIX/token-run1"
+echo "$FIX/some/repo" >> "$A2/.agora/inactive-repos"   # 模拟用户自录名册（二装不可覆盖）
+cp -r "$H2/.config/opencode/skills" "$FIX/skills-run1"
 
 run_install "$H2" "$A2" >/dev/null 2>&1 || bad "二装退出 0 (Req: F1)"
 
@@ -94,6 +105,8 @@ cfg = json.load(open(sys.argv[1]))
 names = [k for k in cfg["mcp"] if k == "agora"]
 assert len(names) == 1, names' "$OCJ2"
 chk "二装 root.token 不变（牌持久复用）(Req: F1)" cmp -s "$FIX/token-run1" "$A2/.agora/root.token"
+chk "二装 skills 逐字节不变 (Req: F12)" diff -r "$FIX/skills-run1" "$H2/.config/opencode/skills" >/dev/null
+chk "二装名册用户自录行不被覆盖 (Req: F12)" grep -qxF "$FIX/some/repo" "$A2/.agora/inactive-repos"
 
 # ---------- 场景 3：缺依赖退出码＋提示＋早退 ----------
 newfix
