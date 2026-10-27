@@ -190,8 +190,7 @@ class TaskService:
 
     def _boot(self, tid, env, title=None):
         page = pathlib.Path(self._store.home) / "wiki" / "tasks" / f"{tid}.md"
-        head = title or f"task {tid}"
-        return (f"[agora] {head} ({tid})\npage: {page}\nenv: {env}\n"
+        return (f"[agora] {tid}: {title or tid}\npage: {page}\nenv: {env}\n"
                 "contract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note\n"
                 "role: worker。可用: post/check_mail/wiki_read/wiki_write/task_dispatch(嵌套)/wait\n"
                 "不可用(403): task_update(预登记归派发方) / task_cancel / board / doctor / enforce\n"
