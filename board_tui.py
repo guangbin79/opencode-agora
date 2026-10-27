@@ -330,36 +330,60 @@ def draw_page(stdscr, title, lines):
 
 
 def run(stdscr, base, token):
-    """主循环：5s 轮询（AGORA_BOARD_INTERVAL 可配）→拉取→build→画→键处理。"""
+    """主循环：画→getch 阻塞 interval（AGORA_BOARD_INTERVAL 可配）；按键即时用
+    内存模型重画，仅超时 -1 或 r 才 poll 拉 HTTP（避免每键 N+1 卡顿）。"""
     interval = max(0.2, float(os.environ.get("AGORA_BOARD_INTERVAL", "5")))
     curses.curs_set(0)
     _init_colors()
     stdscr.timeout(int(interval * 1000))
     m = {"rows": [], "sel": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": ""}
+    details, snap, events = {}, None, None
     status, err, page = "载入…", None, []
-    while True:
+
+    def poll():
+        """拉一帧刷新内存模型；失败保旧行置 err（err 语义＝轮询离线）。"""
+        nonlocal details, status, err, snap, events
         try:
             snap, events, details = load_board(base, token)
-            m["rows"] = build_rows(snap, events, m["filter"])
-            m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
-            err = None
-            status = f"{len(m['rows'])} 行  轮询 {interval:g}s"
-        except Exception as e:                     # 离线：保旧行＋报因
+            _rebuild()
+        except Exception as e:                     # 离线/坏帧：保旧行＋报因
             err = str(e)
+
+    def _rebuild():
+        """用当前（缓存）帧按 m['filter'] 重建行＋刷新状态头。"""
+        nonlocal status, err
+        m["rows"] = build_rows(snap, events, m["filter"])
+        m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
+        err = None
+        status = f"{len(m['rows'])} 行  轮询 {interval:g}s"
+
+    poll()                                         # 首帧先拉，免空板白等一个周期
+    while True:
         if m["view"] == "board":
             draw_board(stdscr, m, status, err)
         else:
             draw_page(stdscr, m["view"], page)
         key = stdscr.getch()
         if key == -1:
-            continue                               # 到点轮询刷一帧
+            poll()                                 # 到点轮询刷一帧
+            continue
         k = curses.keyname(key).decode() if key >= 256 else chr(key)
         a = handle_key(m, k)
         if a.op == "quit":
             return
         if a.op == "cancel":
-            status = try_cancel(base, token, a.task)
+            msg = try_cancel(base, token, a.task)
+            poll()                                 # cancel 本就发 HTTP，顺势刷一帧
+            status = msg                           # 保住取消回执不被轮询状态覆盖
+        elif a.op == "refresh":
+            poll()                                 # r 手动刷：立即拉一帧
+        elif a.op == "apply":                      # 过滤回车：用缓存帧即时重建，零 HTTP
+            if snap is not None:
+                try:
+                    _rebuild()
+                except Exception as e:             # 与 poll 同口径：坏帧保旧行＋报因
+                    err = str(e)
         elif a.op == "detail":
             page = detail_page(details.get(a.task, {"task": {}, "events": []}))
         elif a.op == "doctor":
