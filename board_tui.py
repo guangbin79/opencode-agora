@@ -334,7 +334,7 @@ def draw_board(stdscr, m, status="", err=None):
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
             continue
         text = (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 32)}"
-                f" {_pad(r.state, 13)} {r.last_seen or ''}")
+                f"     {_pad(r.state, 13)} {r.last_seen or ''}")
         if r.kind == "event":
             attr |= curses.A_BOLD
         if i == m["sel"]:
