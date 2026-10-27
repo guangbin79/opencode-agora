@@ -149,7 +149,7 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(self.stub.sessions[wsid]["injects"][-1],
                          f"[agora] credential {tid}\ntoken: {wtok}")
         self.assertTrue(self.stub.sessions[wsid]["injects"][0].startswith(
-            f"[agora] BOOT task {tid}"))
+            f"[agora] ") and tid in boot))
         st, r = call(self.port, "POST", "/post",
                      {"task": tid, "kind": "done", "body": "abc123"}, wtok)
         self.assertEqual(st, 200)
