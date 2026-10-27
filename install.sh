@@ -7,6 +7,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 AGORA_HOME="${AGORA_HOME:-$HOME/plaza}"          # 与 agorad env_config 同缺省（设计 §3）
+printf '%s\n' "$AGORA_HOME" > "$HOME/.agora-home"  # gt-32c051 指针：无 env 组件统一发现（MCP 壳启动亦写）
 STATE_OC="$HOME/.local/state/opencode/service.json"  # T5 实证：serve --service 写此处 {url,password}
 OC_URL="${AGORA_OC_URL:-}"
 OC_PASSWORD="${AGORA_OC_PASSWORD:-}"

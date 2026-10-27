@@ -34,10 +34,19 @@ _MAIN_SID = "main"
 _SERVICE_JSON = ".agora/service.json"  # 设计 §4.8：lift/T4 消费面固定路径
 
 
+def pointer_home():
+    """~/.agora-home 指针回退（gt-32c051：MCP 壳/install 写入的统一发现桥）；缺失/空白＝无。"""
+    try:
+        return (Path.home() / ".agora-home").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def env_config():
-    """env 解析：AGORA_HOME 缺省 ~/plaza（设计 §3）；OC 服务＝AGORA_OC_URL 显式优先，
+    """env 解析：AGORA_HOME 优先级 env > ~/.agora-home 指针 > 缺省 ~/plaza（设计 §3）；
+    OC 服务＝AGORA_OC_URL 显式优先，
     缺省读 $XDG_STATE_HOME/opencode/service.json（T5 实证发现源，password 随取）。"""
-    home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
+    home = os.environ.get("AGORA_HOME") or pointer_home() or str(Path.home() / "plaza")
     url = os.environ.get("AGORA_OC_URL")
     password = os.environ.get("AGORA_OC_PASSWORD")
     if not url:

@@ -210,9 +210,18 @@ def handle_key(m, key):
 
 # ---------------- 数据面（agorad HTTP＋会话 tail 只读） ----------------
 
+def _pointer_home():
+    """~/.agora-home 指针回退（gt-32c051：MCP 壳/install 写入的统一发现桥）；缺失/空白＝无。"""
+    try:
+        return (Path.home() / ".agora-home").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def discover(home=None):
     """root 牌＋端口：$AGORA_HOME/.agora/{root.token,service.json}。"""
-    home = Path(home or os.environ.get("AGORA_HOME") or Path.home() / "plaza")
+    home = Path(home or os.environ.get("AGORA_HOME") or _pointer_home()
+                or Path.home() / "plaza")
     sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
     return f"http://127.0.0.1:{sj['port']}", token

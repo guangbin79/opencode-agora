@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DISPATCH_HINT, READ_HINT, shouldBlock } from "./hook";
+import { agoraHome, DISPATCH_HINT, READ_HINT, shouldBlock } from "./hook";
 import { attachToken, cacheCredential, readCredential, type Cred } from "./cred";
 import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
@@ -378,6 +378,46 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
       else process.env.AGORA_OC_URL = savedUrl;
       resetLift();
+    }
+  });
+});
+
+describe("agoraHome 指针回退（gt-32c051）：env 缺席→~/.agora-home→~/plaza", () => {
+  const savedAg = process.env.AGORA_HOME;
+  let pHome: string; // 惰性算：describe 注册期 root 尚未由 beforeAll 赋值
+
+  const restore = () => {
+    if (savedAg === undefined) delete process.env.AGORA_HOME;
+    else process.env.AGORA_HOME = savedAg;
+  };
+
+  test("env 缺席→读指针，空白/换行 trim", () => {
+    // Req: gt-32c051（homedir 经参注入——Bun 缓存 homedir，HOME 运行时改不动）
+    try {
+      pHome = join(root, "pointer-home");
+      mkdirSync(pHome, { recursive: true });
+      writeFileSync(join(pHome, ".agora-home"), `  ${home}  \n`);
+      delete process.env.AGORA_HOME;
+      expect(agoraHome(pHome)).toBe(home);
+    } finally {
+      restore();
+    }
+  });
+
+  test("优先级 env > 指针 > 缺省 ~/plaza", () => {
+    // Req: gt-32c051
+    try {
+      pHome = join(root, "pointer-home");
+      mkdirSync(pHome, { recursive: true });
+      writeFileSync(join(pHome, ".agora-home"), `${home}\n`);
+      process.env.AGORA_HOME = join(root, "env-home");
+      expect(agoraHome(pHome)).toBe(join(root, "env-home")); // env 压过指针
+      delete process.env.AGORA_HOME;
+      expect(agoraHome(pHome)).toBe(home); // 指针回退
+      rmSync(join(pHome, ".agora-home"));
+      expect(agoraHome(pHome)).toBe(join(pHome, "plaza")); // 缺省
+    } finally {
+      restore();
     }
   });
 });
