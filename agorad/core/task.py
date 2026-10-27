@@ -46,6 +46,11 @@ class TaskService:
                 self._state.get(after)
             except KeyError:
                 self._reject(tid, sid, f"after: 前任务 {after} 不存在")
+        if target_branch is not None:  # 信任边界校验：语法＋存在，坏名 fail-fast
+            try:
+                self._gitx.check_branch(project_dir, target_branch)
+            except Exception as e:
+                self._reject(tid, sid, f"target_branch: {e}")
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
         tid = self._new_tid()

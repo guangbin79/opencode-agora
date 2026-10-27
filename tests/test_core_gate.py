@@ -25,13 +25,21 @@ class FakeOc:
 
 
 class FakeGitx:
-    def __init__(self, merge="ok", gate=False):
-        self.merge_result, self.gate = merge, gate
+    def __init__(self, merge="ok", gate=False, crash=False):
+        self.merge_result, self.gate, self.crash = merge, gate, crash
         self.merge_calls, self.rollbacks, self.removed = [], [], []
-        self.head_calls = []
+        self.head_calls, self.checkouts = [], []
         self.merged, self.head_sha = False, "aaa111"
 
+    def symref(self, repo_dir):
+        return "main"
+
+    def checkout(self, repo_dir, branch):
+        self.checkouts.append((repo_dir, branch))
+
     def merge_ff(self, env_dir, target, branch=None):
+        if self.crash:
+            raise RuntimeError("git checkout issue/7: fatal: used by worktree")
         self.merge_calls.append((env_dir, target, branch))
         self.merged = self.merge_result == "ok"  # 拒并不落地（无 merge commit）
         return self.merge_result
@@ -87,8 +95,8 @@ class TestCoreGate(unittest.TestCase):
 
     # ---- 夹具 ----
 
-    def mk_gate(self, merge="ok", gate=False):
-        self.gx = FakeGitx(merge=merge, gate=gate)
+    def mk_gate(self, merge="ok", gate=False, crash=False):
+        self.gx = FakeGitx(merge=merge, gate=gate, crash=crash)
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
                          lambda env: self.anchor, self.health, self.auth,
                          self.store, runner=self.runner)
@@ -278,6 +286,24 @@ class TestGateRun(TestCoreGate):
 
 class TestGateAudit(TestCoreGate):
     """F-2：门段迁移逐点落 events.jsonl（F8 完整链：受理→门→合并→尾）。"""
+
+    def test_target_branch_restores_default_branch_position(self):  # Req: gt-132747
+        self.seed(tb="issue/7")
+        self.gate.accept_done("t1", "s-w1", "abc123")
+        self.gate.run("t1")
+        self.assertEqual(self.gx.checkouts, [("/repo", "main")])  # 门毕还原，防缺省任务漂移
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+
+    def test_gate_crash_reopens_and_notifies(self):  # Req: gt-132747
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(crash=True)
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")  # 不静默卡 done
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("reopened", names)
+        msgs = [m for m in self.store.read_messages() if m["to"] == "s-w1"]
+        self.assertTrue(any("门内异常" in m.get("body", "") for m in msgs))
 
     def test_target_branch_merges_into_branch(self):  # Req: gt-132747
         self.seed(tb="issue/7")

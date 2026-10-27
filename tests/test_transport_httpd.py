@@ -47,6 +47,9 @@ class FakeGitx:
         self.removed.append(env_dir)
         shutil.rmtree(env_dir, ignore_errors=True)
 
+    def check_branch(self, repo_dir, branch):
+        pass
+
     def merge_ff(self, env_dir, target, branch=None):
         return "ok"
 

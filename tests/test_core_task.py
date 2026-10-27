@@ -20,7 +20,12 @@ from agorad.core.task import Rejected, TaskService
 
 class FakeGitx:
     def __init__(self):
-        self.built, self.removed, self.branches = [], [], []
+        self.built, self.removed, self.branches, self.checked = [], [], [], []
+
+    def check_branch(self, repo_dir, branch):
+        if branch == "bad..name":
+            raise RuntimeError("not a valid branch name")
+        self.checked.append((repo_dir, branch))
 
     def build_env(self, project_dir, tid, branch=None):
         env = f"/envs/{tid}"
@@ -253,8 +258,15 @@ class TestCreateAndRedispatch(TestCoreTask):
         tid = self.svc.create("g", "/repo", None, self.root,
                               target_branch="issue/7")
         self.assertEqual(self.state.get(tid)["target_branch"], "issue/7")
+        self.assertEqual(self.gitx.checked[-1], ("/repo", "issue/7"))  # 信任边界已校验
         tid2 = self.dispatchable()
         self.assertIsNone(self.state.get(tid2)["target_branch"])  # 缺省＝None
+
+    def test_create_rejects_bad_target_branch(self):  # Req: gt-132747
+        for bad in ("bad..name",):  # 存在性拒绝归真 gitx（test_access_gitx）
+            with self.assertRaises(Rejected) as cm:
+                self.svc.create("g", "/repo", None, self.root, target_branch=bad)
+            self.assertIn("target_branch", str(cm.exception))  # 坏名 fail-fast 报因
 
     def test_dispatch_builds_env_from_target_branch(self):  # Req: gt-132747
         disp = self.auth.issue("disp1", "dispatcher")

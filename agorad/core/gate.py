@@ -74,6 +74,7 @@ class Gate:
         branch = t.get("target_branch")  # 合入目标支（外部工作流）；缺省＝仓默认支
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         self._state.set_fields(tid, in_gate=True)
+        origin = self._gitx.symref(target) if branch else None  # 合入前分支位；门毕还原
         try:
             if self.gate_files_touched(tid):  # 闸体变更：拍人不拦门
                 self._health.escalate(KIND_GATEFILES, tid)
@@ -108,7 +109,15 @@ class Gate:
             self._audit(tid, "merged", commit=t.get("commit"))
             self._gitx.remove_env(env)
             self._post(tid, f"merged @{t.get('commit')}——环境已回收")
+        except Exception as e:  # 门内崩（checkout 拒/分支失）：转 reopened 通知，防静默卡死
+            if self._state.get(tid)["state"] == "done":
+                self._state.transition(tid, "reopened")
+                self._audit(tid, "reopened")
+                self._post(tid, f"门内异常：{e}——处理目标分支后重新 post(done, commit)")
+            # 终态后异常（如环境回收败）不逆转门结果
         finally:
+            if origin:
+                self._gitx.checkout(target, origin)
             self._tail(tid)
 
     def gate_files_touched(self, tid):

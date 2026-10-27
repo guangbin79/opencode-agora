@@ -100,6 +100,16 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(self._git(["rev-parse", "main"],
                                    cwd=self.repo).stdout.strip(), main_sha)  # 仓默认支不动
 
+    def test_check_branch_symref_checkout(self):  # Req: gt-132747
+        self._git(["checkout", "-b", "issue/8"], cwd=self.repo)
+        self.assertEqual(self.gx.symref(str(self.repo)), "issue/8")
+        self.gx.checkout(str(self.repo), "main")
+        self.assertEqual(self.gx.symref(str(self.repo)), "main")  # 还原位成立
+        self.assertIsNone(self.gx.check_branch(str(self.repo), "issue/8"))  # 语法＋存在
+        for bad in ("-bad", "a..b", "ghost"):
+            with self.assertRaises(RuntimeError, msg=bad):
+                self.gx.check_branch(str(self.repo), bad)  # 选项注入/语法坏/不存在
+
     def test_target_branch_missing_fails_clear(self):  # Req: gt-132747
         with self.assertRaises(RuntimeError) as cm:
             self.gx.build_env(self.repo, "gt-b2", "no/such")

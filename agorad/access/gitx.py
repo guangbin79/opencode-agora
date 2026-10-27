@@ -53,6 +53,24 @@ class Gitx:
     def head(self, repo_dir: str, branch: str = None) -> str:
         return self._git(["rev-parse", branch or "HEAD"], cwd=repo_dir).stdout.strip()
 
+    def check_branch(self, repo_dir: str, branch: str) -> None:
+        """信任边界校验：引用名语法（防 - 开头选项注入）＋分支存在（防裸 SHA detached 丢提交）。"""
+        self._git(["check-ref-format", "--branch", branch], cwd=repo_dir)
+        r = self._git(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                      cwd=repo_dir, check=False)
+        if r.returncode != 0:
+            raise RuntimeError(f"分支不存在: {branch}")
+
+    def symref(self, repo_dir: str) -> str:
+        return self._git(["rev-parse", "--abbrev-ref", "HEAD"],
+                         cwd=repo_dir).stdout.strip()
+
+    def checkout(self, repo_dir: str, branch: str) -> None:
+        try:  # 门毕还原分支位；失败不掩盖门结果（外部支残留＝改前现状）
+            self._git(["checkout", branch], cwd=repo_dir)
+        except RuntimeError:
+            pass
+
     def rollback(self, target: str, before_sha: str) -> None:
         self._git(["reset", "--hard", before_sha], cwd=target)
 
