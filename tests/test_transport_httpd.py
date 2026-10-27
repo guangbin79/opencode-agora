@@ -148,8 +148,8 @@ class TestHttpSmoke(HttpdTest):
         # T5 真形状：boot 随 create 走 prompt 通道，先于 dispatch 的 credential 注入
         self.assertEqual(self.stub.sessions[wsid]["injects"][-1],
                          f"[agora] credential {tid}\ntoken: {wtok}")
-        self.assertTrue(self.stub.sessions[wsid]["injects"][0].startswith(
-            f"[agora] ") and tid in boot))
+        boot_text = self.stub.sessions[wsid]["injects"][0]
+        self.assertTrue(boot_text.startswith("[agora] ") and tid in boot_text)
         st, r = call(self.port, "POST", "/post",
                      {"task": tid, "kind": "done", "body": "abc123"}, wtok)
         self.assertEqual(st, 200)
