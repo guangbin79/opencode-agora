@@ -23,9 +23,9 @@ opencode v2 上的多 agent 委托协作层——单机、单人、多 AI agent�
 | 工作区污染 | 强制隔离：git 仓写入只发生在任务 worktree 内，插件闸机器校验（凭据＋cwd∈环境） |
 | 跨仓无编排 | 派发链＋顺序硬闸（B7）：耦合仓按依赖序合并；无关仓完全并行 |
 | worker 黑盒 | 链上可见：board／Agent View、last_seen、升级事件流、只追加审计账本 |
-| 无实时通道 | 链边消息先落库后注入（在线 ≤5s、离线信箱补拉），失控数秒内拍主会话 |
+| 无实时通道 | 链边消息先落库后注入（在线 ≤5s、离线信箱补拉）；闸体/质量类升级实时拍主会话，探活类事件在 5 分钟健康节拍内送达 |
 
-姿态是**全自主＋两级失败**：自愈失败静默（汇总可见）；救不回来的（blocked、质量 3 连败、dispatcher 死亡、闸体变更）实时拍人，且照样进汇总。
+姿态是**全自主＋两级失败**：自愈失败静默（汇总可见）；救不回来的（blocked、质量 3 连败、dispatcher 死亡、闸体变更）升级拍主会话——闸体/质量类实时、探活类在 5 分钟节拍内——且照样进汇总。
 
 ## 安装
 
@@ -43,15 +43,15 @@ cd opencode-agora && ./install.sh
 对主会话正常说话，skill 按意图自动挂载：
 
 - "让 agent 修 repoB 的登录 bug" → `agora-dispatch` 拆解、写窄而自包含的 goal、派发、登记 verify；
-- "进展如何" → board 五桶（已合并/在飞/失败/阻塞/已取消）＋链树＋last_seen 查僵；
+- "进展如何" → board 五桶（已合并/在飞/失败/阻塞/已取消；"失败"为保留位——verify 失败在续修期计入在飞）＋链树＋last_seen 查僵；
 - "把那条链停了" → `agora-ops` 先展示级联范围、经你确认才 `task_cancel`。
 
 独立仪表盘一条命令：
 
 ```bash
 python3 board_tui.py    # Agent View：链树/五桶/升级事件流
-                        # vi 键位：j/k/g/G 移动、Enter 明细、L tail worker 会话、
-                        # d doctor、x 取消（y/n 确认）、/ 过滤、r 刷新
+                        # vi 键位：j/k/g/G 移动、Enter 或 l 明细、h 返回、L tail worker 会话、
+                        # d doctor、x 取消（y/n 确认）、/ 过滤、r 刷新、q 退出
 ```
 
 ### 任务生命周期
@@ -67,7 +67,7 @@ python3 board_tui.py    # Agent View：链树/五桶/升级事件流
 | 旋钮 | 默认 | 含义 |
 |---|---|---|
 | `AGORA_HOME` | `~/plaza` | 账本根（state/messages/events/wiki） |
-| `.agora/inactive-repos` | 空 | 启用域名册：所列仓中 agora 全休眠（普通工具直通、agora_* 拒）。仓根路径一行一个，新会话生效；中央名册，仓不能自我退出 |
+| `.agora/inactive-repos` | 空 | 启用域名册：所列仓中 agora 全休眠（普通工具直通、agora_* 拒）。仓根路径一行一个；插件按 opencode 进程缓存名册——**编辑后需重启 opencode 服务生效**（按会话重载为遗留项）。中央名册，仓不能自我退出 |
 | `AGORA_BOARD_INTERVAL` | 5s | board_tui 轮询间隔 |
 | `enforce` | on | root 专用总闸，开/关均审计 |
 | 链深/并发配额 | 5 / 8 | 派发硬闸 |
@@ -84,4 +84,4 @@ python3 board_tui.py    # Agent View：链树/五桶/升级事件流
 
 ## 状态
 
-三计划已交付合并：agorad 核心（12 任务）、接入层（9 任务：MCP 壳/插件五件/安装/T2·T3 真 opencode e2e）、启用域与技能（4 任务）。测试基线：python 182＋bun 41＋install 31 断言＋e2e 十三场景（含崩溃窗口、kill -9 恢复、顺序硬闸）。遗留项（旋转归档、tail 读等）由摩擦驱动。
+三计划已交付合并：agorad 核心（12 任务）、接入层（9 任务：MCP 壳/插件 hook·cred·inject·lift/安装/Agent View 仪表盘/T2·T3 真 opencode e2e）、启用域与技能（4 任务）。测试基线：python 182＋bun 41＋install 31 断言＋e2e 十三场景（含崩溃窗口、kill -9 恢复、顺序硬闸）。遗留项（旋转归档、tail 读等）由摩擦驱动。
