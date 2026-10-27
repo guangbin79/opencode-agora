@@ -105,8 +105,8 @@ class TestHandshakeAndList(McpShellTest):
 
     def test_tools_list_exactly_11_matching_httpd_routes(self):  # Req: F2
         names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(len(names), 11)
-        self.assertEqual(set(names), set(_TOOLS))  # 五族与 httpd 根级路由同集
+        self.assertEqual(len(names), 12)  # 11 服务端 + 1 壳层本地 wait
+        self.assertEqual(set(names) - {"wait"}, set(_TOOLS))  # 11 服务端五族与 httpd 同集；wait＝壳层本地
         for t in self.rpc("tools/list")["result"]["tools"]:
             self.assertTrue(t.get("description"))
             self.assertEqual(t["inputSchema"]["type"], "object")

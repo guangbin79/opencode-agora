@@ -13,6 +13,7 @@ X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -58,6 +59,9 @@ _TOOLS = [
     {"name": "enforce", "description": "拨强制旗（仅 root；on 须布尔）",
      "inputSchema": {"type": "object", "properties": {
          "on": {"type": "boolean"}}, "required": ["on"]}},
+    {"name": "wait", "description": "本地休眠指定秒数（Code Mode 无 setTimeout 的补偿；上限 120s）",
+     "inputSchema": {"type": "object", "properties": {
+         "seconds": {"type": "integer", "maximum": 120}}}},
 ]
 _NAMES = frozenset(t["name"] for t in _TOOLS)
 _ERROR_CODES = {400: -32602, 401: -32001, 403: -32003, 404: -32004,
@@ -134,6 +138,12 @@ def handle(msg):
 
 def _tools_call(rid, params):
     name = params.get("name")
+    if name == "wait":  # 壳层本地休眠（Code Mode 无 setTimeout 的补偿）
+        secs = min(params.get("arguments", {}).get("seconds", 30), 120)
+        time.sleep(secs)
+        return {"jsonrpc": "2.0", "id": rid,
+                "result": {"content": [{"type": "text",
+                                        "text": json.dumps({"ok": True, "waited": secs})}]}}
     if name not in _NAMES:
         return _err(rid, -32602, f"未知工具: {name}")
     args = params.get("arguments")

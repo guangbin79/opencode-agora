@@ -36,6 +36,10 @@ T7 排障志三轮自发性事故的教训（run7/16）：worker 会自发 done�
 
 verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。流程：
 
+**预登记（快速路）**：goal 已含明确验收命令→**先 task_update 登记再 dispatch**——worker 从不碰壁，等待归零。
+
+**回填（探索路）**：goal 未指定或 worker 发现更准确命令→现行流程：
+
 1. **回填**：worker 进环境勘察后 `post(kind=verify, body=命令)` 提案——你经 `check_mail` 收到（留库补拉面）。
 2. **校验**：可执行性＋需求覆盖。不合格→`post(kind=verify_reject, body=驳回原因)`，实时注入 worker，其重报；驳回必须附因。
 3. **登记**：`task_update(task, verify_cmd)` → 状态 registered。空命令必拒。verify 未登记，worker 的 done 必被门拒收。
