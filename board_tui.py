@@ -168,6 +168,7 @@ def handle_key(m, key):
         return Action("noop")
     if key == "L":
         if r and r.kind == "task" and r.worker:
+            m["view"] = "tail"
             return Action("tail", arg=r.worker)
         return Action("noop")
     if key == "d":
