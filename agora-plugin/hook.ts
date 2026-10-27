@@ -4,7 +4,7 @@
  * 语义与 agorad 服务侧一致：豁免面 B3（非 git、/tmp/opencode、enforce off）、
  * 读引导（state 账本经工具面，events/wiki 开放，主会话例外）、主会话对仓写入同拦。
  */
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { Cred } from "./cred";
@@ -19,13 +19,10 @@ const WRITE_TOOLS = new Set(["edit", "write"]);
 const READISH_TOOLS = new Set(["read", "bash"]);
 
 export function agoraHome(homeDir = homedir()): string {
+  // 判定链信任锚仅 env（gt-32c051 裁定 A）：~/.agora-home 指针是被辖方可写文件，
+  // 若跟随则 enforce 旗/读边界可被一行 bash 挪根（终闸 C 册 blocker 实证）——禁加指针回退。
+  // homeDir 参数仅供测试注入口（Bun 缓存 homedir）。
   if (process.env.AGORA_HOME) return process.env.AGORA_HOME;
-  try {
-    const p = readFileSync(join(homeDir, ".agora-home"), "utf8").trim(); // gt-32c051 指针回退
-    if (p) return p;
-  } catch {
-    // 无指针（缺失/不可读）：落缺省
-  }
   return join(homeDir, "plaza");
 }
 
