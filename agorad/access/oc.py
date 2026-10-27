@@ -49,9 +49,10 @@ class Oc:
         token = base64.b64encode(f"opencode:{password or ''}".encode()).decode()
         self._headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
-    def create(self, cwd: str, boot: str) -> str:
-        """建 worker 会话并绑任务 env 目录，boot 文本作首条注入；回 sid。"""
-        data = self._post("/session", {})
+    def create(self, cwd: str, boot: str, title: str = None) -> str:
+        """建 worker 会话并绑任务 env 目录，boot 文本作首条注入；回 sid。title 传给 opencode 供会话命名。"""
+        body = {"title": title} if title else {}
+        data = self._post("/session", body)
         try:
             sid = data["data"]["id"]
         except (KeyError, TypeError) as e:  # 应答形状错（含 200 非 JSON 信封）＝契约 OcUnavailable

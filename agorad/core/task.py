@@ -80,7 +80,8 @@ class TaskService:
             self._reject(tid, sid, f"after: 前任务 {after} 未终态（B7）")
         env = t.get("env_dir") or self._gitx.build_env(t["project_dir"], tid)
         try:
-            wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")))
+            wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
+                                    title=t.get("title"))
         except Exception as e:  # can_spawn 名册：会话创建失败即熔断（不 import access 异常）
             if not t.get("env_dir"):
                 self._gitx.remove_env(env)

@@ -62,9 +62,10 @@ class StubOpencode:
             def do_POST(self):
                 parts, req = self._route()
                 with stub.lock:
-                    if parts == ["session"]:  # 真 shape：多余字段（cwd/message）静默忽略
+                    if parts == ["session"]:  # 真 shape：多余字段（cwd/message）静默忽略；title 接受
                         sid = uuid.uuid4().hex[:12]
-                        stub.sessions[sid] = {"injects": [], "directory": "/", "req": req}
+                        stub.sessions[sid] = {"injects": [], "directory": "/",
+                                              "req": req, "title": (req or {}).get("title")}
                         self._json(200, {"data": {"id": sid, "location": {"directory": "/"}}})
                     elif len(parts) == 3 and parts[0] == "session" and parts[2] == "move":
                         s = stub.sessions.get(parts[1])
