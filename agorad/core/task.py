@@ -80,7 +80,7 @@ class TaskService:
             self._reject(tid, sid, f"after: 前任务 {after} 未终态（B7）")
         env = t.get("env_dir") or self._gitx.build_env(t["project_dir"], tid)
         try:
-            wsid = self._oc.create(env, self._boot(tid, env))
+            wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")))
         except Exception as e:  # can_spawn 名册：会话创建失败即熔断（不 import access 异常）
             if not t.get("env_dir"):
                 self._gitx.remove_env(env)
@@ -179,9 +179,10 @@ class TaskService:
             pass
         return tid
 
-    def _boot(self, tid, env):
+    def _boot(self, tid, env, title=None):
         page = pathlib.Path(self._store.home) / "wiki" / "tasks" / f"{tid}.md"
-        return (f"[agora] BOOT task {tid}\npage: {page}\nenv: {env}\n"
+        head = title or f"task {tid}"
+        return (f"[agora] {head} ({tid})\npage: {page}\nenv: {env}\n"
                 "contract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note\n"
                 "role: worker。可用: post/check_mail/wiki_read/wiki_write/task_dispatch(嵌套)/wait\n"
                 "不可用(403): task_update(预登记归派发方) / task_cancel / board / doctor / enforce\n"
