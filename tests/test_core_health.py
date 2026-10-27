@@ -31,7 +31,7 @@ class FakeOc:
             raise OcUnavailable("stub down")
         return bool(self.liveness.get(sid))
 
-    def create(self, cwd, boot):
+    def create(self, cwd, boot, title=None):
         sid = f"r{len(self.sessions) + 1}"
         self.sessions.append((sid, cwd, boot))
         return sid

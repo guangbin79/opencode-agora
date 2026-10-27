@@ -56,7 +56,7 @@ class FakeGitx:
 class DeadInjectOc:
     """create 成功但 inject 一律拒——凭据直投失败路径。"""
 
-    def create(self, cwd, boot):
+    def create(self, cwd, boot, title=None):
         return "sw1"
 
     def inject(self, sid, text):

@@ -28,7 +28,7 @@ class FakeOc:
             raise OcUnavailable("stub down")
         return bool(self.liveness.get(sid))
 
-    def create(self, cwd, boot):
+    def create(self, cwd, boot, title=None):
         if self.fail_create:
             raise OcUnavailable("stub down")
         sid = f"r{len(self.sessions) + 1}"

@@ -36,7 +36,7 @@ class FakeOc:
         self.sessions, self.injected = [], []
         self.fail_create = False
 
-    def create(self, cwd, boot):
+    def create(self, cwd, boot, title=None):
         if self.fail_create:
             raise OcUnavailable("stub down")
         sid = f"s{len(self.sessions) + 1}"
