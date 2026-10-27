@@ -149,5 +149,6 @@ if [ -n "$AD_PID" ]; then
 fi
 
 echo "install: 完成（$AGORA_HOME）"
+echo "install: 启用域名册 $AGORA_HOME/.agora/inactive-repos（空＝全启用；仓根路径一行一个，新会话生效）"
 echo "install: 更新＝git pull 后重跑本脚本（插件与 agorad 载荷是拷贝不是引用，不重跑不生效）"
 echo "install: lift 失败可重启会话或等 doctor；工具拒因携 resetLift 恢复指引"
