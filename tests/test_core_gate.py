@@ -325,7 +325,7 @@ class TestGateAudit(TestCoreGate):
         self.seed(tb="issue/7")
         self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
         self.gate.run("t1")
-        self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo", "issue/7")])
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", "issue/7")])
         self.assertEqual(self.gx.head_calls, [("/repo", "issue/7")])  # 回滚点取目标支
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("merged", names)
@@ -334,7 +334,7 @@ class TestGateAudit(TestCoreGate):
     def test_target_branch_absent_keeps_default_target(self):  # Req: gt-132747
         self.in_gate()
         self.gate.run("t1")
-        self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo", None)])
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
         self.assertEqual(self.gx.head_calls, [("/repo", None)])  # 缺省＝仓默认支
         self.assertEqual(self.state.get("t1")["state"], "closed")
 
