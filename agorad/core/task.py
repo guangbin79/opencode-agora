@@ -176,7 +176,7 @@ class TaskService:
         return (f"[agora] BOOT task {tid}\npage: {page}\nenv: {env}\n"
                 "contract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note\n"
                 "role: worker。可用: post/check_mail/wiki_read/wiki_write/task_dispatch(嵌套)/wait\n"
-                "不可用(403): task_update(task_create时已预登记或派发方登记) / task_cancel / board / doctor / enforce\n"
+                "不可用(403): task_update(预登记归派发方) / task_cancel / board / doctor / enforce\n"
                 "等待: Code Mode 无 setTimeout——用 agora.wait(seconds) 本地休眠后重试，勿轮询烧推理轮\n"
                 "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记")
 

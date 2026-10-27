@@ -61,7 +61,7 @@ _TOOLS = [
          "on": {"type": "boolean"}}, "required": ["on"]}},
     {"name": "wait", "description": "本地休眠指定秒数（Code Mode 无 setTimeout 的补偿；上限 120s）",
      "inputSchema": {"type": "object", "properties": {
-         "seconds": {"type": "integer", "maximum": 120}}}},
+         "seconds": {"type": "integer", "minimum": 0, "maximum": 120}}}},
 ]
 _NAMES = frozenset(t["name"] for t in _TOOLS)
 _ERROR_CODES = {400: -32602, 401: -32001, 403: -32003, 404: -32004,
@@ -139,7 +139,7 @@ def handle(msg):
 def _tools_call(rid, params):
     name = params.get("name")
     if name == "wait":  # 壳层本地休眠（Code Mode 无 setTimeout 的补偿）
-        secs = min(params.get("arguments", {}).get("seconds", 30), 120)
+        secs = max(0, min(params.get("arguments", {}).get("seconds", 30), 120))
         time.sleep(secs)
         return {"jsonrpc": "2.0", "id": rid,
                 "result": {"content": [{"type": "text",
