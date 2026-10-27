@@ -100,6 +100,32 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(self._git(["rev-parse", "main"],
                                    cwd=self.repo).stdout.strip(), main_sha)  # 仓默认支不动
 
+    def test_tag_shadowed_branch_resolves_branch(self):  # Req: gt-132747
+        self._git(["branch", "v1"], cwd=self.repo)
+        main_sha = self._head(self.repo)
+        self._git(["checkout", "v1"], cwd=self.repo)
+        tag_sha = self._commit(self.repo, {"tag.txt": "t"}, "tagged commit")
+        self._git(["tag", "v1"], cwd=self.repo)  # 同名 tag 指旧提交
+        self._git(["commit", "-q", "--amend", "-m", "tagged"], cwd=self.repo)
+        branch_tip = self._git(["rev-parse", "refs/heads/v1"],
+                               cwd=self.repo).stdout.strip()
+        self.assertNotEqual(branch_tip, self._git(["rev-parse", "v1"],
+                                                  cwd=self.repo).stdout.strip())
+        self.assertEqual(self.gx.head(str(self.repo), "v1"), branch_tip)  # 回滚点＝分支头非 tag
+        env = self.gx.build_env(self.repo, "gt-b3", "v1")
+        self.assertEqual(self._head(Path(env)), branch_tip)  # 起点＝分支头非 tag
+
+    def test_touches_gate_branch_base_excludes_external_commits(self):  # Req: gt-132747
+        self._git(["checkout", "-b", "issue/9"], cwd=self.repo)
+        fork = self._commit(self.repo, {"pyproject.toml": "[x]"}, "external gate change")
+        self._git(["checkout", "main"], cwd=self.repo)
+        env = self.gx.build_env(self.repo, "gt-b4", "issue/9")
+        self._commit(Path(env), {"feat.txt": "f"}, "task work only")
+        self.assertFalse(self.gx.touches_gate(env, ["pyproject.toml"],
+                                              "issue/9"))  # 外部支提交不计入任务 diff
+        self._commit(Path(env), {"Makefile": "all:"}, "task touches gate")
+        self.assertTrue(self.gx.touches_gate(env, ["Makefile"], "issue/9"))
+
     def test_check_branch_symref_checkout(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/8"], cwd=self.repo)
         self.assertEqual(self.gx.symref(str(self.repo)), "issue/8")

@@ -28,7 +28,8 @@ class FakeGitx:
     def __init__(self, merge="ok", gate=False, crash=False):
         self.merge_result, self.gate, self.crash = merge, gate, crash
         self.merge_calls, self.rollbacks, self.removed = [], [], []
-        self.head_calls, self.checkouts = [], []
+        self.head_calls, self.checkouts, self.gate_calls = [], [], []
+        self.restore_ok = True
         self.merged, self.head_sha = False, "aaa111"
 
     def symref(self, repo_dir):
@@ -36,6 +37,7 @@ class FakeGitx:
 
     def checkout(self, repo_dir, branch):
         self.checkouts.append((repo_dir, branch))
+        return self.restore_ok
 
     def merge_ff(self, env_dir, target, branch=None):
         if self.crash:
@@ -50,7 +52,8 @@ class FakeGitx:
     def remove_env(self, env_dir):
         self.removed.append(env_dir)
 
-    def touches_gate(self, env_dir, patterns):
+    def touches_gate(self, env_dir, patterns, branch=None):
+        self.gate_calls.append((env_dir, patterns, branch))
         return self.gate
 
     def head(self, repo_dir, branch=None):
@@ -293,6 +296,19 @@ class TestGateAudit(TestCoreGate):
         self.gate.run("t1")
         self.assertEqual(self.gx.checkouts, [("/repo", "main")])  # 门毕还原，防缺省任务漂移
         self.assertEqual(self.state.get("t1")["state"], "closed")
+
+    def test_restore_failure_audited(self):  # Req: gt-132747
+        self.seed(tb="issue/7")
+        self.gate.accept_done("t1", "s-w1", "abc123")
+        self.gx.restore_ok = False
+        self.gate.run("t1")
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("restore_failed", names)  # 漂移防线失效留痕
+
+    def test_gate_files_touched_passes_target_branch(self):  # Req: gt-132747
+        self.seed(tb="issue/7")
+        self.gate.gate_files_touched("t1")
+        self.assertEqual(self.gx.gate_calls[-1][2], "issue/7")  # diff 基点＝目标支
 
     def test_gate_crash_reopens_and_notifies(self):  # Req: gt-132747
         self.runner = FakeRunner((0, "pass"))

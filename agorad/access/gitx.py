@@ -27,9 +27,10 @@ class Gitx:
         stamp = datetime.now().strftime("%m%d%H%M")
         name = f"{repo.name}__wt-task-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
         env = repo.parent / name  # repo 同级父目录＝../ 相对拓扑等价
-        # branch＝起点分支（外部工作流，如 issue/N-fix）；缺省＝仓默认支
-        self._git(["worktree", "add", "-b", name, str(env)] + ([branch] if branch else []),
-                  cwd=repo)
+        # branch＝起点分支（外部工作流，如 issue/N-fix）；缺省＝仓默认支。
+        # 起点全限定 refs/heads/<branch>：裸名解析 tag 优先（同名 tag 遮蔽致错基线）
+        self._git(["worktree", "add", "-b", name, str(env)]
+                  + ([f"refs/heads/{branch}"] if branch else []), cwd=repo)
         return str(env)
 
     def remove_env(self, env_dir: str) -> None:
@@ -51,7 +52,9 @@ class Gitx:
         return "ok" if r.returncode == 0 and head == env_sha else "non-ff"
 
     def head(self, repo_dir: str, branch: str = None) -> str:
-        return self._git(["rev-parse", branch or "HEAD"], cwd=repo_dir).stdout.strip()
+        # 全限定 refs/heads/<branch>：裸名 rev-parse tag 优先，同名 tag 会给出错误回滚点
+        return self._git(["rev-parse", f"refs/heads/{branch}" if branch else "HEAD"],
+                         cwd=repo_dir).stdout.strip()
 
     def check_branch(self, repo_dir: str, branch: str) -> None:
         """信任边界校验：引用名语法（防 - 开头选项注入）＋分支存在（防裸 SHA detached 丢提交）。"""
@@ -65,25 +68,30 @@ class Gitx:
         return self._git(["rev-parse", "--abbrev-ref", "HEAD"],
                          cwd=repo_dir).stdout.strip()
 
-    def checkout(self, repo_dir: str, branch: str) -> None:
-        try:  # 门毕还原分支位；失败不掩盖门结果（外部支残留＝改前现状）
+    def checkout(self, repo_dir: str, branch: str) -> bool:
+        try:  # 门毕还原分支位；失败不掩盖门结果，回 False 交调用方留痕
             self._git(["checkout", branch], cwd=repo_dir)
+            return True
         except RuntimeError:
-            pass
+            return False
 
     def rollback(self, target: str, before_sha: str) -> None:
         self._git(["reset", "--hard", before_sha], cwd=target)
 
-    def touches_gate(self, env_dir: str, patterns) -> bool:
+    def touches_gate(self, env_dir: str, patterns, branch: str = None) -> bool:
         env = Path(env_dir).resolve()
-        names = self._diff_names(env)
+        names = self._diff_names(env, branch)
         return any(fnmatch(n, p) or fnmatch(Path(n).name, p) for n in names for p in patterns)
 
-    def _diff_names(self, env: Path) -> list[str]:
+    def _diff_names(self, env: Path, branch: str = None) -> list[str]:
         main = self._main(env)
-        branch = env.name
-        base = self._git(["merge-base", branch, "HEAD"], cwd=main).stdout.strip()
-        out = self._git(["diff", "--name-only", base, branch], cwd=main).stdout
+        src = env.name
+        if branch:  # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff
+            base = self._git(["merge-base", f"refs/heads/{branch}", src],
+                             cwd=main).stdout.strip()
+        else:
+            base = self._git(["merge-base", src, "HEAD"], cwd=main).stdout.strip()
+        out = self._git(["diff", "--name-only", base, src], cwd=main).stdout
         return out.splitlines()  # 换行分隔；split() 会把含空格文件名切碎
 
     @staticmethod

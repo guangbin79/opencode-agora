@@ -74,8 +74,10 @@ class Gate:
         branch = t.get("target_branch")  # 合入目标支（外部工作流）；缺省＝仓默认支
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         self._state.set_fields(tid, in_gate=True)
-        origin = self._gitx.symref(target) if branch else None  # 合入前分支位；门毕还原
+        origin = None
         try:
+            if branch:
+                origin = self._gitx.symref(target)  # 合入前分支位；门毕还原（try 内防静默卡死）
             if self.gate_files_touched(tid):  # 闸体变更：拍人不拦门
                 self._health.escalate(KIND_GATEFILES, tid)
             rc, out = self._runner(env, cmd)
@@ -116,14 +118,14 @@ class Gate:
                 self._post(tid, f"门内异常：{e}——处理目标分支后重新 post(done, commit)")
             # 终态后异常（如环境回收败）不逆转门结果
         finally:
-            if origin:
-                self._gitx.checkout(target, origin)
+            if origin and not self._gitx.checkout(target, origin):
+                self._audit(tid, "restore_failed")  # 还原败留痕：主仓停外部支，缺省任务将漂移
             self._tail(tid)
 
     def gate_files_touched(self, tid):
         t = self._state.get(tid)
-        return bool(t.get("env_dir")) and self._gitx.touches_gate(t["env_dir"],
-                                                                  _GATE_PATTERNS)
+        return bool(t.get("env_dir")) and self._gitx.touches_gate(
+            t["env_dir"], _GATE_PATTERNS, t.get("target_branch"))
 
     # ---- 内部 ----
 

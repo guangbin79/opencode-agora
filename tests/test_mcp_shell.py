@@ -40,7 +40,7 @@ class FakeGitx:
     def rollback(self, target, before_sha):
         pass
 
-    def touches_gate(self, env_dir, patterns):
+    def touches_gate(self, env_dir, patterns, branch=None):
         return False
 
 
