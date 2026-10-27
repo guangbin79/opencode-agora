@@ -69,10 +69,12 @@ class DeadInjectOc:
         return {"ok": True, "oc_version": "fake"}
 
 
-def call(port, method, path, body=None, token=None):
+def call(port, method, path, body=None, token=None, sid=None):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Agora-Token"] = token
+    if sid:
+        headers["X-Agora-Sid"] = sid  # R25-A：MCP 壳透传调用者真实会话 sid
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(body).encode() if body is not None else None,
@@ -242,6 +244,24 @@ class TestHttpSmoke(HttpdTest):
             self.assertEqual(st, 200)
         expect = [f"[agora] task {tid} note from main\nm{i}" for i in range(10)]
         self.assertEqual(self.stub.sessions[wsid]["injects"][-10:], expect)
+
+    def test_root_call_with_real_sid_binds_main(self):  # Req: F4（R25-A 拍人真链）
+        st, _ = call(self.port, "POST", "/board", {}, self.root, sid="ses-m1")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.main_sid, "ses-m1")
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "main_sid_bound"]
+        self.assertEqual([e["actor"] for e in ev], ["ses-m1"])  # 换绑审计
+        tid = self.create_task()  # root 牌同步改绑：task 行 dispatcher 落真实 sid
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "ses-m1")
+        st, _ = call(self.port, "POST", "/board", {}, self.root, sid="ses-m2")
+        self.assertEqual(self.app.main_sid, "ses-m2")  # 多主会话最近活跃覆盖
+        call(self.port, "POST", "/board", {}, self.root)  # 无头直连不动绑定
+        self.assertEqual(self.app.main_sid, "ses-m2")
+        wtok = self.app.auth.issue("w6", "worker")
+        st, _ = call(self.port, "POST", "/board", {}, wtok, sid="ses-w6")
+        self.assertEqual(st, 403)  # 非 root 携头：矩阵拒，绑定不动
+        self.assertEqual(self.app.main_sid, "ses-m2")
 
     def test_wiki_write_read_and_guards(self):  # Req: F1
         st, r = call(self.port, "POST", "/wiki_write",

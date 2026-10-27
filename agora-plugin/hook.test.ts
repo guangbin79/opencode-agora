@@ -330,10 +330,12 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       const main: Record<string, unknown> = { task: "t-m" };
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-main", input: main });
       expect(main._token).toBe("tok-rootfile"); // getCredential 未命中→回落 root 牌接管文件
+      expect(main._sid).toBe("s-main"); // R25-A：附牌同携调用者真实会话 sid（服务绑主会话）
       cacheCredential({ token: "tok-worker", sid: "s-prio", role: "worker", envDir: "" });
       const w: Record<string, unknown> = { task: "t-w" };
       await hooks["tool.execute.before"]({ tool: "agora_task_create", sessionID: "s-prio", input: w });
       expect(w._token).toBe("tok-worker"); // worker credential 消息优先级不变
+      expect(w._sid).toBe("s-prio");
       rmSync(join(home, ".agora", "root.token"));
       const none: Record<string, unknown> = { task: "t-n" };
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-nocred", input: none });

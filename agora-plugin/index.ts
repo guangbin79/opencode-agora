@@ -99,9 +99,13 @@ export default {
       const cred = getCredential(event.sessionID);
       // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token——
       // worker credential 消息优先，未命中回落 root 牌接管文件（主会话经 MCP 调任务面）。
+      // _sid 携调用者真实会话 id（R25-A：服务登记主会话绑定，拍人注入真会话）。
       if (isAgora) {
         const token = cred?.token ?? readRootToken();
-        if (token) input._token = token;
+        if (token) {
+          input._token = token;
+          input._sid = event.sessionID;
+        }
       }
       const hint = shouldBlock(event.tool, target, cwd, cred, on);
       if (hint) {

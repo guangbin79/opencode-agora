@@ -58,13 +58,15 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     router = Router(store, state, oc)
     task = TaskService(state, auth, gitx, oc, store, router, write_task_page)
     recover = Recover(state, oc, gitx, store, auth, router=router)
-    health = Health(state, oc, router, recover, main_sid, store=store)
+    app = App(store=store, state=state, auth=auth, router=router, task=task,
+              gate=None, health=None, recover=recover, report=report,
+              oc=oc, gitx=gitx, main_sid=main_sid)
+    health = Health(state, oc, router, recover, app, store=store)  # R25-A：活绑定
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
                 store=store, runner=runner)
-    return App(store=store, state=state, auth=auth, router=router, task=task,
-               gate=gate, health=health, recover=recover, report=report,
-               oc=oc, gitx=gitx, main_sid=main_sid)
+    app.gate, app.health = gate, health
+    return app
 
 
 def issue_root(app):

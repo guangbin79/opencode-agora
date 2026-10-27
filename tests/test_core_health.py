@@ -1,7 +1,7 @@
 """T9 core/health 契约：只探死/升级四类达主会话/正文合成＋不可信段/touch（R1/R9）。
 
-真 Store/State/Router＋假 oc/recover 全注入；升级经 router 落库先行，
-主会话 sid＝"main"（装配保证根链 dispatcher＝main_sid）。
+真 Store/State/Router/Auth＋假 oc/recover 全注入；升级经 router 落库先行，
+主会话 sid＝App 活绑定（R25-A：默认占位 "main"，bind_main 换绑真会话）。
 """
 import shutil
 import tempfile
@@ -10,6 +10,8 @@ from pathlib import Path
 
 from agorad.access.oc import OcUnavailable
 from agorad.access.store import Store
+from agorad.core.app import App
+from agorad.core.auth import Auth
 from agorad.core.health import (KIND_DISPATCHER_DEAD, KIND_GATEFILES,
                                 KIND_QUALITY, KIND_REINJECT, Health)
 from agorad.core.msg import Router
@@ -56,8 +58,12 @@ class TestCoreHealth(unittest.TestCase):
         self.oc = FakeOc()
         self.router = Router(self.store, self.state, self.oc)
         self.recover = FakeRecover()
+        self.app = App(store=self.store, state=self.state,
+                       auth=Auth(self.store), router=self.router, task=None,
+                       gate=None, health=None, recover=self.recover,
+                       report=None, oc=self.oc, gitx=None, main_sid="main")
         self.health = Health(self.state, self.oc, self.router,
-                             self.recover, "main", store=self.store)
+                             self.recover, self.app, store=self.store)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -165,6 +171,45 @@ class TestCoreHealth(unittest.TestCase):
                      KIND_DISPATCHER_DEAD):
             self.assertEqual(sum(f"失控[{kind}]" in b for b in bodies), 1,
                              f"{kind} 未达主会话恰好一次")
+
+    # ---- R25-A：main_sid 活绑定——升级注入真会话 ----
+
+    def test_bind_main_latest_active_wins_and_audited(self):  # Req: F4/F8
+        self.app.bind_main("main", "ses-a")
+        self.app.bind_main("ses-a", "ses-b")
+        self.app.bind_main("ses-b", "ses-b")  # 牌面一致：仅同步 main_sid 不记行
+        self.assertEqual(self.app.main_sid, "ses-b")  # 最近活跃优先
+        ev = [e for e in self.store.read_events()
+              if e["event"] == "main_sid_bound"]
+        self.assertEqual([e["actor"] for e in ev], ["ses-a", "ses-b"])
+
+    def test_bind_main_rebinds_token_so_task_rows_carry_real_sid(self):  # Req: F4
+        tok = self.app.auth.issue("main", "root")
+        self.app.bind_main("main", "ses-main")  # 占位 sid→真会话一次性改绑
+        self.assertEqual(self.app.auth.identify(tok), ("ses-main", "root"))
+
+    def test_bind_main_rejects_task_worker_edge_session(self):  # Req: F4
+        self.seed("t1", worker="ses-hijack")  # worker 凭据缺失回落 root 牌的误附面
+        self.app.bind_main("main", "ses-hijack")
+        self.assertEqual(self.app.main_sid, "main")  # worker 边会话不得抢绑定
+        self.assertEqual([e for e in self.store.read_events()
+                          if e["event"] == "main_sid_bound"], [])
+
+    def test_escalate_injects_bound_real_sid(self):  # Req: F4/F5
+        self.app.bind_main("main", "ses-main")
+        self.seed("t1", disp="ses-main")  # 绑定后建任务：根 dispatcher＝真实 sid
+        self.recover.ok = False
+        self.health.tick()
+        self.assertEqual(self.oc.injected[0][0], "ses-main")  # 注入收件人＝绑定 sid
+        msgs = [m for m in self.store.read_messages() if m["to"] == "ses-main"]
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("失控[reinject-fail]", msgs[0]["body"])
+
+    def test_unbound_escalate_falls_back_to_placeholder(self):  # Req: F4
+        self.seed("t1")  # 未绑定：根 dispatcher＝占位 "main"（真 oc 400→留库回退）
+        self.recover.ok = False
+        self.health.tick()
+        self.assertEqual(self.main_msgs()[0]["to"], "main")  # 留库待补拉
 
     # ---- touch：last_seen 刷新入口 ----
 

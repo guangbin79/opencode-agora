@@ -4,7 +4,7 @@ tick 只探活动任务的直接下级会话（无全局巡检、无 stalled 判
 board/doctor 与人工）；死下级→recover.reinject 自愈（静默），失败→升级；
 死会话若正管着在飞链（dispatcher）→不代管、直接拍人。升级正文由服务权威
 合成；任务/worker 供给文本以"不可信原文"段携带（拍平换行，防伪造服务行）。
-escalate 沿 dispatcher_sid 上行至根任务（根 dispatcher＝main_sid，装配保证）
+escalate 沿 dispatcher_sid 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）
 经 router post——落库先行，注入即视为拍到；escalate 同时落 events.jsonl 审计行
 （F8）。core 只 import stdlib，依赖全注入。
 """
@@ -33,9 +33,10 @@ _KIND_NOTE = {
 class Health:
     """tick 由 main 定时线程驱动；单写者口径（httpd 串行调用）。"""
 
-    def __init__(self, state, oc, router, recover, main_sid, store):
+    def __init__(self, state, oc, router, recover, app, store):
+        """app 按引用注入：main_sid 是活绑定（R25-A），escalate 每次取当前值。"""
         self._state, self._oc, self._router = state, oc, router
-        self._recover, self._main_sid = recover, main_sid
+        self._recover, self._app = recover, app
         self._store = store
 
     def tick(self):
@@ -80,11 +81,11 @@ class Health:
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body)
 
     def _root(self, tid):
-        """沿 dispatcher_sid 上行至根任务（根 dispatcher＝main_sid，装配保证）。"""
+        """沿 dispatcher_sid 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）。"""
         tasks = self._state.snapshot()["tasks"]
         seen = set()
         while (tid not in seen
-               and tasks.get(tid, {}).get("dispatcher_sid") != self._main_sid):
+               and tasks.get(tid, {}).get("dispatcher_sid") != self._app.main_sid):
             seen.add(tid)
             parent = next((p for p, x in tasks.items()
                            if x.get("worker_sid")

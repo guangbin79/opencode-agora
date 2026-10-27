@@ -137,6 +137,14 @@ class TestPassthrough(McpShellTest):
         tid = self.result_of(r)["task"]
         self.assertEqual(self.app.state.get(tid)["goal"], "g")  # 服务真落库
 
+    def test_sid_argument_binds_main_and_stripped(self):  # Req: F4（R25-A）
+        r = self.call_tool("task_create", {"_token": self.root, "_sid": "ses-mcp",
+                                           "goal": "g", "project_dir": "/repo"})
+        self.assertIn("result", r)
+        tid = self.result_of(r)["task"]
+        self.assertEqual(self.app.main_sid, "ses-mcp")  # 壳透传 X-Agora-Sid→绑定
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "ses-mcp")
+
     def test_bad_token_gets_server_401_not_shell(self):  # Req: F2
         r = self.call_tool("task_create", {"_token": "junk", "goal": "g",
                                            "project_dir": "/repo"})

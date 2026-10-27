@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T3 派发链 e2e（F3/F4/F6/F7/F11）：真 opencode（tmux 驻留）＋真 agorad 全链十二场景。
+# T3 派发链 e2e（F3/F4/F6/F7/F11）：真 opencode（tmux 驻留）＋真 agorad 全链十三场景。
 # 隔离同 T6 口径：HOME/XDG_*/AGORA_HOME 全沙箱，绝不触碰本机会话服务；产物 /tmp/opencode。
 # 驱动形态（T6 裁定沿袭＋T7 收敛）：serve/agorad 各驻 tmux；服务侧动作经 agorad HTTP
 # （root 牌＋task_dispatch 回传的 worker 牌）；worker 真会话干活＝目标即指令（goal 窄化，
@@ -126,14 +126,14 @@ grep -q "^agorad ready" "$SANDBOX/agorad.log" || { tail -5 "$SANDBOX/agorad.log"
 AD_PORT="$(python3 -c "import json;print(json.load(open('$SANDBOX/plaza/.agora/service.json'))['port'])")"
 note "agorad 常驻 port=$AD_PORT（tick=2s）"
 
-# ---- 5) git 夹具（8 仓：S1/S2A/S2B/F6×2/F6重注入/F7崩溃窗/F11门内cancel；仓级身份免 -c）----
+# ---- 5) git 夹具（9 仓：S1/S2A/S2B/F6×2/F6重注入/F7崩溃窗/F11门内cancel/R25A拍人；仓级身份免 -c）----
 mk_repo() { git -C "$WORK" init -q "$1" && git -C "$WORK/$1" config user.email w@t \
   && git -C "$WORK/$1" config user.name w && git -C "$WORK/$1" commit -q --allow-empty -m init; }
 mk_repo proj; mk_repo repoA; mk_repo repoB; mk_repo repoD; mk_repo repoE
-mk_repo repoR; mk_repo repoX; mk_repo repoY
-note "夹具 8 仓就绪"
+mk_repo repoR; mk_repo repoX; mk_repo repoY; mk_repo repoM
+note "夹具 9 仓就绪"
 
-# ---- 6) 十二场景（python 驱动）----
+# ---- 6) 十三场景（python 驱动）----
 T3_OC_KEY="$OC_KEY" T3_PROV="$PROV" python3 -u - "$SANDBOX" "$WORK" "$REPO" "$ROOT_TOKEN" \
   "$SANDBOX/state/opencode/service.json" "$OC1_URL" "$OC1_PW" "$OC_BIN" "$STAMP" <<'PY'
 import base64, json, os, pathlib, sqlite3, subprocess, sys, time, urllib.error, urllib.request
@@ -738,6 +738,50 @@ code, _ = agora("/post", {"task": tidY, "kind": "note", "body": "hi"}, wtokY)
 check(code == 401, "F11 cancelled 后旧凭据作废（401） # Req: F11")
 check("merged" not in evs(tidY), "F11 未 merged（无逆转历史面） # Req: F11")
 
+# ============================================================
+# R25-A 拍人真链：主会话真 MCP 附牌绑定→3 连败 blocked→拍人注入真会话
+# （绑定前任务面全走占位 sid 留库回退——本节为 R25 裁定的真链锚，置末不扰前场景）
+# ============================================================
+def mcp_call(name, args):
+    """真 agora_mcp.py 子进程一调用：stdio newline-JSON-RPC（附牌链真面）。"""
+    p = subprocess.Popen(["python3", f"{REPO}/agora_mcp.py"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True,
+                         env=dict(os.environ, AGORA_HOME=PLAZA))
+    out, _ = p.communicate(json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": name, "arguments": args}}) + "\n", timeout=60)
+    return json.loads(out.strip().splitlines()[-1])
+
+msid = api("/session", {})["data"]["id"]  # 真 opencode 会话扮演主会话（注入面可断言）
+r = mcp_call("board", {"_token": ROOT, "_sid": msid})
+check("result" in r and "buckets" in json.loads(r["result"]["content"][0]["text"]),
+      "R25-A 主会话经真 MCP 调 board（root 牌附牌＋_sid 透传） # Req: F4")
+check("main_sid_bound" in open(f"{PLAZA}/events.jsonl").read(),
+      "R25-A 主会话绑定审计留行 # Req: F8")
+tidM, wtokM, envM, wsidM = dispatch("Standby: no work required right now.", "repoM")
+check(row(tidM)["dispatcher_sid"] == msid,
+      f"R25-A 绑定后建任务 dispatcher＝真实主会话 sid（{row(tidM)['dispatcher_sid']}） # Req: F4")
+agora("/task_update", {"task": tidM, "verify_cmd": "false"})
+for i in range(3):
+    if row(tidM)["state"] != "running":  # verify_failed/reopened 续修边：worker 调用即开工
+        agora("/post", {"task": tidM, "kind": "note", "body": f"kick-{i}"}, wtokM)
+    post_done(tidM, wtokM, commit_anchor(envM, f"m work {i}"))
+    wait_state(tidM, {"verify_failed", "blocked"})
+check(row(tidM)["state"] == "blocked" and "escalate" in evs(tidM),
+      "R25-A 3 连败→blocked＋escalate 审计 # Req: F5")
+hit, dl = False, time.time() + 30
+while time.time() < dl and not hit:
+    hit = bool(user_texts(msid, "失控[quality]"))
+    time.sleep(1)
+check(hit, "R25-A 拍人注入真主会话（会话内见失控[quality]） # Req: F4/F5")
+check(any(m.get("kind") == "escalate" and m.get("to") == msid for m in store_msgs()),
+      "R25-A 拍人消息库行 to＝真实主会话 sid # Req: F4")
+agora("/task_cancel", {"task": tidM})  # blocked→cancelled：env 回收（残留断言前置）
+wait_state(tidM, {"cancelled"})
+check(row(tidM)["state"] == "cancelled" and not os.path.exists(envM),
+      "R25-A blocked 任务中止即环境回收 # Req: F11")
+
 print(f"T3 driver done: {len(FAIL)} fail")
 sys.exit(1 if FAIL else 0)
 PY
@@ -789,7 +833,7 @@ for repo in sorted(glob.glob(sys.argv[1] + "/*")):
         ok = False
 sys.exit(0 if ok else 1)
 PY
-then note "PASS 残留：8 夹具仓 worktree/分支全净（worktree list＝1）"; else note "FAIL 残留：worktree 残留"; RC=1; fi
+then note "PASS 残留：9 夹具仓 worktree/分支全净（worktree list＝1）"; else note "FAIL 残留：worktree 残留"; RC=1; fi
 if pgrep -f "agorad/main.py" >/dev/null 2>&1; then note "FAIL 残留：agorad 进程未净"; RC=1; else note "PASS 残留：pgrep agorad 净"; fi
 if tmux ls 2>/dev/null | grep -q "t3-oc\|t3-ad"; then note "FAIL 残留：tmux 会话未净"; RC=1; else note "PASS 残留：tmux 无残会话"; fi
 if compgen -G "$REPO/t3-*" >/dev/null || [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null | grep '^??' | grep -v 'tests/\|.superpowers/\|.omo/\|.review-loop/' || true)" ]; then
@@ -832,5 +876,5 @@ sys.exit(1 if hits else 0)
 PY
 then note "PASS 语义扫：无 cron/巡检/看门狗/stalled 处置代码路径 # Req: F5"; else note "FAIL 语义扫：反需求路径命中"; RC=1; fi
 
-if [ "$RC" -eq 0 ]; then note "ALL GREEN（十二场景＋残留＋密钥面＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
+if [ "$RC" -eq 0 ]; then note "ALL GREEN（十三场景＋残留＋密钥面＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
 exit "$RC"

@@ -88,12 +88,16 @@ def resolve_url():
 
 
 def http_call(name, arguments):
-    """POST /<name>：_token 剥除→头；返回 (status, body)。HTTPError 亦为值。"""
+    """POST /<name>：_token/_sid 剥除→头（_sid＝R25-A 调用者真实会话 sid，服务绑主会话）；
+    返回 (status, body)。HTTPError 亦为值。"""
     args = dict(arguments)
     token = args.pop("_token", None)
+    sid = args.pop("_sid", None)
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Agora-Token"] = token
+    if sid:
+        headers["X-Agora-Sid"] = sid
     req = urllib.request.Request(
         f"{resolve_url()}/{name}",
         data=json.dumps(args, ensure_ascii=False).encode(),
