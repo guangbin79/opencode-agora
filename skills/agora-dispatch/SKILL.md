@@ -74,7 +74,7 @@ verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。�
 - **verify_failed**：worker 已实时收到输出尾部在续修——勿扰，等再 done 重走门。
 - **reopened**：worker 自愈中（集成 verify 败已原子回滚，环境保留）——勿扰。
 - **done**：verify 门运行中（board 可见 in_gate）——勿动；绿即自动合并，不等人点头。门内 cancel 只排队（pending_cancel），门走完由服务结算。
-- **merged→closed**：环境回收完成后服务自动置位，全程勿动；merged 不回滚。
+- **merged→closed**：环境回收完成后服务自动置位，全程勿动；merged 不回滚。**部署提醒**：如果 worker 修改的是 opencode-agora 自身代码，merged 后须重跑 `./install.sh` 使安装盘生效（拷贝不是引用）。
 - 汇报用五桶＋结论＋证据指针（commit／事件链），不自述细节。
 
 > 来源：F7/F10/F11/§2（verify 绿即自动合并）；设计 §4.1（merged→closed）；e2e S1（closed＋env 回收＋merged 带 commit）＋F11 门内 cancel 排队
