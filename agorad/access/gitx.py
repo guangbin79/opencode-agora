@@ -22,12 +22,14 @@ class Gitx:
             raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
         return r
 
-    def build_env(self, project_dir: str, tid: str) -> str:
+    def build_env(self, project_dir: str, tid: str, branch: str = None) -> str:
         repo = Path(project_dir).resolve()
         stamp = datetime.now().strftime("%m%d%H%M")
         name = f"{repo.name}__wt-task-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
         env = repo.parent / name  # repo 同级父目录＝../ 相对拓扑等价
-        self._git(["worktree", "add", "-b", name, str(env)], cwd=repo)
+        # branch＝起点分支（外部工作流，如 issue/N-fix）；缺省＝仓默认支
+        self._git(["worktree", "add", "-b", name, str(env)] + ([branch] if branch else []),
+                  cwd=repo)
         return str(env)
 
     def remove_env(self, env_dir: str) -> None:
@@ -38,16 +40,18 @@ class Gitx:
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)
 
-    def merge_ff(self, env_dir: str, target: str) -> str:
-        branch = Path(env_dir).resolve().name
-        env_sha = self._git(["rev-parse", branch], cwd=target).stdout.strip()
-        r = self._git(["merge", "--ff-only", branch], cwd=target, check=False)
+    def merge_ff(self, env_dir: str, target: str, branch: str = None) -> str:
+        src = Path(env_dir).resolve().name
+        if branch:  # 合入指定分支（外部工作流）；缺省＝仓默认支
+            self._git(["checkout", branch], cwd=target)
+        env_sha = self._git(["rev-parse", src], cwd=target).stdout.strip()
+        r = self._git(["merge", "--ff-only", src], cwd=target, check=False)
         # env 分支为祖先时 git 返回 0 但主干未动（Already up to date）——不算 ok
         head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
         return "ok" if r.returncode == 0 and head == env_sha else "non-ff"
 
-    def head(self, repo_dir: str) -> str:
-        return self._git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
+    def head(self, repo_dir: str, branch: str = None) -> str:
+        return self._git(["rev-parse", branch or "HEAD"], cwd=repo_dir).stdout.strip()
 
     def rollback(self, target: str, before_sha: str) -> None:
         self._git(["reset", "--hard", before_sha], cwd=target)

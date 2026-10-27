@@ -25,16 +25,16 @@ def ok_runner(cwd, cmd):
 
 
 class FakeGitx:
-    def build_env(self, project_dir, tid):
+    def build_env(self, project_dir, tid, branch=None):
         return f"/envs/{tid}"
 
     def remove_env(self, env_dir):
         pass
 
-    def merge_ff(self, env_dir, target):
+    def merge_ff(self, env_dir, target, branch=None):
         return "ok"
 
-    def head(self, repo_dir):
+    def head(self, repo_dir, branch=None):
         return "aaa111"
 
     def rollback(self, target, before_sha):
@@ -118,6 +118,8 @@ class TestHandshakeAndList(McpShellTest):
                          ["path", "text"])  # httpd 实参名 text（非 plan 的 content）
         self.assertEqual(schema["post"]["inputSchema"]["required"],
                          ["task", "kind", "body"])  # 方向服务侧按角色定，无 direction
+        self.assertEqual(schema["task_create"]["inputSchema"]["properties"]
+                         ["target_branch"]["type"], "string")  # gt-132747 外部工作流
 
     def test_notification_silent_parse_error_reported(self):  # Req: F2
         out = io.StringIO()

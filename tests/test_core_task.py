@@ -20,11 +20,12 @@ from agorad.core.task import Rejected, TaskService
 
 class FakeGitx:
     def __init__(self):
-        self.built, self.removed = [], []
+        self.built, self.removed, self.branches = [], [], []
 
-    def build_env(self, project_dir, tid):
+    def build_env(self, project_dir, tid, branch=None):
         env = f"/envs/{tid}"
         self.built.append(env)
+        self.branches.append(branch)
         return env
 
     def remove_env(self, env_dir):
@@ -247,6 +248,22 @@ class TestCreateAndRedispatch(TestCoreTask):
         text = page.read_text(encoding="utf-8")
         self.assertIn("state: dispatched", text)  # 重渲反映当前态
         self.assertIn("disp1", text)  # 归属（dispatcher_sid）渲染
+
+    def test_create_stores_target_branch(self):  # Req: gt-132747
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              target_branch="issue/7")
+        self.assertEqual(self.state.get(tid)["target_branch"], "issue/7")
+        tid2 = self.dispatchable()
+        self.assertIsNone(self.state.get(tid2)["target_branch"])  # 缺省＝None
+
+    def test_dispatch_builds_env_from_target_branch(self):  # Req: gt-132747
+        disp = self.auth.issue("disp1", "dispatcher")
+        tid = self.svc.create("g", "/repo", None, disp,
+                              target_branch="issue/7")
+        self.svc.dispatch(tid, disp)
+        self.assertEqual(self.gitx.branches[-1], "issue/7")  # 起点分支透传
+        tid2, disp2, _ = self.dispatched_pair()
+        self.assertEqual(self.gitx.branches[-1], None)  # 缺省＝None（向后兼容）
 
     def test_create_seeds_queryable_row(self):  # Req: F2
         tid = self.dispatchable("my goal", after=None)

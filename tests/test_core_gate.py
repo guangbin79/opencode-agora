@@ -28,10 +28,11 @@ class FakeGitx:
     def __init__(self, merge="ok", gate=False):
         self.merge_result, self.gate = merge, gate
         self.merge_calls, self.rollbacks, self.removed = [], [], []
+        self.head_calls = []
         self.merged, self.head_sha = False, "aaa111"
 
-    def merge_ff(self, env_dir, target):
-        self.merge_calls.append((env_dir, target))
+    def merge_ff(self, env_dir, target, branch=None):
+        self.merge_calls.append((env_dir, target, branch))
         self.merged = self.merge_result == "ok"  # 拒并不落地（无 merge commit）
         return self.merge_result
 
@@ -44,7 +45,8 @@ class FakeGitx:
     def touches_gate(self, env_dir, patterns):
         return self.gate
 
-    def head(self, repo_dir):
+    def head(self, repo_dir, branch=None):
+        self.head_calls.append((repo_dir, branch))
         return self.head_sha
 
 
@@ -91,9 +93,10 @@ class TestCoreGate(unittest.TestCase):
                          lambda env: self.anchor, self.health, self.auth,
                          self.store, runner=self.runner)
 
-    def seed(self, tid="t1", state="running", streak=0):
+    def seed(self, tid="t1", state="running", streak=0, tb=None):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
                              "env_dir": str(self.env), "after": None,
+                             "target_branch": tb,
                              "verify": {"cmd": "pytest -q", "state": "registered",
                                         "registered_by": "disp1", "registered_at": 1.0},
                              "state": state, "dispatcher_sid": "disp1",
@@ -177,7 +180,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "closed")  # 尾部置 closed
         self.assertEqual(t["commit"], "abc123")  # merged 行含 commit
         self.assertEqual(t["fail_streak"], 0)  # 绿清连败（R12）
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo")])
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
         self.assertEqual(self.gx.removed, [str(self.env)])  # 环境即回收
         self.assertEqual(self.runner.calls,  # env verify→目标仓集成 verify
                          [(str(self.env), "pytest -q"), ("/repo", "pytest -q")])
@@ -259,7 +262,7 @@ class TestGateRun(TestCoreGate):
         self.state.set_fields("t1", pending_cancel=True)
         self.gate.run("t1")
         t = self.state.get("t1")
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo")])  # 照常合并
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])  # 照常合并
         self.assertEqual(t["state"], "closed")  # merged 不逆转历史，走完置 closed
         self.assertNotEqual(t["state"], "cancelled")
 
@@ -275,6 +278,23 @@ class TestGateRun(TestCoreGate):
 
 class TestGateAudit(TestCoreGate):
     """F-2：门段迁移逐点落 events.jsonl（F8 完整链：受理→门→合并→尾）。"""
+
+    def test_target_branch_merges_into_branch(self):  # Req: gt-132747
+        self.seed(tb="issue/7")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo", "issue/7")])
+        self.assertEqual(self.gx.head_calls, [("/repo", "issue/7")])  # 回滚点取目标支
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("merged", names)
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+
+    def test_target_branch_absent_keeps_default_target(self):  # Req: gt-132747
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo", None)])
+        self.assertEqual(self.gx.head_calls, [("/repo", None)])  # 缺省＝仓默认支
+        self.assertEqual(self.state.get("t1")["state"], "closed")
 
     def test_green_path_audits_done_merged_closed_with_commit(self):  # Req: F8
         self.in_gate()

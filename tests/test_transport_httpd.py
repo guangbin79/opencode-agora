@@ -35,9 +35,10 @@ class FakeGitx:
 
     def __init__(self, base):
         self.base = Path(base)
-        self.removed = []
+        self.removed, self.branch = [], None
 
-    def build_env(self, project_dir, tid):
+    def build_env(self, project_dir, tid, branch=None):
+        self.branch = branch
         env = self.base / "envs" / tid
         (env / ".review-loop").mkdir(parents=True)
         return str(env)
@@ -46,10 +47,10 @@ class FakeGitx:
         self.removed.append(env_dir)
         shutil.rmtree(env_dir, ignore_errors=True)
 
-    def merge_ff(self, env_dir, target):
+    def merge_ff(self, env_dir, target, branch=None):
         return "ok"
 
-    def head(self, repo_dir):
+    def head(self, repo_dir, branch=None):
         return "aaa111"
 
     def rollback(self, target, before_sha):
@@ -111,8 +112,9 @@ class HttpdTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.stub = StubOpencode()
         self.stub.start()
+        self.gitx = FakeGitx(self.tmp)
         self.app = assemble(self.tmp, oc_url=self.stub.base_url,
-                            gitx=FakeGitx(self.tmp),
+                            gitx=self.gitx,
                             read_anchor=lambda env: {"head": "abc123",
                                                      "clean": True},
                             runner=getattr(self, "gate_runner", ok_runner))
@@ -130,11 +132,20 @@ class HttpdTest(unittest.TestCase):
 
     # ---- 夹具 ----
 
-    def create_task(self):
+    def create_task(self, body=None):
         st, r = call(self.port, "POST", "/task_create",
-                     {"goal": "g", "project_dir": "/repo"}, self.root)
+                     body or {"goal": "g", "project_dir": "/repo"}, self.root)
         self.assertEqual(st, 200)
         return r["task"]
+
+    def test_target_branch_flows_to_dispatch(self):  # Req: gt-132747
+        tid = self.create_task({"goal": "g", "project_dir": "/repo",
+                                "target_branch": "issue/7"})
+        self.dispatch_task(tid)
+        self.assertEqual(self.gitx.branch, "issue/7")  # httpd→task→gitx 全链透传
+        tid2 = self.create_task()
+        self.dispatch_task(tid2)
+        self.assertIsNone(self.gitx.branch)  # 缺省＝None（向后兼容）
 
     def dispatch_task(self, tid):
         st, r = call(self.port, "POST", "/task_update",

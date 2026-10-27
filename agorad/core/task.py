@@ -37,7 +37,8 @@ class TaskService:
 
     # ---- F2 建任务 ----
 
-    def create(self, goal, project_dir, after, actor_token, title=None):
+    def create(self, goal, project_dir, after, actor_token, title=None,
+               target_branch=None):
         sid, _ = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         if after is not None:
@@ -50,7 +51,8 @@ class TaskService:
         tid = self._new_tid()
         self._state.add(tid, {
             "title": (title or goal.splitlines()[0][:40]) if (title or goal) else tid, "goal": goal,
-            "project_dir": project_dir, "env_dir": None, "after": after,
+            "project_dir": project_dir, "target_branch": target_branch,
+            "env_dir": None, "after": after,
             "verify": {"cmd": "", "state": "pending", "registered_by": None,
                        "registered_at": None},
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
@@ -78,7 +80,8 @@ class TaskService:
         after = t.get("after")
         if after is not None and self._state.get(after)["state"] not in _AFTER_OK:
             self._reject(tid, sid, f"after: 前任务 {after} 未终态（B7）")
-        env = t.get("env_dir") or self._gitx.build_env(t["project_dir"], tid)
+        env = (t.get("env_dir") or
+               self._gitx.build_env(t["project_dir"], tid, t.get("target_branch")))
         try:
             wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
                                     title=f"{tid}: {t.get('title', tid)}")

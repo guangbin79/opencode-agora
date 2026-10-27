@@ -85,6 +85,26 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual((self.repo / "src.py").read_bytes(), before_bytes)
         self.assertFalse((self.repo / "extra.txt").exists())
 
+    def test_target_branch_start_and_merge(self):  # Req: gt-132747
+        self._git(["checkout", "-b", "issue/7"], cwd=self.repo)
+        issue_sha = self._commit(self.repo, {"issue.txt": "i1"}, "issue work")
+        self._git(["checkout", "main"], cwd=self.repo)
+        main_sha = self._commit(self.repo, {"src.py": "v2"}, "advance main")
+        env = self.gx.build_env(self.repo, "gt-b1", "issue/7")
+        self.assertEqual(self._head(Path(env)), issue_sha)  # 起点＝指定分支头
+        env_sha = self._commit(Path(env), {"feat.txt": "f"}, "task work")
+        self.assertEqual(self.gx.head(str(self.repo), "issue/7"), issue_sha)  # 回滚点可取
+        self.assertEqual(self.gx.merge_ff(env, str(self.repo), "issue/7"), "ok")
+        self.assertEqual(self._git(["rev-parse", "issue/7"],
+                                   cwd=self.repo).stdout.strip(), env_sha)  # 合入指定支
+        self.assertEqual(self._git(["rev-parse", "main"],
+                                   cwd=self.repo).stdout.strip(), main_sha)  # 仓默认支不动
+
+    def test_target_branch_missing_fails_clear(self):  # Req: gt-132747
+        with self.assertRaises(RuntimeError) as cm:
+            self.gx.build_env(self.repo, "gt-b2", "no/such")
+        self.assertIn("no/such", str(cm.exception))  # 报因含分支名
+
     def test_touches_gate_matches_task_diff(self):  # Req: F7
         env = self.gx.build_env(self.repo, "gt-x5")
         self._commit(Path(env), {"Makefile": "all:"}, "touch gate")

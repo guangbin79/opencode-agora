@@ -71,6 +71,7 @@ class Gate:
 
     def run(self, tid):
         t = self._state.get(tid)
+        branch = t.get("target_branch")  # 合入目标支（外部工作流）；缺省＝仓默认支
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         self._state.set_fields(tid, in_gate=True)
         try:
@@ -88,8 +89,8 @@ class Gate:
                                 "基础设施；安装 review-loop 后跑 /review-loop 至锚绿，"
                                 "重新 post(done, commit)")
                 return
-            before = self._gitx.head(target)  # 回滚点＝合并前目标分支 HEAD
-            if self._gitx.merge_ff(env, target) != "ok":
+            before = self._gitx.head(target, branch)  # 回滚点＝合并前目标分支 HEAD
+            if self._gitx.merge_ff(env, target, branch) != "ok":
                 self._state.transition(tid, "reopened")  # 拒并不计连败（R12）
                 self._audit(tid, "reopened")
                 self._post(tid, "non-ff 拒并：目标分支已推进——同步主干后重新"
