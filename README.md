@@ -30,7 +30,7 @@ The posture is **full autonomy with two failure tiers**: self-healing failures s
 
 ## Install
 
-Requirements: `python3` (stdlib only), `git`, `opencode` v2, `bun`.
+Requirements: `python3` (stdlib only), `git`, `opencode` v2, `bun`. Auto-merge additionally requires `review-loop`: without a `.review-loop/` directory in the worker environment, verify-green tasks stay at `done` unmerged.
 
 ```bash
 git clone https://github.com/guangbin79/opencode-agora.git

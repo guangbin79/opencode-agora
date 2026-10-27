@@ -29,7 +29,7 @@ opencode v2 上的多 agent 委托协作层——单机、单人、多 AI agent�
 
 ## 安装
 
-依赖：`python3`（仅 stdlib）、`git`、`opencode` v2、`bun`。
+依赖：`python3`（仅 stdlib）、`git`、`opencode` v2、`bun`。自动合并另需 `review-loop` 评审环——worker 环境缺 `.review-loop/` 时，verify 绿的任务驻留 done 不合并。
 
 ```bash
 git clone https://github.com/guangbin79/opencode-agora.git

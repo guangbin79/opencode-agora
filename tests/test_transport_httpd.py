@@ -31,14 +31,20 @@ def fail_runner(cwd, cmd):
 
 
 class FakeGitx:
-    def __init__(self):
+    """build_env 造真环境目录＋.review-loop（镜像生产：建环境含评审钩装配）。"""
+
+    def __init__(self, base):
+        self.base = Path(base)
         self.removed = []
 
     def build_env(self, project_dir, tid):
-        return f"/envs/{tid}"
+        env = self.base / "envs" / tid
+        (env / ".review-loop").mkdir(parents=True)
+        return str(env)
 
     def remove_env(self, env_dir):
         self.removed.append(env_dir)
+        shutil.rmtree(env_dir, ignore_errors=True)
 
     def merge_ff(self, env_dir, target):
         return "ok"
@@ -106,7 +112,7 @@ class HttpdTest(unittest.TestCase):
         self.stub = StubOpencode()
         self.stub.start()
         self.app = assemble(self.tmp, oc_url=self.stub.base_url,
-                            gitx=FakeGitx(),
+                            gitx=FakeGitx(self.tmp),
                             read_anchor=lambda env: {"head": "abc123",
                                                      "clean": True},
                             runner=getattr(self, "gate_runner", ok_runner))
@@ -158,7 +164,8 @@ class TestHttpSmoke(HttpdTest):
             lambda: self.app.state.get(tid)["state"] == "closed"))
         t = self.app.state.get(tid)
         self.assertEqual(t["commit"], "abc123")  # 证据指针落行
-        self.assertEqual(self.app.gitx.removed, [f"/envs/{tid}"])  # 环境回收
+        self.assertEqual(self.app.gitx.removed,
+                         [self.app.state.get(tid)["env_dir"]])  # 环境回收
         self.assertIn("merged", self.stub.sessions[wsid]["injects"][-1])
         st, r = call(self.port, "POST", "/board", {}, self.root)
         self.assertIn(tid, r["buckets"]["已合并"])
@@ -335,13 +342,13 @@ class TestStartupRequeue(unittest.TestCase):
     def test_done_residue_requeued_and_gate_completes(self):  # Req: F6
         tmp = Path(tempfile.mkdtemp())
         try:
-            app = assemble(tmp, oc=DeadInjectOc(), gitx=FakeGitx(),
+            app = assemble(tmp, oc=DeadInjectOc(), gitx=FakeGitx(tmp),
                            read_anchor=lambda env: {"head": "abc123",
                                                     "clean": True},
                            runner=ok_runner)
             app.state.add("t1", {
                 "title": "t1", "goal": "g", "project_dir": "/repo",
-                "env_dir": "/envs/t1", "after": None,
+                "env_dir": app.gitx.build_env("/repo", "t1"), "after": None,
                 "verify": {"cmd": "pytest -q", "state": "registered",
                            "registered_by": "main", "registered_at": 1.0},
                 "state": "done", "commit": "abc123", "in_gate": True,
@@ -367,7 +374,7 @@ class TestGateTailCancel(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.app = assemble(self.tmp, oc=DeadInjectOc(), gitx=FakeGitx(),
+        self.app = assemble(self.tmp, oc=DeadInjectOc(), gitx=FakeGitx(self.tmp),
                             read_anchor=lambda env: {"head": "abc123",
                                                      "clean": True},
                             runner=fail_runner)
@@ -405,7 +412,7 @@ class TestCredentialFallback(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.app = assemble(self.tmp, oc=DeadInjectOc(), gitx=FakeGitx(),
+        self.app = assemble(self.tmp, oc=DeadInjectOc(), gitx=FakeGitx(self.tmp),
                             read_anchor=lambda env: None, runner=ok_runner)
         self.root = self.app.auth.issue("main", "root")
 
@@ -433,7 +440,7 @@ class TestHealthThread(unittest.TestCase):
         self.stub = StubOpencode()
         self.stub.start()
         self.app = assemble(self.tmp, oc_url=self.stub.base_url,
-                            gitx=FakeGitx(),
+                            gitx=FakeGitx(self.tmp),
                             read_anchor=lambda env: None, runner=ok_runner)
         self.app.state.add("t9", {
             "title": "t9", "goal": "g", "project_dir": "/repo",

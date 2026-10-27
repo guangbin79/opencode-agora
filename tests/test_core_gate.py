@@ -69,6 +69,8 @@ class TestCoreGate(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.store = Store(self.tmp)
+        self.env = self.tmp / "envs" / "t1"
+        (self.env / ".review-loop").mkdir(parents=True)  # 评审环在位：绿→照常合并
         self.state = State(self.store)
         self.auth = Auth(self.store)
         self.oc = FakeOc()
@@ -91,7 +93,7 @@ class TestCoreGate(unittest.TestCase):
 
     def seed(self, tid="t1", state="running", streak=0):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
-                             "env_dir": "/envs/t1", "after": None,
+                             "env_dir": str(self.env), "after": None,
                              "verify": {"cmd": "pytest -q", "state": "registered",
                                         "registered_by": "disp1", "registered_at": 1.0},
                              "state": state, "dispatcher_sid": "disp1",
@@ -175,13 +177,29 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "closed")  # 尾部置 closed
         self.assertEqual(t["commit"], "abc123")  # merged 行含 commit
         self.assertEqual(t["fail_streak"], 0)  # 绿清连败（R12）
-        self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo")])
-        self.assertEqual(self.gx.removed, ["/envs/t1"])  # 环境即回收
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo")])
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 环境即回收
         self.assertEqual(self.runner.calls,  # env verify→目标仓集成 verify
-                         [("/envs/t1", "pytest -q"), ("/repo", "pytest -q")])
+                         [(str(self.env), "pytest -q"), ("/repo", "pytest -q")])
         self.assertEqual(self.health.calls, [])
         self.assertTrue(self.worker_msgs())  # worker 收 merged 回执
         self.assertFalse(t.get("in_gate"))
+
+    def test_review_absent_keeps_done_no_merge(self):  # Req: F7
+        """评审环缺失：verify 绿亦不自动合并——驻留 done＋审计＋回 worker。"""
+        shutil.rmtree(self.env / ".review-loop")
+        self.in_gate()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 不 merged／closed
+        self.assertEqual(t["fail_streak"], 0)  # 非质量败：不计连败
+        self.assertEqual(self.gx.merge_calls, [])
+        self.assertEqual(self.gx.removed, [])  # 环境保留（补基础设施后重入）
+        self.assertEqual(len(self.runner.calls), 1)  # 不跑集成 verify
+        self.assertFalse(t.get("in_gate"))  # 门闩照常落
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("review_absent_no_merge", names)
+        self.assertIn("review-loop", self.worker_msgs()[0]["body"])
 
     def test_non_ff_reopens_without_merge_or_bump(self):  # Req: F7
         self.runner = FakeRunner((0, "pass"))
@@ -234,14 +252,14 @@ class TestGateRun(TestCoreGate):
         self.state.set_fields("t1", pending_cancel=True)  # T7 门临界段排队
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "cancelled")  # 门走完生效
-        self.assertEqual(self.gx.removed, ["/envs/t1"])  # 同 T7 直路径：环境回收
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 同 T7 直路径：环境回收
 
     def test_pending_cancel_spares_merged(self):  # Req: F11
         self.in_gate()
         self.state.set_fields("t1", pending_cancel=True)
         self.gate.run("t1")
         t = self.state.get("t1")
-        self.assertEqual(self.gx.merge_calls, [("/envs/t1", "/repo")])  # 照常合并
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo")])  # 照常合并
         self.assertEqual(t["state"], "closed")  # merged 不逆转历史，走完置 closed
         self.assertNotEqual(t["state"], "cancelled")
 
