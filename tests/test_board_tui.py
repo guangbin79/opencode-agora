@@ -16,7 +16,7 @@ import time
 import unittest
 from pathlib import Path
 
-from board_tui import Action, Row, build_rows, handle_key, rel_time
+from board_tui import Action, Row, build_rows, handle_key, rel_time, try_cancel
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -213,6 +213,43 @@ class _StubBoard(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+class _CancelStub(http.server.BaseHTTPRequestHandler):
+    fail = False
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/task_cancel" and self.fail:
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            data = json.dumps({"cancelled": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+
+class TestTryCancel(unittest.TestCase):
+    def test_cancel_failure_is_not_offline(self):  # Req: F10/F11
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _CancelStub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            self.assertEqual(try_cancel(base, "tok", "t1"),
+                             "取消 t1: cancelled=True")
+            _CancelStub.fail = True
+            bad = try_cancel(base, "tok", "t1")
+            self.assertIn("取消失败", bad)          # 取消失败≠离线
+            self.assertNotIn("离线", bad)
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 class TestSmoke(unittest.TestCase):

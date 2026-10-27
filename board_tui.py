@@ -208,6 +208,15 @@ def load_board(base, token):
     return {"tasks": tasks, "chain": chain}, events, details
 
 
+def try_cancel(base, token, task):
+    """task_cancel 一次并回状态文本：取消失败≠离线（离线只由轮询上报）。"""
+    try:
+        r = _call(base, token, "/task_cancel", {"task": task})
+        return f"取消 {task}: cancelled={r.get('cancelled')}"
+    except Exception as e:
+        return f"取消失败: {e}"
+
+
 def tail_session(sid, limit=40):
     """opencode 会话只读 tail：sqlite ro 读 session_message 尾段文本。"""
     data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
@@ -350,11 +359,7 @@ def run(stdscr, base, token):
         if a.op == "quit":
             return
         if a.op == "cancel":
-            try:
-                r = _call(base, token, "/task_cancel", {"task": a.task})
-                status = f"取消 {a.task}: cancelled={r.get('cancelled')}"
-            except Exception as e:
-                status, err = f"取消失败: {e}", str(e)
+            status = try_cancel(base, token, a.task)
         elif a.op == "detail":
             page = detail_page(details.get(a.task, {"task": {}, "events": []}))
         elif a.op == "doctor":
