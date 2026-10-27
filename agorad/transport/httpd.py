@@ -103,7 +103,8 @@ class _Handler(BaseHTTPRequestHandler):
         app = self.app
         if name == "task_create":
             return {"task": app.task.create(body["goal"], body["project_dir"],
-                                            body.get("after"), token)}
+                                            body.get("after"), token,
+                                            title=body.get("title"))}
         if name == "task_dispatch":
             return {"task": body["task"],
                     "token": app.task.dispatch(body["task"], token)}

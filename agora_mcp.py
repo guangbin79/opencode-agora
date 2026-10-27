@@ -26,7 +26,8 @@ _TOOLS = [
     {"name": "task_create", "description": "登记任务（todo）",
      "inputSchema": {"type": "object", "properties": {
          "goal": _STR, "project_dir": _STR,
-         "after": {"type": "string", "description": "前驱任务 id（B7 链）"}},
+         "after": {"type": "string", "description": "前驱任务 id（B7 链）"},
+         "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
          "required": ["goal", "project_dir"]}},
     {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
      "inputSchema": {"type": "object", "properties": {"task": _STR},

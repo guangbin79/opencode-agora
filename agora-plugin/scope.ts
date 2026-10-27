@@ -7,13 +7,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { agoraHome } from "./hook";
 
-let cache: string[] | null = null;
+let cache: string[] | null = null;  // 兼容测试 API（resetScope）；生产路径已去缓存
 
 function norm(p: string): string {
   return p.replace(/\/+$/, "");
 }
 
-/** 读名册：缺失/不可读＝空名册（全员活跃，安全向＝现行行为）。 */
+/** 读名册：缺失/不可读＝空名册（全员活跃，安全向＝现行行为）。每次调用重读（R26 修订：去进程缓存，名册改动即生效）。 */
 export function loadInactiveRepos(): string[] {
   try {
     return readFileSync(join(agoraHome(), ".agora", "inactive-repos"), "utf8")
@@ -27,8 +27,7 @@ export function loadInactiveRepos(): string[] {
 
 /** 会话仓根是否休眠：对启动时缓存精确匹配（worktree toplevel≠主检出路径→不受名册影响）。 */
 export function isDormant(repoRoot: string): boolean {
-  cache ??= loadInactiveRepos();
-  return cache.includes(norm(repoRoot));
+  return loadInactiveRepos().includes(norm(repoRoot));
 }
 
 /** 新会话重置（R26 不热载：名册变更经重启会话生效；亦供测试隔离）。 */

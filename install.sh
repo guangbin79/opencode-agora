@@ -82,6 +82,7 @@ done
 mkdir -p "$AGORA_HOME/.agora"
 rm -rf "$AGORA_HOME/.agora/agorad"
 cp -r "$REPO/agorad" "$AGORA_HOME/.agora/"
+cp -f "$REPO/board_tui.py" "$AGORA_HOME/.agora/"
 find "$AGORA_HOME/.agora/agorad" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---- 5) AGORA_OC_URL 发现结果落档（lift 运行时自发现同源；此处只留档不作为消费面）----

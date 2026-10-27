@@ -37,7 +37,7 @@ class TaskService:
 
     # ---- F2 建任务 ----
 
-    def create(self, goal, project_dir, after, actor_token):
+    def create(self, goal, project_dir, after, actor_token, title=None):
         sid, _ = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         if after is not None:
@@ -49,7 +49,7 @@ class TaskService:
                          if t.get("worker_sid") == sid), default=0)
         tid = self._new_tid()
         self._state.add(tid, {
-            "title": goal.splitlines()[0][:40] if goal else tid, "goal": goal,
+            "title": (title or goal.splitlines()[0][:40]) if (title or goal) else tid, "goal": goal,
             "project_dir": project_dir, "env_dir": None, "after": after,
             "verify": {"cmd": "", "state": "pending", "registered_by": None,
                        "registered_at": None},
@@ -143,6 +143,14 @@ class TaskService:
                                             "registered_at": time.time()})
         self._store.append_event({"ts": time.time(), "actor": sid, "event": EV_VERIFY,
                                   "task": tid})
+        # 推送通知 worker：verify 已登记，消除轮询等待（狗粮摩擦 #1）
+        wsid = t.get("worker_sid")
+        if wsid:
+            try:
+                self._router.post(wsid, ("down", tid), "process",
+                                  f"[agora] verify 已登记: {cmd}")
+            except Exception:
+                pass  # worker 不活则留库补拉（消息先落库铁则）
 
     # ---- 内部 ----
 
