@@ -64,7 +64,7 @@ class Recover:
 
     def _boot(self, tid, t):
         page = self._store.home / "wiki" / "tasks" / f"{tid}.md"
-        return (f"[agora] BOOT task {tid} (reinject)\npage: {page}\n"
+        return (f"[agora] {tid}: {t.get('title', tid)} (reinject)\npage: {page}\n"
                 f"env: {t['env_dir']}\n"
                 "contract: 会话曾死亡已重建——先 check_mail 补拉断点上下文，"
                 "继续任务页目标；结论经 post(done) 回填")
