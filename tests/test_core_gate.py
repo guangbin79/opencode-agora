@@ -1,4 +1,4 @@
-"""T8 core/gate 契约：done 前置三拒/verify 门/自动合并/回滚/升级调用点（R3/R9/R11/R12）。
+"""T8 core/gate 契约：done 前置五拒/verify 门/自动合并/回滚/升级调用点（R3/R9/R11/R12/F13）。
 
 真 Store/State/Router＋假 oc/gitx/health/read_anchor/runner 全注入；
 门体 run 同步调用（后台线程包装归 httpd 装配）。
@@ -13,6 +13,9 @@ from agorad.core.auth import Auth
 from agorad.core.gate import Gate
 from agorad.core.msg import Router
 from agorad.core.state import State
+
+SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+OTHER_SHA = "f0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5"
 
 
 class FakeOc:
@@ -89,7 +92,7 @@ class TestCoreGate(unittest.TestCase):
         self.oc = FakeOc()
         self.router = Router(self.store, self.state, self.oc)
         self.health = FakeHealth()
-        self.anchor = {"head": "abc123", "clean": True}
+        self.anchor = {"head": SHA, "clean": True}
         self.runner = FakeRunner((0, "pass"), (0, "pass"))
         self.mk_gate()
 
@@ -121,7 +124,7 @@ class TestCoreGate(unittest.TestCase):
     def in_gate(self, streak=0):
         """播种 running→受理 done（进入门临界段）。"""
         self.seed(streak=streak)
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
 
     def worker_msgs(self):
         return [m for m in self.store.read_messages() if m["to"] == "s-w1"]
@@ -133,19 +136,50 @@ class TestAcceptDone(TestCoreGate):
         self.state.set_fields("t1", verify={"cmd": "", "state": "pending",
                                             "registered_by": None,
                                             "registered_at": None})
-        r = self.gate.accept_done("t1", "s-w1", "abc123")
+        r = self.gate.accept_done("t1", "s-w1", SHA)
         self.assertIn("rejected:verify-unregistered", r)
         self.assertIn("task_update", r)  # 动作指引：找派发方登记
         self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
 
-    def test_reject_anchor_missing_stale_or_dirty(self):  # Req: F7
+    def test_reject_body_format_with_received_prefix(self):  # Req: F13
         self.seed()
-        for anchor in (None, {"head": "old", "clean": True},
-                       {"head": "abc123", "clean": False}):
-            self.anchor = anchor  # 缺失／落后于报告 commit／评审环未绿
-            r = self.gate.accept_done("t1", "s-w1", "abc123")
-            self.assertIn("rejected:anchor", r)
-            self.assertIn("review-loop", r)  # 动作指引
+        for bad in ("bfe2bfc", "结论已修复", f"commit={SHA}", SHA[:39]):
+            r = self.gate.accept_done("t1", "s-w1", bad)
+            self.assertIn("rejected:body-format", r)
+            self.assertIn("40 位", r)  # 契约文案
+            self.assertIn(repr(bad[:20]), r)  # 收到内容前缀
+        self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
+
+    def test_body_format_rejection_audited_done_rejected(self):  # Req: F13
+        self.seed()
+        self.gate.accept_done("t1", "s-w1", "bfe2bfc")
+        evs = [e for e in self.store.read_events("t1")
+               if e["event"] == "done_rejected"]
+        self.assertEqual([e["note"] for e in evs], ["body-format"])
+
+    def test_reject_anchor_missing_guides_review_loop(self):  # Req: F13
+        self.seed()
+        self.anchor = None  # 无锚或锚落后
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)
+        self.assertIn("review-loop", r)  # 动作指引
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
+    def test_reject_anchor_head_mismatch_names_both_shas(self):  # Req: F13
+        self.seed()
+        self.anchor = {"head": OTHER_SHA, "clean": True}  # 锚指向别的 commit
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)
+        self.assertIn(SHA, r)  # 报告 sha 与
+        self.assertIn(OTHER_SHA, r)  # 分支 HEAD sha 双双可见
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
+    def test_reject_anchor_dirty_guides_fix(self):  # Req: F13
+        self.seed()
+        self.anchor = {"head": SHA, "clean": False}  # 评审环未绿
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)
+        self.assertIn("未绿", r)
         self.assertEqual(self.state.get("t1")["state"], "running")
 
     def test_reject_empty_verify_cmd(self):  # Req: F7
@@ -153,23 +187,23 @@ class TestAcceptDone(TestCoreGate):
         self.state.set_fields("t1", verify={"cmd": "  ", "state": "registered",
                                             "registered_by": "disp1",
                                             "registered_at": 1.0})  # 绕过登记直改快照
-        r = self.gate.accept_done("t1", "s-w1", "abc123")
+        r = self.gate.accept_done("t1", "s-w1", SHA)
         self.assertIn("rejected:verify-empty", r)
         self.assertIn("task_update", r)  # 动作指引：登记非空命令
         self.assertEqual(self.state.get("t1")["state"], "running")
 
     def test_reject_non_running(self):  # Req: F7
         self.seed(state="dispatched")
-        self.assertIn("rejected:state", self.gate.accept_done("t1", "s-w1", "abc123"))
+        self.assertIn("rejected:state", self.gate.accept_done("t1", "s-w1", SHA))
         self.seed("t2", state="done")  # 二次 done 拒（防重入门）
-        self.assertIn("rejected:state", self.gate.accept_done("t2", "s-w1", "abc123"))
+        self.assertIn("rejected:state", self.gate.accept_done("t2", "s-w1", SHA))
 
     def test_accept_transitions_done_with_commit(self):  # Req: F7
         self.seed()
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "done")
-        self.assertEqual(t["commit"], "abc123")  # 报告 commit 入行（merged 证据源）
+        self.assertEqual(t["commit"], SHA)  # 报告 commit 入行（merged 证据源）
 
 
 class TestGateRun(TestCoreGate):
@@ -192,7 +226,7 @@ class TestGateRun(TestCoreGate):
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # 尾部置 closed
-        self.assertEqual(t["commit"], "abc123")  # merged 行含 commit
+        self.assertEqual(t["commit"], SHA)  # merged 行含 commit
         self.assertEqual(t["fail_streak"], 0)  # 绿清连败（R12）
         self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
         self.assertEqual(self.gx.removed, [str(self.env)])  # 环境即回收
@@ -223,7 +257,7 @@ class TestGateRun(TestCoreGate):
         shutil.rmtree(self.env / ".review-loop")
         self.anchor = None  # 无锚：评审环缺失即不查锚
         self.seed()
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "done")  # 驻留 done：人工审合并
@@ -335,14 +369,14 @@ class TestGateAudit(TestCoreGate):
 
     def test_target_branch_restores_default_branch_position(self):  # Req: gt-132747
         self.seed(tb="issue/7")
-        self.gate.accept_done("t1", "s-w1", "abc123")
+        self.gate.accept_done("t1", "s-w1", SHA)
         self.gate.run("t1")
         self.assertEqual(self.gx.checkouts, [("/repo", "main")])  # 门毕还原，防缺省任务漂移
         self.assertEqual(self.state.get("t1")["state"], "closed")
 
     def test_restore_failure_audited(self):  # Req: gt-132747
         self.seed(tb="issue/7")
-        self.gate.accept_done("t1", "s-w1", "abc123")
+        self.gate.accept_done("t1", "s-w1", SHA)
         self.gx.restore_ok = False
         self.gate.run("t1")
         names = [e["event"] for e in self.store.read_events("t1")]
@@ -366,7 +400,7 @@ class TestGateAudit(TestCoreGate):
 
     def test_target_branch_merges_into_branch(self):  # Req: gt-132747
         self.seed(tb="issue/7")
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         self.gate.run("t1")
         self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", "issue/7")])
         self.assertEqual(self.gx.head_calls, [("/repo", "issue/7")])  # 回滚点取目标支
@@ -389,7 +423,7 @@ class TestGateAudit(TestCoreGate):
         for name in ("done", "merged", "closed"):
             self.assertIn(name, names)
         merged = next(e for e in evs if e["event"] == "merged")
-        self.assertEqual(merged["commit"], "abc123")  # merged 带 commit 证据
+        self.assertEqual(merged["commit"], SHA)  # merged 带 commit 证据
 
     def test_fail_path_audits_verify_failed_and_blocked(self):  # Req: F8
         self.runner = FakeRunner((1, "boom"))

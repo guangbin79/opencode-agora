@@ -22,8 +22,10 @@ PROTOCOL_VERSION = "2024-11-05"
 _VERSION = "0.1.0"
 
 _STR = {"type": "string"}
+_TID = {"type": "string",
+        "description": "任务 id（gt-xxxxxx，task_create/task_dispatch 返回）"}
 _TOOLS = [
-    {"name": "task_create", "description": "登记任务（todo）",
+    {"name": "task_create", "description": "登记任务（todo）（dispatcher/root）",
      "inputSchema": {"type": "object", "properties": {
          "goal": _STR, "project_dir": _STR,
          "after": {"type": "string", "description": "前驱任务 id（B7 链）"},
@@ -32,25 +34,32 @@ _TOOLS = [
          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
          "required": ["goal", "project_dir"]}},
     {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
-     "inputSchema": {"type": "object", "properties": {"task": _STR},
+     "inputSchema": {"type": "object", "properties": {"task": _TID},
                      "required": ["task"]}},
-    {"name": "task_update", "description": "登记 verify 命令（派发方）",
+    {"name": "task_update", "description": "登记 verify 命令（仅派发方/root；worker 不可用）",
      "inputSchema": {"type": "object", "properties": {
-         "task": _STR, "verify_cmd": _STR},
+         "task": _TID, "verify_cmd": _STR},
          "required": ["task", "verify_cmd"]}},
-    {"name": "task_cancel", "description": "中止任务（级联下级）",
-     "inputSchema": {"type": "object", "properties": {"task": _STR},
+    {"name": "task_cancel", "description": "中止任务（级联下级）（派发方/root；worker 不可用）",
+     "inputSchema": {"type": "object", "properties": {"task": _TID},
                      "required": ["task"]}},
-    {"name": "post", "description": "链边发消息（kind: note/question/answer/"
-     "done；方向服务按角色定）",
+    {"name": "post", "description": "链边发消息（方向服务按角色定）",
      "inputSchema": {"type": "object", "properties": {
-         "task": _STR, "kind": _STR, "body": _STR},
+         "task": _TID,
+         "kind": {"type": "string",
+                  "enum": ["note", "question", "answer", "done", "verify",
+                           "verify_reject"],
+                  "description": "note=附言；question=问；answer=答；done=完成回填；"
+                                 "verify=提案验收命令；verify_reject=驳回提案"},
+         "body": {"type": "string",
+                  "description": "done 时＝纯 40 位完整 commit sha（无前缀无附言）；"
+                                 "其余 kind＝正文"}},
          "required": ["task", "kind", "body"]}},
     {"name": "check_mail", "description": "拉取本会话收件",
      "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "board", "description": "看板快照（给 task 返回单任务详情）",
-     "inputSchema": {"type": "object", "properties": {"task": _STR}}},
-    {"name": "doctor", "description": "诊断视图（年龄排名＋环境残留）",
+    {"name": "board", "description": "看板快照（给 task 返回单任务详情）（dispatcher/root；worker 不可用）",
+     "inputSchema": {"type": "object", "properties": {"task": _TID}}},
+    {"name": "doctor", "description": "诊断视图（年龄排名＋环境残留）（dispatcher/root；worker 不可用）",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "wiki_read", "description": "读 wiki 页",
      "inputSchema": {"type": "object", "properties": {"path": _STR},

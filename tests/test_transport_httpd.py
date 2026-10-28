@@ -22,6 +22,9 @@ from agorad.transport.httpd import make_server
 from tests.stub_opencode import VERSION, StubOpencode
 
 
+SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+
+
 def ok_runner(cwd, cmd):
     return 0, "pass"
 
@@ -118,7 +121,7 @@ class HttpdTest(unittest.TestCase):
         self.gitx = FakeGitx(self.tmp)
         self.app = assemble(self.tmp, oc_url=self.stub.base_url,
                             gitx=self.gitx,
-                            read_anchor=lambda env: {"head": "abc123",
+                            read_anchor=lambda env: {"head": SHA,
                                                      "clean": True},
                             runner=getattr(self, "gate_runner", ok_runner))
         self.root = self.app.auth.issue("main", "root")
@@ -171,13 +174,13 @@ class TestHttpSmoke(HttpdTest):
         boot_text = self.stub.sessions[wsid]["injects"][0]
         self.assertTrue(boot_text.startswith("[agora] ") and tid in boot_text)
         st, r = call(self.port, "POST", "/post",
-                     {"task": tid, "kind": "done", "body": "abc123"}, wtok)
+                     {"task": tid, "kind": "done", "body": SHA}, wtok)
         self.assertEqual(st, 200)
         self.assertEqual(r, {"result": "accepted"})
         self.assertTrue(wait_until(
             lambda: self.app.state.get(tid)["state"] == "closed"))
         t = self.app.state.get(tid)
-        self.assertEqual(t["commit"], "abc123")  # 证据指针落行
+        self.assertEqual(t["commit"], SHA)  # 证据指针落行
         self.assertEqual(self.app.gitx.removed,
                          [self.app.state.get(tid)["env_dir"]])  # 环境回收
         self.assertIn("merged", self.stub.sessions[wsid]["injects"][-1])
@@ -185,7 +188,7 @@ class TestHttpSmoke(HttpdTest):
         self.assertIn(tid, r["buckets"]["已合并"])
         self.assertEqual(r["chain"], [tid])
         st, r = call(self.port, "POST", "/board", {"task": tid}, self.root)
-        self.assertEqual(r["done_body"], "abc123")  # 结论取自消息库 done 正文
+        self.assertEqual(r["done_body"], SHA)  # 结论取自消息库 done 正文
         st, html_text = call(self.port, "GET", "/view", token=self.root)
         self.assertEqual(st, 200)
         self.assertIn("<html>", html_text)
@@ -331,7 +334,7 @@ class TestReworkLoop(HttpdTest):
         tid = self.create_task()
         wtok = self.dispatch_task(tid)
         st, r = call(self.port, "POST", "/post",
-                     {"task": tid, "kind": "done", "body": "abc123"}, wtok)
+                     {"task": tid, "kind": "done", "body": SHA}, wtok)
         self.assertEqual(r, {"result": "accepted"})
         self.assertTrue(wait_until(
             lambda: self.app.state.get(tid)["state"] == "verify_failed"))
@@ -341,13 +344,43 @@ class TestReworkLoop(HttpdTest):
         self.assertEqual(self.app.state.get(tid)["state"], "running")  # 续修开工
         self.gate_runner.n = 1  # 尾部修完：verify 转绿
         st, r = call(self.port, "POST", "/post",
-                     {"task": tid, "kind": "done", "body": "abc123"}, wtok)
+                     {"task": tid, "kind": "done", "body": SHA}, wtok)
         self.assertEqual(r, {"result": "accepted"})
         self.assertTrue(wait_until(
             lambda: self.app.state.get(tid)["state"] == "closed"))
         running = [e for e in self.app.store.read_events(tid)
                    if e["event"] == "running"]
         self.assertEqual(len(running), 2)  # 首跑＋续修两段开工均审计
+
+
+class TestParamContract(HttpdTest):
+    """F13 参数契约：未知 kind 白名单 400＋bad_request 留痕、403 文案附可用面。"""
+
+    def test_unknown_kind_400_lists_vocab(self):  # Req: F13
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "progress", "body": "x"}, wtok)
+        self.assertEqual(st, 400)
+        self.assertIn("verify_reject", r["error"])  # 列举合法词汇
+        self.assertIn("progress", r["error"])  # 附收到值
+
+    def test_bad_kind_post_audits_bad_request_with_worker_actor(self):  # Req: F13
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, _ = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "progress", "body": "x"}, wtok)
+        self.assertEqual(st, 400)
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "bad_request" and e["tool"] == "post"]
+        self.assertEqual([e["actor"] for e in ev], [wsid])
+
+    def test_worker_board_403_hints_available_surface(self):  # Req: F13
+        wtok = self.app.auth.issue("w9", "worker")
+        st, r = call(self.port, "POST", "/board", {}, wtok)
+        self.assertEqual(st, 403)
+        self.assertIn("check_mail", r["error"])  # 可用面指引
 
 
 class TestStartupRequeue(unittest.TestCase):
@@ -357,7 +390,7 @@ class TestStartupRequeue(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         try:
             app = assemble(tmp, oc=DeadInjectOc(), gitx=FakeGitx(tmp),
-                           read_anchor=lambda env: {"head": "abc123",
+                           read_anchor=lambda env: {"head": SHA,
                                                     "clean": True},
                            runner=ok_runner)
             app.state.add("t1", {
@@ -365,7 +398,7 @@ class TestStartupRequeue(unittest.TestCase):
                 "env_dir": app.gitx.build_env("/repo", "t1"), "after": None,
                 "verify": {"cmd": "pytest -q", "state": "registered",
                            "registered_by": "main", "registered_at": 1.0},
-                "state": "done", "commit": "abc123", "in_gate": True,
+                "state": "done", "commit": SHA, "in_gate": True,
                 "dispatcher_sid": "main", "worker_sid": "w1",
                 "chain_depth": 1, "fail_streak": 0, "created": 0.0,
                 "updated": 0.0})
@@ -373,7 +406,7 @@ class TestStartupRequeue(unittest.TestCase):
             try:
                 self.assertTrue(wait_until(
                     lambda: app.state.get("t1")["state"] == "closed"))
-                self.assertEqual(app.state.get("t1")["commit"], "abc123")
+                self.assertEqual(app.state.get("t1")["commit"], SHA)
                 names = [e["event"] for e in app.store.read_events("t1")]
                 self.assertIn("merged", names)
                 self.assertIn("closed", names)
@@ -389,7 +422,7 @@ class TestGateTailCancel(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.app = assemble(self.tmp, oc=DeadInjectOc(), gitx=FakeGitx(self.tmp),
-                            read_anchor=lambda env: {"head": "abc123",
+                            read_anchor=lambda env: {"head": SHA,
                                                      "clean": True},
                             runner=fail_runner)
         self.root = self.app.auth.issue("main", "root")
@@ -401,7 +434,7 @@ class TestGateTailCancel(unittest.TestCase):
             "state": "running", "dispatcher_sid": "main", "worker_sid": "w1",
             "chain_depth": 1, "fail_streak": 0, "created": 0.0, "updated": 0.0})
         self.wtok = self.app.auth.issue("w1", "worker")
-        self.assertEqual(self.app.gate.accept_done("t1", "w1", "abc123"),
+        self.assertEqual(self.app.gate.accept_done("t1", "w1", SHA),
                          "accepted")
         self.app.task.cancel("t1", self.root)  # done 态→pending_cancel 排队
 

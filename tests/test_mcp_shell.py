@@ -132,6 +132,26 @@ class TestHandshakeAndList(McpShellTest):
         self.assertEqual(json.loads(out.getvalue())["error"]["code"], -32700)
 
 
+class TestSchemaContract(McpShellTest):
+    """F13 参数契约硬化：kind 枚举/body sha 契约/角色可用性标注进 schema。"""
+
+    def test_post_kind_enum_and_body_sha_contract(self):  # Req: F13
+        schema = {t["name"]: t for t in
+                  self.rpc("tools/list")["result"]["tools"]}
+        props = schema["post"]["inputSchema"]["properties"]
+        self.assertEqual(props["kind"]["enum"],
+                         ["note", "question", "answer", "done", "verify",
+                          "verify_reject"])  # 与派发 skill 词汇对齐
+        self.assertIn("40 位", props["body"]["description"])  # done＝纯 sha 契约
+
+    def test_worker_unavailability_marked_in_descriptions(self):  # Req: F13
+        descs = {t["name"]: t["description"] for t in
+                 self.rpc("tools/list")["result"]["tools"]}
+        for name in ("task_update", "task_cancel", "board", "doctor"):
+            self.assertIn("worker 不可用", descs[name])
+        self.assertIn("仅 root", descs["enforce"])
+
+
 class TestPassthrough(McpShellTest):
     def test_task_create_passes_token_via_header(self):  # Req: F2
         r = self.call_tool("task_create", {"_token": self.root, "goal": "g",

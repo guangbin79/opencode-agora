@@ -1,9 +1,11 @@
 """verify 门与自动合并（F7，设计 §4.5）：done 前置受理→隔离 verify→ff 合并→集成 verify。
 
-受理三拒（R3/R9）：任务非 running／verify 未登记／评审锚缺失·落后·未绿——锚拒收仅
-评审环在位时适用（env 有 .review-loop/ 才查锚；锚由服务经注入的 read_anchor 自取，
-无 anchor 入参），拒收附动作指引；评审环缺失→放行 done，verify 绿驻留 done 人工审
-合并（门体既有分支接管）。门体（run 后台线程体）：
+受理五拒（R3/R9/F13，均经 _deny_done 落 done_rejected 审计并附动作指引）：state
+非 running／verify 未登记／verify 命令空／body-format done body 非纯 40 位 hex 完整
+sha（先行，防参数错伪装成锚问题）／anchor——锚拒收仅评审环在位时适用（env 有
+.review-loop/ 才查锚；锚由服务经注入的 read_anchor 自取，无 anchor 入参），拆无锚·
+≠分支 HEAD·未绿三支各配指引；评审环缺失→放行 done，verify 绿驻留 done 人工审合并
+（门体既有分支接管）。门体（run 后台线程体）：
 env 跑 verify→败 verify_failed＋输出尾部（截 2000 字符）实时回 worker＋计连败；
 绿→合并前锚重验：锚缺失/落后/未绿驻留 done（review_absent_no_merge 审计＋
 回 worker——合并充分条件＝.review-loop/ 锚绿于报告 commit，堵 accept→run
@@ -47,30 +49,58 @@ class Gate:
         self._store = store
         self._runner = runner or _subprocess_runner
 
-    # ---- done 受理（前置三拒，拒收附动作指引） ----
+    # ---- done 受理（前置五拒，拒收落审计并附动作指引） ----
 
     def accept_done(self, tid, worker_sid, commit):
         t = self._state.get(tid)
         if t["state"] != "running":  # 含二次 done：防重入门
-            return (f"rejected:state: 任务 {tid} 当前 {t['state']} 非 running——"
-                    "board 查看状态，仅 running 受理 done")
+            return self._deny_done(
+                tid, "state",
+                f"任务 {tid} 当前 {t['state']} 非 running——"
+                "board 查看状态，仅 running 受理 done")
         if t["verify"]["state"] != "registered":
-            return (f"rejected:verify-unregistered: 任务 {tid} verify 未登记——"
-                    "post 通知派发方 task_update 登记 verify 命令，"
-                    "登记后重新 post(done, commit)")
+            return self._deny_done(
+                tid, "verify-unregistered",
+                f"任务 {tid} verify 未登记——"
+                "post 通知派发方 task_update 登记 verify 命令，"
+                "登记后重新 post(done, commit)")
         if not t["verify"]["cmd"].strip():  # 兜底：空命令＝无质量闸，拒入门
-            return (f"rejected:verify-empty: 任务 {tid} verify 命令为空——"
-                    "task_update 登记非空命令后重新 post(done, commit)")
+            return self._deny_done(
+                tid, "verify-empty",
+                f"任务 {tid} verify 命令为空——"
+                "task_update 登记非空命令后重新 post(done, commit)")
+        c = commit.lower()
+        if len(c) != 40 or any(ch not in "0123456789abcdef" for ch in c):
+            return self._deny_done(  # F13：body-format 先行，参数错不再伪装成锚问题
+                tid, "body-format",
+                f"done body 须为纯 40 位十六进制完整 commit sha（收到 {commit[:20]!r}）"
+                "——无前缀无附言；结论文本另发 post(kind=note)")
         # 锚检查仅评审环在位时适用：缺失→放行 done，由门体 review_absent 分支驻留
         if (Path(t["env_dir"]) / ".review-loop").is_dir():
             a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
-            if not a or a.get("head") != commit or not a.get("clean"):
-                return (f"rejected:anchor: 任务 {tid} 评审环未绿或锚落后（.review-loop 锚"
-                        "须＝分支 HEAD 且无 blocker/high）——跑 /review-loop 或待 idle "
-                        "自动触发，绿后带锚重新 post(done, commit)")
+            if a is None:
+                return self._deny_done(
+                    tid, "anchor",
+                    f"任务 {tid} 评审环无锚或锚落后（.review-loop/.last-reviewed 缺失"
+                    "或不等于分支 HEAD）——跑 /review-loop 至锚绿，重新 post(done, commit)")
+            if a.get("head") != commit:
+                return self._deny_done(
+                    tid, "anchor",
+                    f"任务 {tid} {commit} ≠ 分支 HEAD {a['head']}——"
+                    "以 env 内完整 HEAD sha 重新 post(done, commit)")
+            if not a.get("clean"):
+                return self._deny_done(
+                    tid, "anchor",
+                    f"任务 {tid} 评审环未绿——修复 blocker/high 后"
+                    "重新 post(done, commit)")
         self._state.transition(tid, "done", commit=commit)
         self._audit(tid, "done", commit=commit)
         return "accepted"
+
+    def _deny_done(self, tid, tag, msg):
+        """F13：done 拒收统一出口——先审计 done_rejected（note=tag）再带因拒回。"""
+        self._audit(tid, "done_rejected", note=tag)
+        return f"rejected:{tag}: {msg}"
 
     # ---- 门体（后台线程体） ----
 

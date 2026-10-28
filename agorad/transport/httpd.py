@@ -3,7 +3,7 @@
 transport 只 import agorad.core（R2）——access 件经 App 属性触达（store.home
 下 wiki 裸读写，无 import）。鉴权两段（R18）：X-Agora-Token→identify（无牌
 401）→may 粗判（越权 403＋审计行）；归属细判与保险丝归 TaskService。done
-特殊路径＝gate 三拒同步应答，受理绿→落库→1-worker 串行队列后台跑门体。
+特殊路径＝gate 五拒同步应答（拒收落审计），受理绿→落库→1-worker 串行队列后台跑门体。
 """
 import json
 import queue
@@ -21,6 +21,9 @@ from agorad.core.task import Rejected
 _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel",
                     "post", "check_mail", "board", "doctor", "wiki_read",
                     "wiki_write", "enforce"})
+_POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject")
+_DENY_HINT = {"worker": "worker 面：post/check_mail/wiki_read/wiki_write/"
+                        "task_dispatch/wait；需登记 verify→post(kind=question) 请派发方"}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -51,6 +54,7 @@ class _Handler(BaseHTTPRequestHandler):
                              "enforce_on": self.app.auth.enforce_on()})
 
     def do_POST(self):
+        sid = None
         try:
             name = self.path.strip("/").split("?")[0]
             if name not in _TOOLS:
@@ -85,15 +89,15 @@ class _Handler(BaseHTTPRequestHandler):
         except Rejected as e:      # 归属细判/保险丝拒（报因在消息）
             return self._json(403, {"error": str(e)})
         except NotChainEdge as e:
-            return self._json(400, {"error": str(e)})
+            return self._bad(sid, name, str(e))
         except InvalidTransition as e:
             return self._json(409, {"error": str(e)})
         except FileNotFoundError as e:
             return self._json(404, {"error": str(e)})
         except KeyError as e:      # 缺必填字段
-            return self._json(400, {"error": f"缺字段: {e}"})
+            return self._bad(sid, name, f"缺字段: {e}")
         except (ValueError, OSError) as e:
-            return self._json(400, {"error": str(e)})
+            return self._bad(sid, name, str(e))
         except Exception as e:     # 兜底：带因 500，不让连接静默断
             return self._json(500, {"error": str(e)})
 
@@ -153,16 +157,29 @@ class _Handler(BaseHTTPRequestHandler):
             self.app.bind_main(sid, caller)
 
     def _deny(self, sid, role, tool, tid):
-        """越权 403：POST/GET 共用（审计行同形）。"""
+        """越权 403：POST/GET 共用（审计行同形）；hint 非空附可用面退路（F13）。"""
+        hint = _DENY_HINT.get(role, "")
         self.app.store.append_event(
             {"ts": time.time(), "actor": sid, "event": EV_AUTH_DENIED,
              "tool": tool, "task": tid, "note": f"role={role}"})
-        return self._json(403, {"error": f"{tool} 拒绝（role={role}）"})
+        msg = f"{tool} 拒绝（role={role}）"
+        if hint:
+            msg += f"——{hint}"
+        return self._json(403, {"error": msg})
+
+    def _bad(self, sid, tool, msg):
+        """F13 参数错 400：落 bad_request 审计行（可计量）后带因返回。"""
+        self.app.store.append_event({"ts": time.time(), "actor": sid or "unknown",
+                                     "event": "bad_request", "tool": tool or "?",
+                                     "note": msg[:200]})
+        return self._json(400, {"error": msg})
 
     def _post(self, sid, body):
         app, tid, kind = self.app, body["task"], body["kind"]
+        if kind not in _POST_KINDS:  # F13 客户端 kind 白名单；内部直调 Router 不经此路
+            raise ValueError(f"kind 须为 {'/'.join(_POST_KINDS)} 之一（收到 {kind!r}）")
         t = app.state.get(tid)
-        if kind == "done":  # F7 入口：三拒同步应答，受理绿才落库并入门
+        if kind == "done":  # F7 入口：五拒同步应答，受理绿才落库并入门
             if t.get("worker_sid") != sid:
                 raise NotChainEdge(f"{sid}->{tid}: done 仅任务 worker")
             r = app.gate.accept_done(tid, sid, str(body["body"]).strip())
