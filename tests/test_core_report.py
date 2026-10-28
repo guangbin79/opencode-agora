@@ -53,6 +53,17 @@ class TestReport(unittest.TestCase):
         self.assertEqual(forest_view(s),
                          ["t1", "t2", "t3", "ta", "tx"])  # 根层 tid 序（t1<ta<tx），子代紧随父代
 
+    def test_forest_view_same_layer_recent_first(self):  # Req: gt-c05d6e
+        s = snap(ta=row(disp="d1", worker="wa", created=100.0),
+                 tb=row(disp="d2", worker="wb", created=300.0),
+                 tc=row(disp="d3", worker="wc", created=200.0),
+                 t1=row(disp="wa", worker="w1", created=50.0),
+                 t2=row(disp="wa", worker="w2", created=400.0))
+        self.assertEqual(forest_view(s),
+                         ["tb", "tc", "ta", "t2", "t1"])  # 根层与子层同规：created 降序近者在前
+        s["tasks"]["tx"] = row(disp="d9", worker="w9")  # created 缺失→兜底 tid 序垫底
+        self.assertEqual(forest_view(s)[-1], "tx")
+
     def test_forest_view_cycle_bounded(self):  # Req: gt-6def73
         s = snap(t1=row(disp="d1", worker="w1"), t2=row(disp="w1", worker="d1"),
                  t3=row(disp="d2", worker="w3"))

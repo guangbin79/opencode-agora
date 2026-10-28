@@ -60,7 +60,8 @@ class TestBuildRows(unittest.TestCase):
                  t7=trow("blocked"), t8=trow("cancelled"), t9=trow("todo"))
         buckets = [r for r in build_rows(s, [], now=NOW) if r.kind == "bucket"]
         self.assertEqual([r.title for r in buckets],
-                         ["已合并 2", "在飞 5", "失败 0", "阻塞 1", "已取消 1"])
+                         ["Merged 2", "In-flight 5", "Failed 0", "Blocked 1",
+                          "Cancelled 1"])
 
     def test_color_domain_verify_failed_reopened_in_flight(self):  # Req: F10
         s = snap(t1=trow("verify_failed"), t2=trow("reopened"), t3=trow("running"),
@@ -106,8 +107,8 @@ class TestBuildRows(unittest.TestCase):
                          "阻塞": [], "已取消": []}}
         buckets = [r for r in build_rows(s, [], now=NOW) if r.kind == "bucket"]
         self.assertEqual([r.title for r in buckets],
-                         ["已合并 2", "在飞 1", "失败 0", "阻塞 0",
-                          "已取消 0"])  # 服务端全局口径（含本地 tasks 外的 t9）
+                         ["Merged 2", "In-flight 1", "Failed 0", "Blocked 0",
+                          "Cancelled 0"])  # 服务端全局口径（含本地 tasks 外的 t9）
 
     def test_forest_multi_root_default_folded(self):  # Req: gt-6def73
         s = {"tasks": {"A": trow(disp="main", worker="wa"),
@@ -166,10 +167,12 @@ class TestBuildRows(unittest.TestCase):
         s = snap(t1=trow("merged"), t2=trow("running"), t3=trow("blocked"))
         rows = build_rows(s, [], now=NOW, bucket="在飞")   # 计数行不受视图切换影响
         self.assertEqual([r.title for r in rows if r.kind == "bucket"],
-                         ["已合并 1", "*在飞 1", "失败 0", "阻塞 1", "已取消 0"])
+                         ["Merged 1", "*In-flight 1", "Failed 0", "Blocked 1",
+                          "Cancelled 0"])
         rows = build_rows(s, [], now=NOW)
         self.assertEqual([r.title for r in rows if r.kind == "bucket"],
-                         ["已合并 1", "在飞 1", "失败 0", "阻塞 1", "已取消 0"])
+                         ["Merged 1", "In-flight 1", "Failed 0", "Blocked 1",
+                          "Cancelled 0"])
 
     def test_bucket_view_penetrates_fold(self):  # Req: gt-6a26e5
         s = snap(A=trow(disp="main", worker="wa"),
@@ -458,11 +461,11 @@ class TestDoctorPage(unittest.TestCase):
         v = {"age_rank": [["t1", 900.0]], "last_seen_rank": [["t1", 940.0]],
              "stale_candidates": [["t1", 100.0], ["t2", 300.0]], "env": []}
         lines = doctor_page(v, now=NOW)
-        head = "---- 僵态候选（在飞>20min 无活动，判断归上级） ----"
+        head = "---- stale candidates (in-flight >20min idle, up to owner) ----"
         self.assertIn(head, lines)
         i = lines.index(head)
         self.assertEqual(lines[i + 1:i + 3], ["t1  15m", "t2  11m"])  # 最僵在前
-        self.assertLess(lines.index("---- 最后活动（最僵在前） ----"), i)  # 位于最后活动段后
+        self.assertLess(lines.index("---- last activity (stalest first) ----"), i)
         self.assertEqual(doctor_page({}, now=NOW).count(head), 1)  # 无键也照常渲染空段
 
 
@@ -515,11 +518,11 @@ class TestTryCancel(unittest.TestCase):
         try:
             base = f"http://127.0.0.1:{srv.server_address[1]}"
             self.assertEqual(try_cancel(base, "tok", "t1"),
-                             "取消 t1: cancelled=True")
+                             "cancel t1: cancelled=True")
             _CancelStub.fail = True
             bad = try_cancel(base, "tok", "t1")
-            self.assertIn("取消失败", bad)          # 取消失败≠离线
-            self.assertNotIn("离线", bad)
+            self.assertIn("cancel failed", bad)     # 取消失败≠离线
+            self.assertNotIn("offline", bad)
         finally:
             srv.shutdown()
             srv.server_close()

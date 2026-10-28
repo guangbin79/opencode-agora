@@ -74,19 +74,28 @@ def chain_view(snap, dispatcher_sid):
     return out
 
 
+def _layer_key(tasks):
+    """同层排序键（gt-c05d6e）：created 降序（近者在前）；缺失/0 兜底 tid 字典序垫底（稳定）。"""
+    def key(tid):
+        c = tasks[tid].get("created")
+        return (1, tid) if not c else (-c, tid)
+    return key
+
+
 def forest_view(snap):
     """全局链森林（gt-6def73）：父子边仍按 worker_sid↔dispatcher_sid 上溯，
     但在全任务集找父；根＝全任务集内无父的任务。输出 DFS 子树聚簇序 tid 列表
-    （同层按 tid 字典序，稳定可测）；显式栈防递归，seen 集环防护有界
-    （环岛 DFS 不可达，按 tid 序尾附兜底，全员在列）。
+    （同层按 created 降序近者在前，缺失兜底 tid 序，稳定可测）；显式栈防递归，
+    seen 集环防护有界（环岛 DFS 不可达，按同键序尾附兜底，全员在列）。
     """
     tasks = snap["tasks"]
     parent = {tid: next((p for p in sorted(tasks)
                          if tasks[p].get("worker_sid")
                          == t.get("dispatcher_sid")), None)
               for tid, t in tasks.items()}
+    rank = _layer_key(tasks)
     kids, roots = {tid: [] for tid in tasks}, []
-    for tid in sorted(tasks):
+    for tid in sorted(tasks, key=rank):
         p = parent[tid]
         (roots if p is None else kids[p]).append(tid)
     out, seen, stack = [], set(), roots[::-1]
@@ -97,7 +106,7 @@ def forest_view(snap):
         seen.add(tid)
         out.append(tid)
         stack.extend(reversed(kids[tid]))
-    return out + [tid for tid in sorted(tasks) if tid not in seen]
+    return out + [tid for tid in sorted(tasks, key=rank) if tid not in seen]
 
 
 def detail(snap, store, tid):

@@ -25,6 +25,9 @@ _KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead",
 
 # 五桶固序（计数行与数字键 1-5 同序）；桶归属映射 _bucket 单点，禁两套口径
 _BUCKETS = ("已合并", "在飞", "失败", "阻塞", "已取消")
+# 桶显示名（gt-c05d6e）：内部键＝服务端 buckets 中文键，仅渲染层映射
+_LABELS = {"已合并": "Merged", "在飞": "In-flight", "失败": "Failed",
+           "阻塞": "Blocked", "已取消": "Cancelled"}
 
 Action = namedtuple("Action", "op task arg")
 Action.__new__.__defaults__ = (None, None)
@@ -142,8 +145,9 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None):
         buckets = dict.fromkeys(_BUCKETS, 0)
         for t in tasks.values():
             buckets[_bucket(t["state"])] += 1
-    rows = [Row("bucket", title=f"{'*' if name == bucket else ''}{name} {n}",
-                domain="bucket") for name, n in buckets.items()]
+    rows = [Row("bucket", title=f"{'*' if name == bucket else ''}"
+                f"{_LABELS.get(name, name)} {n}", domain="bucket")
+            for name, n in buckets.items()]
     f = filt.lower()
     for tid in order:
         t = tasks[tid]
@@ -334,9 +338,9 @@ def try_cancel(base, token, task):
     """task_cancel 一次并回状态文本：取消失败≠离线（离线只由轮询上报）。"""
     try:
         r = _call(base, token, "/task_cancel", {"task": task})
-        return f"取消 {task}: cancelled={r.get('cancelled')}"
+        return f"cancel {task}: cancelled={r.get('cancelled')}"
     except Exception as e:
-        return f"取消失败: {e}"
+        return f"cancel failed: {e}"
 
 
 def tail_session(sid, limit=40):
@@ -362,7 +366,7 @@ def tail_session(sid, limit=40):
                if isinstance(c, list) else str(c or d.get("text") or "").strip())
         if txt:
             out.append(f"[{typ}] {txt}")
-    return out or ["（会话无文本消息）"]
+    return out or ["(no text messages)"]
 
 
 def detail_page(d):
@@ -372,25 +376,25 @@ def detail_page(d):
              ("title", "state", "dispatcher_sid", "worker_sid", "created",
               "last_seen", "env_dir", "project_dir", "fail_streak",
               "chain_depth")]
-    lines.append("---- 事件尾 ----")
+    lines.append("---- events tail ----")
     lines += [f"{e.get('ts', 0):.0f} {e.get('actor')} {e.get('event')}"
               f" {e.get('kind', '')}".rstrip() for e in d.get("events", [])[-10:]]
     if d.get("done_body"):
-        lines += ["---- done 结论 ----", str(d["done_body"])[:2000]]
+        lines += ["---- done verdict ----", str(d["done_body"])[:2000]]
     return lines
 
 
 def doctor_page(v, now=None):
     """doctor 页文本：年龄排行/最后活动排行/僵态候选/环境在盘性。"""
     now = time.time() if now is None else now
-    lines = ["---- 任务年龄 ----"]
+    lines = ["---- task age ----"]
     lines += [f"{tid}  {rel_time(now - age, now)}" for tid, age in v.get("age_rank", [])]
-    lines.append("---- 最后活动（最僵在前） ----")
+    lines.append("---- last activity (stalest first) ----")
     lines += [f"{tid}  {rel_time(ts, now)}" for tid, ts in v.get("last_seen_rank", [])]
-    lines.append("---- 僵态候选（在飞>20min 无活动，判断归上级） ----")
+    lines.append("---- stale candidates (in-flight >20min idle, up to owner) ----")
     lines += [f"{tid}  {rel_time(ts, now)}" for tid, ts in v.get("stale_candidates", [])]
-    lines.append("---- 环境 ----")
-    lines += [f"{e['tid']} {'盘上' if e['on_disk'] else '缺失'} {e['env_dir']}"
+    lines.append("---- envs ----")
+    lines += [f"{e['tid']} {'on-disk' if e['on_disk'] else 'missing'} {e['env_dir']}"
               for e in v.get("env", [])]
     return lines
 
@@ -426,7 +430,7 @@ def draw_board(stdscr, m, status="", err=None):
     """一帧板面：头行＋固顶桶行＋滚动行流（选中反白/着色域）＋底行提示＋输入/确认行。"""
     h, w = stdscr.getmaxyx()
     stdscr.erase()
-    head = f" agora board  {status}" + (f"  离线: {err}" if err else "")
+    head = f" agora board  {status}" + (f"  offline: {err}" if err else "")
     stdscr.addnstr(0, 0, head, w - 1, curses.A_REVERSE)
     rows = m["rows"]
     nb = sum(1 for r in rows if r.kind == "bucket")
@@ -478,7 +482,7 @@ def run(stdscr, base, token):
          "input": None, "buf": "", "filter": "", "expanded": set(),
          "bucket": None}
     details, snap, events = {}, None, None
-    status, err, page = "载入…", None, []
+    status, err, page = "loading…", None, []
 
     def poll():
         """拉一帧刷新内存模型；失败保旧行置 err（err 语义＝轮询离线）。"""
@@ -497,7 +501,7 @@ def run(stdscr, base, token):
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
         err = None
-        status = f"{len(m['rows'])} 行  轮询 {interval:g}s"
+        status = f"{len(m['rows'])} rows  poll {interval:g}s"
 
     poll()                                         # 首帧先拉，免空板白等一个周期
     while True:
@@ -531,12 +535,12 @@ def run(stdscr, base, token):
             try:
                 page = doctor_page(_call(base, token, "/doctor", {}))
             except Exception as e:
-                page = [f"doctor 不可用: {e}"]
+                page = [f"doctor unavailable: {e}"]
         elif a.op == "tail":
             try:
                 page = tail_session(a.arg)
             except Exception as e:                 # 只读降级为提示行
-                page = [f"会话 tail 不可用: {e}"]
+                page = [f"session tail unavailable: {e}"]
         elif a.op == "back":
             page = []
 
