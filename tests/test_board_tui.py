@@ -71,11 +71,13 @@ class TestBuildRows(unittest.TestCase):
     def test_escalate_events_four_kinds_highlight(self):  # Req: F5
         ev = [{"event": "escalate", "task": "t1", "kind": "quality"},
               {"event": "escalate", "task": "t1", "kind": "dispatcher-dead"},
+              {"event": "escalate", "task": "t2", "kind": "stalled"},  # F5 僵态提醒
               {"event": "dispatched", "task": "t1"},          # 非升级不亮
               {"event": "escalate", "task": "t2", "kind": "no-such-kind"}]
         rows = build_rows(snap(t1=trow(), t2=trow()), ev, now=NOW)
         events = [r for r in rows if r.kind == "event"]
-        self.assertEqual([r.note for r in events], ["quality", "dispatcher-dead"])
+        self.assertEqual([r.note for r in events],
+                         ["quality", "dispatcher-dead", "stalled"])
         self.assertTrue(all(r.domain == "warn" for r in events))
         self.assertEqual(events[0].tid, "t1")  # 紧随其任务行
 

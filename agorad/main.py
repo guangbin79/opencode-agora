@@ -58,7 +58,7 @@ def env_config():
 
 
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
-             runner=None, main_sid=_MAIN_SID, store=None):
+             runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -71,7 +71,9 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     app = App(store=store, state=state, auth=auth, router=router, task=task,
               gate=None, health=None, recover=recover, report=report,
               oc=oc, gitx=gitx, main_sid=main_sid)
-    health = Health(state, oc, router, recover, app, store=store)  # R25-A：活绑定
+    health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
+                    stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
+                    runner=mail_runner)  # 邮件外呼缝独立于 Gate runner：两契约不同
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
                 store=store, runner=runner)

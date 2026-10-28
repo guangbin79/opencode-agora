@@ -19,8 +19,9 @@ import urllib.request
 from collections import namedtuple
 from pathlib import Path
 
-# 升级事件四类（与 core/health 字面量对齐——独立命令不 import agorad）
-_KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead"))
+# 升级事件五类（与 core/health 字面量对齐——独立命令不 import agorad）
+_KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead",
+                    "stalled"))
 
 Action = namedtuple("Action", "op task arg")
 Action.__new__.__defaults__ = (None, None)
@@ -77,7 +78,7 @@ def build_rows(snap, events, filt="", now=None, expanded=None):
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
-    行，只取四类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
+    行，只取五类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
     桶行恒在）；链深按 worker→dispatcher 边上溯，环有界。行序 DFS 子树聚簇
     （子代紧随父代，同层保持 chain 原序）；expanded＝展开集，任务行仅当全部
     严格祖先都在其中才显示（空集＝默认折叠只显根层），escalate 事件行随任务

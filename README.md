@@ -81,6 +81,7 @@ Each task: `create → dispatch → worker codes → verify → auto-merge (ff-o
 | `enforce` | on | Global gate switch (root only, audited) |
 | Chain depth / quota | 5 / 8 | Hard limits on dispatch nesting and concurrency |
 | `$AGORA_HOME/.agora/root.token` | auto | Root credential (created by install, 0600) |
+| `$AGORA_HOME/.agora/email.json` | manual | 僵态提醒邮件（`{"to","command"}`，正文走 stdin；缺省不发） |
 
 ## Requirements
 

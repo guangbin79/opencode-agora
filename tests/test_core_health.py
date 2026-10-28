@@ -1,19 +1,23 @@
-"""T9 core/health 契约：只探死/升级四类达主会话/正文合成＋不可信段/touch（R1/R9）。
+"""T9 core/health 契约：探死＋边沿判僵/升级五类达主会话/正文合成＋不可信段/touch。
 
 真 Store/State/Router/Auth＋假 oc/recover 全注入；升级经 router 落库先行，
-主会话 sid＝App 活绑定（R25-A：默认占位 "main"，bind_main 换绑真会话）。
+主会话 sid＝App 活绑定（R25-A：默认占位 "main"，bind_main 换绑真会话）；
+僵态口径经 report.stale_candidates 构造注入（F5 决策记录 2026-10-28）。
 """
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from agorad.access.oc import OcUnavailable
 from agorad.access.store import Store
+from agorad.core import report
 from agorad.core.app import App
 from agorad.core.auth import Auth
 from agorad.core.health import (KIND_DISPATCHER_DEAD, KIND_GATEFILES,
-                                KIND_QUALITY, KIND_REINJECT, Health)
+                                KIND_QUALITY, KIND_REINJECT, KIND_STALLED,
+                                Health)
 from agorad.core.msg import Router
 from agorad.core.state import State
 
@@ -63,7 +67,8 @@ class TestCoreHealth(unittest.TestCase):
                        gate=None, health=None, recover=self.recover,
                        report=None, oc=self.oc, gitx=None, main_sid="main")
         self.health = Health(self.state, self.oc, self.router,
-                             self.recover, self.app, store=self.store)
+                             self.recover, self.app, store=self.store,
+                             stale_candidates=report.stale_candidates)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -78,7 +83,7 @@ class TestCoreHealth(unittest.TestCase):
                              "state": state, "dispatcher_sid": disp,
                              "worker_sid": worker, "chain_depth": 1,
                              "fail_streak": 0, "last_seen": None,
-                             "created": 0.0, "updated": 0.0})
+                             "created": time.time(), "updated": 0.0})
         return tid
 
     def main_msgs(self):
@@ -126,6 +131,84 @@ class TestCoreHealth(unittest.TestCase):
         self.health.tick()  # oc 不可达≠会话死：不误杀
         self.assertEqual(self.recover.calls, [])
         self.assertEqual(self.main_msgs(), [])
+
+    # ---- tick：边沿判僵＋可选邮件（F5 决策记录 2026-10-28）----
+
+    def wire_email(self, runner):
+        (self.tmp / ".agora").mkdir(exist_ok=True)
+        (self.tmp / ".agora" / "email.json").write_text(
+            '{"to": "ops@example.com", "command": "mailx -s stalled ops@example.com"}')
+        self.health = Health(self.state, self.oc, self.router, self.recover,
+                             self.app, store=self.store,
+                             stale_candidates=report.stale_candidates,
+                             runner=runner)
+
+    def test_tick_new_stale_escalates_once_not_repeated(self):  # Req: F5
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)  # epoch 注册＋last_seen=None → 已超 20min
+        self.oc.liveness["s-w1"] = True  # 会话活着：只剩僵态一条路径
+        self.health.tick()
+        bodies = [m["body"] for m in self.main_msgs()]
+        self.assertEqual(sum("失控[stalled]" in b for b in bodies), 1)
+        self.assertIn("僵态候选", bodies[0])
+        self.health.tick()  # 仍在候选集：边沿触发不重复轰炸
+        self.assertEqual(len(self.main_msgs()), 1)
+
+    def test_stale_resets_on_leaving_candidates(self):  # Req: F5
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()
+        self.health.touch("s-w1")  # 活动刷新 → 离开候选集
+        self.health.tick()
+        self.assertEqual(len(self.main_msgs()), 1)
+        self.state.set_fields("t1", last_seen=time.time() - 1300)  # 再次超阈
+        self.health.tick()
+        self.assertEqual(sum("失控[stalled]" in m["body"]
+                             for m in self.main_msgs()), 2)  # 离开复位→再僵再拍
+
+    def test_stale_skips_fresh_and_terminal(self):  # Req: F5
+        self.seed("t1")
+        self.oc.liveness["s-w1"] = True
+        self.state.set_fields("t1", created=time.time() - 600)  # 未超 20min
+        self.seed("t2", state="cancelled", worker="s-w2")  # 终态永不入候选集
+        self.state.set_fields("t2", created=0.0)  # 即便超阈也不拍
+        self.oc.liveness["s-w2"] = True
+        self.health.tick()
+        self.assertEqual(self.main_msgs(), [])
+
+    def test_email_unconfigured_no_subprocess_no_raise(self):  # Req: F5
+        calls = []
+        self.health = Health(self.state, self.oc, self.router, self.recover,
+                             self.app, store=self.store,
+                             stale_candidates=report.stale_candidates,
+                             runner=lambda *a: calls.append(a))
+        self.seed("t1")  # email.json 缺失
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertEqual(calls, [])  # 未配置＝零外呼零异常
+        self.assertEqual([e for e in self.store.read_events("t1")
+                          if e["event"].startswith("email")], [])
+
+    def test_email_configured_receives_body_and_audited(self):  # Req: F5
+        calls = []
+        self.wire_email(lambda cmd, inp: calls.append((cmd, inp)))
+        self.seed("t1")
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertEqual(calls, [(["mailx", "-s", "stalled", "ops@example.com"],
+                                  self.main_msgs()[0]["body"])])  # shlex 切分＋正文同款
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"].startswith("email")], ["email_sent"])
+
+    def test_email_failure_swallowed_escalate_intact(self):  # Req: F5
+        def boom(cmd, inp):
+            raise RuntimeError("smtp down")
+
+        self.wire_email(boom)
+        self.seed("t1")
+        self.health.escalate(KIND_STALLED, "t1")  # 邮件失败不抛
+        self.assertEqual(len(self.main_msgs()), 1)  # escalate 照发
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"].startswith("email")], ["email_failed"])
 
     # ---- escalate：正文合成＋不可信段＋四类达主会话 ----
 

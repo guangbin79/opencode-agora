@@ -59,11 +59,24 @@ def detail(snap, store, tid):
             "done_body": done[-1]["body"] if done else None}
 
 
+def stale_candidates(snap, now):
+    """僵态候选公开口径（F5 决策记录 2026-10-28）：[[tid, 基线ts],...] 基线升序（最僵在前）。
+
+    在飞口径状态（_STALE_STATES）且 now-(last_seen or created)>_STALE_AFTER，
+    基线＝last_seen or created；health tick 构造注入复用同一口径。
+    """
+    cand = [[tid, t.get("last_seen") or t.get("created", 0.0)]
+            for tid, t in snap["tasks"].items()
+            if t["state"] in _STALE_STATES
+            and now - (t.get("last_seen") or t.get("created", 0.0)) > _STALE_AFTER]
+    cand.sort(key=lambda kv: kv[1])
+    return cand
+
+
 def doctor_view(snap, store_home, now=None):
     """账本侧事实：任务年龄/最后活动排行＋僵态候选＋env_dir 在盘性（盘上孤儿扫描属②期）。
 
-    僵态候选（F5）：在飞口径状态且 now-(last_seen or created)>_STALE_AFTER
-    判为 >20min 无活动，按基线升序（最僵在前）；纯显示，处置归上级判断。
+    僵态候选（F5）：同 stale_candidates 口径，纯显示，处置归上级判断。
     """
     now = time.time() if now is None else now
     home, tasks = Path(store_home), snap["tasks"]
@@ -71,11 +84,7 @@ def doctor_view(snap, store_home, now=None):
     stale = sorted(tasks.items(),
                    key=lambda kv: (kv[1].get("last_seen") is not None,
                                    kv[1].get("last_seen") or 0.0))
-    cand = [[tid, t.get("last_seen") or t.get("created", 0.0)]
-            for tid, t in tasks.items()
-            if t["state"] in _STALE_STATES
-            and now - (t.get("last_seen") or t.get("created", 0.0)) > _STALE_AFTER]
-    cand.sort(key=lambda kv: kv[1])
+    cand = stale_candidates(snap, now)
     env = []
     for tid, t in sorted(tasks.items()):
         e = t.get("env_dir")
