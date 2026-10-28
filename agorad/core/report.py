@@ -111,20 +111,25 @@ def detail(snap, store, tid):
            "done_body": done[-1]["body"] if done else None}
     env = out["task"].get("env_dir")
     if env and Path(env).is_dir():
-        out["env_active_seconds_ago"] = int(time.time() - _env_activity(env))
+        act = _env_activity(env)
+        if act > 0.0:  # is_dir 后被并发回收→walk 空，省略而非输出 1.7e9 假值
+            out["env_active_seconds_ago"] = int(time.time() - act)
     return out
 
 
-def stale_candidates(snap, now):
+def stale_candidates(snap, now, base=None):
     """僵态候选公开口径（F5；F15 融 env 活性）：[[tid, 基线ts],...] 基线升序（最僵在前）。
 
     在飞口径状态（_STALE_STATES）且 now-_stale_baseline(t)>_STALE_AFTER，
     基线＝max(last_seen or created, env 文件活性)；health tick 构造注入复用同一口径。
+    base＝doctor_view 预计算基线 map（评审环 round1：免同请求二遍全树 walk），缺省现算。
     """
     cand = []
     for tid, t in snap["tasks"].items():
         if t["state"] in _STALE_STATES:
-            b = _stale_baseline(t)
+            b = base.get(tid) if base is not None else None
+            if b is None:
+                b = _stale_baseline(t)
             if now - b > _STALE_AFTER:
                 cand.append([tid, b])
     cand.sort(key=lambda kv: kv[1])
@@ -142,7 +147,7 @@ def doctor_view(snap, store_home, now=None):
     home, tasks = Path(store_home), snap["tasks"]
     base = {tid: _stale_baseline(t) for tid, t in tasks.items()}
     ranked = sorted(tasks, key=lambda tid: base[tid])
-    cand = stale_candidates(snap, now)
+    cand = stale_candidates(snap, now, base=base)
     env = []
     for tid, t in sorted(tasks.items()):
         e = t.get("env_dir")
