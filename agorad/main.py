@@ -65,7 +65,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     auth = Auth(store)
     oc = oc if oc is not None else Oc(oc_url, oc_password)
     gitx = gitx if gitx is not None else Gitx()
-    router = Router(store, state, oc)
+    router = Router(store, state, oc,
+                    same_lineage=auth.same_lineage)  # F16 血统链边（装配注入）
     task = TaskService(state, auth, gitx, oc, store, router, write_task_page)
     recover = Recover(state, oc, gitx, store, auth, router=router)
     app = App(store=store, state=state, auth=auth, router=router, task=task,

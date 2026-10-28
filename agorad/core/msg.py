@@ -16,11 +16,20 @@ class NotChainEdge(Exception):
 class Router:
     """单写者路由：无锁无线程，httpd 串行调用（设计 §4.8 并发口径）。"""
 
-    def __init__(self, store, state, oc):
+    def __init__(self, store, state, oc, same_lineage=None):
         self._store = store
         self._state = state
         self._oc = oc
+        self._same_lineage = same_lineage  # F16 血统判定（core 禁兄弟 import，装配注入）
         self._delivered = set()
+
+    def is_dispatcher(self, sid, t):
+        """sid 是否本任务派发方：现 sid 相等，或血统含旧 dispatcher_sid
+        （F16 dispatcher 换号链边连续；血统判定缺失＝仅相等）。"""
+        d = t.get("dispatcher_sid")
+        return (sid == d
+                or (d is not None and self._same_lineage is not None
+                    and self._same_lineage(sid, d)))
 
     def post(self, from_sid, to_edge: tuple, kind: str, body: str) -> int:
         to_sid = self._resolve(from_sid, to_edge)
@@ -59,12 +68,12 @@ class Router:
             t = self._state.get(tid)
         except KeyError:
             raise NotChainEdge(f"{tid}: 任务不存在") from None
-        if d == "up":
-            to_sid, other = t.get("dispatcher_sid"), t.get("worker_sid")
+        if d == "up":  # worker 边不加血统：recover 已覆写 worker_sid，无换号缺口
+            to_sid, ok = t.get("dispatcher_sid"), from_sid == t.get("worker_sid")
         elif d == "down":
-            to_sid, other = t.get("worker_sid"), t.get("dispatcher_sid")
+            to_sid, ok = t.get("worker_sid"), self.is_dispatcher(from_sid, t)
         else:
             raise NotChainEdge(f"{to_edge}: 方向非法")
-        if to_sid is None or from_sid != other:
+        if to_sid is None or not ok:
             raise NotChainEdge(f"{from_sid}->{to_edge}: 非链边")
         return to_sid

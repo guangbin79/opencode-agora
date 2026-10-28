@@ -110,6 +110,10 @@ agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait �
 
 > **决策记录**：残余限制已知不修（另行立项）：worker 处于长 LLM 推理/评审段（既无工具调用也无文件写入）时仍可能过早进候选——观测面下一步诚实化＝会话活性探针（oc.alive 类）。
 
+### F16 sid 血统——dispatcher 换号链边连续（2026-10-28）
+主会话（dispatcher）重启后真实 sid 滚动，root 牌经 rebind 跟随新 sid，但旧任务行 dispatcher_sid 仍记旧值——派发方 post 旧任务报「非链边」失声（F14 修订被迫 cancel＋重建）。设计（用户选⑤「sid 血统」）：①令牌记录身份沿革——rebind 把旧 sid 追加进该牌血统集随牌持久化（旧格式缺字段＝空集），same_lineage 提供判定；②链边校验接受血统——dispatcher 边判定扩为「sid 相等或 same_lineage」，血统判定经装配注入 Router 单点持有（worker 边不加，recover 已覆写 worker_sid），消息 from 仍记真实当前 sid。已知边角：doctor rotate_root 换新牌血统从零起、旧任务链边仍断——轮换属手动管理动作，文档化豁免不修。
+**验收**：rebind 累积血统且重启后在；换号后 post 旧任务达 worker（down 边）、归因记新 sid；无血缘仍拒；worker 边不放行；常规链边零变化；全量测试绿。
+
 ## 5. 非功能需求
 
 - 单机、零第三方依赖（服务与 MCP：Python 3 stdlib；插件：TS on Bun）

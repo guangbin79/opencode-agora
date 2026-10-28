@@ -88,6 +88,28 @@ class TestCoreAuth(unittest.TestCase):
         self.au.set_enforce(False, "root")
         self.assertTrue(Auth(Store(self.tmp)).enforce_on())  # 旗标不落盘，重启默认 on
 
+    def test_rebind_accumulates_lineage_and_persists(self):  # Req: F16
+        tok = self.au.issue("s1", "root")
+        self.au.rebind("s1", "s2")
+        self.assertEqual(self.au.identify(tok), ("s2", "root"))
+        self.assertTrue(self.au.same_lineage("s2", "s1"))  # 曾用名入档
+        self.assertFalse(self.au.same_lineage("s1", "s2"))  # 旧名已不持牌
+        self.au.rebind("s2", "s3")  # 链式换号：血统累积
+        self.assertTrue(self.au.same_lineage("s3", "s2"))
+        self.assertTrue(self.au.same_lineage("s3", "s1"))
+        self.assertTrue(Auth(Store(self.tmp)).same_lineage("s3", "s1"))  # 血统随牌落盘
+
+    def test_lineage_resets_on_rotate_and_old_format_compat(self):  # Req: F16
+        self.au.issue("s1", "root")
+        self.au.rebind("s1", "s2")
+        self.au.rotate_root()  # 轮换发新牌：血统从零起（rotate_root 豁免边角）
+        self.assertFalse(self.au.same_lineage("s2", "s1"))
+        self.st.write_ephemeral("tokens", {"t0": ["s9", "worker"]})  # 旧格式缺血统字段
+        au = Auth(Store(self.tmp))
+        self.assertFalse(au.same_lineage("s9", "any"))  # 缺字段＝空集
+        au.rebind("s9", "s10")  # 旧格式 rebind 起档不炸
+        self.assertTrue(au.same_lineage("s10", "s9"))
+
 
 if __name__ == "__main__":
     unittest.main()

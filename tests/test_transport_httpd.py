@@ -294,6 +294,30 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(st, 403)  # 非 root 携头：矩阵拒，绑定不动
         self.assertEqual(self.app.main_sid, "ses-m2")
 
+    def test_dispatcher_renumber_chain_edge_lineage(self):  # Req: F16
+        """sid 血统：dispatcher 换号（bind_main rebind）后 post 旧任务仍达 worker，
+        旧行 dispatcher_sid 不改写、归因记真实新 sid；无血缘 root 仍拒。"""
+        tid = self.create_task()  # 无头建任务：dispatcher_sid=main
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, _ = call(self.port, "POST", "/board", {}, self.root, sid="ses2")  # 换号 rebind
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "main")  # 旧行不改写
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "blood-note-16"},
+                     self.root, sid="ses2")
+        self.assertEqual(st, 200)  # 血统放行：down 边直达 worker
+        self.assertIn(f"[agora] task {tid} note from ses2",
+                      self.stub.sessions[wsid]["injects"][-1])
+        (m,) = [x for x in self.app.store.read_messages()
+                if x["body"] == "blood-note-16"]
+        self.assertEqual((m["from"], m["to"]), ("ses2", wsid))  # 归因真实新 sid
+        outsider = self.app.auth.issue("ses9", "root")
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "x"},
+                     outsider, sid="ses9")
+        self.assertEqual(st, 400)  # 无血缘：非链边
+
     def test_wiki_write_read_and_guards(self):  # Req: F1
         st, r = call(self.port, "POST", "/wiki_write",
                      {"path": "notes/a.md", "text": "hello"}, self.root)

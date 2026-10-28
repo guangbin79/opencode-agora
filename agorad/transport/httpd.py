@@ -194,7 +194,7 @@ class _Handler(BaseHTTPRequestHandler):
             app.router.post(sid, ("up", tid), "done", str(body["body"]))
             self.gate_q.put(tid)  # 门体后台串行
             return {"result": "accepted"}
-        edge = ("down", tid) if sid == t["dispatcher_sid"] else ("up", tid)
+        edge = ("down", tid) if self.app.router.is_dispatcher(sid, t) else ("up", tid)
         return {"message": app.router.post(sid, edge, kind, str(body["body"]))}
 
     def _wiki(self, rel):

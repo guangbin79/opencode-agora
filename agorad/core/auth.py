@@ -30,9 +30,19 @@ class Auth:
 
     def issue(self, sid, role):
         token = secrets.token_hex()
-        self._tokens[token] = [sid, role]
+        self._tokens[token] = [sid, role, []]
         self._persist()
         return token
+
+    @staticmethod
+    def _lineage(v):
+        """牌血统集（F16 曾用名）；旧格式两元组缺字段＝空集。"""
+        return v[2] if len(v) > 2 else []
+
+    def same_lineage(self, current_sid, historical_sid):
+        """F16：current_sid 现持牌的血统集含 historical_sid（换号链边连续）。"""
+        return any(historical_sid in self._lineage(v)
+                   for v in self._tokens.values() if v[0] == current_sid)
 
     def identify(self, token):
         v = self._tokens.get(token)
@@ -40,10 +50,15 @@ class Auth:
 
     def rebind(self, old_sid, new_sid):
         """按 sid 改绑牌到新会话（值 [new_sid, role]，token 本体不变）——
-        重注入后旧牌即续用。返回牌文本（供 inject 送达），无牌 None。"""
+        重注入后旧牌即续用；old_sid 入血统集随牌落盘（F16 换号链边连续）。
+        返回牌文本（供 inject 送达），无牌 None。"""
         for tok, v in self._tokens.items():
             if v[0] == old_sid:
                 v[0] = new_sid
+                if len(v) < 3:  # 旧格式起档
+                    v.append([])
+                if old_sid not in v[2]:
+                    v[2].append(old_sid)
                 self._persist()
                 return tok
         return None

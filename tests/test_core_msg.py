@@ -103,6 +103,23 @@ class TestCoreMsg(unittest.TestCase):
                 self.r.post(from_sid, edge, "process", "x")
         self.assertEqual(len(self.store.read_messages()), n)  # 拒绝即零落库
 
+    # ---- F16 血统链边 ----
+
+    def test_lineage_dispatcher_edge_continuity(self):  # Req: F16
+        """换号后 dispatcher（现 sid 血统含旧 dispatcher_sid）down 边仍达 worker；
+        归因仍记真实新 sid；worker 边不加血统；无血缘仍拒。"""
+        r = Router(self.store, self.state, self.oc,
+                   same_lineage=lambda cur, old: (cur, old) == ("d2", "d1"))
+        mid = r.post("d2", ("down", "t1"), "note", "hi")
+        (m,) = [x for x in self.store.read_messages() if x["id"] == mid]
+        self.assertEqual((m["from"], m["to"]), ("d2", "w1"))
+        self.assertEqual(self.oc.calls[-1],
+                         ("w1", "[agora] task t1 note from d2\nhi"))
+        with self.assertRaises(NotChainEdge):  # worker 边不加：up 方向血统不放行
+            r.post("d2", ("up", "t1"), "note", "x")
+        with self.assertRaises(NotChainEdge):  # 无血缘 sid 仍拒
+            r.post("stranger", ("down", "t1"), "note", "x")
+
     # ---- 游标推进与排序 ----
 
     def test_check_mail_cursor_and_order(self):  # Req: F4
