@@ -36,7 +36,8 @@ def snap(**tasks):
 
 def model(rows=(), sel=0, **kw):
     m = {"rows": list(rows), "sel": sel, "view": "board", "confirm": None,
-         "input": None, "buf": "", "filter": "", "bucket": None}
+         "input": None, "buf": "", "filter": "", "bucket": None,
+         "proj": False, "gexpanded": set()}
     m.update(kw)
     return m
 
@@ -312,16 +313,20 @@ class TestHandleKey(unittest.TestCase):
         handle_key(m, "2")                 # 同键再按恢复全量
         self.assertIsNone(m["bucket"])
         handle_key(m, "5")
-        handle_key(m, "0")                 # 0 恢复全量
-        self.assertIsNone(m["bucket"])
+        self.assertEqual(m["bucket"], "已取消")
+        handle_key(m, "0")                 # 0＝项目分组模式开关（不清桶，可叠加）
+        self.assertIs(m["proj"], True)
+        self.assertEqual(m["bucket"], "已取消")
+        handle_key(m, "0")
+        self.assertIs(m["proj"], False)    # 再按 0 退出分组模式
         self.assertEqual(handle_key(model(self.ROWS, sel=1, view="detail"), "2").op,
                          "noop")           # 全屏页不切换
         m = model(self.ROWS, sel=1, input="")
         handle_key(m, "2")                 # 输入态下数字是过滤字符
         self.assertEqual(m["buf"], "2")
         self.assertIsNone(m["bucket"])
-        self.assertIn("1-5 bucket | 0 all",
-                      (ROOT / "board_tui.py").read_text(encoding="utf-8"))  # hint 注释 0 键
+        self.assertIn("1-5 bucket | 0 proj",
+                      (ROOT / "board_tui.py").read_text(encoding="utf-8"))  # hint 0 键
 
 
 class TestClampView(unittest.TestCase):
@@ -454,6 +459,82 @@ class TestFoldTree(unittest.TestCase):
         self.assertEqual([r.tid for r in task_rows(rows)], ["t0"])  # 折叠只显根
         rows = build_rows(s, [], now=NOW, expanded=set(s["tasks"]))
         self.assertEqual(len(task_rows(rows)), n)   # 全展开走完 DFS 不触递归上限
+
+
+class TestGroupMode(unittest.TestCase):
+    """0 键项目分组视图＋z 组展开＋Z 全折全展（Req: gt-46ceb0）。"""
+
+    def _snap(self):
+        return {"tasks": {
+            "a1": dict(trow(disp="main", worker="wa"), project_dir="/u/alpha",
+                       created=1.0),
+            "a2": dict(trow(disp="wa", worker="wa2"), project_dir="/u/alpha",
+                       created=3.0),          # a2 子 a1：组内保持 forest 近序
+            "b1": dict(trow(disp="main", worker="wb"), project_dir="/u/beta",
+                       created=2.0),
+            "n1": dict(trow(), created=9.0),  # 缺 project_dir 归 "?" 组
+        }, "chain": ["a1", "a2", "b1", "n1"]}
+
+    def test_group_headers_only_sorted_by_latest_created(self):  # Req: gt-46ceb0
+        rows = build_rows(self._snap(), [], now=NOW, group=True)  # 缺省全折叠
+        heads = [r for r in rows if r.kind == "group"]
+        self.assertEqual([r.tid for r in heads], ["?", "alpha", "beta"])
+        self.assertEqual([r.title for r in heads], ["? 1", "alpha 2", "beta 1"])
+        self.assertEqual([r.domain for r in heads], ["bucket"] * 3)  # 样式同桶行
+        self.assertEqual(task_rows(rows), [])            # 组员行隐藏
+        self.assertEqual(len([r for r in rows if r.kind == "bucket"]), 5)  # 桶行恒在
+
+    def test_group_header_z_expands_members(self):  # Req: gt-46ceb0
+        rows = build_rows(self._snap(), [], now=NOW, group=True,
+                          gexpanded={"alpha"})
+        self.assertEqual([r.tid for r in task_rows(rows)],
+                         ["a1", "a2"])                     # 展开显全组员（DFS 序）
+        rows = build_rows(self._snap(), [], now=NOW, group=True)
+        self.assertEqual(task_rows(rows), [])              # 缺省再折叠
+        heads = [Row("bucket", title="在飞 4", domain="bucket"),
+                 Row("group", "alpha", title="alpha 2", domain="bucket")]
+        m = model(heads, sel=1, gexpanded=set())
+        a = handle_key(m, "z")
+        self.assertEqual((a.op, a.task), ("fold", "alpha"))
+        self.assertEqual(m["gexpanded"], {"alpha"})
+        handle_key(m, "z")
+        self.assertEqual(m["gexpanded"], set())            # 再按折叠
+
+    def test_Z_folds_or_expands_all_levels(self):  # Req: gt-46ceb0
+        rows = [Row("group", "alpha", title="alpha 1", domain="bucket"),
+                Row("task", "t1", 0, "running", "目标", "ses-9", "1m", "", "fly")]
+        m = model(rows, sel=1, expanded=set(), gexpanded=set(),
+                  tids={"t1", "t2"}, groups={"alpha", "beta"})
+        self.assertEqual(handle_key(m, "Z").op, "fold")    # 全折→全展（两层面）
+        self.assertEqual(m["gexpanded"], {"alpha", "beta"})
+        self.assertEqual(m["expanded"], {"t1", "t2"})
+        self.assertEqual(handle_key(m, "Z").op, "fold")    # 有展开→全折
+        self.assertEqual((m["gexpanded"], m["expanded"]), (set(), set()))
+        m = model(rows, sel=1, expanded={"t1"})            # 仅子树展开也算展开态
+        handle_key(m, "Z")
+        self.assertEqual((m["gexpanded"], m["expanded"]), (set(), set()))
+        self.assertEqual(handle_key(model(rows, sel=1, view="detail"), "Z").op,
+                         "noop")                           # 全屏页不折叠
+
+    def test_zero_exit_and_group_bucket_filter_overlap(self):  # Req: gt-46ceb0
+        m = model([], sel=0)
+        self.assertEqual(handle_key(m, "0").op, "apply")
+        self.assertIs(m["proj"], True)
+        self.assertEqual(handle_key(m, "0").op, "apply")   # 再按 0 退出分组模式
+        self.assertIs(m["proj"], False)
+        s = {"tasks": {
+            "m1": dict(trow("merged"), project_dir="/u/alpha", created=1.0),
+            "r1": dict(trow("running"), project_dir="/u/alpha", created=2.0),
+            "m2": dict(trow("merged"), project_dir="/u/beta", created=3.0),
+        }, "chain": ["m1", "r1", "m2"]}
+        rows = build_rows(s, [], now=NOW, group=True, bucket="已合并")
+        self.assertEqual([r.tid for r in task_rows(rows)],
+                         ["m2", "m1"])                     # AND 叠加穿透组折叠
+        self.assertEqual([r.tid for r in rows if r.kind == "group"],
+                         ["beta", "alpha"])                # 组头恒在（最新 created 降序）
+        rows = build_rows(s, [], filt="r1", now=NOW, group=True)
+        self.assertEqual([r.tid for r in task_rows(rows)], ["r1"])  # 文本穿透组折叠
+        self.assertEqual(len([r for r in rows if r.kind == "group"]), 2)
 
 
 class TestDoctorPage(unittest.TestCase):

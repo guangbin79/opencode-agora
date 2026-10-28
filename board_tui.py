@@ -69,6 +69,11 @@ def _domain(state):
             "阻塞": "blocked", "已取消": "gone"}[_bucket(state)]
 
 
+def _gkey(t):
+    """项目分组键＝仓 basename（Path 尾段）；缺 project_dir 归 "?" 组。"""
+    return Path(t["project_dir"]).name if t.get("project_dir") else "?"
+
+
 def rel_time(ts, now=None):
     """last_seen 相对时间：- / 5s / 1m / 2h / 2d。"""
     if ts is None:
@@ -83,13 +88,19 @@ def rel_time(ts, now=None):
     return f"{int(d // 86400)}d"
 
 
-def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None):
+def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
+               group=None, gexpanded=None):
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
     行，只取五类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
     桶行恒在）；bucket＝激活桶视图（数字键 1-5）：只显该桶任务行，与文本
     过滤 AND 叠加、同样穿透折叠，计数行恒全局口径，激活桶头加 "*"。
+    group＝项目分组视图（0 键）：按 _gkey（仓 basename）分组渲染，组头行
+    （kind="group"，题＝标签＋组员数，样式同桶行）按组内最新 created 降序，
+    组员保持 forest DFS 近序；gexpanded＝组展开集，缺省空＝全折叠只显组头，
+    文本/桶过滤与分组叠加且穿透组折叠（命中组员照显，组头恒在）；组展开即
+    全显组员（组折叠语义取代子树折叠）。
     链深按 worker→dispatcher 边上溯，环有界。行序 DFS 子树聚簇
     （子代紧随父代，同层保持 chain 原序）；expanded＝展开集，任务行仅当全部
     严格祖先都在其中才显示（空集＝默认折叠只显根层），escalate 事件行随任务
@@ -97,6 +108,7 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None):
     """
     now = time.time() if now is None else now
     expanded = expanded if expanded is not None else set()
+    gexp = gexpanded if gexpanded is not None else set()
     tasks = snap.get("tasks", {})
     chain = [tid for tid in snap.get("chain", []) if tid in tasks]
     esc = {}
@@ -149,6 +161,39 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None):
                 f"{_LABELS.get(name, name)} {n}", domain="bucket")
             for name, n in buckets.items()]
     f = filt.lower()
+
+    def _emit(out, tid):
+        t = tasks[tid]
+        out.append(Row("task", tid, depth[tid], t["state"], t.get("title", ""),
+                       t.get("worker_sid"), rel_time(t.get("last_seen"), now),
+                       " ".join(esc.get(tid, [])), _domain(t["state"]),
+                       Path(t["project_dir"]).name if t.get("project_dir")
+                       else ""))
+        for kind in esc.get(tid, []):
+            out.append(Row("event", tid, depth[tid] + 1, "",
+                           f"↑ escalate[{kind}]", note=kind, domain="warn"))
+
+    if group:                  # 0 键分组视图：组头＝组内最新 created 降序
+        gmap = {}
+        for tid in order:
+            gmap.setdefault(_gkey(tasks[tid]), []).append(tid)
+        keys = sorted(gmap, key=lambda k: max(tasks[t].get("created") or 0.0
+                                              for t in gmap[k]), reverse=True)
+        for k in keys:
+            members = gmap[k]
+            rows.append(Row("group", k, title=f"{k} {len(members)}",
+                            domain="bucket"))
+            if not f and bucket is None and k not in gexp:
+                continue       # 缺省全折叠；过滤/桶视图穿透组折叠（组头恒在）
+            for tid in members:
+                t = tasks[tid]
+                if f and f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
+                    continue
+                if bucket is not None and _bucket(t["state"]) != bucket:
+                    continue
+                _emit(rows, tid)
+        return rows
+
     for tid in order:
         t = tasks[tid]
         if f and f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
@@ -157,15 +202,7 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None):
             continue        # 桶视图同语义穿透折叠（口径与计数行同源）
         if not f and bucket is None and not _shown(tid):
             continue
-        d = depth[tid]
-        rows.append(Row("task", tid, d, t["state"], t.get("title", ""),
-                        t.get("worker_sid"), rel_time(t.get("last_seen"), now),
-                        " ".join(esc.get(tid, [])), _domain(t["state"]),
-                        Path(t["project_dir"]).name if t.get("project_dir")
-                        else ""))
-        for kind in esc.get(tid, []):
-            rows.append(Row("event", tid, d + 1, "", f"↑ escalate[{kind}]",
-                            note=kind, domain="warn"))
+        _emit(rows, tid)
     return rows
 
 
@@ -205,8 +242,8 @@ def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
     键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
-    x cancel（y/n 确认行） z 折叠/展开当前任务子树 / 过滤（单行输入态） 1-5 桶视图（同键/0
-    恢复全量） r 即刷 q 退出。
+    x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员） Z 全折全展 / 过滤（单行输入态）
+    1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤单行输入态
         if key in ("\n", "\r", "KEY_ENTER"):
@@ -269,6 +306,20 @@ def handle_key(m, key):
         if m.get("view") == "board" and r and r.kind == "task":
             m["expanded"].symmetric_difference_update({r.tid})  # set 就地 toggle
             return Action("fold", task=r.tid)
+        if m.get("view") == "board" and r and r.kind == "group":
+            m.setdefault("gexpanded", set()).symmetric_difference_update(
+                {r.tid})                       # 组展开态就地 toggle（缺省空＝全折叠）
+            return Action("fold", task=r.tid)
+        return Action("noop")
+    if key == "Z":
+        if m.get("view") == "board":
+            if m.get("gexpanded") or m.get("expanded"):    # 任一展开→全折
+                m.setdefault("gexpanded", set()).clear()
+                m.setdefault("expanded", set()).clear()
+            else:                          # 全折→全展（分组＋子树两层面）
+                m["gexpanded"] = set(m.get("groups") or ())
+                m["expanded"] = set(m.get("tids") or ())
+            return Action("fold")
         return Action("noop")
     if key == "r":
         return Action("refresh")
@@ -280,8 +331,11 @@ def handle_key(m, key):
         return Action("noop")
     if key in ("0", "1", "2", "3", "4", "5"):
         if m.get("view") == "board":
-            cur = None if key == "0" else _BUCKETS[int(key) - 1]
-            m["bucket"] = None if m.get("bucket") == cur else cur  # 同键再按复原
+            if key == "0":
+                m["proj"] = not m.get("proj")  # 项目分组模式开关（桶视图可叠加）
+            else:
+                cur = _BUCKETS[int(key) - 1]
+                m["bucket"] = None if m.get("bucket") == cur else cur  # 同键复原
             return Action("apply")             # 与过滤 apply 同路：缓存帧即时重建
         return Action("noop")
     return Action("noop")                      # 非引导键忽略
@@ -441,17 +495,18 @@ def draw_board(stdscr, m, status="", err=None):
                        _color(rows[i].domain) | curses.A_BOLD)
     for i, r in enumerate(rows[m["top"]:m["top"] + visible]):
         attr = _color(r.domain)
-        if r.kind == "event":
+        if r.kind in ("event", "group"):
             attr |= curses.A_BOLD
+        text = r.title if r.kind == "group" else _row_text(r)  # 组头＝桶行式短题
         if m["top"] + i == m["sel"]:
             attr |= curses.A_REVERSE
-        stdscr.addnstr(i + nb + 1, 0, _row_text(r), w - 1, attr)
+        stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor"
-                   " | x cancel | 1-5 bucket | 0 all",
+                   " | x cancel | 1-5 bucket | 0 proj",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
-                   f" r refresh | z fold | q quit | / filter[{m['filter']}]",
+                   f" r refresh | z/Z fold | q quit | / filter[{m['filter']}]",
                    w - 1, curses.A_DIM)
     line = f"/{m['buf']}▌" if m.get("input") is not None else \
            (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None)
@@ -480,7 +535,8 @@ def run(stdscr, base, token):
     stdscr.timeout(int(interval * 1000))
     m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set(),
-         "bucket": None}
+         "bucket": None, "proj": False, "gexpanded": set(),
+         "tids": set(), "groups": set()}
     details, snap, events = {}, None, None
     status, err, page = "loading…", None, []
 
@@ -497,7 +553,10 @@ def run(stdscr, base, token):
         """用当前（缓存）帧按 m['filter'] 重建行＋刷新状态头。"""
         nonlocal status, err
         m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"],
-                               bucket=m["bucket"])
+                               bucket=m["bucket"], group=m["proj"],
+                               gexpanded=m["gexpanded"])
+        m["tids"] = set(snap.get("tasks", {}))     # Z 全展宇宙：tid 与分组键全集
+        m["groups"] = {_gkey(t) for t in snap.get("tasks", {}).values()}
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
         err = None
