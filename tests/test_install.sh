@@ -97,6 +97,8 @@ chk "root.token 0600 (Req: F1)"     [ "$(stat -c %a "$A1/.agora/root.token")" = 
 chk "AGORA_OC_URL 占位 env (Req: F1)" grep -q "AGORA_OC_URL" "$A1/.agora/env"
 chk "install 稳定日志在位含 ready 行（不随 install 清理，gt-e38e41）" grep -q "^agorad ready" "$A1/.agora/install-agorad.log"
 chk "信号死因留痕（冒烟毕 kill 记入稳定日志，gt-e38e41）" grep -q "agorad exit signal=SIGTERM" "$A1/.agora/install-agorad.log"
+chk "install 稳定日志 0600（gt-e38e41）" [ "$(stat -c %a "$A1/.agora/install-agorad.log")" = 600 ]
+chk "日志不留 root 牌行（取牌即抹，gt-e38e41）" bash -c '! grep -q "^AGORA_ROOT_TOKEN: " "$1/.agora/install-agorad.log"' _ "$A1"
 chk "agorad 载荷随装（lift 独立安装解析位，Req: F4）" [ -f "$A1/.agora/agorad/main.py" ]
 chk "载荷含子包（漏包＝ModuleNotFoundError，Req: F4）" bash -c '
 for f in access/oc.py access/store.py core/app.py core/task.py transport/httpd.py; do

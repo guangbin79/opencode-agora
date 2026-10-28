@@ -31,7 +31,8 @@ AD_PID=""; LOG=""
 
 fail() { echo "install: $*" >&2; exit 1; }
 cleanup() {
-  [ -n "$AD_PID" ] && kill "$AD_PID" 2>/dev/null || true
+  [ -n "$AD_PID" ] && { kill "$AD_PID" 2>/dev/null || true; wait "$AD_PID" 2>/dev/null || true; }
+  [ -n "$LOG" ] && sed -i '/^AGORA_ROOT_TOKEN: /d' "$LOG" 2>/dev/null  # 取牌即抹：进程死透再抹（sed -i 换 inode，先抹＝丢 fd 后续留痕）
   return 0
 }
 trap cleanup EXIT
@@ -122,9 +123,10 @@ if agorad_alive; then
 else
   LOG="$AGORA_HOME/.agora/install-agorad.log"  # 稳定日志（gt-e38e41）：不随 install 清理，拉起/死因可后验
   [ -f "$LOG" ] && mv -f "$LOG" "$LOG.1"  # 上一轮留档一轮
+  (umask 077; : > "$LOG")  # 0600：日志含 root 牌行，不得按 umask 0644 落盘
   AD_ENV=(env AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL")  # 展开值不作赋值前缀（bash 视为命令名）
   [ -n "$OC_PASSWORD" ] && AD_ENV+=("AGORA_OC_PASSWORD=$OC_PASSWORD")
-  # setsid 脱会话：装完 shell 退出/进程组收割不再陪葬服务（gt-71b6af）；nohup 兜底 SIGHUP 免疫
+  # setsid 脱会话：装完 shell 退出/进程组收割不再陪葬服务（gt-71b6af）；nohup 兜底启动窗——handler 就位后 SIGHUP＝留痕退出（main.py）
   "${AD_ENV[@]}" setsid nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
   AD_PID=$!
   ready=""
