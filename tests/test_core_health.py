@@ -418,6 +418,11 @@ class TestCoreHealth(unittest.TestCase):
         self.app.bind_dispatcher("root", "ses-new", self.state.get("t1"))
         self.assertEqual(self.state.get("t1")["dispatcher_sid"], "d-live")  # 活号不抢绑
         self.oc.liveness["d-live"] = False
+        self.seed("t2", disp="d-victim")  # 已占 sid 守卫（镜像 bind_worker）：他任务在册号不并
+        self.app.bind_dispatcher("root", "d-victim", self.state.get("t1"))
+        self.app.bind_dispatcher("root", "s-w1", self.state.get("t1"))  # 他任务 worker 号
+        self.assertEqual(self.state.get("t1")["dispatcher_sid"], "d-live")
+        self.assertEqual(self.state.get("t2")["dispatcher_sid"], "d-victim")
         self.app.bind_dispatcher("dispatcher", "ses-new", self.state.get("t1"))
         self.app.bind_dispatcher("worker", "ses-new", self.state.get("t1"))
         self.assertEqual(self.state.get("t1")["dispatcher_sid"], "d-live")  # 非 root 牌拒

@@ -104,6 +104,11 @@ class App:
                if x.get("dispatcher_sid") == d and x["state"] in _ACTIVE]
         if not hit:
             return  # 终态不触发改绑
+        # 已占 sid 不抢绑（镜像 bind_worker 防跨任务冒充；真续接号全新必不撞；
+        # main_sid 不在守卫内：root 牌对齐后 sid==main_sid 是常态非冒充）。
+        if any(sid in (x.get("worker_sid"), x.get("dispatcher_sid"))
+               for x in tasks.values()):
+            return
         try:
             if self.oc.alive(d):
                 return  # 登记会话仍活不抢绑
@@ -111,6 +116,8 @@ class App:
             return
         self.auth.rebind(d, sid)
         for tid in hit:
+            if self.state.get(tid)["state"] not in _ACTIVE:
+                continue  # 探活窗内门体或已结案：终态行冻结不覆写（TOCTOU 复检）
             self.state.set_fields(tid, dispatcher_sid=sid)
             self.store.append_event({"ts": time.time(), "actor": sid,
                                      "event": EV_DISPATCHER_REBOUND,
