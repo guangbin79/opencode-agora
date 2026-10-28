@@ -20,6 +20,7 @@ TERMINAL = frozenset(("merged", "closed", "blocked", "cancelled"))
 _INFLIGHT = ("todo", "dispatched", "running", "done", "verify_failed", "reopened")
 _INTERVAL = 15        # 内部轮询间隔（秒）
 _HTTP_TIMEOUT = 5     # 单次请求超时（board_tui 同值）
+_TIMEOUT_MSG = "须为非负有限秒数"
 
 
 class Fail(Exception):
@@ -102,10 +103,10 @@ def _timeout_arg(v):
     """非负有限秒数；拒 nan/inf/负值（nan 会让 deadline 比较恒 False 变热轮询）。"""
     try:
         t = float(v)
-    except ValueError:
-        raise argparse.ArgumentTypeError("须为非负有限秒数") from None
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError(_TIMEOUT_MSG) from None
     if not 0 <= t < float("inf"):
-        raise argparse.ArgumentTypeError("须为非负有限秒数")
+        raise argparse.ArgumentTypeError(_TIMEOUT_MSG)
     return t
 
 

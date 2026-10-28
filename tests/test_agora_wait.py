@@ -265,6 +265,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         p = run_cli(["wait", "t1", "--timeout", "abc"], self.home(None))
         self.assertEqual(p.returncode, 2)
+        self.assertIn("须为非负有限秒数", p.stderr)  # 归一中文报错（非 argparse 英文默认）
         for bad in ("nan", "inf", "-1"):  # nan deadline 比较恒 False＝热轮询
             p = run_cli(["wait", "t1", "--timeout", bad], self.home(None))
             self.assertEqual(p.returncode, 2, bad)
