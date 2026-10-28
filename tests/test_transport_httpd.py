@@ -635,7 +635,7 @@ class TestCredentialFallback(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_dispatch_credential_inject_fail_lands_in_library(self):  # Req: F3
-        tid = self.app.task.create("g", "/repo", None, self.root)
+        tid = self.app.task.create("g", "/repo", None, self.root, verify_cmd="true")
         tok = self.app.task.dispatch(tid, self.root)
         self.assertEqual(self.app.state.get(tid)["state"], "dispatched")
         msgs = [m for m in self.app.store.read_messages()

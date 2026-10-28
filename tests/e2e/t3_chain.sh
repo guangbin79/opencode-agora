@@ -377,7 +377,7 @@ def git_clean(repo):
 
 def dispatch(goal, repo, after=None):
     """建＋派一体的场景件（goal 即 worker 指令——提示词窄化走任务页）：回 (tid, wtok, env, wsid)。"""
-    body = {"goal": goal, "project_dir": f"{WORK}/{repo}"}
+    body = {"goal": goal, "project_dir": f"{WORK}/{repo}", "verify_cmd": "true"}
     if after:
         body["after"] = after
     code, body = agora("/task_create", body)
@@ -524,7 +524,8 @@ check(seqs == list(range(10)), f"连续 10 条按序全到（实际序：{seqs}�
 code, body = agora("/task_create", {"goal": "Create a file named seen.md containing the exact content "
                                     "of the file ../repoA/merged.md (relative path from your current "
                                     "directory). Commit it with git.",
-                                    "project_dir": f"{WORK}/repoB", "after": tidA})
+                                    "project_dir": f"{WORK}/repoB", "after": tidA,
+                                    "verify_cmd": "true"})
 tidB = body["task"]
 code, body = agora("/task_dispatch", {"task": tidB})
 check(code == 403 and "after" in body.get("error", ""),

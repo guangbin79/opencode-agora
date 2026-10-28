@@ -65,6 +65,7 @@ cd opencode-agora && ./install.sh
 - **会话牌**：root / dispatcher / worker 角色矩阵，越权必拒
 - **启用域**：指定仓中 agora 完全休眠
 - **目标分支**：`target_branch="feature/x"` 合并进指定分支——兼容 PR 工作流
+- **verify 原子登记**：`task_create(verify_cmd="pytest -q")` 建单即登记验收命令；verify 未登记（又无 `verify_pending: true` 豁免旗）的派发当场 403 拒绝
 
 ## 配置
 

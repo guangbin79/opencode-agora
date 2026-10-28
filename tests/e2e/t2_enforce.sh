@@ -252,7 +252,8 @@ deny_case("S1 无凭据拒", B1, A1, main,
           "s1.md", "派发", f"{WORK}/denyrepo/s1.md")
 
 # —— S2 持凭据放行：真 dispatch（BOOT/credential 经 session.prompt 进 cred 缓存）→ env 内写放行 ——
-tid = agora("/task_create", {"goal": "t2 e2e allow", "project_dir": f"{WORK}/proj"})["task"]
+tid = agora("/task_create", {"goal": "t2 e2e allow", "project_dir": f"{WORK}/proj",
+                             "verify_cmd": "true"})["task"]
 agora("/task_dispatch", {"task": tid})
 row = agora("/board", {"task": tid})["task"]
 env_dir = row.get("env_dir") or ""

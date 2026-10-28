@@ -22,6 +22,7 @@ EV_CANCELLED = "cancelled"
 EV_VERIFY = "verify_registered"
 EV_DENIED = "auth_denied"
 EV_REJECTED = "dispatch_rejected"
+EV_REJECTED_VERIFY = "dispatch_rejected_verify_missing"
 
 
 class Rejected(Exception):
@@ -38,9 +39,13 @@ class TaskService:
     # ---- F2 建任务 ----
 
     def create(self, goal, project_dir, after, actor_token, title=None,
-               target_branch=None):
+               target_branch=None, verify_cmd=None, verify_pending=False):
         sid, _ = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
+        if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
+            self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
+        if verify_cmd is not None and not verify_cmd.strip():
+            self._reject(tid, sid, "verify 命令为空——task_create 登记非空命令")
         if after is not None:
             try:
                 self._state.get(after)
@@ -54,18 +59,26 @@ class TaskService:
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
         tid = self._new_tid()
+        now = time.time()
+        verify = {"cmd": "", "state": "pending", "registered_by": None,
+                  "registered_at": None}
+        if verify_cmd is not None:  # 建单原子登记：一步到位，两步舞消失
+            verify = {"cmd": verify_cmd, "state": "registered",
+                      "registered_by": sid, "registered_at": now}
         self._state.add(tid, {
             "title": (title or goal.splitlines()[0][:40]) if (title or goal) else tid, "goal": goal,
             "project_dir": project_dir, "target_branch": target_branch,
             "env_dir": None, "after": after,
-            "verify": {"cmd": "", "state": "pending", "registered_by": None,
-                       "registered_at": None},
+            "verify": verify, "verify_pending": bool(verify_pending),
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
             "chain_depth": depth, "fail_streak": 0, "last_seen": None,
-            "created": time.time(), "updated": time.time()})
+            "created": now, "updated": now})
         self._pages(self._store.home, tid, self._state.get(tid))
-        self._store.append_event({"ts": time.time(), "actor": sid,
+        self._store.append_event({"ts": now, "actor": sid,
                                   "event": EV_CREATED, "task": tid})
+        if verify_cmd is not None:  # 登记事件照落（与 update 路同款审计）
+            self._store.append_event({"ts": now, "actor": sid,
+                                      "event": EV_VERIFY, "task": tid})
         return tid
 
     # ---- F3 派发 ----
@@ -76,6 +89,11 @@ class TaskService:
                             owner=t.get("dispatcher_sid"))
         if t["state"] not in ("todo", "blocked"):
             self._reject(tid, sid, f"{t['state']} 不可派发（仅 todo/blocked）")
+        if (t["verify"]["state"] != "registered" and not t.get("verify_pending")):
+            # 派发硬闸：两步舞漏登记在派发瞬间拍死（gt-e103ae/gt-87f3c2 同根因）；
+            # 唯一豁免＝建单显式 verify_pending（探索路：worker 提案→task_update 登记）
+            self._reject(tid, sid, "verify 未登记——create 传 verify_cmd 原子登记，"
+                                   "或建单 verify_pending=true 走探索路", ev=EV_REJECTED_VERIFY)
         if t["chain_depth"] >= _MAX_DEPTH:
             self._reject(tid, sid, f"chain_depth>={_MAX_DEPTH}")
         active = sum(1 for x in self._state.snapshot()["tasks"].values()
@@ -177,8 +195,8 @@ class TaskService:
             raise Rejected(f"{tid or ''}: {tool} 拒绝（role={role}）")
         return sid, role
 
-    def _reject(self, tid, sid, reason):
-        self._store.append_event({"ts": time.time(), "actor": sid, "event": EV_REJECTED,
+    def _reject(self, tid, sid, reason, ev=EV_REJECTED):
+        self._store.append_event({"ts": time.time(), "actor": sid, "event": ev,
                                   "task": tid, "note": reason})
         raise Rejected(f"{tid}: {reason}")
 

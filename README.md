@@ -70,6 +70,7 @@ Each task: `create → dispatch → worker codes → verify → auto-merge (ff-o
 - **Session tokens**: per-session credentials with role matrix (root / dispatcher / worker). Workers can never cancel, modify verify, or access the board.
 - **Scope control**: list repos in `inactive-repos` to make agora fully dormant there.
 - **Target branch support**: `task_create(target_branch="feature/x")` merges into that branch instead of main — compatible with PR-based workflows.
+- **Atomic verify registration**: `task_create(verify_cmd="pytest -q")` registers the acceptance command at creation; dispatch without a registered verify (or `verify_pending: true` opt-out) is rejected 403 on the spot.
 
 ## Configuration
 

@@ -76,6 +76,7 @@ class TestCoreTask(unittest.TestCase):
                              "env_dir": env,
                              "verify": {"cmd": "", "state": "pending",
                                         "registered_by": None, "registered_at": None},
+                             "verify_pending": True,  # 播种行免硬闸：闸语义归 TestVerifyGate
                              "state": state, "dispatcher_sid": disp,
                              "worker_sid": worker, "chain_depth": depth,
                              "fail_streak": 0, "created": 0.0, "updated": 0.0})
@@ -86,12 +87,13 @@ class TestCoreTask(unittest.TestCase):
         return [json.loads(line) for line in lines if line]
 
     def dispatchable(self, goal="do x", after=None):
-        return self.svc.create(goal, "/repo", after, self.root)
+        # 硬闸后的「可派发」＝建单原子登记 verify（快速路）
+        return self.svc.create(goal, "/repo", after, self.root, verify_cmd="true")
 
     def dispatched_pair(self):
         """建＋派一套（dispatcher 角色 token 持有），返回 (tid, dispatcher_token, worker_token)。"""
         disp = self.auth.issue("disp1", "dispatcher")
-        tid = self.svc.create("g", "/repo", None, disp)
+        tid = self.svc.create("g", "/repo", None, disp, verify_cmd="true")
         return tid, disp, self.svc.dispatch(tid, disp)
 
 
@@ -226,7 +228,7 @@ class TestVerify(TestCoreTask):
         self.assertIn("空", str(cm.exception))
         self.assertTrue(any(e["event"] == "dispatch_rejected"
                             and e.get("task") == tid for e in self.events()))
-        self.assertEqual(self.state.get(tid)["verify"]["state"], "pending")  # 未被登记
+        self.assertEqual(self.state.get(tid)["verify"]["cmd"], "true")  # 原值未被空命令覆写
 
     def test_happy_path_post_then_register_locks(self):  # Req: F2
         tid, disp, worker = self.dispatched_pair()
@@ -243,10 +245,64 @@ class TestVerify(TestCoreTask):
             self.svc.update_verify(tid, worker, "rm -rf /")
 
 
-class TestCreateAndRedispatch(TestCoreTask):
+class TestVerifyGate(TestCoreTask):
+    """F22 派发硬闸＋建单原子登记（gt-e103ae/gt-87f3c2/20261026-135627 同根因）。"""
+
+    def test_create_with_verify_cmd_registers_atomically(self):  # Req: F22
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="pytest -q")
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["state"], "registered")  # 建单即登记：状态直接 registered
+        self.assertEqual(v["cmd"], "pytest -q")
+        self.assertEqual(v["registered_by"], "main")
+        self.assertGreater(v["registered_at"], 0)
+        evs = [e["event"] for e in self.events() if e.get("task") == tid]
+        self.assertEqual(evs, ["task_created", "verify_registered"])  # 登记事件照落
+        self.svc.dispatch(tid, self.root)  # 快速路：dispatch 一步放行
+        self.assertEqual(self.state.get(tid)["state"], "dispatched")
+
+    def test_create_rejects_empty_cmd_and_combo(self):  # Req: F22
+        with self.assertRaises(Rejected) as cm:  # 空命令＝无质量闸，同 update 口径
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="  ")
+        self.assertIn("空", str(cm.exception))
+        with self.assertRaises(Rejected):  # 登记与豁免语义互斥
+            self.svc.create("g", "/repo", None, self.root,
+                            verify_cmd="true", verify_pending=True)
+
+    def test_dispatch_without_verify_rejected_instant_with_audit(self):  # Req: F22
+        tid = self.svc.create("g", "/repo", None, self.root)  # 无 verify 无旗
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("verify 未登记", str(cm.exception))
+        ev = [e for e in self.events()
+              if e["event"] == "dispatch_rejected_verify_missing"]
+        self.assertEqual(len(ev), 1)  # 专属审计行
+        self.assertEqual(self.state.get(tid)["state"], "todo")  # 拒绝在派发瞬间：零副作用
+        self.assertEqual(self.gitx.built, [])  # 未建环境
+        self.assertEqual(self.oc.sessions, [])  # 未建会话未签凭据
+
+    def test_incident_gt_87f3c2_shape_must_be_rejected(self):  # Req: F22
+        """事故复刻证明：create 后漏 update 即 dispatch（两步舞断链）必被 403 拍回。"""
+        disp = self.auth.issue("disp1", "dispatcher")
+        tid = self.svc.create("g", "/repo", None, disp)  # 事故形态：少了 task_update
+        with self.assertRaises(Rejected):
+            self.svc.dispatch(tid, disp)
+        self.assertTrue(any(e["event"] == "dispatch_rejected_verify_missing"
+                            and e.get("task") == tid for e in self.events()))
+
+    def test_verify_pending_exemption_keeps_exploration_path(self):  # Req: F22
+        disp = self.auth.issue("disp1", "dispatcher")
+        tid = self.svc.create("g", "/repo", None, disp, verify_pending=True)
+        self.svc.dispatch(tid, disp)  # 豁免旗：未登记也可先派
+        wsid, _, _ = self.oc.sessions[-1]
+        self.router.post(wsid, ("up", tid), "verify", "pytest -q")  # worker 提案
+        self.svc.update_verify(tid, disp, "pytest -q")  # 派发方登记照常
+        self.assertEqual(self.state.get(tid)["verify"]["state"], "registered")
+
+
+
     def test_create_writes_task_page_and_dispatch_rerenders(self):  # Req: F2
         disp = self.auth.issue("disp1", "dispatcher")
-        tid = self.svc.create("g", "/repo", None, disp)
+        tid = self.svc.create("g", "/repo", None, disp, verify_cmd="true")
         page = self.tmp / "wiki" / "tasks" / f"{tid}.md"
         self.assertTrue(page.exists())  # create 产出任务页（create→page 接线）
         self.svc.dispatch(tid, disp)
@@ -271,18 +327,19 @@ class TestCreateAndRedispatch(TestCoreTask):
     def test_dispatch_builds_env_from_target_branch(self):  # Req: gt-132747
         disp = self.auth.issue("disp1", "dispatcher")
         tid = self.svc.create("g", "/repo", None, disp,
-                              target_branch="issue/7")
+                              target_branch="issue/7", verify_cmd="true")
         self.svc.dispatch(tid, disp)
         self.assertEqual(self.gitx.branches[-1], "issue/7")  # 起点分支透传
         tid2, disp2, _ = self.dispatched_pair()
         self.assertEqual(self.gitx.branches[-1], None)  # 缺省＝None（向后兼容）
 
     def test_create_seeds_queryable_row(self):  # Req: F2
-        tid = self.dispatchable("my goal", after=None)
+        tid = self.svc.create("my goal", "/repo", None, self.root)  # 裸 create：缺省 pending
         t = self.state.snapshot()["tasks"][tid]
         self.assertEqual(t["state"], "todo")
         self.assertEqual(t["dispatcher_sid"], "main")  # 归属＝创建者会话
         self.assertEqual(t["verify"]["state"], "pending")
+        self.assertFalse(t["verify_pending"])
         self.assertEqual(t["goal"], "my goal")
         self.assertEqual(t["chain_depth"], 1)
 

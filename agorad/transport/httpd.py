@@ -114,7 +114,9 @@ class _Handler(BaseHTTPRequestHandler):
             return {"task": app.task.create(body["goal"], body["project_dir"],
                                             body.get("after"), token,
                                             title=body.get("title"),
-                                            target_branch=body.get("target_branch"))}
+                                            target_branch=body.get("target_branch"),
+                                            verify_cmd=body.get("verify_cmd"),
+                                            verify_pending=bool(body.get("verify_pending")))}
         if name == "task_dispatch":
             return {"task": body["task"],
                     "token": app.task.dispatch(body["task"], token)}

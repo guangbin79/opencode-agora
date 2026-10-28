@@ -31,6 +31,12 @@ _TOOLS = [
          "after": {"type": "string", "description": "前驱任务 id（gt-xxxxxx，B7 链）"},
          "target_branch": {"type": "string",
                            "description": "合入目标分支（外部工作流；缺省＝仓默认支）"},
+         "verify_cmd": {"type": "string",
+                        "description": "验收命令：传入即建单时原子登记（推荐，"
+                                       "否则 task_dispatch 硬闸拒派）"},
+         "verify_pending": {"type": "boolean",
+                            "description": "探索路豁免旗：true＝未登记 verify 也可先派发，"
+                                           "worker 提案后 task_update 登记"},
          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
          "required": ["goal", "project_dir"]}},
     {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
