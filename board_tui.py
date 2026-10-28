@@ -350,11 +350,11 @@ def draw_board(stdscr, m, status="", err=None):
         if i == m["sel"]:
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + 1, 0, text, w - 1, attr)
-    hint = (f" j/k 移动 g/G 跳转 Enter/l 明细 L 会话 d doctor x 取消"
-            f" / 过滤 r 刷 q 退  滤[{m['filter']}]")
+    hint = (f" j/k move g/G jump Enter/l detail L tail d doctor x cancel"
+            f" / filter r refresh q quit  filter[{m['filter']}]")
     stdscr.addnstr(h - 2, 0, hint, w - 1, curses.A_DIM)
     line = f"/{m['buf']}▌" if m.get("input") is not None else \
-           (f"取消 {m['confirm']} ? y/n" if m.get("confirm") else None)
+           (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None)
     if line:
         stdscr.addnstr(h - 1, 0, line, w - 1, curses.A_REVERSE)
     stdscr.refresh()
@@ -367,7 +367,7 @@ def draw_page(stdscr, title, lines):
     stdscr.addnstr(0, 0, f" {title}", w - 1, curses.A_REVERSE)
     for i, ln in enumerate(lines[:h - 2]):
         stdscr.addnstr(i + 1, 0, str(ln), w - 1, 0)
-    stdscr.addnstr(h - 1, 0, " h 返回  q 退出", w - 1, curses.A_DIM)
+    stdscr.addnstr(h - 1, 0, " h back  q quit", w - 1, curses.A_DIM)
     stdscr.refresh()
 
 
