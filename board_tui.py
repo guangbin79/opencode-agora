@@ -399,6 +399,13 @@ def _color(domain):
     return curses.color_pair(_PAIR[domain]) if domain in _PAIR and curses.has_colors() else 0
 
 
+def _row_text(r):
+    """任务/事件行文本：列全部定宽，last_seen 宽度浮动不漂移 repo 列。"""
+    return (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 32)}"
+            f"     {_pad(r.state, 13)} {_pad(r.last_seen or '-', 5)}"
+            + (f"  {r.repo}" if r.repo else ""))
+
+
 def draw_board(stdscr, m, status="", err=None):
     """一帧板面：头行＋行流（桶行粗体/选中反白/着色域）＋底行提示＋输入/确认行。"""
     h, w = stdscr.getmaxyx()
@@ -412,9 +419,7 @@ def draw_board(stdscr, m, status="", err=None):
         if r.kind == "bucket":
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
             continue
-        text = (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 32)}"
-                f"     {_pad(r.state, 13)} {_pad(r.last_seen or '-', 5)}"
-                + (f"  {r.repo}" if r.repo else ""))
+        text = _row_text(r)
         if r.kind == "event":
             attr |= curses.A_BOLD
         if m["top"] + i == m["sel"]:

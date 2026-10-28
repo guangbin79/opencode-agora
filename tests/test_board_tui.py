@@ -16,8 +16,9 @@ import time
 import unittest
 from pathlib import Path
 
-from board_tui import (Action, Row, build_rows, clamp_view, detail_page,
-                       doctor_page, handle_key, rel_time, try_cancel)
+from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
+                       detail_page, doctor_page, handle_key, rel_time,
+                       try_cancel)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -89,6 +90,15 @@ class TestBuildRows(unittest.TestCase):
         self.assertEqual(rel_time(NOW - 172800, NOW), "2d")
         s = snap(t1=trow(last_seen=940.0))
         self.assertEqual(task_rows(build_rows(s, [], now=NOW))[0].last_seen, "1m")
+
+    def test_task_line_fixed_columns(self):  # Req: F10
+        s = snap(t1=trow(last_seen=NOW - 5), t2=trow(last_seen=None))
+        s["tasks"]["t1"]["project_dir"] = "/home/u/r1"
+        s["tasks"]["t2"]["project_dir"] = "/home/u/r2"
+        lines = [_row_text(r) for r in task_rows(build_rows(s, [], now=NOW))]
+        self.assertEqual(lines[0].index("r1"), lines[1].index("r2"))  # repo 列起点与 last_seen 宽度无关
+        c1 = lines[1].index("r2")
+        self.assertEqual(lines[1][c1 - 7:c1 - 2], "-    ")  # 缺失 last_seen 定宽 5
 
     def test_buckets_server_global_and_local_fallback(self):  # Req: gt-6def73
         s = {"tasks": {"t1": trow("merged")}, "chain": ["t1"],
