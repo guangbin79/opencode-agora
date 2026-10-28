@@ -5,6 +5,7 @@ service.json（$AGORA_HOME/.agora/ 下，pid/port/started/version/oc_version）�
 health 后台定时线程（默认 300s，AGORA_HEALTH_INTERVAL 可配）→serve_forever。
 """
 import os
+import signal
 import sys
 import threading
 import time
@@ -114,7 +115,16 @@ def start_health_thread(app, interval):
     return th
 
 
+def _log_signal_exit(signum, _frame):
+    """信号死因留痕（gt-e38e41）：默认处置无声死，先在 stderr 记因再退。"""
+    print(f"agorad exit signal={signal.Signals(signum).name}", file=sys.stderr,
+          flush=True)
+    raise SystemExit(128 + signum)
+
+
 def main():
+    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(_sig, _log_signal_exit)
     home, oc_url, oc_password = env_config()
     if not oc_url:
         print("需要 AGORA_OC_URL（或 $XDG_STATE_HOME/opencode/service.json 服务发现）",
@@ -140,10 +150,7 @@ def main():
     start_health_thread(app, float(os.environ.get("AGORA_HEALTH_INTERVAL",
                                                   "300")))
     print(f"agorad ready port={server.server_address[1]}", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    server.serve_forever()
     return 0
 
 

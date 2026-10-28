@@ -56,7 +56,7 @@ EOF
 done
 [ -n "$GOT" ] || kill "$AD1_PID" 2>/dev/null || true
 chk "夹具 agorad 存活（service.json 端口可连，gt-71b6af）" [ -n "$GOT" ]
-chk "install 拉起行 setsid 在位（源级锁，gt-71b6af）" grep -qF 'setsid python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
+chk "install 拉起行 setsid nohup 在位（源级锁，gt-71b6af/gt-e38e41）" grep -qF 'setsid nohup python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
 ADSESS=""
 [ -n "$GOT" ] && ADSESS="$(ps -o sess= -p "$adpid" 2>/dev/null | tr -d ' ')"
 chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"
@@ -95,6 +95,8 @@ chk "收尾输出携名册提示（路径 env 展开非字面量，Req: F12）" 
 chk "root.token 在位非空 (Req: F1)" [ -s "$A1/.agora/root.token" ]
 chk "root.token 0600 (Req: F1)"     [ "$(stat -c %a "$A1/.agora/root.token")" = 600 ]
 chk "AGORA_OC_URL 占位 env (Req: F1)" grep -q "AGORA_OC_URL" "$A1/.agora/env"
+chk "install 稳定日志在位含 ready 行（不随 install 清理，gt-e38e41）" grep -q "^agorad ready" "$A1/.agora/install-agorad.log"
+chk "信号死因留痕（冒烟毕 kill 记入稳定日志，gt-e38e41）" grep -q "agorad exit signal=SIGTERM" "$A1/.agora/install-agorad.log"
 chk "agorad 载荷随装（lift 独立安装解析位，Req: F4）" [ -f "$A1/.agora/agorad/main.py" ]
 chk "载荷含子包（漏包＝ModuleNotFoundError，Req: F4）" bash -c '
 for f in access/oc.py access/store.py core/app.py core/task.py transport/httpd.py; do

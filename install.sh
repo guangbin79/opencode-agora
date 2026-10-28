@@ -27,12 +27,11 @@ OC_DIR="$HOME/.config/opencode"
 PLUGIN_DIR="$OC_DIR/plugins/agora"
 SERVICE_JSON="$AGORA_HOME/.agora/service.json"
 ROOT_TOKEN="$AGORA_HOME/.agora/root.token"
-AD_PID=""; CAP=""
+AD_PID=""; LOG=""
 
 fail() { echo "install: $*" >&2; exit 1; }
 cleanup() {
   [ -n "$AD_PID" ] && kill "$AD_PID" 2>/dev/null || true
-  [ -n "$CAP" ] && rm -f "$CAP"
   return 0
 }
 trap cleanup EXIT
@@ -121,21 +120,21 @@ PY
 if agorad_alive; then
   echo "install: agorad 已在运行——复用既有实例与 root.token"
 else
-  mkdir -p /tmp/opencode
-  CAP="$(mktemp /tmp/opencode/install-agorad.XXXXXX)"
+  LOG="$AGORA_HOME/.agora/install-agorad.log"  # 稳定日志（gt-e38e41）：不随 install 清理，拉起/死因可后验
+  [ -f "$LOG" ] && mv -f "$LOG" "$LOG.1"  # 上一轮留档一轮
   AD_ENV=(env AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL")  # 展开值不作赋值前缀（bash 视为命令名）
   [ -n "$OC_PASSWORD" ] && AD_ENV+=("AGORA_OC_PASSWORD=$OC_PASSWORD")
-  # setsid 脱会话：装完 shell 退出/进程组收割不再陪葬服务（gt-71b6af）
-  "${AD_ENV[@]}" setsid python3 "$REPO/agorad/main.py" >"$CAP" 2>&1 &
+  # setsid 脱会话：装完 shell 退出/进程组收割不再陪葬服务（gt-71b6af）；nohup 兜底 SIGHUP 免疫
+  "${AD_ENV[@]}" setsid nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
   AD_PID=$!
   ready=""
   for _ in {1..100}; do  # 10s 上限：等就绪行（root 牌行在其前 flush）
-    if grep -q "^agorad ready" "$CAP" 2>/dev/null; then ready=1; break; fi
+    if grep -q "^agorad ready" "$LOG" 2>/dev/null; then ready=1; break; fi
     kill -0 "$AD_PID" 2>/dev/null || break
     sleep 0.1
   done
-  [ -n "$ready" ] || { cat "$CAP" >&2; fail "agorad 启动失败（10s 未就绪，见上方输出）"; }
-  tok="$(awk '/^AGORA_ROOT_TOKEN: /{print $2; exit}' "$CAP")"
+  [ -n "$ready" ] || { cat "$LOG" >&2; fail "agorad 启动失败（10s 未就绪，见上方输出）"; }
+  tok="$(awk '/^AGORA_ROOT_TOKEN: /{print $2; exit}' "$LOG")"
   if [ -n "$tok" ]; then
     (umask 077; printf '%s\n' "$tok" > "$ROOT_TOKEN")  # 0600（F1 root 牌唯一落盘点）
   elif [ ! -s "$ROOT_TOKEN" ]; then
@@ -163,6 +162,7 @@ if [ -n "$AD_PID" ]; then
   kill "$AD_PID" 2>/dev/null || true
   wait "$AD_PID" 2>/dev/null || true
   AD_PID=""
+  echo "install: 冒烟毕已停本脚本拉起的实例（装后服务由插件 lift 按需拉起）——拉起日志 $LOG"
 fi
 
 echo "install: 完成（$AGORA_HOME）"
