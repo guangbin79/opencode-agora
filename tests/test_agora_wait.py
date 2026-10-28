@@ -188,6 +188,35 @@ class TestWait(unittest.TestCase):
             agora.wait("t1", f"http://127.0.0.1:{_dead_port()}", "tok",
                        timeout=30, clock=clock, pause=pause)
 
+    def test_follows_pointer_rotation_on_transient(self):  # Req: F14  换模跟随
+        dead = f"http://127.0.0.1:{_dead_port()}"
+        srv = _Srv(["merged"], commit="c" * 40)
+        try:
+            reads = {"n": 0}
+
+            def reread():
+                reads["n"] += 1
+                return (srv.base, "tok2") if reads["n"] > 1 else (dead, "tok")
+
+            clock, pause = self._fake()
+            self.assertEqual(
+                agora.wait("t1", dead, "tok", timeout=100,
+                           clock=clock, pause=pause, reread=reread),
+                (0, "merged @" + "c" * 12))
+        finally:
+            srv.stop()
+
+    def test_reread_failure_keeps_old_endpoint(self):  # Req: F14  半写/缺失瞬间
+        srv = _Srv(["merged"], commit="c" * 40)
+        try:
+            clock, pause = self._fake()
+            self.assertEqual(
+                agora.wait("t1", srv.base, "tok", timeout=100,
+                           clock=clock, pause=pause, reread=lambda: 1 // 0),
+                (0, "merged @" + "c" * 12))
+        finally:
+            srv.stop()
+
 
 class TestCli(unittest.TestCase):
     def setUp(self):
@@ -248,6 +277,20 @@ class TestCli(unittest.TestCase):
         p = run_cli(["wait", "t1", "--timeout", "1"], self.home(None))
         self.assertEqual(p.returncode, 2)
         self.assertEqual(p.stdout, "")
+
+    def test_follows_service_json_repoint_after_remodel(self):  # Req: F14
+        a = _Srv(["running"])
+        home = self.home(a)
+        a.stop()  # 换模：旧端点死，service.json 改指新端口上的活服务
+        b = _Srv(["merged"], commit="d" * 40)
+        try:
+            (home / ".agora" / "service.json").write_text(
+                json.dumps({"port": b.srv.server_address[1]}))
+            p = run_cli(["wait", "t1", "--timeout", "30"], home)
+            self.assertEqual((p.returncode, p.stdout.strip()),
+                             (0, "merged @" + "d" * 12))
+        finally:
+            b.stop()
 
     def test_missing_token_exit_two(self):  # Req: F14
         srv = _Srv(["running"])

@@ -72,10 +72,19 @@ def classify(state):
 
 
 def wait(tid, base, token, timeout=1800, once=False, interval=_INTERVAL,
-         clock=time.monotonic, pause=time.sleep):
-    """轮询至终态：返回 (exit, stdout 行)；重试至超时仍不可达 raise Fail。"""
+         clock=time.monotonic, pause=time.sleep, reread=None):
+    """轮询至终态：返回 (exit, stdout 行)；重试至超时仍不可达 raise Fail。
+
+    reread（run_wait 注入 discover）每轮轮询前重读指针——服务换模
+    （杀旧拉新、端口/牌换代）即跟随新端点续等，不对死端口空转到超时。
+    """
     deadline = clock() + timeout
     while True:
+        if reread:
+            try:
+                base, token = reread()
+            except Exception:  # 指针半写/缺失瞬间保持旧端点，下轮再读
+                pass
         try:
             state, commit = fetch(base, token, tid)
         except Transient as e:
@@ -94,7 +103,8 @@ def run_wait(a):
     base, token = discover()
     if not token:
         raise Fail("root 牌缺失")
-    code, line = wait(a.task_id, base, token, timeout=a.timeout, once=a.once)
+    code, line = wait(a.task_id, base, token, timeout=a.timeout, once=a.once,
+                      reread=discover)
     print(line)
     return code
 
