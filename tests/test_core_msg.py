@@ -135,6 +135,31 @@ class TestCoreMsg(unittest.TestCase):
         self.assertEqual([m["id"] for m in self.r.check_mail("w1")], [m3])
         self.assertEqual(self.r.check_mail("d1"), [])  # 游标后旧件不再交
 
+    # ---- 免通知通道（gt-5bc312 stalled 降噪）----
+
+    def test_silent_post_quiet_channel_fallback_to_pull(self):  # Req: F4/F5
+        """silent post 走 inject_silent（不触发桌面弹出）；通道 False/异常同
+        离线口径：不抛、落库、补拉恰一次。"""
+        self.oc.inject_silent = lambda sid, text: False
+        mid = self.r.post("w1", ("up", "t1"), "escalate", "quiet", silent=True)
+        self.assertEqual(self.oc.calls, [])  # 弹出源未触碰
+        (m,) = self.store.read_messages()
+        self.assertEqual((m["id"], m["body"]), (mid, "quiet"))  # 照常落库
+        self.assertEqual([x["id"] for x in self.r.check_mail("d1")], [mid])
+        self.assertEqual(self.r.check_mail("d1"), [])  # 补拉不重复
+
+    def test_silent_post_online_delivered_once_no_pull(self):  # Req: F4/F5
+        def spy(sid, text):
+            self.oc.calls.append(("silent", sid, text))
+            return True
+
+        self.oc.inject_silent = spy
+        mid = self.r.post("w1", ("up", "t1"), "escalate", "hush", silent=True)
+        self.assertEqual(self.oc.calls,
+                         [("silent", "d1", "[agora] task t1 escalate from w1\nhush")])
+        self.assertEqual(self.r.check_mail("d1"), [])  # 静默已达，补拉不重交
+        self.assertTrue(self.r.dedup_key(mid))
+
 
 if __name__ == "__main__":
     unittest.main()

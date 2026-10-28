@@ -71,6 +71,17 @@ class Oc:
                 return False
             raise
 
+    def inject_silent(self, sid: str, text: str) -> bool:
+        """免通知注入（stalled 降噪 gt-5bc312）：synthetic 消息 resume=false——
+        只落会话转录，不调度模型回合，桌面端无「响应就绪」弹出；失败契约同 inject。"""
+        try:
+            self._post(f"/session/{sid}/synthetic", {"text": text, "resume": False})
+            return True
+        except OcUnavailable as e:
+            if e.status in (400, 404):
+                return False
+            raise
+
     def session(self, sid: str) -> dict | None:
         """会话详情（同 alive 契约：404→None，OcUnavailable 照抛）。"""
         try:

@@ -29,6 +29,8 @@ class FakeOc:
         self.liveness = {}  # sid->bool；缺席＝死
         self.time_of = {}  # sid->{"updated":ms,"idle":ms}；缺席＝缺形状→不 busy
         self.sessions, self.injected = [], []
+        self.silent_injected = []  # 免通知通道（stalled 降噪）
+        self.silent_down = False  # True＝免通知通道不可达（契约 False）
         self.down = False
 
     def session(self, sid):
@@ -45,6 +47,12 @@ class FakeOc:
 
     def inject(self, sid, text):
         self.injected.append((sid, text))
+        return True
+
+    def inject_silent(self, sid, text):
+        if self.silent_down:
+            return False  # 通道不可达：留库补拉
+        self.silent_injected.append((sid, text))
         return True
 
 
@@ -229,6 +237,34 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(len(self.main_msgs()), 1)  # escalate 照发
         self.assertEqual([e["event"] for e in self.store.read_events("t1")
                           if e["event"].startswith("email")], ["email_failed"])
+
+    # ---- stalled 免通知通道（gt-5bc312 降噪）：提醒不弹窗 ----
+
+    def test_stalled_silent_quiet_channel_without_injection(self):  # Req: F5
+        """stalled 拍人改走免通知通道：落库＋会话内静默提醒（synthetic，
+        不唤醒回合→桌面无「响应就绪」弹出）；审计行与邮件例外不受影响。"""
+        self.seed("t1")
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertEqual(self.oc.injected, [])  # 不走会话注入＝无桌面弹出
+        body = self.main_msgs()[0]["body"]  # 消息照常落库
+        self.assertIn("失控[stalled]", body)
+        self.assertEqual(len(self.oc.silent_injected), 1)  # 免通知通道恰一次
+        sid, text = self.oc.silent_injected[0]
+        self.assertEqual(sid, "main")  # 提醒仍达主会话
+        self.assertIn(body, text)
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"] == "escalate"], ["escalate"])  # 审计行不变
+        self.health.escalate(KIND_QUALITY, "t1")  # 其余 kind 注入语义不变（对照）
+        self.assertEqual(len(self.oc.injected), 1)
+
+    def test_stalled_silent_channel_down_falls_back_to_pull(self):  # Req: F5
+        self.seed("t1")
+        self.oc.silent_down = True
+        self.health.escalate(KIND_STALLED, "t1")  # 通道不可达不抛
+        self.assertEqual(self.oc.injected, [])
+        pulled = self.router.check_mail("main")
+        self.assertEqual(len(pulled), 1)  # 留库补拉兜底（F4 离线语义）
+        self.assertIn("失控[stalled]", pulled[0]["body"])
 
     # ---- escalate：正文合成＋不可信段＋四类达主会话 ----
 

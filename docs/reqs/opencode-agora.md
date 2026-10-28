@@ -70,6 +70,8 @@ dispatcher↔worker 结构化消息，方向不限：接收方会话存活即实
 
 > **决策记录**：僵态免判口径完善（2026-10-28 用户裁定，正午 7 邮件 4-5 误报复盘）：①last_seen 只由 worker 服务调用刷新，dispatcher 查看动作不续命；②report 僵态候选对 in_gate=True 免判（门内 verify/合并静默属正常），agorad 启动清残留门闩（门线程不跨进程存活）；③health tick 复用探死 GET 读 oc 会话 time.updated/idle，updated>idle 免判＝doctor 口径减 busy 免决（F15 env mtime 保留作 doctor 纯账本兜底）；④done 滞留（锚缺失驻留待人工合并，in_gate 已落）照拍＝催合并。盲区声明：门线程挂死（verify 永不返回）随 in_gate 永久免检，属门故障类，报警另立。均只提醒不处置，反需求不变。
 
+> **决策记录**：stalled 拍人降噪（2026-10-28 用户裁定）：僵态提醒不再会话注入（注入唤醒模型回合→桌面端「响应就绪」弹出扰人）——改走 opencode synthetic 免通知通道（`POST /session/{sid}/synthetic` resume:false，只落主会话转录、不调度执行、不弹窗）；通道不可达/异常留库补拉（F4 离线语义兜底）；审计行与邮件例外不变；其余失控类（quality/gatefiles/reinject-fail/dispatcher-dead）注入语义不变。只提醒不处置，反需求不变。
+
 ### F6 崩溃恢复（S4）
 权威状态持久化（append 全量快照行＋逐行 fsync，迁移先落快照后写消息）、启动重载末行快照（断尾回退；消息按 msg-id 幂等去重，丢失由补拉/重发兜底）。agorad（服务）或 opencode 服务任一重启：in-flight 链自动恢复——worker 死则按任务页+环境现场重注入续跑（同一凭据）；dispatcher 死则通知其父或根。worker 侧工具调用失败（服务暂不可用）本地排队重放。
 **验收**：`kill -9` 服务→重启→状态一致+in-flight 续跑；opencode 重启→服务探测并走同一恢复路径；dispatcher 单会话死亡（服务与 opencode 均正常）→父/根收到通知。

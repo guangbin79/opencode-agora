@@ -31,15 +31,17 @@ class Router:
                 or (d is not None and self._same_lineage is not None
                     and self._same_lineage(sid, d)))
 
-    def post(self, from_sid, to_edge: tuple, kind: str, body: str) -> int:
+    def post(self, from_sid, to_edge: tuple, kind: str, body: str,
+             silent: bool = False) -> int:
         to_sid = self._resolve(from_sid, to_edge)
         tid = to_edge[1]
         mid = self._store.write_message(  # 铁则：先落库后注入
             {"ts": time.time(), "task": tid, "kind": kind,
              "from": from_sid, "to": to_sid}, body)
         text = f"[agora] task {tid} {kind} from {from_sid}\n{body}"
+        send = self._oc.inject_silent if silent else self._oc.inject
         try:
-            ok = self._oc.inject(to_sid, text)
+            ok = send(to_sid, text)  # silent＝免通知通道（stalled）：不弹窗
         except Exception:  # oc 异常（凭据轮换 401/网络故障）同失败口径：落库兜底——
             ok = False     # done 链路不得因投递面异常断裂（T7 e2e 实测：raise→门不排队）
         if ok:

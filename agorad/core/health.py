@@ -8,7 +8,8 @@ stalled 升级＋可选邮件（email.json opt-in）；离开候选集复位，o
 免判；"僵"的处置仍归人工。升级正文由服务权威合成；任务/worker 供给文本以
 "不可信原文"段携带（拍平换行，防伪造服务行）。escalate 沿 dispatcher_sid
 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）经 router post——
-落库先行，注入即视为拍到；escalate 同时落 events.jsonl 审计行（F8）。
+落库先行，注入即视为拍到（stalled 例外：synthetic 免通知通道，不弹窗）；
+escalate 同时落 events.jsonl 审计行（F8）。
 core 只 import stdlib，依赖全注入。
 """
 import json
@@ -138,7 +139,10 @@ class Health:
                 self._state.touch_seen(tid)  # 心跳只进内存：快照仅随真实迁移追加
 
     def escalate(self, kind, tid, raw=None):
-        """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。"""
+        """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
+
+        stalled 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户裁定），
+        其余 kind 照常会话注入。"""
         t = self._state.get(tid)
         body = (f"失控[{kind}] 任务{tid}：{_KIND_NOTE[kind]}；"
                 f"状态 {t['state']}，worker={t.get('worker_sid') or '-'}，"
@@ -151,7 +155,8 @@ class Health:
         rt = self._state.get(root)
         self._store.append_event({"ts": time.time(), "actor": "health",
                                   "event": "escalate", "task": tid, "kind": kind})
-        self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body)
+        self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
+                          silent=(kind == KIND_STALLED))  # stalled 免通知通道：不弹窗（gt-5bc312）
         if kind == KIND_STALLED:  # 僵态邮件例外（§6 决策记录）：仅此 kind 外呼
             self._notify_email(tid, body)
 
