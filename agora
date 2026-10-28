@@ -100,7 +100,10 @@ def run_wait(a):
 
 def _timeout_arg(v):
     """非负有限秒数；拒 nan/inf/负值（nan 会让 deadline 比较恒 False 变热轮询）。"""
-    t = float(v)
+    try:
+        t = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("须为非负有限秒数") from None
     if not 0 <= t < float("inf"):
         raise argparse.ArgumentTypeError("须为非负有限秒数")
     return t
