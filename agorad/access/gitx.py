@@ -1,10 +1,11 @@
 """git 唯一接触点（北向访问层）：worktree 建清/ff-only 合并/原子回滚/闸体检测。
 
 环境形态沿用全局 worktree 铁律语义：目录＝repo 同级父目录下
-`<REPO>__wt-task-<tid>__<MMDDHHMM><rand4>`，分支同名，保证 `../` 相对拓扑等价；
+`<REPO>__wt-task-<tid>__<MMDDHHMM><rand4>`（REPO 经 _slug 消毒为 ref 安全名），分支同名，保证 `../` 相对拓扑等价；
 线性历史——merge 只走 --ff-only，绝不产生 merge commit。
 """
 import secrets
+import re
 import string
 import shutil
 import subprocess
@@ -17,6 +18,13 @@ _RAND = string.ascii_lowercase + string.digits
 
 class Gitx:
     @staticmethod
+    def _slug(name: str) -> str:
+        # repo 名消毒为 ref 安全 slug：ref 禁字符→_、@{ 序列断开、折叠 ..、去首部 ./-（.dotfiles 类仓名可派发）
+        s = name.replace("@{", "@_")  # ref 只禁 @{ 序列，{ 单独合法
+        s = re.sub(r"[\x00-\x20\x7f~^:?*\[\\]", "_", s)
+        return re.sub(r"\.{2,}", ".", s).lstrip(".-") or "repo"
+
+    @staticmethod
     def _git(args, cwd, check=True):
         r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
         if check and r.returncode != 0:
@@ -26,7 +34,7 @@ class Gitx:
     def build_env(self, project_dir: str, tid: str, branch: str = None) -> str:
         repo = Path(project_dir).resolve()
         stamp = datetime.now().strftime("%m%d%H%M")
-        name = f"{repo.name}__wt-task-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
+        name = f"{self._slug(repo.name)}__wt-task-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
         env = repo.parent / name  # repo 同级父目录＝../ 相对拓扑等价
         # branch＝起点分支（外部工作流，如 issue/N-fix）；缺省＝仓默认支。
         # 起点全限定 refs/heads/<branch>：裸名解析 tag 优先（同名 tag 遮蔽致错基线）

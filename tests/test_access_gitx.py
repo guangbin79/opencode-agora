@@ -13,12 +13,15 @@ class TestAccessGitx(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.repo = self.tmp / "proj"
-        self.repo.mkdir()
-        self._git(["init", "-b", "main"], cwd=self.repo)
-        self._git(["config", "user.email", "t@t"], cwd=self.repo)
-        self._git(["config", "user.name", "t"], cwd=self.repo)
-        self._commit(self.repo, {"src.py": "v1"}, "init")
+        self._init_repo(self.repo)
         self.gx = Gitx()
+
+    def _init_repo(self, path):
+        path.mkdir()
+        self._git(["init", "-b", "main"], cwd=path)
+        self._git(["config", "user.email", "t@t"], cwd=path)
+        self._git(["config", "user.name", "t"], cwd=path)
+        self._commit(path, {"src.py": "v1"}, "init")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -57,6 +60,23 @@ class TestAccessGitx(unittest.TestCase):
         before = self._head(self.repo)
         self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "non-ff")
         self.assertEqual(self._head(self.repo), before)  # 主干未被污染
+
+    def test_dot_repo_name_ref_safe_env(self):  # Req: F1
+        dot = self.tmp / ".dotfiles"
+        self._init_repo(dot)
+        env = self.gx.build_env(str(dot), "gt-d1")
+        self.assertEqual(Path(env).parent, dot.parent)  # 仓同级父目录
+        self._git(["check-ref-format", "--branch", Path(env).name], cwd=self.tmp)  # 构造名恒过 ref 语法
+        self.gx.remove_env(env)
+        self.assertEqual(self._worktrees(dot), [str(dot)])  # 级联干净
+        self.assertEqual(self._git(["branch", "--list", Path(env).name], cwd=dot).stdout.strip(), "")
+        # 消毒规则钉死：非法名修正、合法名恒等、..折叠、全空兜底
+        self.assertEqual(Gitx._slug(".dotfiles"), "dotfiles")
+        self.assertEqual(Gitx._slug("proj"), "proj")
+        self.assertEqual(Gitx._slug("a..b"), "a.b")
+        self.assertEqual(Gitx._slug("--"), "repo")
+        self.assertEqual(Gitx._slug("env{prod}"), "env{prod}")  # { 单独合法，恒等
+        self.assertEqual(Gitx._slug("a@{b"), "a@_b")  # 只断 @{ 序列
 
     def test_merge_ok_fast_forward(self):  # Req: F7
         env = self.gx.build_env(self.repo, "gt-x2")
