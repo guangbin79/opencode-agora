@@ -153,7 +153,11 @@ class Gate:
                 self._state.transition(tid, "reopened")
                 self._audit(tid, "reopened")
                 self._post(tid, f"门内异常：{e}——处理目标分支后重新 post(done, commit)")
-            # 终态后异常（如环境回收败）不逆转门结果
+            else:  # 终态后异常（如环境回收败）：不逆转门结果，但留痕＋实时提示派发方
+                self._audit(tid, "reclaim_failed", note=str(e)[:200])
+                t = self._state.get(tid)
+                self._router.post(t["worker_sid"], ("up", tid), "milestone",
+                                  f"环境回收失败：{e}——任务终态不变，残留目录需人工清理")
         finally:
             if origin and not self._gitx.checkout(target, origin):
                 self._audit(tid, "restore_failed")  # 还原败留痕：主仓停外部支，缺省任务将漂移
@@ -182,7 +186,10 @@ class Gate:
         if t["state"] == "cancelled":
             self._audit(tid, "cancelled")
             if t.get("env_dir"):  # 同 T7 直路径口径：cancelled 即环境回收
-                self._gitx.remove_env(t["env_dir"])
+                try:
+                    self._gitx.remove_env(t["env_dir"])
+                except Exception as e:  # 回收败留痕后继续：终止通知＋凭据作废不得被拦断
+                    self._audit(tid, "reclaim_failed", note=str(e)[:200])
             if t.get("worker_sid"):  # 同 T7 直路径：终止通知＋凭据作废
                 self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                   f"task {tid} cancelled at gate tail")

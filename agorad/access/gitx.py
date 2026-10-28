@@ -9,11 +9,15 @@ import re
 import string
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
 _RAND = string.ascii_lowercase + string.digits
+# rmtree 撞写重试参数：worker 评审环进程合并后仍可能往 env/.review-loop/ 写文件
+_RMT_TRIES = 4
+_RMT_WAIT = 0.5
 
 
 class Gitx:
@@ -44,9 +48,18 @@ class Gitx:
 
     def remove_env(self, env_dir: str) -> None:
         env = Path(env_dir).resolve()
-        main = self._main(env)
-        self._git(["worktree", "remove", "--force", str(env)], cwd=env)
-        shutil.rmtree(env, ignore_errors=True)  # 兜底：非跟踪残留（.review-loop/ 等）
+        try:
+            main = self._main(env)  # 最先取：注销后 env 不再是 worktree，_main 会失败
+        except RuntimeError:  # 已注销半途残留：worktree list 失联，按命名铁律归位主仓
+            main = env.parent / env.name.partition("__wt-task-")[0]
+        self._git(["worktree", "remove", "--force", str(env)], cwd=env, check=False)
+        for _ in range(_RMT_TRIES):  # 评审环并发写撞 rmtree：重试收敛，删不掉禁假账
+            shutil.rmtree(env, ignore_errors=True)
+            if not env.exists():
+                break
+            time.sleep(_RMT_WAIT)
+        if env.exists():  # 重试走完仍残留＝并发写入未停，如实上抛（分支留给重试收敛）
+            raise RuntimeError(f"env 目录删除失败（并发写入未停）: {env}")
         r = self._git(["branch", "-d", env.name], cwd=main, check=False)
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)

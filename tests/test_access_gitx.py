@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import agorad.access.gitx as gitx_mod
 from agorad.access.gitx import Gitx
 
 
@@ -93,6 +94,34 @@ class TestAccessGitx(unittest.TestCase):
         self.gx.remove_env(env)
         self.assertEqual(self._worktrees(self.repo), [str(self.repo)])  # worktree list 干净
         self.assertEqual(self._git(["branch", "--list", Path(env).name], cwd=self.repo).stdout.strip(), "")
+
+    def test_remove_env_converges_on_deregistered_shell(self):  # Req: gt-2e4829
+        env = Path(self.gx.build_env(self.repo, "gt-x8"))
+        self._git(["worktree", "remove", "--force", str(env)],
+                  cwd=self.repo)  # 模拟半途注销：git 已注销、目录残留
+        (env / ".review-loop").mkdir(parents=True)  # 重建残留壳：评审环并发写重建
+        (env / ".review-loop" / "anchor.json").write_text("{}")
+        self.gx.remove_env(str(env))  # 幂等收敛不抛
+        self.assertFalse(env.exists())  # 目录消失
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])
+        self.assertEqual(self._git(["branch", "--list", env.name],
+                                   cwd=self.repo).stdout.strip(), "")  # 分支清掉
+
+    def test_remove_env_raises_when_delete_blocked(self):  # Req: gt-2e4829
+        env = Path(self.gx.build_env(self.repo, "gt-x9"))
+        (env / ".review-loop").mkdir()
+        (env / ".review-loop" / "anchor.json").write_text("{}")
+        (env / ".review-loop").chmod(0o500)  # 同用户删不掉其中文件：模拟并发写入未停
+        orig_wait = gitx_mod._RMT_WAIT
+        gitx_mod._RMT_WAIT = 0  # 重试不睡：测试提速
+        try:
+            with self.assertRaises(RuntimeError) as cm:
+                self.gx.remove_env(str(env))
+            self.assertIn("并发写入未停", str(cm.exception))  # 禁假账：如实上抛
+            self.assertTrue(env.exists())  # 残留如实存在
+        finally:
+            (env / ".review-loop").chmod(0o700)
+            gitx_mod._RMT_WAIT = orig_wait
 
     def test_rollback_restores_bytes_and_sha(self):  # Req: F7
         env = self.gx.build_env(self.repo, "gt-x4")

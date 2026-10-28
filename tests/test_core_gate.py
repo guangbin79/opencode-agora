@@ -28,8 +28,9 @@ class FakeOc:
 
 
 class FakeGitx:
-    def __init__(self, merge="ok", gate=False, crash=False):
+    def __init__(self, merge="ok", gate=False, crash=False, fail_remove=False):
         self.merge_result, self.gate, self.crash = merge, gate, crash
+        self.fail_remove = fail_remove
         self.merge_calls, self.rollbacks, self.removed = [], [], []
         self.head_calls, self.checkouts, self.gate_calls = [], [], []
         self.restore_ok = True
@@ -53,6 +54,8 @@ class FakeGitx:
         self.rollbacks.append((target, before_sha))
 
     def remove_env(self, env_dir):
+        if self.fail_remove:  # 回收失败注入：终态后异常须留痕不假账
+            raise RuntimeError("rmtree: Directory not empty")
         self.removed.append(env_dir)
 
     def touches_gate(self, env_dir, patterns, branch=None):
@@ -101,8 +104,9 @@ class TestCoreGate(unittest.TestCase):
 
     # ---- 夹具 ----
 
-    def mk_gate(self, merge="ok", gate=False, crash=False):
-        self.gx = FakeGitx(merge=merge, gate=gate, crash=crash)
+    def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False):
+        self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
+                           fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
         anchor = lambda env: (self.anchor
                               if (self.env / ".review-loop").is_dir() else None)
@@ -248,6 +252,18 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.health.calls, [])
         self.assertTrue(self.worker_msgs())  # worker 收 merged 回执
         self.assertFalse(t.get("in_gate"))
+
+    def test_reclaim_failure_keeps_merged_and_notifies(self):  # Req: gt-2e4829
+        self.mk_gate(fail_remove=True)
+        self.in_gate()
+        self.gate.run("t1")
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("reclaim_failed", names)  # 终态后异常留痕
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # merged 不逆转
+        disp = [m for m in self.store.read_messages() if m["to"] == "disp1"]
+        self.assertTrue(any("环境回收失败" in m["body"] for m in disp))  # 实时提示派发方
+        self.assertTrue(all("环境已回收" not in m["body"]
+                            for m in self.store.read_messages()))  # 禁假账文案
 
     def test_review_absent_keeps_done_no_merge(self):  # Req: F7
         """评审环缺失：verify 绿亦不自动合并——驻留 done＋审计＋回 worker。"""
