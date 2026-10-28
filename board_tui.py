@@ -25,8 +25,8 @@ _KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead",
 
 Action = namedtuple("Action", "op task arg")
 Action.__new__.__defaults__ = (None, None)
-Row = namedtuple("Row", "kind tid depth state title worker last_seen note domain")
-Row.__new__.__defaults__ = (None, 0, "", "", None, "", "", "")
+Row = namedtuple("Row", "kind tid depth state title worker last_seen note domain repo")
+Row.__new__.__defaults__ = (None, 0, "", "", None, "", "", "", "")
 
 
 # ---------------- 渲染模型（纯函数） ----------------
@@ -127,11 +127,16 @@ def build_rows(snap, events, filt="", now=None, expanded=None):
             cur = parent.get(cur)
         return True
 
-    buckets = {"已合并": 0, "在飞": 0, "失败": 0, "阻塞": 0, "已取消": 0}
-    for t in tasks.values():
-        buckets["已合并" if t["state"] in ("merged", "closed")
-                else "阻塞" if t["state"] == "blocked"
-                else "已取消" if t["state"] == "cancelled" else "在飞"] += 1
+    sb = snap.get("buckets")
+    if sb is not None:      # 服务端全局五桶口径（gt-6def73）
+        buckets = {name: len(sb.get(name, []))
+                   for name in ("已合并", "在飞", "失败", "阻塞", "已取消")}
+    else:                   # 旧响应无 buckets：本地计数兜底
+        buckets = {"已合并": 0, "在飞": 0, "失败": 0, "阻塞": 0, "已取消": 0}
+        for t in tasks.values():
+            buckets["已合并" if t["state"] in ("merged", "closed")
+                    else "阻塞" if t["state"] == "blocked"
+                    else "已取消" if t["state"] == "cancelled" else "在飞"] += 1
     rows = [Row("bucket", title=f"{name} {n}", domain="bucket")
             for name, n in buckets.items()]
     f = filt.lower()
@@ -145,7 +150,9 @@ def build_rows(snap, events, filt="", now=None, expanded=None):
         d = depth[tid]
         rows.append(Row("task", tid, d, t["state"], t.get("title", ""),
                         t.get("worker_sid"), rel_time(t.get("last_seen"), now),
-                        " ".join(esc.get(tid, [])), _domain(t["state"])))
+                        " ".join(esc.get(tid, [])), _domain(t["state"]),
+                        Path(t["project_dir"]).name if t.get("project_dir")
+                        else ""))
         for kind in esc.get(tid, []):
             rows.append(Row("event", tid, d + 1, "", f"↑ escalate[{kind}]",
                             note=kind, domain="warn"))
@@ -274,16 +281,21 @@ def _call(base, token, path, body, timeout=5):
 
 
 def load_board(base, token):
-    """board 全量：五桶＋根链＋逐任务明细（行＋事件）。离线由壳兜住。"""
+    """board 全量：全局五桶＋森林序（旧 agorad 无 forest 回退 chain）＋逐任务明细。
+
+    snap["chain"] 实为渲染序（forest 优先）；snap["buckets"]＝服务端全局五桶
+    （旧响应缺失时 build_rows 本地计数兜底）。离线由壳兜住。
+    """
     top = _call(base, token, "/board", {})
-    chain = top.get("chain", [])
+    order = top.get("forest", top.get("chain", []))
     tasks, events, details = {}, [], {}
-    for tid in chain:
+    for tid in order:
         d = _call(base, token, "/board", {"task": tid})
         tasks[tid] = d["task"]
         events.extend(d.get("events", []))
         details[tid] = d
-    return {"tasks": tasks, "chain": chain}, events, details
+    return {"tasks": tasks, "chain": order,
+            "buckets": top.get("buckets")}, events, details
 
 
 def try_cancel(base, token, task):
@@ -326,7 +338,8 @@ def detail_page(d):
     t = d.get("task", {})
     lines = [f"{k}: {t.get(k)}" for k in
              ("title", "state", "dispatcher_sid", "worker_sid", "created",
-              "last_seen", "env_dir", "fail_streak", "chain_depth")]
+              "last_seen", "env_dir", "project_dir", "fail_streak",
+              "chain_depth")]
     lines.append("---- 事件尾 ----")
     lines += [f"{e.get('ts', 0):.0f} {e.get('actor')} {e.get('event')}"
               f" {e.get('kind', '')}".rstrip() for e in d.get("events", [])[-10:]]
@@ -382,7 +395,8 @@ def draw_board(stdscr, m, status="", err=None):
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
             continue
         text = (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 32)}"
-                f"     {_pad(r.state, 13)} {r.last_seen or ''}")
+                f"     {_pad(r.state, 13)} {r.last_seen or ''}"
+                + (f"  {r.repo}" if r.repo else ""))
         if r.kind == "event":
             attr |= curses.A_BOLD
         if i == m["sel"]:

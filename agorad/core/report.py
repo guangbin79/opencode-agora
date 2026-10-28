@@ -51,6 +51,32 @@ def chain_view(snap, dispatcher_sid):
     return out
 
 
+def forest_view(snap):
+    """全局链森林（gt-6def73）：父子边仍按 worker_sid↔dispatcher_sid 上溯，
+    但在全任务集找父；根＝全任务集内无父的任务。输出 DFS 子树聚簇序 tid 列表
+    （同层按 tid 字典序，稳定可测）；显式栈防递归，seen 集环防护有界
+    （环岛 DFS 不可达，按 tid 序尾附兜底，全员在列）。
+    """
+    tasks = snap["tasks"]
+    parent = {tid: next((p for p in sorted(tasks)
+                         if tasks[p].get("worker_sid")
+                         == t.get("dispatcher_sid")), None)
+              for tid, t in tasks.items()}
+    kids, roots = {tid: [] for tid in tasks}, []
+    for tid in sorted(tasks):
+        p = parent[tid]
+        (roots if p is None else kids[p]).append(tid)
+    out, seen, stack = [], set(), roots[::-1]
+    while stack:
+        tid = stack.pop()
+        if tid in seen:
+            continue
+        seen.add(tid)
+        out.append(tid)
+        stack.extend(reversed(kids[tid]))
+    return out + [tid for tid in sorted(tasks) if tid not in seen]
+
+
 def detail(snap, store, tid):
     """单任务明细三件套：全字段行＋事件链＋done 正文（最新一条＝当前结论）。"""
     done = [m for m in store.read_messages()

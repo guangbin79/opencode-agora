@@ -16,8 +16,8 @@ import time
 import unittest
 from pathlib import Path
 
-from board_tui import (Action, Row, build_rows, doctor_page, handle_key,
-                       rel_time, try_cancel)
+from board_tui import (Action, Row, build_rows, detail_page, doctor_page,
+                       handle_key, rel_time, try_cancel)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -89,6 +89,40 @@ class TestBuildRows(unittest.TestCase):
         self.assertEqual(rel_time(NOW - 172800, NOW), "2d")
         s = snap(t1=trow(last_seen=940.0))
         self.assertEqual(task_rows(build_rows(s, [], now=NOW))[0].last_seen, "1m")
+
+    def test_buckets_server_global_and_local_fallback(self):  # Req: gt-6def73
+        s = {"tasks": {"t1": trow("merged")}, "chain": ["t1"],
+             "buckets": {"已合并": ["t1", "t9"], "在飞": ["t2"], "失败": [],
+                         "阻塞": [], "已取消": []}}
+        buckets = [r for r in build_rows(s, [], now=NOW) if r.kind == "bucket"]
+        self.assertEqual([r.title for r in buckets],
+                         ["已合并 2", "在飞 1", "失败 0", "阻塞 0",
+                          "已取消 0"])  # 服务端全局口径（含本地 tasks 外的 t9）
+
+    def test_forest_multi_root_default_folded(self):  # Req: gt-6def73
+        s = {"tasks": {"A": trow(disp="main", worker="wa"),
+                       "B": trow(disp="other", worker="wb"),
+                       "A1": trow(disp="wa", worker="wa1")},
+             "chain": ["A", "B", "A1"]}  # forest 序：根层 A、B 两棵树
+        rows = build_rows(s, [], now=NOW)  # 默认折叠只显所有根行
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A", "B"])
+        rows = build_rows(s, [], now=NOW, expanded={"A"})
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A", "A1", "B"])
+
+    def test_repo_column_from_project_dir(self):  # Req: gt-6def73
+        s = snap(t1=trow(), t2=trow())
+        s["tasks"]["t1"]["project_dir"] = "/home/u/myrepo"
+        s["tasks"]["t2"]["project_dir"] = "/x/opencode-agora__wt-1"
+        repo = {r.tid: r.repo for r in task_rows(build_rows(s, [], now=NOW))}
+        self.assertEqual(repo, {"t1": "myrepo",
+                                "t2": "opencode-agora__wt-1"})  # Path 尾段
+        s["tasks"]["t2"].pop("project_dir")
+        repo = {r.tid: r.repo for r in task_rows(build_rows(s, [], now=NOW))}
+        self.assertEqual(repo["t2"], "")  # 缺失空串
+
+    def test_detail_page_shows_project_dir(self):  # Req: gt-6def73
+        d = {"task": dict(trow(), project_dir="/home/u/myrepo"), "events": []}
+        self.assertIn("project_dir: /home/u/myrepo", detail_page(d))
 
     def test_filter_substring(self):  # Req: F10
         s = snap(t1=trow(title="登录页"), t2=trow(title="支付网关", state="blocked"),

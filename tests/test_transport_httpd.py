@@ -202,6 +202,13 @@ class TestHttpSmoke(HttpdTest):
         st, _ = call(self.port, "POST", "/board", {}, token="junk")
         self.assertEqual(st, 401)
 
+    def test_board_top_level_includes_forest(self):  # Req: gt-6def73
+        tid = self.create_task()
+        st, r = call(self.port, "POST", "/board", {}, self.root)
+        self.assertEqual(st, 200)
+        self.assertIn("forest", r)  # 顶层新字段（chain/buckets 语义不动）
+        self.assertEqual(r["forest"], [tid])  # 全任务集口径：根＝无父
+
     def test_worker_enforce_denied_403_and_audited(self):  # Req: F1
         wtok = self.app.auth.issue("w9", "worker")
         st, r = call(self.port, "POST", "/enforce", {"on": False}, wtok)

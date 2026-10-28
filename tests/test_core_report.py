@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from agorad.access.store import Store
-from agorad.core.report import buckets, chain_view, detail, doctor_view, view_html
+from agorad.core.report import (buckets, chain_view, detail, doctor_view,
+                                forest_view, view_html)
 
 
 def row(state="running", disp="d1", worker="w1", created=0.0, last_seen=None,
@@ -41,6 +42,24 @@ class TestReport(unittest.TestCase):
     def test_chain_view_cycle_terminates(self):  # Req: F10
         s = snap(t1=row(disp="d1", worker="w1"), t2=row(disp="w1", worker="d1"))
         self.assertEqual(chain_view(s, "d1"), ["t1", "t2"])  # 环有界不挂死
+
+    def test_forest_view_multi_root_cluster(self):  # Req: gt-6def73
+        s = snap(t1=row(disp="d1", worker="w1"), t2=row(disp="w1", worker="w2"),
+                 t3=row(disp="w2", worker="w3"), tx=row(disp="d9", worker="w9"),
+                 ta=row(disp="d8", worker="w8"))
+        self.assertEqual(forest_view(s),
+                         ["t1", "t2", "t3", "ta", "tx"])  # 根层 tid 序（t1<ta<tx），子代紧随父代
+
+    def test_forest_view_cycle_bounded(self):  # Req: gt-6def73
+        s = snap(t1=row(disp="d1", worker="w1"), t2=row(disp="w1", worker="d1"),
+                 t3=row(disp="d2", worker="w3"))
+        out = forest_view(s)  # 环有界不挂死，环岛尾附，全员在列
+        self.assertEqual(sorted(out), ["t1", "t2", "t3"])
+        self.assertEqual(out[:1], ["t3"])  # 唯一根在前
+
+    def test_forest_view_self_parent_bounded(self):  # Req: gt-6def73
+        s = snap(t1=row(disp="d1", worker="d1"))  # 自环：dispatcher=worker
+        self.assertEqual(forest_view(s), ["t1"])
 
     def test_detail_row_events_done_body(self):  # Req: F10
         tmp = Path(tempfile.mkdtemp())

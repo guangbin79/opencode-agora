@@ -127,7 +127,8 @@ class _Handler(BaseHTTPRequestHandler):
             if "task" in body:
                 return report.detail(snap, app.store, body["task"])
             return {"buckets": report.buckets(snap),
-                    "chain": report.chain_view(snap, sid)}
+                    "chain": report.chain_view(snap, sid),
+                    "forest": report.forest_view(snap)}
         if name == "doctor":
             return report.doctor_view(app.state.snapshot(), app.store.home)
         if name == "wiki_read":
