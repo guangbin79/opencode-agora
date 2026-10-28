@@ -121,6 +121,10 @@ agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait �
 生产实证（本任务派发链）：worker 会话 credential 直投失败时 hook 恒拒且拒因只给「去派发」——引导错向，worker 无法自愈。拆 shouldBlock 无凭据拒因：cred?.token 为假（本会话无凭据）→DISPATCH_HINT 追加 NO_CRED_HINT「若你是被派发的 worker：凭据可能直投失败已落信箱，先调 agora_check_mail 领牌再重试」；有凭据但 cwd∉envDir 的路径维持原 DISPATCH_HINT 不变（持牌主会话同拦／持牌服务不可达默认拒文案不变；无凭据子情形走 NO_CRED_HINT 支）。附带修复 hook.test.ts BOOT 夹具腐化：夹具 BOOT 文本旧格式「[agora] BOOT task t-b」不匹配 inject.ts BOOT_MSG（/\[agora\] (gt-\S+): /）致 envDir 未登记、合流后恒 deny——夹具对齐现行 gt- 前缀格式，断言不变，inject.ts 不动。
 **验收**：cred=null 拒串含 "agora_check_mail"；有 token 而 envDir 不含 cwd 拒串严格等于原 DISPATCH_HINT；BOOT 先行＋credential 合流放行用例恢复绿；bun test agora-plugin/ 全绿。
 
+### F18 插件侧 worker PATH 注入（2026-10-28，gt-26c027）
+生产实证（gt-71b6af 踩坑）：agorad 拉起全量透传（lift.ts Bun.spawn），但 worker 会话（opencode serve 服务生成）PATH 被剥成 ".opencode/bin:/usr/local/bin:/usr/bin:/bin"——剥离在 opencode 服务层，worker 跑 bun 套件须手动补 ~/.bun/bin。用户裁决：不做 worker 自救，插件/装配侧一次做对。接缝勘察定夺（v2.2.0 二进制实证）：shell 工具与终端同经 Shell.create→trigger("shell","create.before",payload)，payload.env 按引用直改直达 spawn env——插件 setup 可选挂载 ctx.shell.hook("create.before")（旧运行时无 shell 命名空间静默跳过），spawn 前基于既有 PATH 去重前插 $HOME/.bun/bin 与 $HOME/.local/bin（不硬编码全量；幂等；payload 缺 env 安全向不动）。
+**验收**：注入路径插件测试锁死（补全/去重/幂等/接线原地改 env/缺 env 与旧运行时安全向）；`grep -rqF ".bun/bin" agora-plugin/` 过；bun test agora-plugin/ 全绿；install.sh 整目录复制天然携带新模块零改动。
+
 ## 5. 非功能需求
 
 - 单机、零第三方依赖（服务与 MCP：Python 3 stdlib；插件：TS on Bun）

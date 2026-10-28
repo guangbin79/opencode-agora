@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getCredential } from "./cred";
+import { onShellCreate, type ShellCreatePayload } from "./envPath";
 import { onInject } from "./inject";
 import { ensureOnce, resetLift, LIFT_RECOVER, type LiftResult } from "./lift";
 import { isDormant } from "./scope";
@@ -30,6 +31,10 @@ export interface OcCtx {
   session: {
     hook(name: "prompt", fn: (ev: OcPromptEvent) => Promise<void>): void;
     get(args: { sessionID: string }): Promise<{ location?: { directory?: string } } | undefined>;
+  };
+  /** v2.2.0 起 shell 工具/终端 spawn 前钩子；旧运行时缺省（可选挂载）。 */
+  shell?: {
+    hook(name: "create.before", fn: (ev: ShellCreatePayload) => void | Promise<void>): void;
   };
 }
 
@@ -73,6 +78,9 @@ export default {
     ctx.session.hook("prompt", async (event) => {
       onInject({ sessionID: event.sessionID, text: event.prompt?.text ?? "" });
     });
+    // F18 worker PATH 补全：shell spawn 前 payload.env 按引用直改（补 ~/.bun/bin、~/.local/bin）；
+    // 旧运行时无 shell 命名空间→可选挂载静默跳过。
+    ctx.shell?.hook("create.before", (event) => onShellCreate(event));
     ctx.tool.hook("execute.before", async (event) => {
       // R29：休眠分支短路在 lift/pullEnforce/attach/readGuide 之前——休眠仓零 HTTP 零文件读（除名册缓存）。
       const isAgora = /^agora_/.test(event.tool);
