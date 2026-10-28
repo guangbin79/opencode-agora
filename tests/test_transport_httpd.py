@@ -316,10 +316,11 @@ class TestHttpSmoke(HttpdTest):
                 if x["body"] == "blood-note-16"]
         self.assertEqual((m["from"], m["to"]), ("ses2", wsid))  # 归因真实新 sid
         outsider = self.app.auth.issue("ses9", "root")
+        self.stub.sessions["main"] = {"injects": [], "directory": "/"}  # F21：登记号仍活
         st, r = call(self.port, "POST", "/post",
                      {"task": tid, "kind": "note", "body": "x"},
                      outsider, sid="ses9")
-        self.assertEqual(st, 400)  # 无血缘：非链边
+        self.assertEqual(st, 400)  # 无血缘且登记号活：非链边（死号则走 F21 改绑）
 
     def test_wiki_write_read_and_guards(self):  # Req: F1
         st, r = call(self.port, "POST", "/wiki_write",
@@ -452,6 +453,43 @@ class TestReworkLoop(HttpdTest):
         running = [e for e in self.app.store.read_events(tid)
                    if e["event"] == "running"]
         self.assertEqual(len(running), 2)  # 首跑＋续修两段开工均审计
+
+
+class TestDispatcherRebind(HttpdTest):
+    """F21：post 非链边死号改绑放行——壳重启 dispatcher 换号后旧任务可达。"""
+
+    def test_post_dead_dispatcher_number_rebinds_and_delivers(self):  # Req: F21
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        # 壳重启模拟：任务登记 dispatcher_sid 是旧号（stub 无此会话＝死）
+        self.app.state.set_fields(tid, dispatcher_sid="ses-old-dead")
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "nudge"},
+                     self.root, sid="ses-new-main")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "ses-new-main")
+        self.assertIn(f"[agora] task {tid} note from ses-new-main",
+                      self.stub.sessions[wsid]["injects"][-1])  # down 边直达 worker
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "dispatcher_rebind"]
+        self.assertEqual([(e["task"], e["from"], e["to"]) for e in ev],
+                         [(tid, "ses-old-dead", "ses-new-main")])
+
+    def test_post_live_dispatcher_number_keeps_rejecting(self):  # Req: F21
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        self.app.state.set_fields(tid, dispatcher_sid="ses-other-live")
+        self.stub.sessions["ses-other-live"] = {
+            "injects": [], "directory": "/"}  # 登记号仍活
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "x"},
+                     self.root, sid="ses-new-main")
+        self.assertEqual(st, 400)  # 非链边保持既有拒绝
+        self.assertIn("非链边", r["error"])
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "ses-other-live")
+        self.assertEqual([e for e in self.app.store.read_events()
+                          if e["event"] == "dispatcher_rebind"], [])
 
 
 class TestParamContract(HttpdTest):

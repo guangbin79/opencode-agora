@@ -40,6 +40,9 @@ class FakeOc:
             return None
         return {"time": self.time_of[sid]} if sid in self.time_of else {}
 
+    def alive(self, sid):  # 与真 Oc.alive 同形：session 非 None 即活
+        return self.session(sid) is not None
+
     def create(self, cwd, boot, title=None):
         sid = f"r{len(self.sessions) + 1}"
         self.sessions.append((sid, cwd, boot))
@@ -395,6 +398,53 @@ class TestCoreHealth(unittest.TestCase):
               if e["event"] == "worker_rebound"]
         self.assertEqual(ev, [("t1", "s-w1", "ses-new"),
                               ("t2", "s-w1", "ses-new")])
+
+    # ---- gt-31ecee：dispatcher 侧换号改绑——死号愈合，活号/无牌/终态不动 ----
+
+    def test_bind_dispatcher_dead_number_rebinds_and_audits(self):  # Req: F21
+        self.seed("t1", disp="d-old")  # FakeOc liveness 缺席＝死
+        tok = self.app.auth.issue("d-old", "root")
+        self.app.bind_dispatcher("root", "ses-new", self.state.get("t1"))
+        self.assertEqual(self.app.auth.identify(tok), ("ses-new", "root"))
+        self.assertTrue(self.app.auth.same_lineage("ses-new", "d-old"))  # 旧号入血统
+        self.assertEqual(self.state.get("t1")["dispatcher_sid"], "ses-new")  # 行同步覆写
+        ev = [e for e in self.store.read_events() if e["event"] == "dispatcher_rebind"]
+        self.assertEqual([(e["task"], e["from"], e["to"]) for e in ev],
+                         [("t1", "d-old", "ses-new")])
+
+    def test_bind_dispatcher_guards_live_nonroot_terminal_ocdown(self):  # Req: F21
+        self.seed("t1", disp="d-live")
+        self.oc.liveness["d-live"] = True
+        self.app.bind_dispatcher("root", "ses-new", self.state.get("t1"))
+        self.assertEqual(self.state.get("t1")["dispatcher_sid"], "d-live")  # 活号不抢绑
+        self.oc.liveness["d-live"] = False
+        self.app.bind_dispatcher("dispatcher", "ses-new", self.state.get("t1"))
+        self.app.bind_dispatcher("worker", "ses-new", self.state.get("t1"))
+        self.assertEqual(self.state.get("t1")["dispatcher_sid"], "d-live")  # 非 root 牌拒
+        for i, st in enumerate(("merged", "closed", "cancelled")):  # 终态冻结
+            self.seed(f"tt{i}", state=st, disp=f"dt{i}")
+            self.app.bind_dispatcher("root", "ses-new", self.state.get(f"tt{i}"))
+            self.assertEqual(self.state.get(f"tt{i}")["dispatcher_sid"], f"dt{i}")
+        self.seed("t9", disp="d-dead")
+        self.oc.down = True  # oc 不可达≠会话死：免判
+        self.app.bind_dispatcher("root", "ses-new", self.state.get("t9"))
+        self.oc.down = False
+        self.assertEqual(self.state.get("t9")["dispatcher_sid"], "d-dead")
+        self.seed("t0", disp=None)
+        self.app.bind_dispatcher("root", "ses-new", self.state.get("t0"))  # 无登记号不动
+        self.assertIsNone(self.state.get("t0")["dispatcher_sid"])
+        self.assertEqual([e for e in self.store.read_events()
+                          if e["event"] == "dispatcher_rebind"], [])
+
+    def test_bind_dispatcher_heals_all_active_tasks_of_dead_number(self):  # Req: F21
+        self.seed("t1", disp="d-old")
+        self.seed("t2", state="dispatched", disp="d-old", worker="s-w2")
+        self.seed("t3", state="merged", disp="d-old")  # 终态行冻结
+        self.app.bind_dispatcher("root", "ses-new", self.state.get("t1"))
+        self.assertEqual(self.state.get("t2")["dispatcher_sid"], "ses-new")
+        self.assertEqual(self.state.get("t3")["dispatcher_sid"], "d-old")
+        ev = [e for e in self.store.read_events() if e["event"] == "dispatcher_rebind"]
+        self.assertEqual(sorted(e["task"] for e in ev), ["t1", "t2"])
 
     def test_escalate_injects_bound_real_sid(self):  # Req: F4/F5
         self.app.bind_main("main", "ses-main")

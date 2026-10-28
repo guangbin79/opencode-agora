@@ -119,7 +119,7 @@ class _Handler(BaseHTTPRequestHandler):
         if name == "task_cancel":
             return {"cancelled": app.task.cancel(body["task"], token)}
         if name == "post":
-            return self._post(sid, body)
+            return self._post(sid, role, body)
         if name == "check_mail":
             return {"messages": app.router.check_mail(sid)}
         if name == "board":
@@ -158,7 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not caller:
             return sid
         if role == "root":
-            self.app.bind_main(sid, caller)
+            return self.app.bind_main(sid, caller)  # 对齐后 sid：改绑当笔即生效（F21 前置）
         elif role == "worker":
             return self.app.bind_worker(sid, caller)
         return sid
@@ -186,7 +186,7 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
         return self._json(400, {"error": msg})
 
-    def _post(self, sid, body):
+    def _post(self, sid, role, body):
         app, tid, kind = self.app, body["task"], body["kind"]
         if kind not in _POST_KINDS:  # F13 客户端 kind 白名单；内部直调 Router 不经此路
             raise ValueError(f"kind 须为 {'/'.join(_POST_KINDS)} 之一（收到 {kind!r}）")
@@ -200,6 +200,9 @@ class _Handler(BaseHTTPRequestHandler):
             app.router.post(sid, ("up", tid), "done", str(body["body"]))
             self.gate_q.put(tid)  # 门体后台串行
             return {"result": "accepted"}
+        if not app.router.is_dispatcher(sid, t):
+            app.bind_dispatcher(role, sid, t)  # F21：root 持牌＋登记号死→改绑后放行
+            t = app.state.get(tid)
         edge = ("down", tid) if self.app.router.is_dispatcher(sid, t) else ("up", tid)
         return {"message": app.router.post(sid, edge, kind, str(body["body"]))}
 

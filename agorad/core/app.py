@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 EV_MAIN_BOUND = "main_sid_bound"
 EV_WORKER_REBOUND = "worker_rebound"
+EV_DISPATCHER_REBOUND = "dispatcher_rebind"
 
 # worker 换号自愈口径活动态（词汇对齐 task._ACTIVE；core 禁兄弟 import 故字面量本地定义）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
@@ -32,16 +33,18 @@ class App:
         会话——改绑牌使后续 task 行 dispatcher 落真实 sid，拍人链边直达真会话；
         重启后 main_sid 复位与牌不同步亦经此自愈。任务 worker 边会话拒绝绑定：
         worker 凭据缺失回落 root 牌（B1）＋携 sid 属误附，不得抢主会话绑定。
+        返回对齐后 sid（拒绑＝原 sid）——本笔请求后续归属判定即以新 sid 走。
         """
         if caller != sid:
             if any(t.get("worker_sid") == caller
                    for t in self.state.snapshot()["tasks"].values()):
-                return
+                return sid
             self.auth.rebind(sid, caller)
         if self.main_sid != caller:
             self.main_sid = caller
             self.store.append_event({"ts": time.time(), "actor": caller,
                                      "event": EV_MAIN_BOUND})
+        return caller
 
     def bind_worker(self, sid, caller):
         """gt-d55b9e：worker 牌换号自愈——持牌即身份，漂移即改绑（镜像 bind_main）。
@@ -85,3 +88,30 @@ class App:
                                      "event": EV_WORKER_REBOUND, "task": tid,
                                      "from": sid, "to": caller})
         return caller
+
+    def bind_dispatcher(self, role, sid, t):
+        """F21：dispatcher 侧换号改绑（镜像 bind_worker，补壳重启死号缺口）——
+        root 牌 post 命中「非链边」前判愈合：登记 dispatcher_sid ≠ 调用者且该
+        会话已不存在（oc 存在性检查）→ auth.rebind（旧号入血统）＋活动任务行
+        dispatcher_sid 同步覆写＋dispatcher_rebind 审计（含新旧 sid 与任务），
+        本笔 post 按链边放行。守卫（不满足保持既有拒绝）：非 root 牌、活号
+        （防活号互抢）、任务终态（冻结不动）、oc 不可达≠死（recover 同口径免判）。"""
+        d = t.get("dispatcher_sid")
+        if role != "root" or not d or d == sid:
+            return
+        tasks = self.state.snapshot()["tasks"]
+        hit = [tid for tid, x in tasks.items()
+               if x.get("dispatcher_sid") == d and x["state"] in _ACTIVE]
+        if not hit:
+            return  # 终态不触发改绑
+        try:
+            if self.oc.alive(d):
+                return  # 登记会话仍活不抢绑
+        except Exception:  # oc 不可达≠会话死：本轮免判（recover.startup 同口径）
+            return
+        self.auth.rebind(d, sid)
+        for tid in hit:
+            self.state.set_fields(tid, dispatcher_sid=sid)
+            self.store.append_event({"ts": time.time(), "actor": sid,
+                                     "event": EV_DISPATCHER_REBOUND,
+                                     "task": tid, "from": d, "to": sid})

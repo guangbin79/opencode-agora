@@ -156,3 +156,7 @@ v2 全新开发，无数据迁移：任务状态从零开始。`~/plaza` wiki �
 ### F20 账本尾读＋有界瘦身（2026-10-28，gt-a02ab1）
 4.4GB 写放大事故（F5 决策记录）善后加固，F6 不改写：①启动 load_state 只 seek 末 TAIL_BYTES(1MB) 解析完整行取最后完整快照（末行胜出语义一字不变），文件 ≤阈值或尾窗无完整行回退全文件扫——启动耗时与账本大小解耦；②追加路径有界保持：行数超 COMPACT_LINES(500) 即原子重写（tmp+fsync+replace）仅留刚追加的末完整行——flock 单写者安全、时机在迁移路径避开启动；此为「账本只追加」的有界例外，快照语义（§4.8）不变。
 **验收**：大文件尾读命中末行；尾窗无完整行回退；尾读断尾行回退上一完整行；超阈重写单行且无 .tmp 残留、load 往返一致；`python3 -m unittest tests.test_access_store tests.test_core_state` 绿。
+
+### F21 dispatcher 侧换号改绑——post 非链边死号自愈（2026-10-28，gt-31ecee）
+生产实证（同日两次）：MCP 壳被 harness 重启后领新 sid，对在飞旧任务 post 报「非链边」拒——任务登记 dispatcher_sid 是旧号，F16 same_lineage 只认血统（重开壳是无血统新生，永不被认），F19 改绑只覆盖 worker 侧，派发方对在飞任务失声（紧急修正只能走 cancel 重派重炮路径）。修法（方案 a，dispatcher 改绑＋死号守卫）：post 路由命中「非链边」拒绝前先判愈合条件——发送者持 root 级（主会话）牌、sid ≠ 任务登记 dispatcher_sid、且登记会话已不存在（oc 会话存在性检查，F19/recover 同款）三者全中 → auth.rebind（旧号入血统，token 本体不变）＋活动任务行 dispatcher_sid 同步覆写＋本笔 post 按链边放行；审计 event=dispatcher_rebind（含新旧 sid 与任务）。守卫（不满足保持既有拒绝）：登记会话仍活（防活号互抢）、发送者非 root 牌、任务终态（merged/closed/cancelled 冻结）、oc 不可达≠死（recover 同口径免判）。
+**验收**：死号＋root 牌→改绑且 post 达 worker、行覆写、血统入册、审计落盘；死号一次改绑其名下全部活动任务行；活号/非 root 牌/终态/无登记号各不改绑仍拒；oc 不可达免判；既有链边与 done 五拒零变化；全量测试绿。
