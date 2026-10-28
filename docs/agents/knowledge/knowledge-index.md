@@ -21,6 +21,7 @@
 - **状态桶行固顶**（gt-cb1075）：sel 最小＝首任务行索引，clamp 追 sel 会把桶行（行流前缀）永久滚出——固顶＝桶行画在滚动窗外（draw_board 固定画 y=1..nb），clamp_view 加 nb 参把 top 钳在 [nb, len-visible]；矮屏任务区允许 0（`max(0, ·)` 又一实例：硬挤 1 行 h≤6 越界 curses.error 退出、更高则挤入提示行不可见）
 - **install 生命周期与 setsid 观察法**（gt-71b6af）：install 只停自拉实例（第 8 步），装后服务不在场（由插件 lift 拉起，MCP 壳仅消费）；setsid 在脚本上下文原位 exec 不 fork（`$!` 即 daemon pid，kill/wait 仍达）；验脱会话须装后以同启动行自拉安装位载荷——装中观察有 ready→smoke→kill 竞态窗不可靠
 - **指针读守卫对齐下游 raise 面**（gt-54f874 评审实证）：指针文件半写形状里，非对象 JSON 在下标处抛 TypeError、非数端口经 f-string 进 urlopen 抛 http.client.InvalidURL（HTTPException 族，非 OSError）——`except (OSError,ValueError,KeyError)` 元组兜不住，穿透轮询循环经 main 兜底 exit 2 杀活等待。收口单点＝discover 出口形状校验（`int(port)`＋拒含 `\r`/`\n` 的牌），守卫元组补 TypeError；合法 header 值规则（`\n(?![ \t])|\r(?![ \t\n])`）比直觉宽（obs-fold 折行合法）——控制符牌须一律拒读而非只拒 `\n`
+- **内存态心跳禁走落盘字段路径**（gt-a18ef6 写放大事故实证）：httpd 每工具调用经 health.touch→set_fields(last_seen) 触发全量快照追加——O(调用数) 行×全任务快照把 tasks.jsonl 撑到 4.4GB/48791 行（相邻快照 293 对中 updated 变 291、last_seen 变 238，样本每秒 3 次），load_state 逐行解析挂死。定式：模块头声明「崩溃回退接受」的内存态字段（last_seen/mail_read）一律走专用内存方法（touch_seen/touch_mail 口径），set_fields 只收实质变更；心跳内存化的重启回退由 F15 env 活性＋busy 免判兜底，僵态只提醒不处置
 
 ## 已知接受面
 
