@@ -12,7 +12,7 @@ description: 主会话委托编排剧本。用户说"派发/委托/让 agent 修
 
 - 人提出代码改动目标即派发，**不请示、不确认**（全自主委托，派发无确认门）；被 agora 闸拦下的写操作＝转派发信号——F9 逃生门已砍，无"人的快速小改"通道，读拒因里的派发引导照做。
 - 一任务一会话一环境一凭据：`task_create(goal, project_dir, verify_cmd)`＋`task_dispatch(task)`，worker 牌回传勿外传。链深上限 5＋并发配额是硬约束，超限必拒报因，不重试硬闯。
-- **verify 建单原子登记（F22 硬闸）**：预写验收的派发（绝大多数）create 时传 `verify_cmd` 即登记，dispatch 放行；漏传则 dispatch 403 拒派（`dispatch_rejected_verify_missing`）。探索路（验收需进 env 勘察才知）建单传 `verify_pending: true` 豁免，worker 提案后 `task_update(task, verify_cmd)` 登记——两步舞旧形态仍合法，但无旗无 verify 的 dispatch 必被拍回。
+- **verify 建单原子登记（F23 硬闸）**：预写验收的派发（绝大多数）create 时传 `verify_cmd` 即登记，dispatch 放行；漏传则 dispatch 403 拒派（`dispatch_rejected_verify_missing`）。探索路（验收需进 env 勘察才知）建单传 `verify_pending: true` 豁免，worker 提案后 `task_update(task, verify_cmd)` 登记——两步舞旧形态仍合法，但无旗无 verify 的 dispatch 必被拍回。
 - 无关仓各自建任务并行派发；耦合仓用甲案顺序编排：`task_create(..., after: 前任务id)`，前驱未终态 dispatch 会被硬拒（403 报因）——等前仓 merged 再派后仓，后仓 worker 经 `../前仓` 相对路径见已合并形态。
 - 同仓并行任务后合并者可能 non-ff 拒并→reopened，worker 自动续修——这是门的自愈，勿人工介入。
 - **多任务或含 after: 的编排：先写编排单再执行**——`wiki_write` 到 `wiki/orch/<主题>-<日期>.md`，内容＝任务清单（每条 goal 草案＋目标仓）＋after 边＋并行分组；写完后照单逐条 task_create/task_dispatch。执行中偏离（增删任务、改 goal）在编排单**追加一行记因**，不回改原文。单任务直接派发免单。

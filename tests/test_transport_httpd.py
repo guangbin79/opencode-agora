@@ -255,7 +255,7 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual([e for e in self.app.store.read_events()
                           if e["event"].startswith("enforce")], [])  # 无审计行
 
-    def test_task_create_verify_params_type_checked(self):  # Req: F22
+    def test_task_create_verify_params_type_checked(self):  # Req: F23
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "g", "project_dir": "/repo",
                       "verify_pending": "false"}, self.root)

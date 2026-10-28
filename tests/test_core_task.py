@@ -246,9 +246,9 @@ class TestVerify(TestCoreTask):
 
 
 class TestVerifyGate(TestCoreTask):
-    """F22 派发硬闸＋建单原子登记（gt-e103ae/gt-87f3c2/20261026-135627 同根因）。"""
+    """F23 派发硬闸＋建单原子登记（gt-e103ae/gt-87f3c2/20261026-135627 同根因）。"""
 
-    def test_create_with_verify_cmd_registers_atomically(self):  # Req: F22
+    def test_create_with_verify_cmd_registers_atomically(self):  # Req: F23
         tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="pytest -q")
         v = self.state.get(tid)["verify"]
         self.assertEqual(v["state"], "registered")  # 建单即登记：状态直接 registered
@@ -260,7 +260,7 @@ class TestVerifyGate(TestCoreTask):
         self.svc.dispatch(tid, self.root)  # 快速路：dispatch 一步放行
         self.assertEqual(self.state.get(tid)["state"], "dispatched")
 
-    def test_create_rejects_empty_cmd_and_combo(self):  # Req: F22
+    def test_create_rejects_empty_cmd_and_combo(self):  # Req: F23
         with self.assertRaises(Rejected) as cm:  # 空命令＝无质量闸，同 update 口径
             self.svc.create("g", "/repo", None, self.root, verify_cmd="  ")
         self.assertIn("空", str(cm.exception))
@@ -268,7 +268,7 @@ class TestVerifyGate(TestCoreTask):
             self.svc.create("g", "/repo", None, self.root,
                             verify_cmd="true", verify_pending=True)
 
-    def test_dispatch_without_verify_rejected_instant_with_audit(self):  # Req: F22
+    def test_dispatch_without_verify_rejected_instant_with_audit(self):  # Req: F23
         tid = self.svc.create("g", "/repo", None, self.root)  # 无 verify 无旗
         with self.assertRaises(Rejected) as cm:
             self.svc.dispatch(tid, self.root)
@@ -280,7 +280,7 @@ class TestVerifyGate(TestCoreTask):
         self.assertEqual(self.gitx.built, [])  # 未建环境
         self.assertEqual(self.oc.sessions, [])  # 未建会话未签凭据
 
-    def test_incident_gt_87f3c2_shape_must_be_rejected(self):  # Req: F22
+    def test_incident_gt_87f3c2_shape_must_be_rejected(self):  # Req: F23
         """事故复刻证明：create 后漏 update 即 dispatch（两步舞断链）必被 403 拍回。"""
         disp = self.auth.issue("disp1", "dispatcher")
         tid = self.svc.create("g", "/repo", None, disp)  # 事故形态：少了 task_update
@@ -289,7 +289,7 @@ class TestVerifyGate(TestCoreTask):
         self.assertTrue(any(e["event"] == "dispatch_rejected_verify_missing"
                             and e.get("task") == tid for e in self.events()))
 
-    def test_verify_pending_exemption_keeps_exploration_path(self):  # Req: F22
+    def test_verify_pending_exemption_keeps_exploration_path(self):  # Req: F23
         disp = self.auth.issue("disp1", "dispatcher")
         tid = self.svc.create("g", "/repo", None, disp, verify_pending=True)
         self.svc.dispatch(tid, disp)  # 豁免旗：未登记也可先派
