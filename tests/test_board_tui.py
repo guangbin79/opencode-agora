@@ -322,6 +322,24 @@ class TestClampView(unittest.TestCase):
         clamp_view(m, 5)
         self.assertEqual((m["sel"], m["top"]), (5, 1))  # top 回收至 len-visible
 
+    def test_bucket_visible_after_g(self):  # Req: gt-cb1075
+        """桶行固顶：G 跳底再 g 回顶，桶行恒在可见窗（top 不低于桶行数）。"""
+        nb = 5
+        rows = [Row("bucket", title=f"桶 {i} 0", domain="bucket")
+                for i in range(nb)] + [
+                Row("task", f"t{i}", 0, "running", "目标", "ses-9", "1m", "", "fly")
+                for i in range(20)]
+        m = model(rows, sel=nb, top=0)
+        clamp_view(m, 8, nb)
+        self.assertEqual(m["top"], nb)         # 启动即见桶行＋首个任务行
+        handle_key(m, "G")                     # 跳底：sel=24
+        clamp_view(m, 8, nb)
+        self.assertEqual(m["top"], 17)         # 贴底但 >= 桶行数
+        self.assertGreaterEqual(m["top"], nb)  # 桶行在滚动窗外＝固顶恒画恒可见
+        handle_key(m, "g")                     # 回顶落首任务行：sel=5
+        clamp_view(m, 8, nb)
+        self.assertEqual((m["sel"], m["top"]), (nb, nb))  # 桶行仍在窗内
+
 
 class TestFoldTree(unittest.TestCase):
     """链树折叠＋DFS 聚簇：链 [A,B,A1,B1,A2]（A1 子 A、A2 子 A1、B1 子 B）。"""

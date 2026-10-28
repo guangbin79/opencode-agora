@@ -178,14 +178,17 @@ def _skip_bucket(m, down=True, origin=None):
         m["sel"] = origin
 
 
-def clamp_view(m, visible):
-    """视口滚动：保证 sel 落在 [top, top+visible) 窗口内（就地改，无返回值语义）。"""
+def clamp_view(m, visible, nb=0):
+    """视口滚动：保证 sel 落在 [top, top+visible) 窗口内（就地改，无返回值语义）。
+
+    nb＝固顶桶行数：滚动窗只盖 body 行，top 钳在 [nb, len-visible]，桶行恒可见。
+    """
     if m["sel"] < m["top"]:
         m["top"] = m["sel"]
     elif m["sel"] >= m["top"] + visible:
         m["top"] = m["sel"] - visible + 1
-    m["top"] = min(max(0, m["top"]),
-                   max(0, len(m.get("rows") or []) - visible))  # 行流收缩后回收 top
+    m["top"] = min(max(nb, m["top"]),
+                   max(nb, len(m.get("rows") or []) - visible))  # 行流收缩后回收 top
 
 
 def handle_key(m, key):
@@ -407,24 +410,25 @@ def _row_text(r):
 
 
 def draw_board(stdscr, m, status="", err=None):
-    """一帧板面：头行＋行流（桶行粗体/选中反白/着色域）＋底行提示＋输入/确认行。"""
+    """一帧板面：头行＋固顶桶行＋滚动行流（选中反白/着色域）＋底行提示＋输入/确认行。"""
     h, w = stdscr.getmaxyx()
     stdscr.erase()
     head = f" agora board  {status}" + (f"  离线: {err}" if err else "")
     stdscr.addnstr(0, 0, head, w - 1, curses.A_REVERSE)
-    visible = max(1, h - 4)
-    clamp_view(m, visible)
-    for i, r in enumerate(m["rows"][m["top"]:m["top"] + visible]):
+    rows = m["rows"]
+    nb = sum(1 for r in rows if r.kind == "bucket")
+    visible = max(0, h - 4 - nb)           # 矮屏任务区可为 0：宁缺毋挤，不越提示行
+    clamp_view(m, visible or 1, nb)        # 0 仍钳 top，空切片不画任务行
+    for i in range(min(nb, max(0, h - 4))):  # 桶行也止于提示行上方
+        stdscr.addnstr(i + 1, 0, f"─ {rows[i].title}", w - 1,
+                       _color(rows[i].domain) | curses.A_BOLD)
+    for i, r in enumerate(rows[m["top"]:m["top"] + visible]):
         attr = _color(r.domain)
-        if r.kind == "bucket":
-            stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
-            continue
-        text = _row_text(r)
         if r.kind == "event":
             attr |= curses.A_BOLD
         if m["top"] + i == m["sel"]:
             attr |= curses.A_REVERSE
-        stdscr.addnstr(i + 1, 0, text, w - 1, attr)
+        stdscr.addnstr(i + nb + 1, 0, _row_text(r), w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor | x cancel",
                    w - 1, curses.A_DIM)
