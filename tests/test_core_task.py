@@ -154,6 +154,13 @@ class TestFuses(TestCoreTask):
         ev = [e for e in self.events() if e["event"] == "dispatch_rejected"]
         self.assertEqual(len(ev), 1)  # 直 raise 补审计行（F-2）
         self.assertTrue(ev[0].get("task"))
+    def test_new_tid_prefix_task_and_legacy_gt_after_chain(self):  # Req: F24
+        tid = self.dispatchable()
+        self.assertRegex(tid, r"^task-[0-9a-f]{6}$")  # 新前缀 task-，6 hex 不变
+        self.seed("gt-abc123", state="cancelled")  # 存量账本旧前缀终身有效（B7 终态）
+        child = self.dispatchable(after="gt-abc123")  # 旧 id 作 after：存在性校验双形态同收
+        self.svc.dispatch(child, self.root)
+        self.assertEqual(self.state.get(child)["state"], "dispatched")
 
 
 class TestCancel(TestCoreTask):

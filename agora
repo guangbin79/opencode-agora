@@ -149,7 +149,7 @@ def _parser():
                "或 --once 下当前在飞\n"
                "2＝异常（用法错/任务未知 404/root 牌缺失/认牌失败/重试至超时仍不可达）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    w.add_argument("task_id", metavar="task-id", help="任务 id（gt-xxxxxx）")
+    w.add_argument("task_id", metavar="task-id", help="任务 id（task-xxxxxx 或历史 gt-xxxxxx）")
     w.add_argument("--timeout", type=_timeout_arg, default=1800,
                    help="到期仍在飞退出 1（秒）；缺省 1800（防调用方永挂）")
     w.add_argument("--once", action="store_true", help="单查形态，立即返回不阻塞")

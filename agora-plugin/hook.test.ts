@@ -158,7 +158,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       session: {
         hook: (name, fn) => { hooks[`session.${name}`] = fn; },
         get: async ({ sessionID }: { sessionID: string }) => ({
-          location: { directory: sessionID === "s-boot" ? envDir : plain },
+          location: { directory: sessionID.startsWith("s-boot") ? envDir : plain }, // s-boot*＝任务 env 夹具（F24 双前缀用例复用）
         }),
       },
     } as any);
@@ -204,6 +204,21 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     setEnforce(true);
     try {
       await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot", input: { filePath: join(repo, "a.md") } });
+    } finally {
+      setEnforce(false);
+    }
+  });
+  test("BOOT task- 新前缀同链登记（F24 双前缀兼容）", async () => {
+    // Req: F24
+    const hooks = wire();
+    await hooks["session.prompt"]({
+      sessionID: "s-boot-t",
+      prompt: { text: `[agora] task-t-f24: F24 双前缀\npage: p.md\nenv: ${envDir}\ncontract: x` },
+    });
+    await hooks["session.prompt"]({ sessionID: "s-boot-t", prompt: { text: "[agora] credential t-f24\ntoken: tok-f24" } });
+    setEnforce(true);
+    try {
+      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot-t", input: { filePath: join(repo, "a.md") } });
     } finally {
       setEnforce(false);
     }

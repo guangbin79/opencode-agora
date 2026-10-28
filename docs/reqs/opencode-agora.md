@@ -168,3 +168,7 @@ worker 间无横向观测面（消息拓扑＝链边，兄弟协作经共同上�
 ### F23 verify 流程加固——建单原子登记＋派发硬闸（2026-10-28，gt-54d5fc；correct 剧本产物）
 三例同根因事故（gt-e103ae、gt-87f3c2、20261026-135627）：两步舞（create→update→dispatch）无强制，漏 task_update 登记最晚在 worker post(done) 才爆炸。修法两件：①task_create 加可选 verify_cmd——传入即建单时原子登记（verify_registered 事件照落、状态直接 registered，与 update 路同款审计），快速路一步完成；②task_dispatch 硬闸——目标任务 verify 未登记即 403 拒派＋专属审计行 dispatch_rejected_verify_missing（拒绝在派发瞬间：不建环境不建会话），唯一豁免＝建单显式 verify_pending: true（探索路：worker 进 env 提案 verify→派发方 task_update 登记，现行流程不变）。兼容：旧形态 create 后 update 再 dispatch 合法不变；task_update 语义不变（空命令拒、登记即锁定）；verify_cmd 与 verify_pending 互斥拒。MCP 壳 task_create schema 透传新参（httpd→task 全链）。（编号 F23：F22 已被 gt-5ba70a 同仓协作面占用，2026-10-29 rebase 撞号让位）
 **验收**：原子路 create(verify_cmd)→registered＋事件落盘＋dispatch 放行；硬闸 create（无 verify 无旗）→dispatch 403＋审计行＋零副作用（不建环境不建会话）；豁免 create(verify_pending=true)→dispatch 放行、后续 update 登记照常；事故复刻 gt-87f3c2 形态（create 后漏 update 即 dispatch）必被拒；`python3 -m unittest tests.test_core_task tests.test_transport_httpd` 绿；全量绿。
+
+### F24 任务 id 前缀 task-＋历史 gt- 终身双兼容（2026-10-29，gt-99ae7b 用户裁定）
+新任务 id 生成前缀从 gt- 换 task-（望文生义；6 hex 长度不变）。前缀是契约词汇散布多个校验/解析面，存量 75+ 任务终身 gt-*，所有输入/解析面双形态同收：①生成 task.py _new_tid；②after 链输入面（存在性校验前缀无关，测试锚定旧 id 全链）；③MCP 壳 schema 描述与 agora CLI help 标注双形态；④高危点插件 inject BOOT 正则双前缀——漏改＝worker 凭据登记断链。
+**验收**：新 tid 命中 ^task-[0-9a-f]{6}$；旧 gt- id 作 after 建单＋派发全链通；插件 BOOT 两前缀用例绿；`python3 -m unittest tests.test_core_task tests.test_transport_httpd` 绿。
