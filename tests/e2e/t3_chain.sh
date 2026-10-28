@@ -424,7 +424,8 @@ check(row(tidG)["state"] == "todo" and not row(tidG).get("env_dir")
       and "dispatched" not in evs(tidG),
       "F22 拒绝零副作用（未建环境未派发） # Req: F22")
 code, _ = agora("/task_cancel", {"task": tidG})
-check(code == 200, f"S0 收尾：gate 探针任务取消净（{code}） # Req: F22")
+check(code == 200 and row(tidG)["state"] == "cancelled",
+      f"S0 收尾：gate 探针任务取消净（{code} {row(tidG)['state']}） # Req: F22")
 
 # ============================================================
 # S1 全链：建→派→worker 真活→verify 提案/登记→done→门→merged→closed
