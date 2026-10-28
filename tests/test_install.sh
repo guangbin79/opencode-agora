@@ -13,7 +13,16 @@ chk()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$
 run_install() { HOME="$1" AGORA_HOME="$2" bash "$REPO/install.sh"; }
 FIX=""
 
-teardown() { [ -n "$FIX" ] && rm -rf "$FIX"; }
+teardown() {
+  local d p
+  for d in "${A1:-}" "${A2:-}" "${A4:-}"; do  # 按夹具 service.json pid 补杀，避免孤儿 agorad（gt-71b6af）
+    [ -n "$d" ] || continue
+    p="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$d/.agora/service.json" 2>/dev/null)" || continue
+    [ -n "$p" ] && kill "$p" 2>/dev/null
+  done
+  [ -n "$FIX" ] && rm -rf "$FIX"
+  return 0
+}
 trap teardown EXIT
 
 newfix() {
@@ -26,6 +35,31 @@ newfix
 H1="$FIX/home"; A1="$FIX/plaza"; OCJ="$H1/.config/opencode/opencode.json"
 
 if out=$(run_install "$H1" "$A1" 2>&1); then ok "首装退出 0 (Req: F1)"; else bad "首装退出 0 (Req: F1)（$out）"; fi
+
+# ---- setsid 脱会话回归（gt-71b6af）：install 收尾停自拉实例，装后以同形态自拉安装位
+# 载荷，断言夹具 agorad 存活＋会话脱离测试 shell（确定性观察，无装中竞态）----
+OLDPID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$A1/.agora/service.json" 2>/dev/null || true)"
+MYSESS="$(ps -o sess= -p $$ | tr -d ' ')"
+AD_ENV=(env AGORA_HOME="$A1" AGORA_OC_URL="http://127.0.0.1:4096" PYTHONDONTWRITEBYTECODE=1)  # 占位同 install 缺省（oc 不可达不挡服务）；不写字节码免污载荷目录断言
+"${AD_ENV[@]}" setsid python3 "$A1/.agora/agorad/main.py" >"$FIX/ad1.log" 2>&1 &
+AD1_PID=$!
+GOT=""
+for _ in {1..100}; do  # 5s：等新实例覆写 service.json（pid 换新）且端口可连
+  snap="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d.get("pid",""),d.get("port",""))' "$A1/.agora/service.json" 2>/dev/null || true)"
+  read -r adpid adport <<EOF
+${snap:- }
+EOF
+  if [ -n "$adpid" ] && [ "$adpid" != "$OLDPID" ] && timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$adport" 2>/dev/null; then
+    GOT=1; break
+  fi
+  sleep 0.05
+done
+[ -n "$GOT" ] || kill "$AD1_PID" 2>/dev/null || true
+chk "夹具 agorad 存活（service.json 端口可连，gt-71b6af）" [ -n "$GOT" ]
+chk "install 拉起行 setsid 在位（源级锁，gt-71b6af）" grep -qF 'setsid python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
+ADSESS=""
+[ -n "$GOT" ] && ADSESS="$(ps -o sess= -p "$adpid" 2>/dev/null | tr -d ' ')"
+chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"
 
 chk "骨架 state/messages (Req: F1)" [ -d "$A1/state/messages" ]
 chk "骨架 wiki (Req: F1)"           [ -d "$A1/wiki" ]

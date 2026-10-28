@@ -39,7 +39,7 @@ trap cleanup EXIT
 
 # ---- 1) 依赖检查 ----
 missing=""
-for c in python3 git opencode bun; do
+for c in python3 git opencode bun setsid; do
   command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
 done
 [ -z "$missing" ] || fail "缺依赖:$missing —— 安装后重试"
@@ -125,7 +125,8 @@ else
   CAP="$(mktemp /tmp/opencode/install-agorad.XXXXXX)"
   AD_ENV=(env AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL")  # 展开值不作赋值前缀（bash 视为命令名）
   [ -n "$OC_PASSWORD" ] && AD_ENV+=("AGORA_OC_PASSWORD=$OC_PASSWORD")
-  "${AD_ENV[@]}" python3 "$REPO/agorad/main.py" >"$CAP" 2>&1 &
+  # setsid 脱会话：装完 shell 退出/进程组收割不再陪葬服务（gt-71b6af）
+  "${AD_ENV[@]}" setsid python3 "$REPO/agorad/main.py" >"$CAP" 2>&1 &
   AD_PID=$!
   ready=""
   for _ in {1..100}; do  # 10s 上限：等就绪行（root 牌行在其前 flush）
