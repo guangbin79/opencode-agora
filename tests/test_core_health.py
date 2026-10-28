@@ -78,7 +78,7 @@ class TestCoreHealth(unittest.TestCase):
         self.recover = FakeRecover()
         self.app = App(store=self.store, state=self.state,
                        auth=Auth(self.store), router=self.router, task=None,
-                       gate=None, health=None, recover=self.recover,
+                       peer=None, gate=None, health=None, recover=self.recover,
                        report=None, oc=self.oc, gitx=None, main_sid="main")
         self.health = Health(self.state, self.oc, self.router,
                              self.recover, self.app, store=self.store,

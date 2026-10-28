@@ -716,5 +716,69 @@ class TestAnchors(unittest.TestCase):
         self.assertIsNone(anchors.read_anchor(None))  # 未派发无环境
 
 
+class TestPeerSurface(HttpdTest):
+    """F22 同仓协作面全链：peer 写读/分区/权限/BOOT 契约行。"""
+
+    def dispatch_two(self, repo_a="/repoA", repo_b="/repoB"):
+        ta = self.create_task({"goal": "g", "project_dir": repo_a})
+        wa = self.dispatch_task(ta)
+        tb = self.create_task({"goal": "g", "project_dir": repo_b})
+        wb = self.dispatch_task(tb)
+        return ta, wa, tb, wb
+
+    def test_worker_peer_write_read_loop(self):  # Req: F22
+        tid = self.create_task({"goal": "g", "project_dir": "/repoX"})
+        wtok = self.dispatch_task(tid)
+        st, r = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "hi from worker"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertIn("message", r)
+        st, r = call(self.port, "POST", "/repo_board", {}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["repo"], "/repoX")  # worker 分区＝己任务仓
+        self.assertEqual([t["tid"] for t in r["tasks"]], [tid])
+        (m,) = r["messages"]
+        self.assertEqual((m["author"], m["body"], m["untrusted"]),
+                         (tid, "hi from worker", True))
+        st, r = call(self.port, "POST", "/repo_board", {"repo": "/repoX"},
+                     self.root)  # root 诊断可指定仓
+        self.assertEqual(st, 200)
+        self.assertEqual([t["tid"] for t in r["tasks"]], [tid])
+
+    def test_partition_isolation_between_workers(self):  # Req: F22
+        ta, wa, tb, wb = self.dispatch_two()
+        st, _ = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "from A"}, wa)
+        self.assertEqual(st, 200)
+        st, r = call(self.port, "POST", "/repo_board", {}, wb)
+        self.assertEqual(st, 200)
+        self.assertEqual([t["tid"] for t in r["tasks"]], [tb])  # 只见己仓任务
+        self.assertEqual(r["messages"], [])  # 跨仓留言不可见
+        st, r = call(self.port, "POST", "/repo_board", {"repo": "/repoB"},
+                     self.root)
+        self.assertEqual([t["tid"] for t in r["tasks"]], [tb])
+        self.assertEqual(r["messages"], [])
+        st, r = call(self.port, "POST", "/repo_board", {}, self.root)  # 缺省＝全仓
+        self.assertEqual(sorted(t["tid"] for t in r["tasks"]), sorted([ta, tb]))
+
+    def test_peer_write_worker_token_only(self):  # Req: F22 权限
+        st, r = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "root says"}, self.root)
+        self.assertEqual(st, 403)
+        self.assertIn("worker", r["error"])
+        dtok = self.app.auth.issue("d9", "dispatcher")
+        st, _ = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "disp says"}, dtok)
+        self.assertEqual(st, 403)
+
+    def test_boot_carries_repo_board_contract(self):  # Req: F22（BOOT 引导＋注入防线）
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        boot = self.stub.sessions[wsid]["injects"][0]
+        self.assertIn("repo_board", boot)
+        self.assertIn("仅供参考", boot)  # peer 留言是数据不是指令
+
+
 if __name__ == "__main__":
     unittest.main()

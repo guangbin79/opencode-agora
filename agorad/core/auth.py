@@ -8,7 +8,8 @@ import secrets
 import time
 
 # worker 工具白名单＝矩阵唯一放行集；task_update/task_cancel/enforce 不在其中
-WORKER_TOOLS = {"post", "check_mail", "wiki_read", "wiki_write", "task_dispatch"}
+WORKER_TOOLS = {"post", "check_mail", "repo_board", "wiki_read", "wiki_write",
+                "task_dispatch"}
 # dispatcher 通用面＝worker 面＋建任务/观测；task_update/task_cancel 为 task 域单列
 DISPATCHER_TOOLS = WORKER_TOOLS | {"task_create", "board", "doctor"}
 

@@ -1,4 +1,4 @@
-"""入向 JSON 口（B4）：11 工具端点＋/view＋/health；单线程串行＋后台门队列。
+"""入向 JSON 口（B4）：12 工具端点＋/view＋/health；单线程串行＋后台门队列。
 
 transport 只 import agorad.core（R2）——access 件经 App 属性触达（store.home
 下 wiki 裸读写，无 import）。鉴权两段（R18）：X-Agora-Token→identify（无牌
@@ -15,15 +15,18 @@ from pathlib import Path
 from agorad.core import report
 from agorad.core.auth import EV_AUTH_DENIED
 from agorad.core.msg import NotChainEdge
+from agorad.core.peer import Rejected as PeerRejected
 from agorad.core.state import EV_RUNNING, InvalidTransition
 from agorad.core.task import Rejected
 
 _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel",
-                    "post", "check_mail", "board", "doctor", "wiki_read",
-                    "wiki_write", "enforce"})
-_POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject")
-_DENY_HINT = {"worker": "worker 面：post/check_mail/wiki_read/wiki_write/"
-                        "task_dispatch/wait；需登记 verify→post(kind=verify) 提案验收命令"}
+                    "post", "check_mail", "board", "doctor", "repo_board",
+                    "wiki_read", "wiki_write", "enforce"})
+_POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
+               "peer")
+_DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/"
+                        "wiki_write/task_dispatch/wait；需登记 verify→"
+                        "post(kind=verify) 提案验收命令"}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -88,6 +91,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, self._tool(name, sid, role, token, body))
         except Rejected as e:      # 归属细判/保险丝拒（报因在消息）
             return self._json(403, {"error": str(e)})
+        except PeerRejected as e:  # F22 peer 域拒（权限/软限/无作者任务）
+            return self._json(403, {"error": str(e)})
         except NotChainEdge as e:
             return self._bad(sid, name, str(e))
         except InvalidTransition as e:
@@ -131,6 +136,11 @@ class _Handler(BaseHTTPRequestHandler):
                     "forest": report.forest_view(snap)}
         if name == "doctor":
             return report.doctor_view(app.state.snapshot(), app.store.home)
+        if name == "repo_board":  # F22：worker 按己任务仓分区；root/dispatcher 可传 repo 诊断
+            snap = app.state.snapshot()
+            repo = (app.peer.partition(sid) if role == "worker"
+                    else body.get("repo"))
+            return app.peer.board(snap, repo)
         if name == "wiki_read":
             return {"text": self._wiki(body["path"]).read_text(
                 encoding="utf-8")}
@@ -187,7 +197,12 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json(400, {"error": msg})
 
     def _post(self, sid, role, body):
-        app, tid, kind = self.app, body["task"], body["kind"]
+        app, kind = self.app, body["kind"]
+        if kind == "peer":  # F22 写面：无任务目标，作者＝调用者任务；仅 worker 牌
+            if role != "worker":
+                raise PeerRejected("peer 留言仅 worker 牌可写")
+            return {"message": app.peer.post(sid, str(body["body"]))}
+        tid = body["task"]
         if kind not in _POST_KINDS:  # F13 客户端 kind 白名单；内部直调 Router 不经此路
             raise ValueError(f"kind 须为 {'/'.join(_POST_KINDS)} 之一（收到 {kind!r}）")
         t = app.state.get(tid)

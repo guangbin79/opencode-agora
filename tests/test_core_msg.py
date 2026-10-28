@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agorad.access.store import Store
 from agorad.core.msg import NotChainEdge, Router
+from agorad.core.peer import PeerBoard, Rejected as PeerRejected
 from agorad.core.state import State
 
 
@@ -170,6 +171,90 @@ class TestCoreMsg(unittest.TestCase):
                          [("silent", "d1", "[agora] task t1 escalate from w1\nhush")])
         self.assertEqual(self.r.check_mail("d1"), [])  # 静默已达，补拉不重交
         self.assertTrue(self.r.dedup_key(mid))
+
+
+class TestPeerBoard(unittest.TestCase):
+    """F22 同仓协作面：peer 写读回路/分区/上限/is_stale/权限/审计（真 Store tmp 夹具）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(self.tmp)
+        self.store.append_state({
+            "version": 1,
+            "tasks": {
+                "t1": {"state": "running", "fail_streak": 0, "title": "A",
+                       "project_dir": "/repoA/",  # 尾斜杠：分区 normpath 归一
+                       "created": 0.0, "updated": 0.0,
+                       "dispatcher_sid": "d1", "worker_sid": "w1"},
+                "t2": {"state": "running", "fail_streak": 0, "title": "B",
+                       "project_dir": "/repoB",
+                       "created": 0.0, "updated": 0.0,
+                       "dispatcher_sid": "d2", "worker_sid": "w2"},
+            },
+            "mail_read": {},
+        })
+        self.state = State(self.store)
+        self.pb = PeerBoard(self.store, self.state)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_post_board_roundtrip(self):  # Req: F22
+        mid = self.pb.post("w1", "hello peers")
+        r = self.pb.board(self.state.snapshot(), self.pb.partition("w1"))
+        self.assertEqual(r["repo"], "/repoA")  # 尾斜杠归一
+        self.assertEqual([(t["tid"], t["title"], t["state"]) for t in r["tasks"]],
+                         [("t1", "A", "running")])  # 在飞四字段
+        (m,) = r["messages"]
+        self.assertEqual((m["id"], m["author"], m["author_state"], m["body"]),
+                         (mid, "t1", "running", "hello peers"))
+        self.assertGreaterEqual(m["age_seconds"], 0)
+        self.assertFalse(m["is_stale"])
+        self.assertTrue(m["untrusted"])  # 注入防线：数据非指令
+        (raw,) = self.store.read_messages()
+        self.assertEqual(raw["to"], "")  # 消息库全员有 to 不变量（check_mail 直取）
+
+    def test_partition_isolation(self):  # Req: F22
+        self.pb.post("w1", "from A")
+        r = self.pb.board(self.state.snapshot(), "/repoB")
+        self.assertEqual([t["tid"] for t in r["tasks"]], ["t2"])  # 跨仓任务不可见
+        self.assertEqual(r["messages"], [])  # 跨仓留言不可见
+        r_all = self.pb.board(self.state.snapshot())  # root/dispatcher 诊断＝全仓
+        self.assertEqual(sorted(t["tid"] for t in r_all["tasks"]), ["t1", "t2"])
+
+    def test_length_cap_500(self):  # Req: F22 护栏 a
+        self.pb.post("w1", "x" * 600)
+        (m,) = [x for x in self.store.read_messages() if x["kind"] == "peer"]
+        self.assertEqual(len(m["body"]), 500)
+
+    def test_soft_limit_10_then_reject(self):  # Req: F22 护栏 c
+        for i in range(10):
+            self.pb.post("w1", f"m{i}")
+        with self.assertRaises(PeerRejected) as cm:
+            self.pb.post("w1", "m10")
+        self.assertIn("knowledge index", str(cm.exception))
+        self.assertEqual(len([x for x in self.store.read_messages()
+                              if x["kind"] == "peer"]), 10)
+
+    def test_is_stale_after_author_terminal(self):  # Req: F22 护栏 b
+        self.pb.post("w1", "note")
+        for to in ("done", "merged", "closed"):
+            self.state.transition("t1", to)
+        r = self.pb.board(self.state.snapshot(), "/repoA")
+        self.assertEqual([t["tid"] for t in r["tasks"]], [])  # 终态不在飞摘要
+        (m,) = r["messages"]  # 数据保留：留言仍在，消费方据 is_stale 降权
+        self.assertTrue(m["is_stale"])
+        self.assertEqual(m["author_state"], "closed")
+
+    def test_write_worker_author_required(self):  # Req: F22 权限（核心侧：作者可定）
+        with self.assertRaises(PeerRejected):
+            self.pb.post("stranger", "x")  # 无任务行＝作者不可定
+
+    def test_audit_event(self):  # Req: F22 护栏审计
+        mid = self.pb.post("w1", "audited")
+        ev = [e for e in self.store.read_events() if e["event"] == "peer_post"]
+        self.assertEqual([(e["task"], e["repo"], e["mid"]) for e in ev],
+                         [("t1", "/repoA", mid)])
 
 
 if __name__ == "__main__":

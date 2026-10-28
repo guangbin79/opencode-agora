@@ -25,6 +25,7 @@ from agorad.core.auth import Auth
 from agorad.core.gate import Gate
 from agorad.core.health import Health
 from agorad.core.msg import Router
+from agorad.core.peer import PeerBoard
 from agorad.core.recover import Recover
 from agorad.core.state import State
 from agorad.core.task import TaskService
@@ -69,9 +70,10 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     router = Router(store, state, oc,
                     same_lineage=auth.same_lineage)  # F16 血统链边（装配注入）
     task = TaskService(state, auth, gitx, oc, store, router, write_task_page)
+    peer = PeerBoard(store, state)  # F22 同仓协作面（写面权限归 httpd 角色判定）
     recover = Recover(state, oc, gitx, store, auth, router=router)
     app = App(store=store, state=state, auth=auth, router=router, task=task,
-              gate=None, health=None, recover=recover, report=report,
+              peer=peer, gate=None, health=None, recover=recover, report=report,
               oc=oc, gitx=gitx, main_sid=main_sid)
     health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）

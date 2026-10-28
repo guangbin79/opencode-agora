@@ -1,6 +1,6 @@
 """T1 MCP 壳契约：stdio newline-JSON-RPC ↔ 真 agorad（make_server）全链。
 
-壳＝薄代理零逻辑：11 工具根级路由 POST /<name>、_token 剥除→X-Agora-Token、
+壳＝薄代理零逻辑：12 工具根级路由 POST /<name>、_token 剥除→X-Agora-Token、
 HTTP 错误档→JSON-RPC 负数区 code（message 服务原文）；未知工具/缺牌壳内
 直错（不打服务）。夹具形态同 test_transport_httpd（假 gitx/锚/runner＋
 StubOpencode，root 牌 sid=main）。
@@ -108,8 +108,8 @@ class TestHandshakeAndList(McpShellTest):
 
     def test_tools_list_exactly_11_matching_httpd_routes(self):  # Req: F2
         names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(len(names), 12)  # 11 服务端 + 1 壳层本地 wait
-        self.assertEqual(set(names) - {"wait"}, set(_TOOLS))  # 11 服务端五族与 httpd 同集；wait＝壳层本地
+        self.assertEqual(len(names), 13)  # 12 服务端 + 1 壳层本地 wait（F22 repo_board）
+        self.assertEqual(set(names) - {"wait"}, set(_TOOLS))  # 服务端五族与 httpd 同集；wait＝壳层本地
         for t in self.rpc("tools/list")["result"]["tools"]:
             self.assertTrue(t.get("description"))
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -120,7 +120,7 @@ class TestHandshakeAndList(McpShellTest):
         self.assertEqual(schema["wiki_write"]["inputSchema"]["required"],
                          ["path", "text"])  # httpd 实参名 text（非 plan 的 content）
         self.assertEqual(schema["post"]["inputSchema"]["required"],
-                         ["task", "kind", "body"])  # 方向服务侧按角色定，无 direction
+                         ["kind", "body"])  # F22：kind=peer 无 task（其余缺 task 服务侧 400）
         self.assertEqual(schema["task_create"]["inputSchema"]["properties"]
                          ["target_branch"]["type"], "string")  # gt-132747 外部工作流
 
@@ -144,7 +144,7 @@ class TestSchemaContract(McpShellTest):
         props = schema["post"]["inputSchema"]["properties"]
         self.assertEqual(props["kind"]["enum"],
                          ["note", "question", "answer", "done", "verify",
-                          "verify_reject"])  # 与派发 skill 词汇对齐
+                          "verify_reject", "peer"])  # F22 追加 peer 留言面
         self.assertIn("40 位", props["body"]["description"])  # done＝纯 sha 契约
 
     def test_task_create_after_describes_b7_chain(self):  # Req: F13

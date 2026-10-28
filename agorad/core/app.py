@@ -18,6 +18,7 @@ class App:
     auth: object
     router: object
     task: object
+    peer: object
     gate: object
     health: object
     recover: object
