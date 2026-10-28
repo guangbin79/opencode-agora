@@ -2,8 +2,8 @@
 
 tick 只探活动任务的直接下级会话（无全局巡检）；死下级→recover.reinject 自愈
 （静默），失败→升级；死会话若正管着在飞链（dispatcher）→不代管、直接拍人。
-另含 worker 凭据周期重注入（F25）：插件凭据缓存仅驻内存，宿主重载即清零＝工具
-全拦僵死——周期经免通知通道重发 dispatch 同形凭据自愈。
+worker 凭据自愈已推改拉（F25 修正）：inject_silent 推送通道证伪（v2.2.0
+synthetic 不触发 prompt 钩子），改由插件 hook 缓存未命中经 /cred_for_sid 拉取。
 边沿判僵（F5 决策记录 2026-10-28，只提醒不处置）：tick 顺带按 doctor 同口径
 （20min 无活动，report.stale_candidates 构造注入）算僵态候选，新进候选集→
 stalled 升级＋可选邮件（email.json opt-in）；离开候选集复位，oc 不可达轮次
@@ -31,9 +31,6 @@ _RAW_MAX = 500
 # 活动面＝探活与 last_seen 的任务集（verify_failed/reopened 归在飞，同 task 口径）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _IN_FLIGHT = {"dispatched", "running"}  # 自愈重注入仅限 worker 在跑的两态
-_CRED_STATES = {"dispatched", "running", "done"}  # 凭据周期重注入面（F25 裁定三态；
-# verify_failed/reopened/blocked 不在面——短期续修/待重派态，终态亦不注入）
-_CRED_INTERVAL = 600.0  # 重注入周期缺省 10min（main 装配经 AGORA_CRED_REINJECT_INTERVAL 配）
 
 _KIND_NOTE = {
     KIND_QUALITY: "同一任务连续 3 次质量失败，已自动 blocked",
@@ -57,13 +54,11 @@ class Health:
     """tick 由 main 定时线程驱动；单写者口径（httpd 串行调用）。"""
 
     def __init__(self, state, oc, router, recover, app, store,
-                 runner=None, stale_candidates=None, cred_interval=_CRED_INTERVAL):
-        """app 按引用注入：main_sid 是活绑定（R25-A），escalate 每次取当前值；
-        凭据重注入经 app.auth.token_for 只读取牌（F25，不改绑不轮换）。
+                 runner=None, stale_candidates=None):
+        """app 按引用注入：main_sid 是活绑定（R25-A），escalate 每次取当前值。
 
         stale_candidates＝report.stale_candidates（core 禁兄弟 import，构造注入）；
-        runner＝邮件外呼缝（gate 同款），缺省真 subprocess；
-        cred_interval＝凭据重注入周期秒数（main 装配经 env 配）。
+        runner＝邮件外呼缝（gate 同款），缺省真 subprocess。
         """
         self._state, self._oc, self._router = state, oc, router
         self._recover, self._app = recover, app
@@ -71,15 +66,12 @@ class Health:
         self._runner = runner or _subprocess_runner
         self._stale_candidates = stale_candidates
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
-        self._cred_interval = cred_interval
-        self._cred_sent = {}  # tid->上次凭据重注入时刻（内存态，崩溃回退＝多注一次）
 
     def tick(self):
         """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵只提醒不处置。"""
         tasks = self._state.snapshot()["tasks"]
         oc_down = False
         busy = set()  # updated>idle＝回合进行中：僵态本轮免判（doctor 口径减 busy 免决）
-        dead = set()  # 本轮探得已死的 worker sid：凭据重注入免发免落库（死会话无人补拉）
         for tid, t in tasks.items():
             wsid = t.get("worker_sid")
             if t["state"] not in _ACTIVE or not wsid:
@@ -90,7 +82,6 @@ class Health:
                 oc_down = True
                 continue
             if data is None:
-                dead.add(wsid)
                 if any(x.get("dispatcher_sid") == wsid and x["state"] in _IN_FLIGHT
                        for x in tasks.values()):
                     self.escalate(KIND_DISPATCHER_DEAD, tid)  # 死会话管着在飞链——拍人不代管
@@ -101,48 +92,7 @@ class Health:
                 if (tm.get("updated") or 0) > (tm.get("idle") or 0):
                     busy.add(tid)
         if not oc_down:
-            self._cred_reinject(tasks, dead)
             self._stale_scan(tasks, busy)
-
-    def _cred_reinject(self, tasks, dead):
-        """worker 凭据周期重注入（F25）：插件凭据缓存仅驻内存，会话进程或插件宿主
-        重载即清零＝hook 全拦僵死（gt-fd5bb0/gt-99ae7b 两次实锤）。每 cred_interval
-        对在飞任务的 worker 经免通知通道（synthetic，落转录不调度回合＝零上下文
-        污染）重发 dispatch 同形凭据——插件 onInject 幂等重缓存，重复到达无害。
-        防噪：不逐轮落审计；终态不注入；oc 不可达轮次 tick 已整体免判；死会话
-        （tick 探活面直供 dead 集）免发免落库——留库无人补拉只会堆积带牌行，死面
-        归 recover.reinject/gate 管；通道失败（契约 False 与抛异常）同 dispatch
-        口径经 router 落库兜底不抛（补拉可取）；出账同 _stale_seen 口径防无界增长。
-        """
-        now = time.time()
-        for tid, snap in tasks.items():
-            if snap["state"] not in _CRED_STATES or not snap.get("worker_sid"):
-                continue
-            if now - self._cred_sent.get(tid, 0.0) < self._cred_interval:
-                continue  # 周期内免发（首轮缺省 0＝立即注一次，缩小自愈窗）
-            self._cred_sent[tid] = now  # 先记后发：失败轮次等下个周期（留库兜底已可达）
-            try:
-                t = self._state.get(tid)  # 探活窗内可能已迁移/结案：终态行不注入
-            except KeyError:
-                continue
-            if t["state"] not in _CRED_STATES or not t.get("worker_sid"):
-                continue
-            if t["worker_sid"] in dead:
-                continue  # 死会话不注入不落库：凭据行无人拉，死面归 recover/gate
-            tok = self._app.auth.token_for(t["worker_sid"])
-            if not tok:
-                continue  # 牌已废（重派/取消路径自会签新）：无可重注
-            text = f"[agora] credential {tid}\ntoken: {tok}"  # 与 dispatch 同形
-            try:
-                ok = self._oc.inject_silent(t["worker_sid"], text)
-            except Exception:  # oc 抖动（网络类）同 dispatch 兜底口径：落库不抛
-                ok = False
-            if not ok:
-                self._router.post(t["dispatcher_sid"], ("down", tid), "credential", text)
-        # 出账（评审环 R2）：终态/缺席行清账，防常驻进程 _cred_sent 无界增长；
-        # 再入面任务（blocked→dispatched）重进即重注一次，幂等无害
-        self._cred_sent = {tid: ts for tid, ts in self._cred_sent.items()
-                           if tasks.get(tid, {}).get("state") in _CRED_STATES}
 
     def _stale_scan(self, tasks, busy):
         """边沿判僵（F5 决策记录 2026-10-28）：新进候选集→stalled 拍人。

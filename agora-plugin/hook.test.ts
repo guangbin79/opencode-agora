@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { agoraHome, DISPATCH_HINT, NO_CRED_HINT, READ_HINT, shouldBlock, wrongDoorHint } from "./hook";
-import { attachToken, cacheCredential, readCredential, type Cred } from "./cred";
+import {
+  attachToken, cacheCredential, getCredential, pullCredential,
+  readCredential, resetCredPull, type Cred,
+} from "./cred";
 import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
 
@@ -342,6 +345,81 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       expect(plainIn._token).toBeUndefined();
     } finally {
       setEnforce(false);
+    }
+  });
+
+  test("cred_for_sid 拉取自愈：write 未命中→拉取命中填缓存放行；404 默认拒；节流窗内零新拉（F25 修正）", async () => {
+    // Req: F25
+    const hooks = wire();
+    setEnforce(null); // 服务持旗拉取形态
+    const pulls: string[] = [];
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            pulls.push(sid);
+            if (sid === "s-boot-pull-w") {
+              return Response.json({ tid: "t-pull", env_dir: envDir, token: "tok-pull" });
+            }
+            return new Response("{}", { status: 404 });
+          });
+        }
+        if (req.headers.get("x-agora-token") !== "tok-root") return new Response("{}", { status: 401 });
+        return Response.json({ ok: true, enforce_on: true });
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`; // lift 直达探活
+    resetLift();
+    resetCredPull();
+    try {
+      // 未命中→拉取命中→填缓存→cwd∈env 放行（s-boot* 前缀＝wire 桩回任务 env cwd）
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-w", input: { filePath: join(repo, "a.md") } });
+      expect(getCredential("s-boot-pull-w")?.token).toBe("tok-pull");
+      // 404 未命中→现有默认拒文案；同 sid 立即重试→节流窗内不再拉
+      await expect(
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-none", input: { filePath: join(repo, "a.md") } }),
+      ).rejects.toThrow(/派发/);
+      expect(pulls).toEqual(["s-boot-pull-w", "s-boot-pull-none"]);
+      await expect(
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-none", input: { filePath: join(repo, "a.md") } }),
+      ).rejects.toThrow(/派发/);
+      expect(pulls.length).toBe(2); // 节流：同 sid 窗内零新拉
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      setEnforce(false);
+      srv.stop(true);
+    }
+  });
+
+  test("pullCredential 纯函数：形状缺字段 null、非 2xx null、服务异常 null（安全向）", async () => {
+    // Req: F25
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/bad-shape") return Response.json({ tid: "t" }); // 缺 token/env_dir
+        return new Response("{}", { status: 500 });
+      },
+    });
+    resetCredPull();
+    try {
+      expect(await pullCredential("s-a", srv.port)).toBeNull(); // 500→null
+      resetCredPull(); // 出节流窗
+      expect(await pullCredential("s-a", srv.port + 1)).toBeNull(); // 连接拒→null
+      resetCredPull();
+      expect(await pullCredential("s-b", srv.port)).toBeNull(); // bad-shape→null
+      expect(getCredential("s-b")).toBeUndefined(); // 未填缓存
+    } finally {
+      resetCredPull();
+      srv.stop(true);
     }
   });
 

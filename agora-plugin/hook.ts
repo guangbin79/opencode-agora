@@ -66,6 +66,11 @@ export function enforceRelevant(tool: string): boolean {
   return WRITE_TOOLS.has(tool) || READISH_TOOLS.has(tool);
 }
 
+/** write 判定类（F25 修正：仅 write 工具缓存未命中触发 cred_for_sid 拉取）。 */
+export function isWriteTool(tool: string): boolean {
+  return WRITE_TOOLS.has(tool);
+}
+
 /** wrong-door 拒因＋副本换算（尽力而为）：envDir basename 形如 {repo}__wt-* →
  * 主仓根＝envDir 父目录/{repo}；cwd 落主仓内则附副本对应路径，推导不出退化为仅列两侧实值。 */
 export function wrongDoorHint(envDir: string, cwd: string): string {

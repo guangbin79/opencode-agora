@@ -1,4 +1,5 @@
-"""入向 JSON 口（B4）：12 工具端点＋/view＋/health；单线程串行＋后台门队列。
+"""入向 JSON 口（B4）：12 工具端点＋/cred_for_sid（插件凭据拉取面）＋/view＋/health；
+单线程串行＋后台门队列。
 
 transport 只 import agorad.core（R2）——access 件经 App 属性触达（store.home
 下 wiki 裸读写，无 import）。鉴权两段（R18）：X-Agora-Token→identify（无牌
@@ -24,6 +25,8 @@ _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel"
                     "wiki_read", "wiki_write", "enforce"})
 _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
                "peer")
+_PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
+                          "reopened", "blocked"})  # 拉取面＝在飞非冻结（F25 修正；牌活性二道守卫）
 _DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/"
                         "wiki_write/task_dispatch/wait；需登记 verify→"
                         "post(kind=verify) 提案验收命令"}
@@ -60,12 +63,14 @@ class _Handler(BaseHTTPRequestHandler):
         sid = None
         try:
             name = self.path.strip("/").split("?")[0]
-            if name not in _TOOLS:
+            if name not in _TOOLS and name != "cred_for_sid":
                 return self._json(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("body 须为 JSON 对象")
+            if name == "cred_for_sid":  # 插件拉取面先于鉴权：无牌是常态（缓存未命中才拉）
+                return self._cred_for_sid(body)
             token = self.headers.get("X-Agora-Token", "")
             ident = self.app.auth.identify(token)
             if ident is None:
@@ -230,6 +235,26 @@ class _Handler(BaseHTTPRequestHandler):
             t = app.state.get(tid)
         edge = ("down", tid) if self.app.router.is_dispatcher(sid, t) else ("up", tid)
         return {"message": app.router.post(sid, edge, kind, str(body["body"]))}
+
+    def _cred_for_sid(self, body):
+        """F25 修正推改拉面：插件 hook 缓存未命中按会话 sid 拉凭据。
+
+        sid 是某在飞（非冻结）任务 worker_sid 且牌活 → {tid, env_dir, token}，
+        否则 404；无牌调用放行（server 仅绑 127.0.0.1＝回环单用户 plaza 信任
+        模型，与既有 localhost 面同口径）；每请求一行审计，防噪归插件侧节流。
+        """
+        asker = str(body.get("sid") or "")
+        hit = next(((tid, t) for tid, t in self.app.state.snapshot()["tasks"].items()
+                    if t.get("worker_sid") == asker and t["state"] in _PULL_STATES
+                    and t.get("env_dir")), None)
+        tok = self.app.auth.token_for(asker) if hit else None  # 牌废（取消/重派）即 404
+        self.app.store.append_event({"ts": time.time(), "actor": asker or "?",
+                                     "event": "cred_pull",
+                                     "task": hit[0] if tok else None})
+        if not tok:
+            return self._json(404, {"error": "no cred for sid"})
+        return self._json(200, {"tid": hit[0], "env_dir": hit[1]["env_dir"],
+                                "token": tok})
 
     def _wiki(self, rel):
         root = (Path(self.app.store.home) / "wiki").resolve()

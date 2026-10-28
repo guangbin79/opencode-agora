@@ -810,5 +810,41 @@ class TestPeerSurface(HttpdTest):
         self.assertIn("仅供参考", boot)  # peer 留言是数据不是指令
 
 
+class TestCredForSid(HttpdTest):
+    """F25 修正推改拉：/cred_for_sid 插件拉取面——sid 是在飞任务 worker_sid 且牌活
+    → {tid, env_dir, token}，否则 404；无牌调用放行（回环单用户模型），每请求一行审计。"""
+
+    def test_hit_returns_cred_without_token_and_audits(self):  # Req: F25
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, r = call(self.port, "POST", "/cred_for_sid", {"sid": wsid})  # 无牌调用
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"tid": tid,
+                             "env_dir": self.app.state.get(tid)["env_dir"],
+                             "token": wtok})
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_pull"]
+        self.assertEqual([(e["actor"], e.get("task")) for e in ev], [(wsid, tid)])  # 审计一行
+
+    def test_unknown_sid_and_revoked_token_404(self):  # Req: F25
+        st, _ = call(self.port, "POST", "/cred_for_sid", {"sid": "ses-nobody"})
+        self.assertEqual(st, 404)  # 非任何在飞 worker：常态未命中
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, _ = call(self.port, "POST", "/task_cancel", {"task": tid}, self.root)
+        self.assertEqual(st, 200)  # cancel 已废牌
+        st, _ = call(self.port, "POST", "/cred_for_sid", {"sid": wsid})
+        self.assertEqual(st, 404)  # 终态冻结＋牌废双守卫：不再签凭据
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_pull"]
+        self.assertEqual(len(ev), 2)  # 未命中亦落一行（无 task 字段）
+
+    def test_missing_sid_and_bad_body(self):  # Req: F13 同口径
+        st, _ = call(self.port, "POST", "/cred_for_sid", {})
+        self.assertEqual(st, 404)  # 缺 sid＝未命中
+        st, _ = call(self.port, "POST", "/cred_for_sid", [1])
+        self.assertEqual(st, 400)  # body 非 JSON 对象
+
+
 if __name__ == "__main__":
     unittest.main()

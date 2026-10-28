@@ -9,12 +9,12 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getCredential } from "./cred";
+import { getCredential, pullCredential } from "./cred";
 import { onShellCreate, type ShellCreatePayload } from "./envPath";
 import { onInject } from "./inject";
 import { ensureOnce, resetLift, LIFT_RECOVER, type LiftResult } from "./lift";
 import { isDormant } from "./scope";
-import { agoraHome, enforceRelevant, shouldBlock } from "./hook";
+import { agoraHome, enforceRelevant, isWriteTool, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -111,7 +111,12 @@ export default {
         (typeof input.filePath === "string" && input.filePath) ||
         (typeof input.path === "string" && input.path) ||
         "";
-      const cred = getCredential(event.sessionID);
+      let cred = getCredential(event.sessionID);
+      // F25 修正推改拉：write 判定遇缓存未命中（推送通道不触发钩子的出生竞态/宿主
+      // 重载）→节流拉取自愈；命中填缓存放行，未命中/失败 cred 保持空＝默认拒。
+      if (!cred && on && lift?.ok && isWriteTool(event.tool)) {
+        cred = await pullCredential(event.sessionID, lift.port);
+      }
       // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token——
       // worker credential 消息优先，未命中回落 root 牌接管文件（主会话经 MCP 调任务面）。
       // _sid 携调用者真实会话 id（R25-A：服务登记主会话绑定，拍人注入真会话）。
