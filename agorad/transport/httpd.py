@@ -43,7 +43,7 @@ class _Handler(BaseHTTPRequestHandler):
         if ident is None:
             return self._json(401, {"error": "无牌或牌无效"})
         sid, role = ident
-        self._bind_main(sid, role)
+        sid = self._bind_caller(sid, role)
         tool = "board" if name == "view" else "doctor"  # 查询面同级（may 矩阵）
         if not self.app.auth.may(role, tool, None, None):
             return self._deny(sid, role, tool, None)
@@ -68,7 +68,7 @@ class _Handler(BaseHTTPRequestHandler):
             if ident is None:
                 return self._json(401, {"error": "无牌或牌无效"})
             sid, role = ident
-            self._bind_main(sid, role)
+            sid = self._bind_caller(sid, role)  # 改绑后行取新 sid：开工/归属按牌面一致判定
             tid = body.get("task")
             row = None
             if tid is not None:
@@ -150,12 +150,18 @@ class _Handler(BaseHTTPRequestHandler):
             return {"enforce_on": app.auth.enforce_on()}
         raise KeyError(name)
 
-    def _bind_main(self, sid, role):
-        """R25-A：root 牌调用携 X-Agora-Sid（MCP 壳透传真实会话 sid）即登记为
-        主会话绑定（最近活跃覆盖）；无头直连（T4 冒烟/看板 tui）不动绑定。"""
+    def _bind_caller(self, sid, role):
+        """R25-A root 活绑定＋gt-d55b9e worker 换号自愈：MCP 壳透传 X-Agora-Sid
+        （调用者真实会话 sid）即对齐牌面；无头直连（T4 冒烟/看板 tui）不动绑定。
+        返回对齐后 sid——改绑发生时后续归属判定须以新 sid 走。"""
         caller = self.headers.get("X-Agora-Sid", "")
-        if role == "root" and caller:
+        if not caller:
+            return sid
+        if role == "root":
             self.app.bind_main(sid, caller)
+        elif role == "worker":
+            return self.app.bind_worker(sid, caller)
+        return sid
 
     def _deny(self, sid, role, tool, tid):
         """越权 403：POST/GET 共用（审计行同形）；hint 非空附可用面退路（F13）。"""

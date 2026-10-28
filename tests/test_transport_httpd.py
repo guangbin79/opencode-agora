@@ -343,6 +343,59 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(r["env"], [])
 
 
+class TestWorkerRebind(HttpdTest):
+    """gt-d55b9e：worker 牌换号自愈——持牌即身份，漂移即改绑（镜像 R25-A root 面）。"""
+
+    def test_worker_continued_session_rebinds_and_done_accepted(self):  # Req: F19
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": SHA}, wtok,
+                     sid="ses-new")  # 续接换号：牌面 sid≠真实会话
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"result": "accepted"})  # 五拒一克不减：受理绿
+        self.assertEqual(self.app.auth.identify(wtok), ("ses-new", "worker"))
+        self.assertTrue(self.app.auth.same_lineage("ses-new", wsid))  # 旧 sid 入血统
+        self.assertEqual(self.app.state.get(tid)["worker_sid"], "ses-new")  # 行覆写
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "worker_rebound"]
+        self.assertEqual([(e["task"], e["from"], e["to"]) for e in ev],
+                         [(tid, wsid, "ses-new")])  # 改绑审计
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(tid)["state"] == "closed"))  # 全链照常走完
+
+    def test_foreign_or_missing_token_rejected_without_rebind(self):  # Req: F19
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        other = self.app.auth.issue("ses-x", "worker")  # 他牌：注册 sid 无主
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": SHA}, other,
+                     sid="ses-y")
+        self.assertEqual(st, 400)
+        self.assertIn("done 仅任务 worker", r["error"])
+        self.assertEqual(self.app.auth.identify(other), ("ses-x", "worker"))  # 未改绑
+        self.assertEqual(self.app.state.get(tid)["worker_sid"], wsid)
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": SHA}, None, sid="ses-y")
+        self.assertEqual(st, 401)  # 无牌：既有拒绝路径，零改绑
+        self.assertEqual(self.app.state.get(tid)["worker_sid"], wsid)
+
+    def test_terminal_task_no_rebind(self):  # Req: F19
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, _ = call(self.port, "POST", "/task_cancel", {"task": tid}, self.root)
+        self.assertEqual(st, 200)  # cancel 已废旧凭据
+        dead = self.app.auth.issue(wsid, "worker")  # 终态后持同 sid 牌
+        st, _ = call(self.port, "POST", "/wiki_read",
+                     {"path": "notes/none.md"}, dead, sid="ses-new")
+        self.assertEqual(st, 404)  # 工具面照常应答
+        self.assertEqual(self.app.auth.identify(dead), (wsid, "worker"))  # 不改绑
+        self.assertEqual(self.app.state.get(tid)["worker_sid"], wsid)  # 行不动
+
+
 class SwitchRunner:
     """首跑败后续绿：驱动 done→verify_failed→running→done→closed 续修循环。"""
 

@@ -298,6 +298,42 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual([e for e in self.store.read_events()
                           if e["event"] == "main_sid_bound"], [])
 
+    # ---- gt-d55b9e：worker 牌换号自愈——活动态改绑，终态/无主不动 ----
+
+    def test_bind_worker_rebinds_active_task_worker_with_lineage(self):  # Req: F19
+        self.seed("t1", state="dispatched", worker="s-w1")
+        tok = self.app.auth.issue("s-w1", "worker")
+        self.assertEqual(self.app.bind_worker("s-w1", "ses-new"), "ses-new")
+        self.assertEqual(self.app.auth.identify(tok), ("ses-new", "worker"))
+        self.assertTrue(self.app.auth.same_lineage("ses-new", "s-w1"))  # 旧 sid 入血统
+        self.assertEqual(self.state.get("t1")["worker_sid"], "ses-new")  # 行同步覆写
+        ev = [e for e in self.store.read_events() if e["event"] == "worker_rebound"]
+        self.assertEqual([(e["task"], e["from"], e["to"]) for e in ev],
+                         [("t1", "s-w1", "ses-new")])
+
+    def test_bind_worker_state_matrix_active_rebinds_terminal_frozen(self):  # Req: F19
+        for i, st in enumerate(("dispatched", "running", "done", "verify_failed",
+                                "reopened", "blocked")):
+            sid = f"wa{i}"
+            self.seed(f"ta{i}", state=st, worker=sid)
+            self.assertEqual(self.app.bind_worker(sid, "wn"), "wn")  # 活动态：改绑
+            self.assertEqual(self.state.get(f"ta{i}")["worker_sid"], "wn")
+        for i, st in enumerate(("merged", "closed", "cancelled")):
+            sid = f"wt{i}"
+            self.seed(f"tt{i}", state=st, worker=sid)
+            tok = self.app.auth.issue(sid, "worker")
+            self.assertEqual(self.app.bind_worker(sid, "wn"), sid)  # 终态：不动
+            self.assertEqual(self.app.auth.identify(tok), (sid, "worker"))
+            self.assertEqual(self.state.get(f"tt{i}")["worker_sid"], sid)
+
+    def test_bind_worker_ignores_unowned_sid_and_no_drift(self):  # Req: F19
+        tok = self.app.auth.issue("w-free", "worker")  # 非任何任务 worker 的牌
+        self.assertEqual(self.app.bind_worker("w-free", "ses-new"), "w-free")
+        self.assertEqual(self.app.auth.identify(tok), ("w-free", "worker"))
+        self.seed("t1", worker="s-w1")
+        self.assertEqual(self.app.bind_worker("s-w1", "s-w1"), "s-w1")  # 牌面一致：不动
+        self.assertEqual(self.state.get("t1")["worker_sid"], "s-w1")
+
     def test_escalate_injects_bound_real_sid(self):  # Req: F4/F5
         self.app.bind_main("main", "ses-main")
         self.seed("t1", disp="ses-main")  # 绑定后建任务：根 dispatcher＝真实 sid

@@ -3,11 +3,15 @@ import time
 from dataclasses import dataclass
 
 EV_MAIN_BOUND = "main_sid_bound"
+EV_WORKER_REBOUND = "worker_rebound"
+
+# worker 换号自愈口径活动态（词汇对齐 task._ACTIVE；core 禁兄弟 import 故字面量本地定义）
+_ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 
 
 @dataclass
 class App:
-    """聚合根：core 服务＋注入的 access 件＋装配元数据（main_sid/root 之外零逻辑）。"""
+    """聚合根：core 服务＋注入的 access 件＋装配元数据＋换号自愈绑定面（R25-A/gt-d55b9e）。"""
     store: object
     state: object
     auth: object
@@ -38,3 +42,26 @@ class App:
             self.main_sid = caller
             self.store.append_event({"ts": time.time(), "actor": caller,
                                      "event": EV_MAIN_BOUND})
+
+    def bind_worker(self, sid, caller):
+        """gt-d55b9e：worker 牌换号自愈——持牌即身份，漂移即改绑（镜像 bind_main）。
+
+        sid＝牌注册 sid（dispatch 时落行的 worker_sid），caller＝X-Agora-Sid
+        真实续接会话。注册 sid 是某活动任务 worker_sid 且两者漂移 → rebind
+        （旧 sid 入血统，token 本体不变）＋任务行 worker_sid 同步覆写（与
+        recover.reinject 同口径）。守卫：终态/无主 sid 一律不动——worker 改绑
+        只动 worker 牌，主会话/他牌不受累。返回改绑后 sid（调用方刷新身份）。
+        """
+        if caller == sid:
+            return sid
+        hit = [tid for tid, t in self.state.snapshot()["tasks"].items()
+               if t.get("worker_sid") == sid and t["state"] in _ACTIVE]
+        if not hit:
+            return sid
+        self.auth.rebind(sid, caller)
+        for tid in hit:
+            self.state.set_fields(tid, worker_sid=caller)
+            self.store.append_event({"ts": time.time(), "actor": sid,
+                                     "event": EV_WORKER_REBOUND, "task": tid,
+                                     "from": sid, "to": caller})
+        return caller
