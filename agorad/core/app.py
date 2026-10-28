@@ -54,7 +54,15 @@ class App:
         """
         if caller == sid:
             return sid
-        hit = [tid for tid, t in self.state.snapshot()["tasks"].items()
+        tasks = self.state.snapshot()["tasks"]
+        # 已占 sid 不抢绑（镜像 bind_main 守卫）：X-Agora-Sid 是自证头，worker 可从
+        # 任务页读到他任务 sid——caller 已是主会话/任一任务 dispatcher/worker 即拒
+        # （防跨任务冒充；真续接 sid 全新必不撞）。
+        if caller == self.main_sid or any(
+                caller in (t.get("worker_sid"), t.get("dispatcher_sid"))
+                for t in tasks.values()):
+            return sid
+        hit = [tid for tid, t in tasks.items()
                if t.get("worker_sid") == sid and t["state"] in _ACTIVE]
         if not hit:
             return sid

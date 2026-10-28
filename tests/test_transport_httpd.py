@@ -395,6 +395,20 @@ class TestWorkerRebind(HttpdTest):
         self.assertEqual(self.app.auth.identify(dead), (wsid, "worker"))  # 不改绑
         self.assertEqual(self.app.state.get(tid)["worker_sid"], wsid)  # 行不动
 
+    def test_forged_victim_sid_header_cannot_hijack(self):  # Req: F18（终闸 C 册冒充面）
+        tid = self.create_task()
+        atok = self.dispatch_task(tid)
+        avid = self.create_task()
+        self.dispatch_task(avid)
+        vsid = self.app.state.get(avid)["worker_sid"]
+        st, r = call(self.port, "POST", "/post",
+                     {"task": avid, "kind": "done", "body": SHA}, atok, sid=vsid)
+        self.assertEqual(st, 400)  # 冒充受害 worker：done 照拒
+        self.assertIn("done 仅任务 worker", r["error"])
+        self.assertEqual(self.app.auth.identify(atok)[0],
+                         self.app.state.get(tid)["worker_sid"])  # 牌与己行未动
+        self.assertEqual(self.app.state.get(avid)["worker_sid"], vsid)  # 受害行未动
+
 
 class SwitchRunner:
     """首跑败后续绿：驱动 done→verify_failed→running→done→closed 续修循环。"""

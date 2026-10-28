@@ -314,10 +314,10 @@ class TestCoreHealth(unittest.TestCase):
     def test_bind_worker_state_matrix_active_rebinds_terminal_frozen(self):  # Req: F19
         for i, st in enumerate(("dispatched", "running", "done", "verify_failed",
                                 "reopened", "blocked")):
-            sid = f"wa{i}"
+            sid, fresh = f"wa{i}", f"wn{i}"  # 每轮全新目标 sid：已占 sid 守卫拒复用
             self.seed(f"ta{i}", state=st, worker=sid)
-            self.assertEqual(self.app.bind_worker(sid, "wn"), "wn")  # 活动态：改绑
-            self.assertEqual(self.state.get(f"ta{i}")["worker_sid"], "wn")
+            self.assertEqual(self.app.bind_worker(sid, fresh), fresh)  # 活动态：改绑
+            self.assertEqual(self.state.get(f"ta{i}")["worker_sid"], fresh)
         for i, st in enumerate(("merged", "closed", "cancelled")):
             sid = f"wt{i}"
             self.seed(f"tt{i}", state=st, worker=sid)
@@ -333,6 +333,17 @@ class TestCoreHealth(unittest.TestCase):
         self.seed("t1", worker="s-w1")
         self.assertEqual(self.app.bind_worker("s-w1", "s-w1"), "s-w1")  # 牌面一致：不动
         self.assertEqual(self.state.get("t1")["worker_sid"], "s-w1")
+
+    def test_bind_worker_refuses_owned_caller_sid(self):  # Req: F18（终闸 C 册冒充面）
+        self.seed("t1", worker="s-w1")
+        self.seed("t2", disp="d9", worker="s-w2")  # 受害任务：worker/dispatcher 在册
+        tok = self.app.auth.issue("s-w1", "worker")
+        self.assertEqual(self.app.bind_worker("s-w1", "s-w2"), "s-w1")  # 冒充他 worker：拒
+        self.assertEqual(self.app.bind_worker("s-w1", "d9"), "s-w1")  # 冒充 dispatcher：拒
+        self.assertEqual(self.app.bind_worker("s-w1", "main"), "s-w1")  # 冒充主会话：拒
+        self.assertEqual(self.app.auth.identify(tok), ("s-w1", "worker"))
+        self.assertEqual(self.state.get("t1")["worker_sid"], "s-w1")
+        self.assertEqual(self.state.get("t2")["worker_sid"], "s-w2")
 
     def test_escalate_injects_bound_real_sid(self):  # Req: F4/F5
         self.app.bind_main("main", "ses-main")
