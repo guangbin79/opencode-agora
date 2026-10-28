@@ -95,7 +95,8 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
     行，只取五类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
     桶行恒在）；bucket＝激活桶视图（数字键 1-5）：只显该桶任务行，与文本
-    过滤 AND 叠加、同样穿透折叠，计数行恒全局口径，激活桶头加 "*"。
+    过滤 AND 叠加、同样穿透折叠，计数行恒全局口径；桶行带键位数字前缀
+    （"N Label count"，gt-87f3c2），激活桶头并置 "*"。
     group＝项目分组视图（0 键）：按 _gkey（仓 basename）分组渲染，组头行
     （kind="group"，题＝标签＋组员数，样式同桶行）按组内最新 created 降序，
     组员保持 forest DFS 近序；gexpanded＝组展开集，缺省空＝全折叠只显组头，
@@ -158,7 +159,8 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
         for t in tasks.values():
             buckets[_bucket(t["state"])] += 1
     rows = [Row("bucket", title=f"{'*' if name == bucket else ''}"
-                f"{_LABELS.get(name, name)} {n}", domain="bucket")
+                f"{_BUCKETS.index(name) + 1} {_LABELS.get(name, name)} {n}",
+                domain="bucket")  # 数字前缀＝键位 1-5 可发现性（gt-87f3c2）
             for name, n in buckets.items()]
     f = filt.lower()
 

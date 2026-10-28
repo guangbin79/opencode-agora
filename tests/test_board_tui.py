@@ -61,8 +61,8 @@ class TestBuildRows(unittest.TestCase):
                  t7=trow("blocked"), t8=trow("cancelled"), t9=trow("todo"))
         buckets = [r for r in build_rows(s, [], now=NOW) if r.kind == "bucket"]
         self.assertEqual([r.title for r in buckets],
-                         ["Merged 2", "In-flight 5", "Failed 0", "Blocked 1",
-                          "Cancelled 1"])
+                         ["1 Merged 2", "2 In-flight 5", "3 Failed 0",
+                          "4 Blocked 1", "5 Cancelled 1"])
 
     def test_color_domain_verify_failed_reopened_in_flight(self):  # Req: F10
         s = snap(t1=trow("verify_failed"), t2=trow("reopened"), t3=trow("running"),
@@ -108,8 +108,8 @@ class TestBuildRows(unittest.TestCase):
                          "阻塞": [], "已取消": []}}
         buckets = [r for r in build_rows(s, [], now=NOW) if r.kind == "bucket"]
         self.assertEqual([r.title for r in buckets],
-                         ["Merged 2", "In-flight 1", "Failed 0", "Blocked 0",
-                          "Cancelled 0"])  # 服务端全局口径（含本地 tasks 外的 t9）
+                         ["1 Merged 2", "2 In-flight 1", "3 Failed 0",
+                          "4 Blocked 0", "5 Cancelled 0"])  # 服务端全局口径（含本地 tasks 外的 t9）
 
     def test_forest_multi_root_default_folded(self):  # Req: gt-6def73
         s = {"tasks": {"A": trow(disp="main", worker="wa"),
@@ -168,12 +168,12 @@ class TestBuildRows(unittest.TestCase):
         s = snap(t1=trow("merged"), t2=trow("running"), t3=trow("blocked"))
         rows = build_rows(s, [], now=NOW, bucket="在飞")   # 计数行不受视图切换影响
         self.assertEqual([r.title for r in rows if r.kind == "bucket"],
-                         ["Merged 1", "*In-flight 1", "Failed 0", "Blocked 1",
-                          "Cancelled 0"])
+                         ["1 Merged 1", "*2 In-flight 1", "3 Failed 0",
+                          "4 Blocked 1", "5 Cancelled 0"])
         rows = build_rows(s, [], now=NOW)
         self.assertEqual([r.title for r in rows if r.kind == "bucket"],
-                         ["Merged 1", "In-flight 1", "Failed 0", "Blocked 1",
-                          "Cancelled 0"])
+                         ["1 Merged 1", "2 In-flight 1", "3 Failed 0",
+                          "4 Blocked 1", "5 Cancelled 0"])
 
     def test_bucket_view_penetrates_fold(self):  # Req: gt-6a26e5
         s = snap(A=trow(disp="main", worker="wa"),
@@ -327,6 +327,10 @@ class TestHandleKey(unittest.TestCase):
         self.assertIsNone(m["bucket"])
         self.assertIn("1-5 bucket | 0 proj",
                       (ROOT / "board_tui.py").read_text(encoding="utf-8"))  # hint 0 键
+
+    def test_hint_fold_wording_is_zZ_fold(self):  # Req: gt-87f3c2
+        self.assertIn("z/Z fold",
+                      (ROOT / "board_tui.py").read_text(encoding="utf-8"))
 
 
 class TestClampView(unittest.TestCase):
