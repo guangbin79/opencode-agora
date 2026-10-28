@@ -12,6 +12,10 @@ WORKER_TOOLS = {"post", "check_mail", "wiki_read", "wiki_write", "task_dispatch"
 # dispatcher 通用面＝worker 面＋建任务/观测；task_update/task_cancel 为 task 域单列
 DISPATCHER_TOOLS = WORKER_TOOLS | {"task_create", "board", "doctor"}
 
+# 血统封顶（gt-83185d R1）：牌血统最多留最近 16 条曾用名（FIFO 最旧出局），
+# 防持牌调用每次携随机新 X-Agora-Sid 把血统表与落盘无限撑大
+LINEAGE_CAP = 16
+
 # 审计事件名常量
 EV_ENFORCE_ON = "enforce_on"
 EV_ENFORCE_OFF = "enforce_off"
@@ -59,6 +63,7 @@ class Auth:
                     v.append([])
                 if old_sid not in v[2]:
                     v[2].append(old_sid)
+                del v[2][:-LINEAGE_CAP]  # 封顶：最旧出局
                 self._persist()
                 return tok
         return None

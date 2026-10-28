@@ -345,6 +345,21 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(self.state.get("t1")["worker_sid"], "s-w1")
         self.assertEqual(self.state.get("t2")["worker_sid"], "s-w2")
 
+    def test_bind_worker_propagates_nested_dispatcher_rows(self):  # Req: gt-83185d R2
+        self.seed("t1", worker="s-w1")  # worker 本任务
+        self.seed("t2", disp="s-w1", worker="s-sub")  # 嵌套子任务：worker 是派发方
+        self.seed("t3", state="merged", disp="s-w1", worker="s-old")  # 终态子任务
+        tok = self.app.auth.issue("s-w1", "worker")
+        self.assertEqual(self.app.bind_worker("s-w1", "ses-new"), "ses-new")
+        self.assertEqual(self.state.get("t2")["dispatcher_sid"], "ses-new")  # authorship 保持
+        self.assertEqual(self.state.get("t2")["worker_sid"], "s-sub")  # 字段各覆各的
+        self.assertEqual(self.state.get("t3")["dispatcher_sid"], "s-w1")  # 终态不触
+        self.assertEqual(self.state.get("t1")["worker_sid"], "ses-new")
+        ev = [(e["task"], e["from"], e["to"]) for e in self.store.read_events()
+              if e["event"] == "worker_rebound"]
+        self.assertEqual(ev, [("t1", "s-w1", "ses-new"),
+                              ("t2", "s-w1", "ses-new")])
+
     def test_escalate_injects_bound_real_sid(self):  # Req: F4/F5
         self.app.bind_main("main", "ses-main")
         self.seed("t1", disp="ses-main")  # 绑定后建任务：根 dispatcher＝真实 sid

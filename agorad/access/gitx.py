@@ -109,16 +109,29 @@ class Gitx:
         names = self._diff_names(env, branch)
         return any(fnmatch(n, p) or fnmatch(Path(n).name, p) for n in names for p in patterns)
 
+    def diff_check(self, env_dir: str, branch: str = None) -> str:
+        """任务 diff 机械检查（gt-83185d R3）：merge-base..env 跑 `git diff --check`
+        （冲突标记/空白错误）——docs 在 OCR 评审排除面，gate 机械兜底。
+        返回告警文本，空＝干净。"""
+        env = Path(env_dir).resolve()
+        main = self._main(env)
+        base = self._merge_base(env, branch)
+        r = self._git(["diff", "--check", base, env.name], cwd=main, check=False)
+        return r.stdout.strip() if r.returncode else ""
+
     def _diff_names(self, env: Path, branch: str = None) -> list[str]:
+        main = self._main(env)
+        base = self._merge_base(env, branch)
+        out = self._git(["diff", "--name-only", base, env.name], cwd=main).stdout
+        return out.splitlines()  # 换行分隔；split() 会把含空格文件名切碎
+
+    def _merge_base(self, env: Path, branch: str = None) -> str:
         main = self._main(env)
         src = env.name
         if branch:  # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff
-            base = self._git(["merge-base", f"refs/heads/{branch}", src],
+            return self._git(["merge-base", f"refs/heads/{branch}", src],
                              cwd=main).stdout.strip()
-        else:
-            base = self._git(["merge-base", src, "HEAD"], cwd=main).stdout.strip()
-        out = self._git(["diff", "--name-only", base, src], cwd=main).stdout
-        return out.splitlines()  # 换行分隔；split() 会把含空格文件名切碎
+        return self._git(["merge-base", src, "HEAD"], cwd=main).stdout.strip()
 
     @staticmethod
     def _main(env: Path) -> Path:

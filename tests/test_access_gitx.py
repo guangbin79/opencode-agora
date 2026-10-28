@@ -196,6 +196,15 @@ class TestAccessGitx(unittest.TestCase):
         self._commit(Path(env), {"Makefile": "all:"}, "task touches gate")
         self.assertTrue(self.gx.touches_gate(env, ["Makefile"], "issue/9"))
 
+    def test_diff_check_flags_conflict_markers(self):  # Req: gt-83185d R3
+        env = self.gx.build_env(self.repo, "gt-dc1")
+        self._commit(Path(env), {"c.py": "a = 1\n<<<<<<< HEAD\n"}, "conflicted")
+        warn = self.gx.diff_check(env)
+        self.assertIn("c.py", warn)
+        self.assertIn("leftover conflict marker", warn)  # git --check 冲突标记文案
+        self._commit(Path(env), {"c.py": "a = 1\n"}, "cleanup")
+        self.assertEqual(self.gx.diff_check(env), "")  # 清理后端到端干净
+
     def test_check_branch_symref_checkout(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/8"], cwd=self.repo)
         self.assertEqual(self.gx.symref(str(self.repo)), "issue/8")

@@ -49,8 +49,12 @@ class App:
         sid＝牌注册 sid（dispatch 时落行的 worker_sid），caller＝X-Agora-Sid
         真实续接会话。注册 sid 是某活动任务 worker_sid 且两者漂移 → rebind
         （旧 sid 入血统，token 本体不变）＋任务行 worker_sid 同步覆写（与
-        recover.reinject 同口径）。守卫：终态/无主 sid 一律不动——worker 改绑
-        只动 worker 牌，主会话/他牌不受累。返回改绑后 sid（调用方刷新身份）。
+        recover.reinject 同口径）。改绑波及 authorship（gt-83185d R2）：worker
+        作为派发方的活动嵌套子任务行 dispatcher_sid 一并覆写为 caller——
+        嵌套任务所有权在换号后保持，不被归属终审 dispatcher_sid==caller 卡死。
+        守卫：终态/无主 sid 一律不动；worker_sid 行与 dispatcher_sid 行分别
+        覆写对应字段不串；已占 caller sid 拒绑（下）原样——worker 改绑只动
+        worker 牌，主会话/他牌不受累。返回改绑后 sid（调用方刷新身份）。
         """
         if caller == sid:
             return sid
@@ -69,6 +73,14 @@ class App:
         self.auth.rebind(sid, caller)
         for tid in hit:
             self.state.set_fields(tid, worker_sid=caller)
+            self.store.append_event({"ts": time.time(), "actor": sid,
+                                     "event": EV_WORKER_REBOUND, "task": tid,
+                                     "from": sid, "to": caller})
+        # R2 波及：嵌套子任务行只覆写 dispatcher_sid 字段（worker_sid 行不串）
+        nested = [tid for tid, t in tasks.items()
+                  if t.get("dispatcher_sid") == sid and t["state"] in _ACTIVE]
+        for tid in nested:
+            self.state.set_fields(tid, dispatcher_sid=caller)
             self.store.append_event({"ts": time.time(), "actor": sid,
                                      "event": EV_WORKER_REBOUND, "task": tid,
                                      "from": sid, "to": caller})

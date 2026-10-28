@@ -116,6 +116,12 @@ class Gate:
                 origin = self._gitx.symref(target)  # 合入前分支位；门毕还原（try 内防静默卡死）
             if self.gate_files_touched(tid):  # 闸体变更：拍人不拦门
                 self._health.escalate(KIND_GATEFILES, tid)
+            warn = self._gitx.diff_check(env, branch)  # 冲突标记机械检查，先于用户 verify
+            if warn:  # gt-83185d R3：非空走 verify_failed 口径（截 2000 与 verify 败一致）
+                self._quality_fail(tid, "verify_failed",
+                                   "diff 检查发现冲突标记/空白错误——清理后重新"
+                                   f" post(done, commit)\n输出尾部:\n{warn[-_TAIL:]}")
+                return
             rc, out = self._runner(env, cmd)
             if rc != 0:
                 self._quality_fail(tid, "verify_failed",

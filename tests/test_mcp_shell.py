@@ -43,6 +43,9 @@ class FakeGitx:
     def touches_gate(self, env_dir, patterns, branch=None):
         return False
 
+    def diff_check(self, env_dir, branch=None):
+        return ""
+
 
 class McpShellTest(unittest.TestCase):
     """真 agorad 夹具：壳经 AGORAD_URL 指向 make_server 端口。"""

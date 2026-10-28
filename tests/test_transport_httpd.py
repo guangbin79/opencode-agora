@@ -65,6 +65,9 @@ class FakeGitx:
     def touches_gate(self, env_dir, patterns, branch=None):
         return False
 
+    def diff_check(self, env_dir, branch=None):
+        return ""
+
 
 class DeadInjectOc:
     """create 成功但 inject 一律拒——凭据直投失败路径。"""

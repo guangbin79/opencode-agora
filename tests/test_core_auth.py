@@ -99,6 +99,15 @@ class TestCoreAuth(unittest.TestCase):
         self.assertTrue(self.au.same_lineage("s3", "s1"))
         self.assertTrue(Auth(Store(self.tmp)).same_lineage("s3", "s1"))  # 血统随牌落盘
 
+    def test_rebind_lineage_capped_at_16_fifo(self):  # Req: gt-83185d R1
+        tok = self.au.issue("s0", "root")
+        for i in range(20):  # 连续换号 20 跳（随机新 X-Agora-Sid 面）
+            self.au.rebind(f"s{i}", f"s{i + 1}")
+        self.assertEqual(self.au.identify(tok), ("s20", "root"))
+        self.assertTrue(self.au.same_lineage("s20", "s19"))  # 最近记录保留
+        self.assertTrue(self.au.same_lineage("s20", "s4"))  # 恰留 16 条：s4 最旧在册
+        self.assertFalse(self.au.same_lineage("s20", "s3"))  # 最旧出局
+
     def test_lineage_resets_on_rotate_and_old_format_compat(self):  # Req: F16
         self.au.issue("s1", "root")
         self.au.rebind("s1", "s2")

@@ -33,6 +33,7 @@ class FakeGitx:
         self.fail_remove = fail_remove
         self.merge_calls, self.rollbacks, self.removed = [], [], []
         self.head_calls, self.checkouts, self.gate_calls = [], [], []
+        self.warn, self.check_calls = "", []  # diff_check 告警注入（gt-83185d R3）
         self.restore_ok = True
         self.merged, self.head_sha = False, "aaa111"
 
@@ -61,6 +62,10 @@ class FakeGitx:
     def touches_gate(self, env_dir, patterns, branch=None):
         self.gate_calls.append((env_dir, patterns, branch))
         return self.gate
+
+    def diff_check(self, env_dir, branch=None):
+        self.check_calls.append((env_dir, branch))
+        return self.warn
 
     def head(self, repo_dir, branch=None):
         self.head_calls.append((repo_dir, branch))
@@ -237,6 +242,25 @@ class TestGateRun(TestCoreGate):
         self.assertIn("y" * 2000, body)  # 输出尾部（截 2000）
         self.assertNotIn("y" * 2001, body)
         self.assertIn("post(done", body)  # 动作指引
+
+    def test_conflict_markers_fail_before_verify_no_merge(self):  # Req: gt-83185d R3
+        self.in_gate()
+        self.gx.warn = "docs/x.md:3: leftover conflict marker.\n<<<<<<< HEAD"
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "verify_failed")
+        self.assertEqual(t["fail_streak"], 1)  # verify_failed 口径计连败
+        self.assertEqual(self.runner.calls, [])  # 先于用户 verify（verify 未跑）
+        self.assertEqual(self.gx.merge_calls, [])  # 不合并
+        body = self.worker_msgs()[0]["body"]
+        self.assertIn("<<<<<<< HEAD", body)  # 标记证据随告警尾部回 worker
+        self.assertIn("post(done", body)
+
+    def test_diff_check_clean_merges_as_before(self):  # Req: gt-83185d R3
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 干净零影响照常合并
+        self.assertEqual(self.gx.check_calls, [(str(self.env), None)])  # env＋branch 口径
 
     def test_verify_green_merges_and_closes(self):  # Req: F7
         self.in_gate(streak=2)
