@@ -110,14 +110,11 @@ def build_rows(snap, events, filt="", now=None, expanded=None):
     for tid in chain:
         (roots if parent[tid] is None else kids[parent[tid]]).append(tid)
     order = []
-
-    def _walk(tid):
+    stack = roots[::-1]
+    while stack:                       # 显式栈 DFS：链深由远端 JSON 定，不触递归上限
+        tid = stack.pop()
         order.append(tid)
-        for c in kids[tid]:
-            _walk(c)
-
-    for tid in roots:
-        _walk(tid)
+        stack.extend(reversed(kids[tid]))
     order += [tid for tid in chain if tid not in set(order)]  # 环上孤岛 DFS 不可达，保链序兜底
 
     def _shown(tid):
@@ -378,7 +375,7 @@ def draw_board(stdscr, m, status="", err=None):
     stdscr.erase()
     head = f" agora board  {status}" + (f"  离线: {err}" if err else "")
     stdscr.addnstr(0, 0, head, w - 1, curses.A_REVERSE)
-    for i, r in enumerate(m["rows"][:h - 4]):
+    for i, r in enumerate(m["rows"][:max(0, h - 4)]):
         attr = _color(r.domain)
         if r.kind == "bucket":
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)

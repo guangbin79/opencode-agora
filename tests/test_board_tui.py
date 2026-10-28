@@ -256,6 +256,16 @@ class TestFoldTree(unittest.TestCase):
         rows = build_rows(self._chain(), [], filt="A2", now=NOW)  # 折叠＋命中深层
         self.assertEqual([r.tid for r in task_rows(rows)], ["A2"])
 
+    def test_deep_chain_no_recursion_limit(self):  # Req: F10
+        n = 1500
+        s = {"tasks": {f"t{i}": trow(disp="main" if i == 0 else f"w{i - 1}",
+                                     worker=f"w{i}") for i in range(n)},
+             "chain": [f"t{i}" for i in range(n)]}
+        rows = build_rows(s, [], now=NOW, expanded=set())
+        self.assertEqual([r.tid for r in task_rows(rows)], ["t0"])  # 折叠只显根
+        rows = build_rows(s, [], now=NOW, expanded=set(s["tasks"]))
+        self.assertEqual(len(task_rows(rows)), n)   # 全展开走完 DFS 不触递归上限
+
 
 class TestDoctorPage(unittest.TestCase):
     def test_stale_candidates_section(self):  # Req: F5
