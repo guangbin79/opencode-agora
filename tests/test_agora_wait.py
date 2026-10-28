@@ -267,7 +267,8 @@ class TestWait(unittest.TestCase):
             srv.stop()
 
     def test_discover_rejects_torn_pointer(self):  # Req: F14  半写形状不外溢 fetch
-        for port, token in [("abc", "tok"), ([], "tok"), (8080, "a\nb")]:
+        for port, token in [("abc", "tok"), ([], "tok"), (8080, "a\nb"),
+                            (8080, "a\rb")]:
             with self.subTest(port=port, token=token):
                 home = mkhome(port, token)
                 self.addCleanup(shutil.rmtree, home, True)

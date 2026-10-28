@@ -51,8 +51,8 @@ def discover(home=None):
     sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
     port = int(sj["port"])  # 非数端口（半写形态）在此炸 ValueError/TypeError，不外溢 fetch
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
-    if "\n" in token:  # 撕裂写残留换行会让 putheader 带牌面炸进 stderr
-        raise ValueError("torn root.token")
+    if "\n" in token or "\r" in token:  # 控制符会让 putheader 带牌面炸进 stderr／折叠改头
+        raise ValueError("root 牌撕裂（含换行/回车）")
     return f"http://127.0.0.1:{port}", token
 
 
@@ -147,7 +147,7 @@ def _parser():
         epilog="退出码：0＝终态到达（merged/closed/blocked/cancelled 任一）\n"
                f"1＝--timeout 到期仍在飞（{'/'.join(_INFLIGHT)}），"
                "或 --once 下当前在飞\n"
-               "2＝异常（用法错/任务未知 404/root 牌缺失/重试至超时仍不可达）",
+               "2＝异常（用法错/任务未知 404/root 牌缺失/认牌失败/重试至超时仍不可达）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     w.add_argument("task_id", metavar="task-id", help="任务 id（gt-xxxxxx）")
     w.add_argument("--timeout", type=_timeout_arg, default=1800,
