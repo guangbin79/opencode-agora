@@ -382,6 +382,35 @@ class TestParamContract(HttpdTest):
         self.assertEqual(st, 403)
         self.assertIn("check_mail", r["error"])  # 可用面指引
 
+    def test_worker_403_hint_points_to_verify_proposal_channel(self):  # Req: F13
+        wtok = self.app.auth.issue("w9", "worker")
+        st, r = call(self.port, "POST", "/board", {}, wtok)
+        self.assertIn("post(kind=verify)", r["error"])  # verify 提案专用通道
+        self.assertNotIn("question", r["error"])  # 不再指问询通道
+
+    def test_unauthenticated_bad_body_400_without_audit(self):  # Req: F13
+        st, _ = call(self.port, "POST", "/post", [1], "no-such-token")
+        self.assertEqual(st, 400)
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "bad_request"]
+        self.assertEqual(ev, [])  # 鉴权前协议噪声不入计量
+
+    def test_bad_request_audit_failure_still_400(self):  # Req: F13
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        orig = self.app.store.append_event
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        self.app.store.append_event = boom
+        try:
+            st, _ = call(self.port, "POST", "/post",
+                         {"task": tid, "kind": "progress", "body": "x"}, wtok)
+        finally:
+            self.app.store.append_event = orig
+        self.assertEqual(st, 400)  # 审计写失败不影响应答（best-effort）
+
 
 class TestStartupRequeue(unittest.TestCase):
     """F-4：kill -9 门中残留（done＋in_gate）→ make_server 重排门队列，verify 幂等重跑。"""

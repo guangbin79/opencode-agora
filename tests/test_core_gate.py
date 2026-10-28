@@ -180,6 +180,13 @@ class TestAcceptDone(TestCoreGate):
         self.assertIn(OTHER_SHA, r)  # 分支 HEAD sha 双双可见
         self.assertEqual(self.state.get("t1")["state"], "running")
 
+    def test_reject_anchor_without_head_key_no_crash(self):  # Req: F13
+        self.seed()
+        self.anchor = {"clean": True}  # 契约外形态（缺 head 键）
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)  # 照常拒收，不 KeyError
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
     def test_reject_anchor_dirty_guides_fix(self):  # Req: F13
         self.seed()
         self.anchor = {"head": SHA, "clean": False}  # 评审环未绿

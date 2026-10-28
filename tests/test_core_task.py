@@ -286,6 +286,12 @@ class TestCreateAndRedispatch(TestCoreTask):
         self.assertEqual(t["goal"], "my goal")
         self.assertEqual(t["chain_depth"], 1)
 
+    def test_boot_carries_opening_and_shell_contract(self):  # Req: F13
+        self.dispatched_pair()
+        boot = self.oc.sessions[-1][2]
+        self.assertIn("开工: 进 env 后首个动作 post(kind=note", boot)
+        self.assertIn("shell: mcp_shell（shell_execute）按 argv 数组执行", boot)
+
     def test_redispatch_revokes_old_token(self):  # Req: F3
         tid, disp, old = self.dispatched_pair()
         for _ in range(3):

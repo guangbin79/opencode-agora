@@ -23,7 +23,7 @@ _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel"
                     "wiki_write", "enforce"})
 _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject")
 _DENY_HINT = {"worker": "worker 面：post/check_mail/wiki_read/wiki_write/"
-                        "task_dispatch/wait；需登记 verify→post(kind=question) 请派发方"}
+                        "task_dispatch/wait；需登记 verify→post(kind=verify) 提案验收命令"}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -169,9 +169,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _bad(self, sid, tool, msg):
         """F13 参数错 400：落 bad_request 审计行（可计量）后带因返回。"""
-        self.app.store.append_event({"ts": time.time(), "actor": sid or "unknown",
-                                     "event": "bad_request", "tool": tool or "?",
-                                     "note": msg[:200]})
+        if sid is not None:  # 鉴权前解析错属协议噪声，不混入参数错计量
+            try:  # best-effort：审计写失败不影响 400 应答
+                self.app.store.append_event(
+                    {"ts": time.time(), "actor": sid,
+                     "event": "bad_request", "tool": tool or "?",
+                     "note": msg[:200]})
+            except Exception:
+                pass
         return self._json(400, {"error": msg})
 
     def _post(self, sid, body):

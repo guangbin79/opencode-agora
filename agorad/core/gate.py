@@ -87,7 +87,7 @@ class Gate:
             if a.get("head") != commit:
                 return self._deny_done(
                     tid, "anchor",
-                    f"任务 {tid} {commit} ≠ 分支 HEAD {a['head']}——"
+                    f"任务 {tid} {commit} ≠ 分支 HEAD {a.get('head')}——"
                     "以 env 内完整 HEAD sha 重新 post(done, commit)")
             if not a.get("clean"):
                 return self._deny_done(

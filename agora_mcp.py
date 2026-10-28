@@ -28,7 +28,7 @@ _TOOLS = [
     {"name": "task_create", "description": "登记任务（todo）（dispatcher/root）",
      "inputSchema": {"type": "object", "properties": {
          "goal": _STR, "project_dir": _STR,
-         "after": {"type": "string", "description": "前驱任务 id（B7 链）"},
+         "after": {"type": "string", "description": "前驱任务 id（gt-xxxxxx，B7 链）"},
          "target_branch": {"type": "string",
                            "description": "合入目标分支（外部工作流；缺省＝仓默认支）"},
          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},

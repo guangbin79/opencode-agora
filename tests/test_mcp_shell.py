@@ -144,6 +144,13 @@ class TestSchemaContract(McpShellTest):
                           "verify_reject"])  # 与派发 skill 词汇对齐
         self.assertIn("40 位", props["body"]["description"])  # done＝纯 sha 契约
 
+    def test_task_create_after_describes_b7_chain(self):  # Req: F13
+        schema = {t["name"]: t for t in
+                  self.rpc("tools/list")["result"]["tools"]}
+        desc = schema["task_create"]["inputSchema"]["properties"]["after"]["description"]
+        self.assertIn("前驱任务 id", desc)
+        self.assertIn("B7", desc)
+
     def test_worker_unavailability_marked_in_descriptions(self):  # Req: F13
         descs = {t["name"]: t["description"] for t in
                  self.rpc("tools/list")["result"]["tools"]}
