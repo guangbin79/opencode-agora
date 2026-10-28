@@ -290,9 +290,9 @@ class TestGateRun(TestCoreGate):
         shutil.rmtree(self.env / ".review-loop")
         self.anchor = None  # 降级受理（评审环缺失）
         self.seed()
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         (self.env / ".review-loop").mkdir(parents=True)  # verify 期间 idle 评审环跑绿
-        self.anchor = {"head": "abc123", "clean": True}
+        self.anchor = {"head": SHA, "clean": True}
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # merged→closed
