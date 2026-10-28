@@ -49,8 +49,11 @@ def discover(home=None):
     home = Path(home or os.environ.get("AGORA_HOME") or _pointer_home()
                 or Path.home() / "plaza")
     sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
+    port = int(sj["port"])  # 非数端口（半写形态）在此炸 ValueError/TypeError，不外溢 fetch
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
-    return f"http://127.0.0.1:{sj['port']}", token
+    if "\n" in token:  # 撕裂写残留换行会让 putheader 带牌面炸进 stderr
+        raise ValueError("torn root.token")
+    return f"http://127.0.0.1:{port}", token
 
 
 def fetch(base, token, tid):
@@ -92,15 +95,16 @@ def wait(tid, base, token, timeout=1800, once=False, interval=_INTERVAL,
                 nb, nt = reread()
                 if nb and nt:  # 半写空端点/空牌不采纳，保持旧端点下轮再读
                     base, token = nb, nt
-            except (OSError, ValueError, KeyError):
-                pass  # 指针半写/缺失瞬间保持旧端点，下轮再读
+            except (OSError, ValueError, TypeError, KeyError):
+                pass  # 指针半写/缺失（含非 dict JSON）保持旧端点，下轮再读
         try:
             state, commit = fetch(base, token, tid)
         except Transient as e:
             if isinstance(e, Rejected) and reread is None:
                 raise Fail(str(e)) from None  # 不跟随换模：认牌失败维持终局
             if once or clock() >= deadline:
-                head = "服务不可达" if once else "服务不可达（重试至超时）"
+                head = ("认牌失败" if isinstance(e, Rejected)
+                        else "服务不可达" if once else "服务不可达（重试至超时）")
                 raise Fail(f"{head}: {e}") from None
         else:
             if classify(state) == 0:

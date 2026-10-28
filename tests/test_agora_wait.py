@@ -266,6 +266,39 @@ class TestWait(unittest.TestCase):
         finally:
             srv.stop()
 
+    def test_discover_rejects_torn_pointer(self):  # Req: F14  半写形状不外溢 fetch
+        for port, token in [("abc", "tok"), ([], "tok"), (8080, "a\nb")]:
+            with self.subTest(port=port, token=token):
+                home = mkhome(port, token)
+                self.addCleanup(shutil.rmtree, home, True)
+                with self.assertRaises((ValueError, TypeError)):
+                    agora.discover(home)
+
+    def test_reread_type_error_keeps_old_endpoint(self):  # Req: F14  非 dict JSON
+        srv = _Srv(["merged"], commit="c" * 40)
+        try:
+            def nondict():  # service.json 半写成形如 5 / [] 的合法非对象 JSON
+                json.loads("5")["port"]
+
+            clock, pause = self._fake()
+            self.assertEqual(
+                agora.wait("t1", srv.base, "tok", timeout=100,
+                           clock=clock, pause=pause, reread=nondict),
+                (0, "merged @" + "c" * 12))
+        finally:
+            srv.stop()
+
+    def test_auth_rejection_head_labels_auth(self):  # Req: F14  排障口径不混可达性
+        srv = _Srv(["running"], code=403)
+        try:
+            clock, pause = self._fake()
+            with self.assertRaises(agora.Fail) as cm:
+                agora.wait("t1", srv.base, "tok", timeout=30,
+                           clock=clock, pause=pause, reread=lambda: (srv.base, "tok"))
+            self.assertIn("认牌失败", str(cm.exception))
+        finally:
+            srv.stop()
+
 
 class TestCli(unittest.TestCase):
     def setUp(self):
