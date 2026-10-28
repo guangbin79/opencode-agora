@@ -31,7 +31,8 @@ _RAW_MAX = 500
 # 活动面＝探活与 last_seen 的任务集（verify_failed/reopened 归在飞，同 task 口径）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _IN_FLIGHT = {"dispatched", "running"}  # 自愈重注入仅限 worker 在跑的两态
-_CRED_STATES = {"dispatched", "running", "done"}  # 凭据周期重注入面（F25；终态不注入）
+_CRED_STATES = {"dispatched", "running", "done"}  # 凭据周期重注入面（F25 裁定三态；
+# verify_failed/reopened/blocked 不在面——短期续修/待重派态，终态亦不注入）
 _CRED_INTERVAL = 600.0  # 重注入周期缺省 10min（main 装配经 AGORA_CRED_REINJECT_INTERVAL 配）
 
 _KIND_NOTE = {
@@ -78,6 +79,7 @@ class Health:
         tasks = self._state.snapshot()["tasks"]
         oc_down = False
         busy = set()  # updated>idle＝回合进行中：僵态本轮免判（doctor 口径减 busy 免决）
+        dead = set()  # 本轮探得已死的 worker sid：凭据重注入免发免落库（死会话无人补拉）
         for tid, t in tasks.items():
             wsid = t.get("worker_sid")
             if t["state"] not in _ACTIVE or not wsid:
@@ -88,6 +90,7 @@ class Health:
                 oc_down = True
                 continue
             if data is None:
+                dead.add(wsid)
                 if any(x.get("dispatcher_sid") == wsid and x["state"] in _IN_FLIGHT
                        for x in tasks.values()):
                     self.escalate(KIND_DISPATCHER_DEAD, tid)  # 死会话管着在飞链——拍人不代管
@@ -98,16 +101,18 @@ class Health:
                 if (tm.get("updated") or 0) > (tm.get("idle") or 0):
                     busy.add(tid)
         if not oc_down:
-            self._cred_reinject(tasks)
+            self._cred_reinject(tasks, dead)
             self._stale_scan(tasks, busy)
 
-    def _cred_reinject(self, tasks):
+    def _cred_reinject(self, tasks, dead):
         """worker 凭据周期重注入（F25）：插件凭据缓存仅驻内存，会话进程或插件宿主
         重载即清零＝hook 全拦僵死（gt-fd5bb0/gt-99ae7b 两次实锤）。每 cred_interval
         对在飞任务的 worker 经免通知通道（synthetic，落转录不调度回合＝零上下文
         污染）重发 dispatch 同形凭据——插件 onInject 幂等重缓存，重复到达无害。
-        防噪：不逐轮落审计；终态不注入；oc 不可达轮次 tick 已整体免判；通道失败
-        （契约 False 与抛异常）同 dispatch 口径经 router 落库兜底不抛（补拉可取）。
+        防噪：不逐轮落审计；终态不注入；oc 不可达轮次 tick 已整体免判；死会话
+        （tick 探活面直供 dead 集）免发免落库——留库无人补拉只会堆积带牌行，死面
+        归 recover.reinject/gate 管；通道失败（契约 False 与抛异常）同 dispatch
+        口径经 router 落库兜底不抛（补拉可取）；出账同 _stale_seen 口径防无界增长。
         """
         now = time.time()
         for tid, snap in tasks.items():
@@ -122,6 +127,8 @@ class Health:
                 continue
             if t["state"] not in _CRED_STATES or not t.get("worker_sid"):
                 continue
+            if t["worker_sid"] in dead:
+                continue  # 死会话不注入不落库：凭据行无人拉，死面归 recover/gate
             tok = self._app.auth.token_for(t["worker_sid"])
             if not tok:
                 continue  # 牌已废（重派/取消路径自会签新）：无可重注
@@ -132,6 +139,10 @@ class Health:
                 ok = False
             if not ok:
                 self._router.post(t["dispatcher_sid"], ("down", tid), "credential", text)
+        # 出账（评审环 R2）：终态/缺席行清账，防常驻进程 _cred_sent 无界增长；
+        # 再入面任务（blocked→dispatched）重进即重注一次，幂等无害
+        self._cred_sent = {tid: ts for tid, ts in self._cred_sent.items()
+                           if tasks.get(tid, {}).get("state") in _CRED_STATES}
 
     def _stale_scan(self, tasks, busy):
         """边沿判僵（F5 决策记录 2026-10-28）：新进候选集→stalled 拍人。

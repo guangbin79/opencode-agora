@@ -319,6 +319,19 @@ class TestCoreHealth(unittest.TestCase):
         self.health.tick()  # 抛异常形态同不抛
         self.assertEqual(len(self.router.check_mail("s-w1")), 1)
 
+    def test_reinject_cred_dead_session_skipped_and_ledger_pruned(self):  # Req: F25
+        """死会话免发免落库（done 驻留人工审期 worker 死无人管：凭据行无人拉只会
+        堆积带牌行）；出账终态/幽灵行防无界增长（同 _stale_seen 口径）。"""
+        self.seed("t1", state="done", worker="s-w1")
+        tok = self.app.auth.issue("s-w1", "worker")
+        self.health._cred_sent = {"t1": 0.0, "t9": 0.0}  # t1 到期；t9 幽灵行
+        self.health.tick()  # s-w1 死（liveness 缺席）且 done ∉ _IN_FLIGHT：无自愈无升级
+        self.assertEqual(self.oc.silent_injected, [])  # 死会话不注入
+        self.assertEqual([m for m in self.store.read_messages()
+                          if m["to"] == "s-w1"], [])  # 不落库堆积凭据行
+        self.assertEqual(sorted(self.health._cred_sent), ["t1"])  # 幽灵行出账，t1 仍在面
+        self.assertEqual(self.app.auth.identify(tok), ("s-w1", "worker"))
+
     def test_reinject_cred_no_audit_noise(self):  # Req: F25
         self.seed("t1")
         self.oc.liveness["s-w1"] = True
