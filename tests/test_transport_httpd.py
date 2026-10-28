@@ -270,6 +270,15 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(st, 403)  # 互斥组合 core 层拒（同 after/target_branch 先例）
         self.assertEqual([t for t in self.app.state.snapshot()["tasks"].values()
                           if t["goal"] == "g"], [])  # 拒绝零建行
+        # 快速路正向锚：httpd 透传 verify_cmd，建单登记后 dispatch 免 update 过闸
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "fast", "project_dir": "/repo",
+                      "verify_cmd": "true"}, self.root)
+        self.assertEqual(st, 200)
+        tid = r["task"]
+        st, r = call(self.port, "POST", "/task_dispatch", {"task": tid}, self.root)
+        self.assertEqual(st, 200)  # 无 update 直派放行
+        self.assertEqual(self.app.state.get(tid)["verify"]["state"], "registered")
 
     def test_root_enforce_toggles_and_audits(self):  # Req: F1
         st, r = call(self.port, "POST", "/enforce", {"on": False}, self.root)

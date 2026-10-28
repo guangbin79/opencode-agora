@@ -414,13 +414,17 @@ start_agorad()
 # ============================================================
 code, body = agora("/task_create", {"goal": "F22 gate probe",
                                     "project_dir": f"{WORK}/repoA"})
+assert code == 200, body  # 同 dispatch() 口径：建单失败带因断言，非 KeyError 裸栈
 tidG = body["task"]
 code, body = agora("/task_dispatch", {"task": tidG})
 check(code == 403 and "verify 未登记" in body.get("error", ""),
       f"F22 硬闸：verify 未登记派发必拒（{code} {body.get('error', '')[:40]}） # Req: F22")
 check("dispatch_rejected_verify_missing" in evs(tidG), "F22 拒因审计留行 # Req: F22")
-check(row(tidG)["state"] == "todo", "F22 拒绝零副作用（未建环境未派发） # Req: F22")
-agora("/task_cancel", {"task": tidG})
+check(row(tidG)["state"] == "todo" and not row(tidG).get("env_dir")
+      and "dispatched" not in evs(tidG),
+      "F22 拒绝零副作用（未建环境未派发） # Req: F22")
+code, _ = agora("/task_cancel", {"task": tidG})
+check(code == 200, f"S0 收尾：gate 探针任务取消净（{code}） # Req: F22")
 
 # ============================================================
 # S1 全链：建→派→worker 真活→verify 提案/登记→done→门→merged→closed
