@@ -547,8 +547,9 @@ class TestHealthThread(unittest.TestCase):
             lambda: self.app.state.get("t9")["worker_sid"] != dead))
         new = self.app.state.get("t9")["worker_sid"]
         self.assertIn(new, self.stub.sessions)  # 新会话在册＝活（T5：死＝消失）
-        self.assertTrue(any(e["event"] == "reinjected"
-                            for e in self.app.store.read_events("t9")))
+        self.assertTrue(wait_until(          # 审计行落在 worker 覆写后：等终态非即读
+            lambda: any(e["event"] == "reinjected"
+                        for e in self.app.store.read_events("t9"))))
         self.assertTrue(wait_until(lambda: (
             self.app.store.read_ephemeral(".agora/service.json") or {})
             .get("oc_version") == VERSION))
