@@ -77,7 +77,9 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
               oc=oc, gitx=gitx, main_sid=main_sid)
     health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
-                    runner=mail_runner)  # 邮件外呼缝独立于 Gate runner：两契约不同
+                    runner=mail_runner,  # 邮件外呼缝独立于 Gate runner：两契约不同
+                    cred_interval=float(os.environ.get(  # F25 凭据重注入周期（秒）
+                        "AGORA_CRED_REINJECT_INTERVAL", "600")))
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
                 store=store, runner=runner)

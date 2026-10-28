@@ -69,6 +69,10 @@ class Auth:
                 return tok
         return None
 
+    def token_for(self, sid):
+        """按 sid 查牌文本（F25 周期重注入只读面，不改绑不轮换）；无牌 None。"""
+        return next((tok for tok, v in self._tokens.items() if v[0] == sid), None)
+
     def revoke(self, token):
         if token not in self._tokens:
             return False
