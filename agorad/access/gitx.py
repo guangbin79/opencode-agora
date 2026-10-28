@@ -112,14 +112,14 @@ class Gitx:
     def diff_check(self, env_dir: str, branch: str = None) -> str:
         """任务 diff 机械检查（gt-83185d R3）：merge-base..env 跑 `git diff --check`
         （冲突标记/空白错误）——docs 在 OCR 评审排除面，gate 机械兜底。
-        返回告警文本，空＝干净。"""
+        返回告警文本，空＝干净；git 自身失败（非零退出且无告警输出）宁抛 RuntimeError。"""
         env = Path(env_dir).resolve()
         main = self._main(env)
         base = self._merge_base(env, branch, main)
         r = self._git(["diff", "--check", base, env.name], cwd=main, check=False)
         warn = r.stdout.strip()
         if r.returncode and not warn:  # 检查告警必带输出；空＝git 自身失败，宁抛不假绿
-            raise RuntimeError(f"git diff --check: {r.stderr.strip()}")
+            raise RuntimeError(f"git diff --check(rc={r.returncode}): {r.stderr.strip()}")
         return warn
 
     def _diff_names(self, env: Path, branch: str = None) -> list[str]:
