@@ -215,6 +215,21 @@ class TestGateRun(TestCoreGate):
         self.assertIn("review_absent_no_merge", names)
         self.assertIn("review-loop", self.worker_msgs()[0]["body"])
 
+    def test_review_loop_absent_accepts_done_then_stays_done(self):  # Req: gt-8c8fe8
+        """评审环缺失降级：受理不再锚拒，done 放行；门体绿亦驻留 done 不合并。"""
+        shutil.rmtree(self.env / ".review-loop")
+        self.anchor = None  # 无锚：评审环缺失即不查锚
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留 done：人工审合并
+        self.assertEqual(t["fail_streak"], 0)  # 非质量败：不计连败
+        self.assertEqual(self.gx.merge_calls, [])  # 无自动合并
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("review_absent_no_merge", names)
+        self.assertIn("review-loop", self.worker_msgs()[0]["body"])  # 补设施指引
+
     def test_non_ff_reopens_without_merge_or_bump(self):  # Req: F7
         self.runner = FakeRunner((0, "pass"))
         self.mk_gate(merge="non-ff")

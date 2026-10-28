@@ -61,7 +61,7 @@ cd opencode-agora && ./install.sh
 - **强制隔离**：插件级闸拦截无凭据的 git 仓写入
 - **跨仓编排**：`after:` 依赖链；无关仓并行派发
 - **崩溃恢复**：任意时刻 kill -9，重启后 worker 重注入续跑
-- **实时升级通知**：质量三连败、dispatcher 死亡、闸体变更——秒级拍主会话
+- **分级升级**：质量失败与闸体变更实时拍主会话；dispatcher 死亡由健康巡检发现（默认每 5 分钟，`AGORA_HEALTH_INTERVAL` 可配）
 - **会话牌**：root / dispatcher / worker 角色矩阵，越权必拒
 - **启用域**：指定仓中 agora 完全休眠
 - **目标分支**：`target_branch="feature/x"` 合并进指定分支——兼容 PR 工作流
@@ -71,7 +71,7 @@ cd opencode-agora && ./install.sh
 | 选项 | 默认 | 说明 |
 |------|------|------|
 | `AGORA_HOME` | `~/plaza` | 账本根目录 |
-| `.agora/inactive-repos` | 空 | 休眠仓名册（一行一个路径） |
+| `$AGORA_HOME/.agora/inactive-repos` | 空 | 休眠仓名册（一行一个路径） |
 | `AGORA_BOARD_INTERVAL` | 5 | 仪表盘轮询间隔（秒） |
 | `enforce` | on | 强制闸总开关（仅 root，开/关审计） |
 | 链深 / 并发配额 | 5 / 8 | 派发硬上限 |

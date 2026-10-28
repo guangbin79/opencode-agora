@@ -1,7 +1,9 @@
 """verify 门与自动合并（F7，设计 §4.5）：done 前置受理→隔离 verify→ff 合并→集成 verify。
 
-受理三拒（R3/R9）：任务非 running／verify 未登记／评审锚缺失·落后·未绿——锚由服务经
-注入的 read_anchor 自取（无 anchor 入参），拒收附动作指引。门体（run 后台线程体）：
+受理三拒（R3/R9）：任务非 running／verify 未登记／评审锚缺失·落后·未绿——锚拒收仅
+评审环在位时适用（env 有 .review-loop/ 才查锚；锚由服务经注入的 read_anchor 自取，
+无 anchor 入参），拒收附动作指引；评审环缺失→放行 done，verify 绿驻留 done 人工审
+合并（门体既有分支接管）。门体（run 后台线程体）：
 env 跑 verify→败 verify_failed＋输出尾部（截 2000 字符）实时回 worker＋计连败；
 绿→评审环缺失驻留 done（review_absent_no_merge 审计＋回 worker——自动合并
 需 .review-loop/ 基础设施）→ff-only 合并→non-ff 拒并 reopened（fail_streak 不动）→集成 verify 败→原子回滚
@@ -58,11 +60,13 @@ class Gate:
         if not t["verify"]["cmd"].strip():  # 兜底：空命令＝无质量闸，拒入门
             return (f"rejected:verify-empty: 任务 {tid} verify 命令为空——"
                     "task_update 登记非空命令后重新 post(done, commit)")
-        a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
-        if not a or a.get("head") != commit or not a.get("clean"):
-            return (f"rejected:anchor: 任务 {tid} 评审环未绿或锚落后（.review-loop 锚"
-                    "须＝分支 HEAD 且无 blocker/high）——跑 /review-loop 或待 idle "
-                    "自动触发，绿后带锚重新 post(done, commit)")
+        # 锚检查仅评审环在位时适用：缺失→放行 done，由门体 review_absent 分支驻留
+        if (Path(t["env_dir"]) / ".review-loop").is_dir():
+            a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
+            if not a or a.get("head") != commit or not a.get("clean"):
+                return (f"rejected:anchor: 任务 {tid} 评审环未绿或锚落后（.review-loop 锚"
+                        "须＝分支 HEAD 且无 blocker/high）——跑 /review-loop 或待 idle "
+                        "自动触发，绿后带锚重新 post(done, commit)")
         self._state.transition(tid, "done", commit=commit)
         self._audit(tid, "done", commit=commit)
         return "accepted"

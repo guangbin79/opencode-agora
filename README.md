@@ -66,7 +66,7 @@ Each task: `create → dispatch → worker codes → verify → auto-merge (ff-o
 - **Enforced isolation**: plugin-level gate blocks git-repo writes without task credentials. Single machine, zero-trust between sessions.
 - **Cross-repo orchestration**: `task_create(after: previous_task_id)` for dependency chains. Unrelated repos dispatch in parallel.
 - **Crash recovery**: `kill -9` the service at any time. State is append-only snapshots, workers re-inject with same credentials on restart.
-- **Real-time escalation**: quality failures, dispatcher death, gate tampering — all ping the main session within seconds.
+- **Escalation**: quality failures and gate tampering ping the main session in real time; dispatcher death is caught by the health patrol (default every 5 minutes, configurable via `AGORA_HEALTH_INTERVAL`).
 - **Session tokens**: per-session credentials with role matrix (root / dispatcher / worker). Workers can never cancel, modify verify, or access the board.
 - **Scope control**: list repos in `inactive-repos` to make agora fully dormant there.
 - **Target branch support**: `task_create(target_branch="feature/x")` merges into that branch instead of main — compatible with PR-based workflows.
