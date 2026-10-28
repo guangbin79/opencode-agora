@@ -6,6 +6,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { AGORAD_TIMEOUT_MS, agoradUrl } from "./lift";
 
 export type AgoraRole = "root" | "dispatcher" | "worker";
 export type Cred = { token: string; sid: string; role: AgoraRole; tid?: string; envDir?: string };
@@ -40,11 +41,11 @@ export async function pullCredential(sid: string, port: number): Promise<Cred | 
   }
   pullSeen.set(sid, now);
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/cred_for_sid`, {
+    const r = await fetch(agoradUrl(port, "/cred_for_sid"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sid }),
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
     });
     if (!r.ok) return null; // 404＝非在飞 worker：常态未命中
     const d = (await r.json()) as { tid?: string; env_dir?: string; token?: string };

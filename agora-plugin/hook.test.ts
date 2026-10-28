@@ -377,6 +377,8 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     resetLift();
     resetCredPull();
     try {
+      // 2.2.0 病灶回归锚（派发方增强②）：本用例全程不发 session.prompt——即
+      // 「prompt 钩子未填充但 tool 钩子在触发」形态，拉取自愈须独立于推送通道成立。
       // 未命中→拉取命中→填缓存→cwd∈env 放行（s-boot* 前缀＝wire 桩回任务 env cwd）
       await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-w", input: { filePath: join(repo, "a.md") } });
       expect(getCredential("s-boot-pull-w")?.token).toBe("tok-pull");

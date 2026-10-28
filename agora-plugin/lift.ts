@@ -136,3 +136,9 @@ export function resetLift(): void {
 }
 
 export const LIFT_RECOVER = "agorad 不可达已 memo（每进程一次）：救活服务后经 doctor resetLift 恢复，无需重启会话";
+
+/** agorad 回环面共用寻址＋超时（拉旗 pullEnforce／拉凭据 pullCredential 同源防漂移）。 */
+export const AGORAD_TIMEOUT_MS = 2000;
+export function agoradUrl(port: number, path: string): string {
+  return `http://127.0.0.1:${port}${path}`;
+}

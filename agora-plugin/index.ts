@@ -12,7 +12,9 @@ import { join } from "node:path";
 import { getCredential, pullCredential } from "./cred";
 import { onShellCreate, type ShellCreatePayload } from "./envPath";
 import { onInject } from "./inject";
-import { ensureOnce, resetLift, LIFT_RECOVER, type LiftResult } from "./lift";
+import {
+  AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
+} from "./lift";
 import { isDormant } from "./scope";
 import { agoraHome, enforceRelevant, isWriteTool, shouldBlock } from "./hook";
 
@@ -61,9 +63,9 @@ async function pullEnforce(): Promise<boolean> {
   try {
     const tok = readRootToken();
     if (tok === null) return true;
-    const r = await fetch(`http://127.0.0.1:${lift.port}/health`, {
+    const r = await fetch(agoradUrl(lift.port, "/health"), {
       headers: { "X-Agora-Token": tok },
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
     });
     if (!r.ok) return true;
     return ((await r.json()) as { enforce_on?: boolean }).enforce_on !== false;
@@ -112,10 +114,21 @@ export default {
         (typeof input.path === "string" && input.path) ||
         "";
       let cred = getCredential(event.sessionID);
+      let credSrc = cred ? "cache" : "miss";
       // F25 修正推改拉：write 判定遇缓存未命中（推送通道不触发钩子的出生竞态/宿主
       // 重载）→节流拉取自愈；命中填缓存放行，未命中/失败 cred 保持空＝默认拒。
       if (!cred && on && lift?.ok && isWriteTool(event.tool)) {
-        cred = await pullCredential(event.sessionID, lift.port);
+        const pulled = await pullCredential(event.sessionID, lift.port);
+        if (pulled) {
+          cred = pulled;
+          credSrc = "pulled";
+        }
+      }
+      // 派发方增强①（2026-10-29）：AGORA_HOOK_DEBUG=1 时 stderr 记判定链触发与凭据
+      // 来源——分诊「钩子没触发」vs「缓存空」两态（2.2.0 病灶）；stderr 入服务日志不污染 TUI。
+      if (process.env.AGORA_HOOK_DEBUG) {
+        process.stderr.write(
+          `[agora-plugin] tool=${event.tool} sid=${event.sessionID} cred=${credSrc} enforce=${on}\n`);
       }
       // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token——
       // worker credential 消息优先，未命中回落 root 牌接管文件（主会话经 MCP 调任务面）。
