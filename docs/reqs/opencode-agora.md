@@ -115,6 +115,7 @@ agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait �
 **验收**：rebind 累积血统且重启后在；换号后 post 旧任务达 worker（down 边）、归因记新 sid；无血缘仍拒；worker 边不放行；常规链边零变化；全量测试绿。
 
 ### F17 hook 无凭据拒因指路 check_mail（2026-10-28）
+**dropped（gt-958281 撤销）**：credential 直投失败是小概率事件（信箱账本 47 派发 0 落信箱）且 check_mail 需持牌构成死路（无牌 worker 在 MCP 壳即拒，recover 不覆盖活而无牌）；兜底=派发方查僵→task_cancel＋重建任务重派（新会话新签牌）。
 生产实证（本任务派发链）：worker 会话 credential 直投失败时 hook 恒拒且拒因只给「去派发」——引导错向，worker 无法自愈。拆 shouldBlock 无凭据拒因：cred?.token 为假（本会话无凭据）→DISPATCH_HINT 追加 NO_CRED_HINT「若你是被派发的 worker：凭据可能直投失败已落信箱，先调 agora_check_mail 领牌再重试」；有凭据但 cwd∉envDir 的路径维持原 DISPATCH_HINT 不变（持牌主会话同拦／持牌服务不可达默认拒文案不变；无凭据子情形走 NO_CRED_HINT 支）。附带修复 hook.test.ts BOOT 夹具腐化：夹具 BOOT 文本旧格式「[agora] BOOT task t-b」不匹配 inject.ts BOOT_MSG（/\[agora\] (gt-\S+): /）致 envDir 未登记、合流后恒 deny——夹具对齐现行 gt- 前缀格式，断言不变，inject.ts 不动。
 **验收**：cred=null 拒串含 "agora_check_mail"；有 token 而 envDir 不含 cwd 拒串严格等于原 DISPATCH_HINT；BOOT 先行＋credential 合流放行用例恢复绿；bun test agora-plugin/ 全绿。
 
