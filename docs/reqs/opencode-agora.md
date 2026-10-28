@@ -68,6 +68,8 @@ dispatcher↔worker 结构化消息，方向不限：接收方会话存活即实
 
 > **决策记录**：僵态自动提醒（2026-10-28 用户裁定）：health tick 顺带边沿判僵（同 doctor 口径 20min），新进入候选集→失控通道注入主会话＋可选邮件（$AGORA_HOME/.agora/email.json：to＋command，正文走 stdin；未配置退回仅主会话提醒）。F5 定时器语义扩「探活＋僵态提醒（只提醒不处置）」，反需求「stalled 自动处置」仍禁。
 
+> **决策记录**：僵态免判口径完善（2026-10-28 用户裁定，正午 7 邮件 4-5 误报复盘）：①last_seen 只由 worker 服务调用刷新，dispatcher 查看动作不续命；②report 僵态候选对 in_gate=True 免判（门内 verify/合并静默属正常），agorad 启动清残留门闩（门线程不跨进程存活）；③health tick 复用探死 GET 读 oc 会话 time.updated/idle，updated>idle 免判＝doctor 口径减 busy 免决（F15 env mtime 保留作 doctor 纯账本兜底）；④done 滞留（锚缺失驻留待人工合并，in_gate 已落）照拍＝催合并。盲区声明：门线程挂死（verify 永不返回）随 in_gate 永久免检，属门故障类，报警另立。均只提醒不处置，反需求不变。
+
 ### F6 崩溃恢复（S4）
 权威状态持久化（append 全量快照行＋逐行 fsync，迁移先落快照后写消息）、启动重载末行快照（断尾回退；消息按 msg-id 幂等去重，丢失由补拉/重发兜底）。agorad（服务）或 opencode 服务任一重启：in-flight 链自动恢复——worker 死则按任务页+环境现场重注入续跑（同一凭据）；dispatcher 死则通知其父或根。worker 侧工具调用失败（服务暂不可用）本地排队重放。
 **验收**：`kill -9` 服务→重启→状态一致+in-flight 续跑；opencode 重启→服务探测并走同一恢复路径；dispatcher 单会话死亡（服务与 opencode 均正常）→父/根收到通知。

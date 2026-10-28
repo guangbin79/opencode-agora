@@ -7,7 +7,8 @@
   boot 文本＝POST /session/{sid}/prompt {text}。
 - inject：POST /session/{sid}/prompt {text}→200 {data:{delivery:"steer"}}；busy 会话排队按序；
   未知/已删 sid→404 SessionNotFoundError→False；非 ses_ 形 sid→400→False（T6 实测补）。
-- alive：GET /session/{sid}→200 {data:{...}}＝活；404＝死（不抛）。
+- alive/session：GET /session/{sid}→200 {data:{...}}＝活；404＝死（不抛）。
+  session(sid) 回同一 data 体（含 time:{created,updated,idle,viewed} 毫秒 epoch），404→None。
 - probe：GET /info→{version,...}（无 /health 端点）。
 网络故障（连接拒绝/超时/网络类 URLError）→OcUnavailable；非 2xx→OcUnavailable（.status 带码）；
 死会话 inject 返回 False 不抛。
@@ -70,13 +71,17 @@ class Oc:
                 return False
             raise
 
-    def alive(self, sid: str) -> bool:
+    def session(self, sid: str) -> dict | None:
+        """会话详情（同 alive 契约：404→None，OcUnavailable 照抛）。"""
         try:
-            return bool(self._get(f"/session/{sid}").get("data"))
+            return self._get(f"/session/{sid}").get("data")
         except OcUnavailable as e:
             if e.status == 404:
-                return False
+                return None
             raise
+
+    def alive(self, sid: str) -> bool:
+        return self.session(sid) is not None
 
     def probe(self) -> dict:
         info = self._get("/info")

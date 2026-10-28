@@ -23,6 +23,8 @@ class Recover:
         self._store, self._auth, self._router = store, auth, router
 
     def startup(self):
+        """启动复查重注入；先清残留门闩——门线程不跨进程存活，kill -9 残闩必清。"""
+        self._state.clear_gate_latches()
         for tid, t in self._state.snapshot()["tasks"].items():
             if t["state"] not in _REINJECTABLE or not t.get("worker_sid"):
                 continue

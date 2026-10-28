@@ -68,33 +68,41 @@ class Health:
         """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵只提醒不处置。"""
         tasks = self._state.snapshot()["tasks"]
         oc_down = False
+        busy = set()  # updated>idle＝回合进行中：僵态本轮免判（doctor 口径减 busy 免决）
         for tid, t in tasks.items():
             wsid = t.get("worker_sid")
             if t["state"] not in _ACTIVE or not wsid:
                 continue
             try:
-                alive = self._oc.alive(wsid)
+                data = self._oc.session(wsid)
             except Exception:  # oc 不可达≠会话死：本轮免判（含僵态），勿误杀
                 oc_down = True
                 continue
-            if alive:
-                continue
-            if any(x.get("dispatcher_sid") == wsid and x["state"] in _IN_FLIGHT
-                   for x in tasks.values()):
-                self.escalate(KIND_DISPATCHER_DEAD, tid)  # 死会话管着在飞链——拍人不代管
-            elif t["state"] in _IN_FLIGHT and not self._recover.reinject(tid):
-                self.escalate(KIND_REINJECT, tid)
+            if data is None:
+                if any(x.get("dispatcher_sid") == wsid and x["state"] in _IN_FLIGHT
+                       for x in tasks.values()):
+                    self.escalate(KIND_DISPATCHER_DEAD, tid)  # 死会话管着在飞链——拍人不代管
+                elif t["state"] in _IN_FLIGHT and not self._recover.reinject(tid):
+                    self.escalate(KIND_REINJECT, tid)
+            else:
+                tm = data.get("time") or {}  # 缺形状→不 busy→照判（安全回退）
+                if (tm.get("updated") or 0) > (tm.get("idle") or 0):
+                    busy.add(tid)
         if not oc_down:
-            self._stale_scan(tasks)
+            self._stale_scan(tasks, busy)
 
-    def _stale_scan(self, tasks):
+    def _stale_scan(self, tasks, busy):
         """边沿判僵（F5 决策记录 2026-10-28）：新进候选集→stalled 拍人。
 
-        _stale_seen 每轮同步为当前候选集（离开即移除，之后再僵再拍）。
+        免判口径（二批）：busy（updated>idle，回合进行中）本轮从候选集剔除；
+        离开 busy 再超阈重新边沿触发。_stale_seen 每轮同步为当前候选集
+        （离开即移除，之后再僵再拍）。
         """
         if self._stale_candidates is None:
             return
-        cand = self._stale_candidates({"tasks": tasks}, time.time())
+        cand = [(tid, b) for tid, b
+                in self._stale_candidates({"tasks": tasks}, time.time())
+                if tid not in busy]
         for tid, _ in cand:
             if tid not in self._stale_seen:  # 边沿：在候选集而不在记忆集
                 self.escalate(KIND_STALLED, tid)
@@ -123,9 +131,10 @@ class Health:
                                   "event": event, "task": tid, "to": to})
 
     def touch(self, sid):
-        """last_seen 刷新入口：worker/dispatcher 每次调用服务时由 httpd 调。"""
+        """last_seen 刷新入口：仅 worker 服务调用刷——dispatcher 查看≠worker
+        干活，查看不续命（二批决策；018676 真僵晚拍 40min 实证）。"""
         for tid, t in self._state.snapshot()["tasks"].items():
-            if sid in (t.get("worker_sid"), t.get("dispatcher_sid")):
+            if sid == t.get("worker_sid"):
                 self._state.set_fields(tid, last_seen=time.time())
 
     def escalate(self, kind, tid, raw=None):

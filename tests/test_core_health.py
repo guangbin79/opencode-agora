@@ -27,13 +27,16 @@ UNTRUSTED = "---- 不可信原文 ----"
 class FakeOc:
     def __init__(self):
         self.liveness = {}  # sid->bool；缺席＝死
+        self.time_of = {}  # sid->{"updated":ms,"idle":ms}；缺席＝缺形状→不 busy
         self.sessions, self.injected = [], []
         self.down = False
 
-    def alive(self, sid):
+    def session(self, sid):
         if self.down:
             raise OcUnavailable("stub down")
-        return bool(self.liveness.get(sid))
+        if not self.liveness.get(sid):
+            return None
+        return {"time": self.time_of[sid]} if sid in self.time_of else {}
 
     def create(self, cwd, boot, title=None):
         sid = f"r{len(self.sessions) + 1}"
@@ -177,6 +180,23 @@ class TestCoreHealth(unittest.TestCase):
         self.health.tick()
         self.assertEqual(self.main_msgs(), [])
 
+    def test_tick_busy_worker_vetoed_from_stale(self):  # Req: F5
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True  # 会话活着且回合进行中：免判
+        self.oc.time_of["s-w1"] = {"updated": time.time() * 1000, "idle": 1000.0}
+        self.health.tick()
+        self.assertEqual(self.main_msgs(), [])
+
+    def test_tick_finished_turn_still_flagged(self):  # Req: F5
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True  # 活着但回合已结束（updated<idle）：照判
+        self.oc.time_of["s-w1"] = {"updated": 800.0, "idle": 900.0}
+        self.health.tick()
+        self.assertEqual(sum("失控[stalled]" in m["body"]
+                             for m in self.main_msgs()), 1)
+
     def test_email_unconfigured_no_subprocess_no_raise(self):  # Req: F5
         calls = []
         self.health = Health(self.state, self.oc, self.router, self.recover,
@@ -296,13 +316,12 @@ class TestCoreHealth(unittest.TestCase):
 
     # ---- touch：last_seen 刷新入口 ----
 
-    def test_touch_updates_last_seen(self):  # Req: F5
+    def test_touch_worker_only(self):  # Req: F5
         self.seed("t1")
-        self.assertIsNone(self.state.get("t1")["last_seen"])
-        self.health.touch("s-w1")
-        self.assertGreater(self.state.get("t1")["last_seen"], 0)
-        self.health.touch("main")  # dispatcher 侧调用同样刷
-        self.assertGreater(self.state.get("t1")["last_seen"], 0)
+        self.health.touch("s-w1")  # worker 服务调用刷
+        self.state.set_fields("t1", last_seen=123.0)
+        self.health.touch("main")  # dispatcher 查看≠干活：不续命（018676 实证）
+        self.assertEqual(self.state.get("t1")["last_seen"], 123.0)
 
 
 if __name__ == "__main__":

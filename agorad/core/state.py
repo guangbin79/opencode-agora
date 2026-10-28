@@ -115,6 +115,16 @@ class State:
             self._persist()
             return True
 
+    def clear_gate_latches(self):
+        """启动清残留门闩：门线程不跨进程存活，kill -9 残闩是撒谎闩（二批决策）。"""
+        with self._lock:
+            for tid, t in self._tasks.items():
+                if t.get("in_gate"):
+                    t["in_gate"] = False
+                    self._store.append_event({"ts": time.time(), "actor": "agorad",
+                                              "event": "gate_latch_reset", "task": tid})
+            self._persist()
+
     def gate_tail(self, tid) -> dict:
         """门尾原子结算：pending 取走＋终态写入同临界区（cancel×门尾 TOCTOU 封闭）。
 

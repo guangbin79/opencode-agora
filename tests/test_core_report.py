@@ -113,6 +113,10 @@ class TestReport(unittest.TestCase):
         self.assertEqual([age for _, age in v["age_rank"]],
                          [1600.0, 1600.0, 1500.0, 1500.0, 1300.0, 1.0])  # F15 融合基线：t1(300)→1300、t2(1599)→1，复用同一 now
 
+    def test_stale_candidates_skip_in_gate(self):  # Req: F5
+        s = snap(tg=dict(row("done"), in_gate=True), tl=row("done"))
+        self.assertEqual(stale_candidates(s, 3000.0), [["tl", 0.0]])  # 门内静默属正常：免判；同态无闩照拍
+
     def test_env_activity_missing_or_empty_zero(self):  # Req: F15
         self.assertEqual(_env_activity(None), 0.0)
         self.assertEqual(_env_activity("/nonexistent-env-dir"), 0.0)

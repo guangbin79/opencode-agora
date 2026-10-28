@@ -120,6 +120,15 @@ class TestCoreRecover(unittest.TestCase):
         self.rec.startup()
         self.assertEqual(self.oc.sessions, [])
 
+    def test_startup_clears_stale_gate_latch(self):  # Req: F5
+        self.seed("t1", state="done")
+        self.state.set_fields("t1", in_gate=True)  # kill -9 残闩
+        self.rec.startup()
+        self.assertFalse(self.state.get("t1")["in_gate"])
+        ev = [e for e in self.events() if e["event"] == "gate_latch_reset"]
+        self.assertEqual([(e["task"], e["actor"]) for e in ev],
+                         [("t1", "agorad")])  # 恰一条审计行
+
     def test_startup_oc_down_neutral(self):  # Req: F6
         self.oc.down = True
         self.seed("t1")

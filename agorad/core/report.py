@@ -126,7 +126,8 @@ def stale_candidates(snap, now, base=None):
     """
     cand = []
     for tid, t in snap["tasks"].items():
-        if t["state"] in _STALE_STATES:
+        # shortcut: 门线程挂死（verify 永不返回）随 in_gate 永久免检，门故障类报警另立，when: 出现首例门挂死
+        if t["state"] in _STALE_STATES and not t.get("in_gate"):
             b = base.get(tid) if base is not None else None
             if b is None:
                 b = _stale_baseline(t)
