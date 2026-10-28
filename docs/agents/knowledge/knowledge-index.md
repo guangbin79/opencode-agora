@@ -17,7 +17,7 @@
 - **评审环锚绑定**：done 前提＝.review-loop/.last-reviewed == HEAD（代码被审过且绿）
 - **摩擦驱动迭代**：狗粮两口实证——第一口 2 次被拒 9 事件；第二口零被拒 7 事件
 - **AGORA_HOME 指针**：MCP 壳/install 写 ~/.agora-home 单行指针；组件 env>指针>缺省 发现；插件判定链不跟随（被辖方可写文件不作信任锚，gt-32c051 裁定 A）
-- **TUI 行号与深树两坑**（gt-c3c74f 评审实证）：curses 行切片/行号算术须防 h 过小出负值（如 `max(0, ·)`，draw_board 实例）；树深由远端 JSON 决定的遍历禁递归，用显式栈（build_rows DFS）
+- **TUI 行号与深树三坑**（gt-c3c74f/gt-8d5761 评审实证）：curses 行切片/行号算术须防 h 过小出负值（如 `max(0, ·)`，draw_board 实例）；树深由远端 JSON 决定的遍历禁递归，用显式栈（build_rows DFS）；键位处理器先改 sel 再调滑动辅助时，空滑回退必须用按键前行 origin——回退到进辅助时的桶行＝光标隐身（_skip_bucket 实例）
 
 ## 已知接受面
 
