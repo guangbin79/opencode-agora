@@ -170,5 +170,5 @@ worker 间无横向观测面（消息拓扑＝链边，兄弟协作经共同上�
 **验收**：原子路 create(verify_cmd)→registered＋事件落盘＋dispatch 放行；硬闸 create（无 verify 无旗）→dispatch 403＋审计行＋零副作用（不建环境不建会话）；豁免 create(verify_pending=true)→dispatch 放行、后续 update 登记照常；事故复刻 gt-87f3c2 形态（create 后漏 update 即 dispatch）必被拒；`python3 -m unittest tests.test_core_task tests.test_transport_httpd` 绿；全量绿。
 
 ### F24 任务 id 前缀 task-＋历史 gt- 终身双兼容（2026-10-29，gt-99ae7b 用户裁定）
-新任务 id 生成前缀从 gt- 换 task-（望文生义；6 hex 长度不变）。前缀是契约词汇散布多个校验/解析面，存量 75+ 任务终身 gt-*，所有输入/解析面双形态同收：①生成 task.py _new_tid；②after 链输入面（存在性校验前缀无关，测试锚定旧 id 全链）；③MCP 壳 schema 描述与 agora CLI help 标注双形态；④高危点插件 inject BOOT 正则双前缀——漏改＝worker 凭据登记断链。
+新任务 id 生成前缀从 gt- 换 task-（望文生义；6 hex 长度不变）。前缀是契约词汇散布多个校验/解析面，存量 75+ 任务终身 gt-*，所有输入/解析面双形态同收：①生成 task.py _new_tid；②after 链输入面（存在性校验前缀无关，测试锚定旧 id 全链）；③MCP 壳 schema 描述与 agora CLI help 标注双形态；④高危点插件 inject BOOT 正则双前缀——漏改＝worker 凭据登记断链；⑤e2e 断言面（t3_chain.sh S1 startswith 双前缀，ocr 评审补册）。
 **验收**：新 tid 命中 ^task-[0-9a-f]{6}$；旧 gt- id 作 after 建单＋派发全链通；插件 BOOT 两前缀用例绿；`python3 -m unittest tests.test_core_task tests.test_transport_httpd` 绿。
