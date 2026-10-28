@@ -100,8 +100,11 @@ class TestCoreGate(unittest.TestCase):
 
     def mk_gate(self, merge="ok", gate=False, crash=False):
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash)
+        # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
+        anchor = lambda env: (self.anchor
+                              if (self.env / ".review-loop").is_dir() else None)
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
-                         lambda env: self.anchor, self.health, self.auth,
+                         anchor, self.health, self.auth,
                          self.store, runner=self.runner)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None):
@@ -229,6 +232,31 @@ class TestGateRun(TestCoreGate):
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("review_absent_no_merge", names)
         self.assertIn("review-loop", self.worker_msgs()[0]["body"])  # 补设施指引
+
+    def test_merge_time_anchor_missing_degrades(self):  # Req: gt-3e7301
+        """合并前锚重验：受理后锚不在/未绿（accept→run 窗口 TOCTOU）→驻留 done。"""
+        self.in_gate()  # 正常受理：目录在＋锚绿
+        self.anchor = None  # 合并时锚不在/未绿
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留 done：人工审合并
+        self.assertEqual(t["fail_streak"], 0)  # 非质量败：不计连败
+        self.assertEqual(self.gx.merge_calls, [])  # 零合并
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("review_absent_no_merge", names)
+
+    def test_review_green_during_verify_merges(self):  # Req: gt-3e7301
+        """降级受理后 verify 期间评审环跑绿：锚绿于 commit 即照常合并（正路径）。"""
+        shutil.rmtree(self.env / ".review-loop")
+        self.anchor = None  # 降级受理（评审环缺失）
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", "abc123"), "accepted")
+        (self.env / ".review-loop").mkdir(parents=True)  # verify 期间 idle 评审环跑绿
+        self.anchor = {"head": "abc123", "clean": True}
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")  # merged→closed
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
 
     def test_non_ff_reopens_without_merge_or_bump(self):  # Req: F7
         self.runner = FakeRunner((0, "pass"))

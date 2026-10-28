@@ -5,8 +5,9 @@
 无 anchor 入参），拒收附动作指引；评审环缺失→放行 done，verify 绿驻留 done 人工审
 合并（门体既有分支接管）。门体（run 后台线程体）：
 env 跑 verify→败 verify_failed＋输出尾部（截 2000 字符）实时回 worker＋计连败；
-绿→评审环缺失驻留 done（review_absent_no_merge 审计＋回 worker——自动合并
-需 .review-loop/ 基础设施）→ff-only 合并→non-ff 拒并 reopened（fail_streak 不动）→集成 verify 败→原子回滚
+绿→合并前锚重验：锚缺失/落后/未绿驻留 done（review_absent_no_merge 审计＋
+回 worker——合并充分条件＝.review-loop/ 锚绿于报告 commit，堵 accept→run
+窗口 TOCTOU 与 done 后偷提交）→ff-only 合并→non-ff 拒并 reopened（fail_streak 不动）→集成 verify 败→原子回滚
 （合并前 sha）＋reopened＋计连败；全绿→fail_streak_reset＋merged（commit 证据落行）
 ＋环境回收＋尾部置 closed。每处迁移落 events.jsonl 一行（F8 门段审计，事件名＝
 迁移后状态名，merged 带 commit）。全程 in-gate 门闩（accept 即置位）＋
@@ -90,11 +91,12 @@ class Gate:
                                    f"verify 失败——修复后重新 post(done, commit)"
                                    f"\n输出尾部:\n{out[-_TAIL:]}")
                 return
-            if not (Path(env) / ".review-loop").is_dir():  # 评审环缺失：绿亦不合并
+            a = self._read_anchor(env)  # 合并前锚重验：堵 accept→run 窗口 TOCTOU
+            if not a or a.get("head") != t.get("commit") or not a.get("clean"):
                 self._audit(tid, "review_absent_no_merge")
-                self._post(tid, "verify 绿但 env 缺 .review-loop/——自动合并需评审环"
-                                "基础设施；安装 review-loop 后跑 /review-loop 至锚绿，"
-                                "重新 post(done, commit)")
+                self._post(tid, "verify 绿但合并时 .review-loop 锚缺失/落后/未绿——"
+                                "任务驻留 done 待人工审阅合并（dispatcher 可 "
+                                "cancel 或人工 git 合并）")
                 return
             before = self._gitx.head(target, branch)  # 回滚点＝合并前目标分支 HEAD
             if self._gitx.merge_ff(env, target, branch) != "ok":
