@@ -1,5 +1,7 @@
 # opencode-agora
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Multi-agent delegation for [opencode](https://opencode.ai) v2 — you state goals, agents deliver verified code, merges happen automatically.
 
 ```
