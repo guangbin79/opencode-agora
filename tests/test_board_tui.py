@@ -150,7 +150,7 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual(m["sel"], 1)
         handle_key(m, "k")
         handle_key(m, "k")
-        self.assertEqual(m["sel"], 0)  # 顶钳制
+        self.assertEqual(m["sel"], 1)  # 首任务行上方全桶头：原地不动不停桶头
 
     def test_jk_skip_bucket_headers(self):  # Req: F10
         rows = self.ROWS + [Row("bucket", title="失败 0", domain="bucket"),
@@ -164,6 +164,22 @@ class TestHandleKey(unittest.TestCase):
         m = model([self.ROWS[0]])          # 纯桶列表：无行动行，钳端点不越界
         handle_key(m, "j")
         self.assertEqual(m["sel"], 0)
+
+    def test_k_at_first_task_stays_on_bucket_void(self):  # Req: F10
+        rows = [Row("bucket", title=f"桶 {i} 0", domain="bucket")
+                for i in range(5)] + [
+                Row("task", "t1", 0, "running", "目标", "ses-9", "1m", "", "fly"),
+                Row("task", "t2", 0, "done", "二", "ses-8", "2m", "", "done")]
+        m = model(rows, sel=5)             # 首个任务行
+        handle_key(m, "k")                 # 上方全为桶头：原地不动，不停桶头
+        self.assertEqual(m["sel"], 5)
+        handle_key(m, "k")
+        handle_key(m, "k")
+        self.assertEqual(m["sel"], 5)      # 连按多次仍不变（光标不隐身）
+        handle_key(m, "j")
+        self.assertEqual(m["sel"], 6)      # 常规移动不回归
+        handle_key(m, "k")
+        self.assertEqual(m["sel"], 5)
 
     def test_enter_l_detail_h_back(self):  # Req: F10
         m = model(self.ROWS, sel=1)

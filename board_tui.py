@@ -164,14 +164,18 @@ def _sel_row(m):
     return rows[m["sel"]] if 0 <= m.get("sel", 0) < len(rows) else None
 
 
-def _skip_bucket(m, down=True):
-    """桶头只作分隔：越过后滑到最近任务/事件行，全程无行动行则钳在端点。"""
+def _skip_bucket(m, down=True, origin=None):
+    """桶头只作分隔：越过后滑到最近任务/事件行；该方向全程无行动行则退回 origin
+    （按键前行，防 k 在首个任务行空滑后光标停桶头隐身），缺省＝进入时行。"""
     rows = m.get("rows") or []
     d = 1 if down else -1
+    origin = m["sel"] if origin is None else origin
     while 0 <= m["sel"] < len(rows) and rows[m["sel"]].kind == "bucket":
         if not 0 <= m["sel"] + d < len(rows):
             break
         m["sel"] += d
+    if 0 <= m["sel"] < len(rows) and rows[m["sel"]].kind == "bucket":
+        m["sel"] = origin
 
 
 def clamp_view(m, visible):
@@ -208,12 +212,14 @@ def handle_key(m, key):
         return Action("cancel", task=tid) if key == "y" else Action("noop")
     r = _sel_row(m)
     if key in ("j", "KEY_DOWN"):
+        origin = m["sel"]
         m["sel"] = min(m["sel"] + 1, max(0, len(m.get("rows") or []) - 1))
-        _skip_bucket(m, down=True)
+        _skip_bucket(m, down=True, origin=origin)
         return Action("move")
     if key in ("k", "KEY_UP"):
+        origin = m["sel"]
         m["sel"] = max(m["sel"] - 1, 0)
-        _skip_bucket(m, down=False)
+        _skip_bucket(m, down=False, origin=origin)
         return Action("move")
     if key == "g":
         m["sel"] = 0
@@ -407,7 +413,7 @@ def draw_board(stdscr, m, status="", err=None):
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
             continue
         text = (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 32)}"
-                f"     {_pad(r.state, 13)} {r.last_seen or ''}"
+                f"     {_pad(r.state, 13)} {_pad(r.last_seen or '-', 5)}"
                 + (f"  {r.repo}" if r.repo else ""))
         if r.kind == "event":
             attr |= curses.A_BOLD
