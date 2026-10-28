@@ -86,6 +86,15 @@ class State:
         with self._lock:
             self._mail_read[sid] = time.time()
 
+    def touch_seen(self, tid):
+        """last_seen 心跳只进内存（gt-a18ef6 写放大根因修复）：O(调用数) 全量
+        快照落盘曾致账本 4.4GB——追加仅随真实迁移；崩溃回退按模块头语义
+        接受（同 touch_mail 口径）。"""
+        with self._lock:
+            t = self._tasks.get(tid)
+            if t is not None:
+                t["last_seen"] = time.time()
+
     def transition(self, tid, to, **fields):
         with self._lock:
             t = self._tasks[tid]

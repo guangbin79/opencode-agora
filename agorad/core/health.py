@@ -135,7 +135,7 @@ class Health:
         干活，查看不续命（二批决策；018676 真僵晚拍 40min 实证）。"""
         for tid, t in self._state.snapshot()["tasks"].items():
             if sid == t.get("worker_sid"):
-                self._state.set_fields(tid, last_seen=time.time())
+                self._state.touch_seen(tid)  # 心跳只进内存：快照仅随真实迁移追加
 
     def escalate(self, kind, tid, raw=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。"""

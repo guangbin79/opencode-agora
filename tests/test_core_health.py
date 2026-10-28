@@ -363,6 +363,19 @@ class TestCoreHealth(unittest.TestCase):
 
     # ---- touch：last_seen 刷新入口 ----
 
+    def test_touch_amplif_heartbeat_never_appends_snapshot(self):  # Req: F5
+        """gt-a18ef6 写放大回归：心跳 O(调用) 落盘曾致账本 4.4GB——
+        重复 touch 追加行数有界（O(迁移) 非 O(调用)），内存 last_seen 仍刷新。"""
+        self.seed("t1")
+        ledger = self.tmp / "state" / "tasks.jsonl"
+        base = ledger.read_text(encoding="utf-8").count("\n")
+        for _ in range(50):
+            self.health.touch("s-w1")  # httpd 每次工具调用的同款心跳
+        self.assertEqual(ledger.read_text(encoding="utf-8").count("\n"), base)
+        self.assertGreater(self.state.get("t1")["last_seen"], 0)  # 探活口径不丢
+        self.state.transition("t1", "done")  # 真实迁移照常落一行
+        self.assertEqual(ledger.read_text(encoding="utf-8").count("\n"), base + 1)
+
     def test_touch_worker_only(self):  # Req: F5
         self.seed("t1")
         self.health.touch("s-w1")  # worker 服务调用刷
