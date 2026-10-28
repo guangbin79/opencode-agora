@@ -79,10 +79,11 @@ def wait(tid, base, token, timeout=1800, once=False, interval=_INTERVAL,
             state, commit = fetch(base, token, tid)
         except Transient as e:
             if once or clock() >= deadline:
-                raise Fail(f"服务不可达（重试至超时）: {e}") from None
+                head = "服务不可达" if once else "服务不可达（重试至超时）"
+                raise Fail(f"{head}: {e}") from None
         else:
             if classify(state) == 0:
-                return 0, f"{state} @{commit[:12]}" if commit else state
+                return 0, (f"{state} @{commit[:12]}" if commit else state)
             if once or clock() >= deadline:
                 return 1, f"in-flight: {state}"
         pause(min(interval, max(0.0, deadline - clock())))
@@ -95,6 +96,14 @@ def run_wait(a):
     code, line = wait(a.task_id, base, token, timeout=a.timeout, once=a.once)
     print(line)
     return code
+
+
+def _timeout_arg(v):
+    """非负有限秒数；拒 nan/inf/负值（nan 会让 deadline 比较恒 False 变热轮询）。"""
+    t = float(v)
+    if not 0 <= t < float("inf"):
+        raise argparse.ArgumentTypeError("须为非负有限秒数")
+    return t
 
 
 def _parser():
@@ -112,7 +121,7 @@ def _parser():
                "2＝异常（用法错/任务未知 404/root 牌缺失/重试至超时仍不可达）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     w.add_argument("task_id", metavar="task-id", help="任务 id（gt-xxxxxx）")
-    w.add_argument("--timeout", type=float, default=1800,
+    w.add_argument("--timeout", type=_timeout_arg, default=1800,
                    help="到期仍在飞退出 1（秒）；缺省 1800（防调用方永挂）")
     w.add_argument("--once", action="store_true", help="单查形态，立即返回不阻塞")
     w.set_defaults(fn=run_wait)

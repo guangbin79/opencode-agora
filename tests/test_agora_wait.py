@@ -265,6 +265,9 @@ class TestCli(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         p = run_cli(["wait", "t1", "--timeout", "abc"], self.home(None))
         self.assertEqual(p.returncode, 2)
+        for bad in ("nan", "inf", "-1"):  # nan deadline 比较恒 False＝热轮询
+            p = run_cli(["wait", "t1", "--timeout", bad], self.home(None))
+            self.assertEqual(p.returncode, 2, bad)
 
     def test_help_usage_and_exit_code_table(self):  # Req: F14
         p = run_cli(["wait", "--help"], self.home(None))

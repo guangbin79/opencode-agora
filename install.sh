@@ -95,8 +95,7 @@ chmod +x "$AGORA_HOME/.agora/board_tui.py"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
 
-# ---- 4c) agora CLI（F14：wait 阻塞谓词；bin 面拷贝同风格）----
-mkdir -p "$HOME/.local/bin"
+# ---- 4c) agora CLI（F14：wait 阻塞谓词；bin 目录 4b 已建）----
 cp -f "$REPO/agora" "$HOME/.local/bin/agora"
 chmod +x "$HOME/.local/bin/agora"
 find "$AGORA_HOME/.agora/agorad" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
