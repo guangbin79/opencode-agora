@@ -148,6 +148,17 @@ class TestCoreMsg(unittest.TestCase):
         self.assertEqual([x["id"] for x in self.r.check_mail("d1")], [mid])
         self.assertEqual(self.r.check_mail("d1"), [])  # 补拉不重复
 
+    def test_silent_post_raise_swallowed_persist_only(self):  # Req: F4/F5
+        """inject_silent 抛异常（凭据轮换 401/网络故障）同离线口径：不抛、
+        落库、补拉恰一次——投递面异常不断链。"""
+        def boom(sid, text):
+            raise RuntimeError("HTTP 401")
+
+        self.oc.inject_silent = boom
+        mid = self.r.post("w1", ("up", "t1"), "escalate", "hush", silent=True)
+        self.assertEqual([x["id"] for x in self.r.check_mail("d1")], [mid])
+        self.assertTrue(self.r.dedup_key(mid))
+
     def test_silent_post_online_delivered_once_no_pull(self):  # Req: F4/F5
         def spy(sid, text):
             self.oc.calls.append(("silent", sid, text))

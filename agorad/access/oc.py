@@ -7,6 +7,9 @@
   boot 文本＝POST /session/{sid}/prompt {text}。
 - inject：POST /session/{sid}/prompt {text}→200 {data:{delivery:"steer"}}；busy 会话排队按序；
   未知/已删 sid→404 SessionNotFoundError→False；非 ses_ 形 sid→400→False（T6 实测补）。
+- inject_silent：POST /session/{sid}/synthetic {text,resume:false}→204 无体（免通知通道：
+  只落转录不调度回合，桌面无「响应就绪」弹出；v2.2.0 binary schema 实证声明 204/400/401/404）；
+  失败契约同 inject（400/404→False，其余 OcUnavailable 上抛）。
 - alive/session：GET /session/{sid}→200 {data:{...}}＝活；404＝死（不抛）。
   session(sid) 回同一 data 体（含 time:{created,updated,idle,viewed} 毫秒 epoch），404→None。
 - probe：GET /info→{version,...}（无 /health 端点）。
