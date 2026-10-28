@@ -52,6 +52,7 @@ MCP 路径的 `task_cancel` 无确认门（无 board-tui 式 y/n），确认纪�
 - **`last_seen_rank`**：最后活动排行——worker 每次调用服务即刷新 last_seen，活着但排名垫底（久未动）＝**僵态候选**。"僵"不自动处置（无巡检、无 stalled 定时器），由人判断后转 dispatch 失控三选一（cancel／再 dispatch／放任）。
 - **`env`**：每任务 env_dir 在盘性（`on_disk`）——false＝登记环境已不在盘（merged/cancelled 回收后属正常）。
 - **孤儿目录**：盘上无任务对应的环境目录永不自动删；当前 doctor 只报在册环境的在盘性，盘上孤儿扫描属②期——on_disk 与状态对不上、或人目视发现无主目录时，才值得人 `ls` 复核一圈。
+- **不手动删 worktree 目录**——服务 `remove_env` 负责回收（含 rmtree 兜底）。手动 rm 可能误伤在飞任务的环境（gt-3e7301 事故）。残留排查用 doctor 确认 closed 后由服务清理，不人手 rm。
 
 何时值得人看一眼：age 前列且状态非在飞/blocked、last_seen 长期停滞、on_disk 与任务状态矛盾。三者之外勿主动巡检——不上 cron、不做全局扫描。
 
