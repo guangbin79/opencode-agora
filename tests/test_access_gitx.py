@@ -205,6 +205,19 @@ class TestAccessGitx(unittest.TestCase):
         self._commit(Path(env), {"c.py": "a = 1\n"}, "cleanup")
         self.assertEqual(self.gx.diff_check(env), "")  # 清理后端到端干净
 
+    def test_diff_check_git_failure_raises_not_clean(self):  # Req: gt-83185d R3
+        class BoomGitx(Gitx):  # git 自身失败（坏对象，exit 128 无输出）宁抛不假绿
+            def _git(self, args, cwd, check=True):
+                if "--check" in args:
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+                return Gitx._git(args, cwd, check)
+
+        gx = BoomGitx()
+        env = gx.build_env(self.repo, "gt-dc2")
+        self._commit(Path(env), {"ok.py": "x"}, "clean work")
+        with self.assertRaises(RuntimeError):
+            gx.diff_check(env)
+
     def test_check_branch_symref_checkout(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/8"], cwd=self.repo)
         self.assertEqual(self.gx.symref(str(self.repo)), "issue/8")

@@ -115,18 +115,22 @@ class Gitx:
         返回告警文本，空＝干净。"""
         env = Path(env_dir).resolve()
         main = self._main(env)
-        base = self._merge_base(env, branch)
+        base = self._merge_base(env, branch, main)
         r = self._git(["diff", "--check", base, env.name], cwd=main, check=False)
-        return r.stdout.strip() if r.returncode else ""
+        warn = r.stdout.strip()
+        if r.returncode and not warn:  # 检查告警必带输出；空＝git 自身失败，宁抛不假绿
+            raise RuntimeError(f"git diff --check: {r.stderr.strip()}")
+        return warn
 
     def _diff_names(self, env: Path, branch: str = None) -> list[str]:
         main = self._main(env)
-        base = self._merge_base(env, branch)
+        base = self._merge_base(env, branch, main)
         out = self._git(["diff", "--name-only", base, env.name], cwd=main).stdout
         return out.splitlines()  # 换行分隔；split() 会把含空格文件名切碎
 
-    def _merge_base(self, env: Path, branch: str = None) -> str:
-        main = self._main(env)
+    def _merge_base(self, env: Path, branch: str = None,
+                    main: Path = None) -> str:  # main 可注入：调用方已定位免重复子进程
+        main = main or self._main(env)
         src = env.name
         if branch:  # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff
             return self._git(["merge-base", f"refs/heads/{branch}", src],
