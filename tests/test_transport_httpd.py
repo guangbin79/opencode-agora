@@ -264,12 +264,17 @@ class TestHttpSmoke(HttpdTest):
                      {"goal": "g", "project_dir": "/repo", "verify_cmd": 123},
                      self.root)
         self.assertEqual(st, 400)  # 非串 verify_cmd 400 报因，不落 500
+        tid = self.create_task()
+        st, r = call(self.port, "POST", "/task_update",
+                     {"task": tid, "verify_cmd": 123}, self.root)
+        self.assertEqual(st, 400)  # task_update 同字段同守卫（create/update 不对称即缝隙）
+        self.assertEqual(self.app.state.get(tid)["verify"]["state"], "pending")  # 未被污染
         st, r = call(self.port, "POST", "/task_create",
-                     {"goal": "g", "project_dir": "/repo",
+                     {"goal": "g2", "project_dir": "/repo",
                       "verify_cmd": "true", "verify_pending": True}, self.root)
         self.assertEqual(st, 403)  # 互斥组合 core 层拒（同 after/target_branch 先例）
         self.assertEqual([t for t in self.app.state.snapshot()["tasks"].values()
-                          if t["goal"] == "g"], [])  # 拒绝零建行
+                          if t["goal"] == "g2"], [])  # 拒绝零建行
         # 快速路正向锚：httpd 透传 verify_cmd，建单登记后 dispatch 免 update 过闸
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "fast", "project_dir": "/repo",

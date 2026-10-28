@@ -126,7 +126,10 @@ class _Handler(BaseHTTPRequestHandler):
             return {"task": body["task"],
                     "token": app.task.dispatch(body["task"], token)}
         if name == "task_update":
-            app.task.update_verify(body["task"], token, body["verify_cmd"])
+            vc = body["verify_cmd"]
+            if not isinstance(vc, str):  # 同 create 口径：非串 400 报因，不落 500
+                raise ValueError("verify_cmd 须为字符串")
+            app.task.update_verify(body["task"], token, vc)
             return {"ok": True}
         if name == "task_cancel":
             return {"cancelled": app.task.cancel(body["task"], token)}

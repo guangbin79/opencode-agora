@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# T3 派发链 e2e（F3/F4/F6/F7/F11）：真 opencode（tmux 驻留）＋真 agorad 全链十三场景。
+# T3 派发链 e2e（F3/F4/F6/F7/F11/F23）：真 opencode（tmux 驻留）＋真 agorad 全链十四场景。
 # 隔离同 T6 口径：HOME/XDG_*/AGORA_HOME 全沙箱，绝不触碰本机会话服务；产物 /tmp/opencode。
 # 驱动形态（T6 裁定沿袭＋T7 收敛）：serve/agorad 各驻 tmux；服务侧动作经 agorad HTTP
 # （root 牌＋task_dispatch 回传的 worker 牌）；worker 真会话干活＝目标即指令（goal 窄化，
 # 模型自主落盘/提交），验收＝服务侧状态＋git 事实＋消息库/文件事实，不依赖模型自述，
 # 亦不与其自发续作竞速（run7/16 实证：自发性是契约行为，脚本须状态驱动收敛）。
-# 场景：S1 全链 / S2 跨仓顺序（B7 拒＋相对路径见新主）/ S3 过程沟通（问答一轮）＋
+# 场景：S0 F23 派发硬闸（无 verify 无旗 dispatch 必拒）/ S1 全链 / S2 跨仓顺序（B7 拒＋相对路径见新主）/ S3 过程沟通（问答一轮）＋
 # 在线 ≤5s 计时＋连续 10 条按序 / 杀 agorad 重启续 / 杀 opencode 服务重启 / 会话死亡
 # 重注入（牌重绑链边可达）/ done 崩溃窗口（重启重排不双死）/ 门内 cancel 排队 /
 # 非 root enforce 403 / verify 驳回起重。残留断言＋反需求语义扫（F5 弱锚收口）。
 # 用法：bash tests/e2e/t3_chain.sh
-# Req: F3/F4/F6/F7/F11（锚逐断言标注）
+# Req: F3/F4/F6/F7/F11/F23（锚逐断言标注；F23 快速路正向锚在 tests/test_transport_httpd.py）
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -133,7 +133,7 @@ mk_repo proj; mk_repo repoA; mk_repo repoB; mk_repo repoD; mk_repo repoE
 mk_repo repoR; mk_repo repoX; mk_repo repoY; mk_repo repoM
 note "夹具 9 仓就绪"
 
-# ---- 6) 十三场景（python 驱动）----
+# ---- 6) 十四场景（python 驱动）----
 T3_OC_KEY="$OC_KEY" T3_PROV="$PROV" python3 -u - "$SANDBOX" "$WORK" "$REPO" "$ROOT_TOKEN" \
   "$SANDBOX/state/opencode/service.json" "$OC1_URL" "$OC1_PW" "$OC_BIN" "$STAMP" <<'PY'
 import base64, json, os, pathlib, sqlite3, subprocess, sys, time, urllib.error, urllib.request
@@ -410,7 +410,7 @@ kill_agorad()
 start_agorad()
 
 # ============================================================
-# S0 F23 派发硬闸：无 verify 无旗 dispatch 必拒＋专属审计行（快速路见 S1 后的原子登记对照）
+# S0 F23 派发硬闸：无 verify 无旗 dispatch 必拒＋专属审计行（S1 走探索路对照；快速路正向锚在 test_transport_httpd）
 # ============================================================
 code, body = agora("/task_create", {"goal": "F23 gate probe",
                                     "project_dir": f"{WORK}/repoA"})
@@ -895,5 +895,5 @@ sys.exit(1 if hits else 0)
 PY
 then note "PASS 语义扫：无 cron/巡检/看门狗/stalled 处置代码路径 # Req: F5"; else note "FAIL 语义扫：反需求路径命中"; RC=1; fi
 
-if [ "$RC" -eq 0 ]; then note "ALL GREEN（十三场景＋残留＋密钥面＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
+if [ "$RC" -eq 0 ]; then note "ALL GREEN（十四场景＋残留＋密钥面＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
 exit "$RC"
