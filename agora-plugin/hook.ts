@@ -11,6 +11,9 @@ import type { Cred } from "./cred";
 
 export const DISPATCH_HINT =
   "被拦：本机 git 仓直改仅限委托的隔离环境（cwd∈任务 env）。请经 agora 任务面派发（task_create/task_dispatch）持凭据作业；直接改仓仅限豁免面。";
+// F17：无凭据拒因指路——credential 直投可能失败落信箱，worker 可自行领牌恢复。
+export const NO_CRED_HINT =
+  "若你是被派发的 worker：凭据可能直投失败已落信箱，先调 agora_check_mail 领牌再重试。";
 export const READ_HINT =
   "被拦：tasks.jsonl 与 messages/ 属账本面，请走工具面（board/check_mail）；events.jsonl 与 wiki 可直接读。主会话不受此限。";
 
@@ -85,5 +88,6 @@ export function shouldBlock(
   if (!WRITE_TOOLS.has(tool)) return null;
   if (under(TMP_ROOT, target) || !inGitRepo(target)) return null; // 豁免面 B3
   if (cred?.token && cred.envDir && under(cred.envDir, cwd)) return null;
-  return DISPATCH_HINT; // 无凭据／cwd∉env／主会话同拦／服务不可达默认拒——同一引导
+  if (!cred?.token) return DISPATCH_HINT + NO_CRED_HINT; // F17：无凭据拒因指路 check_mail
+  return DISPATCH_HINT; // 有凭据 cwd∉env／持牌主会话同拦／持牌服务不可达默认拒——原引导不变
 }

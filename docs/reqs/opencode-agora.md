@@ -114,6 +114,10 @@ agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait �
 主会话（dispatcher）重启后真实 sid 滚动，root 牌经 rebind 跟随新 sid，但旧任务行 dispatcher_sid 仍记旧值——派发方 post 旧任务报「非链边」失声（F14 修订被迫 cancel＋重建）。设计（用户选⑤「sid 血统」）：①令牌记录身份沿革——rebind 把旧 sid 追加进该牌血统集随牌持久化（旧格式缺字段＝空集），same_lineage 提供判定；②链边校验接受血统——dispatcher 边判定扩为「sid 相等或 same_lineage」，血统判定经装配注入 Router 单点持有（worker 边不加，recover 已覆写 worker_sid），消息 from 仍记真实当前 sid。已知边角：doctor rotate_root 换新牌血统从零起、旧任务链边仍断——轮换属手动管理动作，文档化豁免不修。
 **验收**：rebind 累积血统且重启后在；换号后 post 旧任务达 worker（down 边）、归因记新 sid；无血缘仍拒；worker 边不放行；常规链边零变化；全量测试绿。
 
+### F17 hook 无凭据拒因指路 check_mail（2026-10-28）
+生产实证（本任务派发链）：worker 会话 credential 直投失败时 hook 恒拒且拒因只给「去派发」——引导错向，worker 无法自愈。拆 shouldBlock 无凭据拒因：cred?.token 为假（本会话无凭据）→DISPATCH_HINT 追加 NO_CRED_HINT「若你是被派发的 worker：凭据可能直投失败已落信箱，先调 agora_check_mail 领牌再重试」；有凭据但 cwd∉envDir 的路径维持原 DISPATCH_HINT 不变（持牌主会话同拦／持牌服务不可达默认拒文案不变；无凭据子情形走 NO_CRED_HINT 支）。附带修复 hook.test.ts BOOT 夹具腐化：夹具 BOOT 文本旧格式「[agora] BOOT task t-b」不匹配 inject.ts BOOT_MSG（/\[agora\] (gt-\S+): /）致 envDir 未登记、合流后恒 deny——夹具对齐现行 gt- 前缀格式，断言不变，inject.ts 不动。
+**验收**：cred=null 拒串含 "agora_check_mail"；有 token 而 envDir 不含 cwd 拒串严格等于原 DISPATCH_HINT；BOOT 先行＋credential 合流放行用例恢复绿；bun test agora-plugin/ 全绿。
+
 ## 5. 非功能需求
 
 - 单机、零第三方依赖（服务与 MCP：Python 3 stdlib；插件：TS on Bun）

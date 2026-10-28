@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { agoraHome, DISPATCH_HINT, READ_HINT, shouldBlock } from "./hook";
+import { agoraHome, DISPATCH_HINT, NO_CRED_HINT, READ_HINT, shouldBlock } from "./hook";
 import { attachToken, cacheCredential, readCredential, type Cred } from "./cred";
 import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
@@ -82,13 +82,13 @@ describe("shouldBlock 判定链", () => {
 
   test("git 仓无凭据 edit/write→拒＋派发引导文案（write 目标可尚未存在）", () => {
     // Req: F1
-    expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true)).toBe(DISPATCH_HINT);
-    expect(shouldBlock("write", join(repo, "new.md"), plain, null, true)).toBe(DISPATCH_HINT);
+    expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true)).toBe(DISPATCH_HINT + NO_CRED_HINT);
+    expect(shouldBlock("write", join(repo, "new.md"), plain, null, true)).toBe(DISPATCH_HINT + NO_CRED_HINT);
   });
 
   test("realpath 折叠：非 git 目录下符号链接指向仓内文件→拒（折叠后入链）", () => {
     // Req: F1
-    expect(shouldBlock("edit", join(plain, "link.md"), plain, null, true)).toBe(DISPATCH_HINT);
+    expect(shouldBlock("edit", join(plain, "link.md"), plain, null, true)).toBe(DISPATCH_HINT + NO_CRED_HINT);
   });
 
   test("持活动凭据 cwd∈env→放行；cwd∉env→拒", () => {
@@ -100,6 +100,18 @@ describe("shouldBlock 判定链", () => {
   test("主会话（root 牌）对仓库代码写入同拦", () => {
     // Req: F1
     expect(shouldBlock("edit", join(repo, "a.md"), plain, rootCred, true)).toBe(DISPATCH_HINT);
+  });
+
+  test("F17 无凭据拒因指路：cred=null 返回串含 check_mail 领牌指引", () => {
+    // Req: F17
+    const hint = shouldBlock("edit", join(repo, "a.md"), plain, null, true);
+    expect(hint).toContain("agora_check_mail");
+    expect(hint).toContain(DISPATCH_HINT);
+  });
+
+  test("F17 有凭据 cwd∉env：拒因严格等于原派发引导（不加指路）", () => {
+    // Req: F17
+    expect(shouldBlock("edit", join(repo, "a.md"), plain, worker, true)).toBe(DISPATCH_HINT);
   });
 
   test("读引导：read/bash 直读 state/tasks.jsonl 与 messages/→拒＋工具面引导", () => {
@@ -198,7 +210,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     const hooks = wire();
     await hooks["session.prompt"]({
       sessionID: "s-boot",
-      prompt: { text: `[agora] BOOT task t-b\npage: p.md\nenv: ${envDir}\ncontract: x` },
+      prompt: { text: `[agora] gt-t-b: F1 判定链\npage: p.md\nenv: ${envDir}\ncontract: x` },
     });
     await hooks["session.prompt"]({ sessionID: "s-boot", prompt: { text: "[agora] credential t-b\ntoken: tok-b" } });
     setEnforce(true);
