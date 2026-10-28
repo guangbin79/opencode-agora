@@ -6,6 +6,7 @@
 """
 import secrets
 import string
+import shutil
 import subprocess
 from datetime import datetime
 from fnmatch import fnmatch
@@ -37,6 +38,7 @@ class Gitx:
         env = Path(env_dir).resolve()
         main = self._main(env)
         self._git(["worktree", "remove", "--force", str(env)], cwd=env)
+        shutil.rmtree(env, ignore_errors=True)  # 兜底：非跟踪残留（.review-loop/ 等）
         r = self._git(["branch", "-d", env.name], cwd=main, check=False)
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)
