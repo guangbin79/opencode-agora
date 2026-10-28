@@ -73,14 +73,18 @@ def rel_time(ts, now=None):
     return f"{int(d // 86400)}d"
 
 
-def build_rows(snap, events, filt="", now=None):
+def build_rows(snap, events, filt="", now=None, expanded=None):
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
     行，只取四类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
-    桶行恒在）；链深按 worker→dispatcher 边上溯，环有界。
+    桶行恒在）；链深按 worker→dispatcher 边上溯，环有界。行序 DFS 子树聚簇
+    （子代紧随父代，同层保持 chain 原序）；expanded＝展开集，任务行仅当全部
+    严格祖先都在其中才显示（空集＝默认折叠只显根层），escalate 事件行随任务
+    行同显隐；过滤非空时穿透折叠，命中行照常显示。
     """
     now = time.time() if now is None else now
+    expanded = expanded if expanded is not None else set()
     tasks = snap.get("tasks", {})
     chain = [tid for tid in snap.get("chain", []) if tid in tasks]
     esc = {}
@@ -88,17 +92,43 @@ def build_rows(snap, events, filt="", now=None):
         if (e.get("event") == "escalate" and e.get("kind") in _KINDS
                 and e.get("task") in chain):
             esc.setdefault(e["task"], []).append(e["kind"])
+    parent = {tid: next((p for p in chain if tasks[p].get("worker_sid")
+                         == tasks[tid].get("dispatcher_sid")), None)
+              for tid in chain}
     depth = {}
     for tid in chain:
         seen, d, cur = set(), 0, tid
         while cur not in seen:
             seen.add(cur)
-            up = next((p for p in chain if tasks[p].get("worker_sid")
-                       == tasks[cur].get("dispatcher_sid")), None)
+            up = parent.get(cur)
             if up is None:
                 break
             d, cur = d + 1, up
         depth[tid] = d
+    kids = {tid: [] for tid in chain}
+    roots = []
+    for tid in chain:
+        (roots if parent[tid] is None else kids[parent[tid]]).append(tid)
+    order = []
+
+    def _walk(tid):
+        order.append(tid)
+        for c in kids[tid]:
+            _walk(c)
+
+    for tid in roots:
+        _walk(tid)
+    order += [tid for tid in chain if tid not in set(order)]  # 环上孤岛 DFS 不可达，保链序兜底
+
+    def _shown(tid):
+        cur, seen = parent.get(tid), set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if cur not in expanded:
+                return False
+            cur = parent.get(cur)
+        return True
+
     buckets = {"已合并": 0, "在飞": 0, "失败": 0, "阻塞": 0, "已取消": 0}
     for t in tasks.values():
         buckets["已合并" if t["state"] in ("merged", "closed")
@@ -107,9 +137,12 @@ def build_rows(snap, events, filt="", now=None):
     rows = [Row("bucket", title=f"{name} {n}", domain="bucket")
             for name, n in buckets.items()]
     f = filt.lower()
-    for tid in chain:
+    for tid in order:
         t = tasks[tid]
-        if f and f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
+        if f:                  # 过滤穿透折叠：命中行全部照常显示，不看 expanded
+            if f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
+                continue
+        elif not _shown(tid):
             continue
         d = depth[tid]
         rows.append(Row("task", tid, d, t["state"], t.get("title", ""),
@@ -140,7 +173,7 @@ def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
     键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
-    x cancel（y/n 确认行） / 过滤（单行输入态） r 即刷 q 退出。
+    x cancel（y/n 确认行） z 折叠/展开当前任务子树 / 过滤（单行输入态） r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤单行输入态
         if key in ("\n", "\r", "KEY_ENTER"):
@@ -197,6 +230,11 @@ def handle_key(m, key):
             m["confirm"] = r.tid
             return Action("confirm", task=r.tid)
         return Action("noop")                  # 全屏页不武装确认（旁路门）
+    if key == "z":
+        if m.get("view") == "board" and r and r.kind == "task":
+            m["expanded"].symmetric_difference_update({r.tid})  # set 就地 toggle
+            return Action("fold", task=r.tid)
+        return Action("noop")
     if key == "r":
         return Action("refresh")
     if key == "q":
@@ -340,7 +378,7 @@ def draw_board(stdscr, m, status="", err=None):
     stdscr.erase()
     head = f" agora board  {status}" + (f"  离线: {err}" if err else "")
     stdscr.addnstr(0, 0, head, w - 1, curses.A_REVERSE)
-    for i, r in enumerate(m["rows"][:h - 3]):
+    for i, r in enumerate(m["rows"][:h - 4]):
         attr = _color(r.domain)
         if r.kind == "bucket":
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
@@ -352,9 +390,12 @@ def draw_board(stdscr, m, status="", err=None):
         if i == m["sel"]:
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + 1, 0, text, w - 1, attr)
-    hint = (f" j/k move g/G jump Enter/l detail L tail d doctor x cancel"
-            f" / filter r refresh q quit  filter[{m['filter']}]")
-    stdscr.addnstr(h - 2, 0, hint, w - 1, curses.A_DIM)
+    stdscr.addnstr(h - 3, 0,
+                   " j/k move | g/G jump | Enter/l detail | L tail | d doctor | x cancel",
+                   w - 1, curses.A_DIM)
+    stdscr.addnstr(h - 2, 0,
+                   f" / filter | r refresh | z fold | q quit  filter[{m['filter']}]",
+                   w - 1, curses.A_DIM)
     line = f"/{m['buf']}▌" if m.get("input") is not None else \
            (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None)
     if line:
@@ -369,7 +410,7 @@ def draw_page(stdscr, title, lines):
     stdscr.addnstr(0, 0, f" {title}", w - 1, curses.A_REVERSE)
     for i, ln in enumerate(lines[:h - 2]):
         stdscr.addnstr(i + 1, 0, str(ln), w - 1, 0)
-    stdscr.addnstr(h - 1, 0, " h back  q quit", w - 1, curses.A_DIM)
+    stdscr.addnstr(h - 1, 0, " h back | q quit", w - 1, curses.A_DIM)
     stdscr.refresh()
 
 
@@ -381,7 +422,7 @@ def run(stdscr, base, token):
     _init_colors()
     stdscr.timeout(int(interval * 1000))
     m = {"rows": [], "sel": 0, "view": "board", "confirm": None,
-         "input": None, "buf": "", "filter": ""}
+         "input": None, "buf": "", "filter": "", "expanded": set()}
     details, snap, events = {}, None, None
     status, err, page = "载入…", None, []
 
@@ -397,7 +438,7 @@ def run(stdscr, base, token):
     def _rebuild():
         """用当前（缓存）帧按 m['filter'] 重建行＋刷新状态头。"""
         nonlocal status, err
-        m["rows"] = build_rows(snap, events, m["filter"])
+        m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"])
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
         err = None
@@ -423,7 +464,7 @@ def run(stdscr, base, token):
             status = msg                           # 保住取消回执不被轮询状态覆盖
         elif a.op == "refresh":
             poll()                                 # r 手动刷：立即拉一帧
-        elif a.op == "apply":                      # 过滤回车：用缓存帧即时重建，零 HTTP
+        elif a.op in ("apply", "fold"):        # 过滤回车/z 折叠：用缓存帧即时重建，零 HTTP
             if snap is not None:
                 try:
                     _rebuild()
@@ -455,7 +496,7 @@ def selftest():
     except Exception as e:
         rows, err = [], str(e)
     m = {"rows": rows, "sel": 0, "view": "board", "confirm": None,
-         "input": None, "buf": "", "filter": ""}
+         "input": None, "buf": "", "filter": "", "expanded": set()}
 
     def once(stdscr):
         curses.curs_set(0)

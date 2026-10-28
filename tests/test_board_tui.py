@@ -49,7 +49,7 @@ class TestBuildRows(unittest.TestCase):
         s = snap(t1=trow(disp="main", worker="w1"),
                  t2=trow(disp="w1", worker="w2"),
                  t3=trow(disp="w2", worker="w3"))
-        rows = build_rows(s, [], now=NOW)
+        rows = build_rows(s, [], now=NOW, expanded={"t1", "t2"})  # 全展开看缩进
         self.assertEqual([(r.tid, r.depth) for r in task_rows(rows)],
                          [("t1", 0), ("t2", 1), ("t3", 2)])
 
@@ -203,8 +203,58 @@ class TestHandleKey(unittest.TestCase):
 
     def test_unknown_key_ignored(self):  # Req: F10
         m = model(self.ROWS, sel=1)
-        self.assertEqual(handle_key(m, "z").op, "noop")
+        self.assertEqual(handle_key(m, "v").op, "noop")  # z 已成折叠键，另取未知键
         self.assertEqual(m["sel"], 1)
+
+
+class TestFoldTree(unittest.TestCase):
+    """链树折叠＋DFS 聚簇：链 [A,B,A1,B1,A2]（A1 子 A、A2 子 A1、B1 子 B）。"""
+
+    def _chain(self):  # Req: F10
+        return snap(A=trow(disp="main", worker="wa"),
+                    B=trow(disp="main", worker="wb"),
+                    A1=trow(disp="wa", worker="wa1"),
+                    B1=trow(disp="wb", worker="wb1"),
+                    A2=trow(disp="wa1", worker="wa2"))
+
+    def test_dfs_cluster_order(self):  # Req: F10
+        rows = build_rows(self._chain(), [], now=NOW, expanded={"A", "A1", "B"})
+        self.assertEqual([r.tid for r in task_rows(rows)],
+                         ["A", "A1", "A2", "B", "B1"])  # 子代紧随父代，同层保链序
+
+    def test_default_folded_roots_only(self):  # Req: F10
+        rows = build_rows(self._chain(), [], now=NOW)  # expanded 缺省＝空集
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A", "B"])
+
+    def test_expand_stepwise(self):  # Req: F10
+        s = self._chain()
+        rows = build_rows(s, [], now=NOW, expanded={"A"})
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A", "A1", "B"])
+        rows = build_rows(s, [], now=NOW, expanded={"A", "A1"})
+        self.assertEqual([r.tid for r in task_rows(rows)],
+                         ["A", "A1", "A2", "B"])  # B 未展开，B1 仍隐
+
+    def test_z_toggles_expanded_in_place(self):  # Req: F10
+        rows = [Row("bucket", title="在飞 1", domain="bucket"),
+                Row("task", "t1", 0, "running", "目标", "ses-9", "1m", "", "fly")]
+        m = model(rows, sel=1, expanded=set())
+        exp = m["expanded"]
+        a = handle_key(m, "z")
+        self.assertEqual((a.op, a.task), ("fold", "t1"))
+        self.assertEqual(m["expanded"], {"t1"})
+        self.assertIs(m["expanded"], exp)          # 就地 toggle，不换集
+        a = handle_key(m, "z")
+        self.assertEqual((a.op, a.task), ("fold", "t1"))
+        self.assertEqual(m["expanded"], set())
+        self.assertEqual(handle_key(model(rows, sel=0, expanded=set()), "z").op,
+                         "noop")                   # 桶头行不折叠
+        self.assertEqual(
+            handle_key(model(rows, sel=1, view="detail", expanded=set()),
+                       "z").op, "noop")            # 全屏页不折叠
+
+    def test_filter_penetrates_fold(self):  # Req: F10
+        rows = build_rows(self._chain(), [], filt="A2", now=NOW)  # 折叠＋命中深层
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A2"])
 
 
 class TestDoctorPage(unittest.TestCase):
