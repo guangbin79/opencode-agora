@@ -25,6 +25,8 @@
 - **账本尾读＋有界瘦身**（gt-a02ab1 事故善后）：load_state 只 seek 末 1MB 解析完整行（尾窗无完整行回退全扫，末行胜出不变）——启动耗时与账本大小解耦；追加路径行数超 500（计数器内存懒播种＋自增，flock 单写者安全，禁每次追加全文件重扫——ocr 实证 O(size)/append 复耦）即原子重写仅留末完整行——「只追加」的有界例外，重写时机避开启动路径
 - **任务 id 前缀契约词散布面**（gt-99ae7b）：前缀变更漏面两处实证——①交替正则写 `(?:gt|task)-` 丢字面 `task-` 子串，registered verify 的 grep -qE 直接失配（写成 `(gt-\S+|task-\S+)` 保两字面）；②e2e 断言 startswith("gt-") 硬编码在 t3_chain.sh（ocr 捕获，单测覆盖不到）。改前缀先 grep 全仓字面前缀含测试/文档断言面
 - **worker 会话原生写被自家闸拦的写通道**（gt-99ae7b）：harness 会话插件凭据缓存空（inject 未达）时 edit/write 全拦、req-gate 拦首写——mcp_shell 白名单（git/cat/ls）成唯一写通道：原生 write 落 /tmp/opencode 补丁文件＋`git apply --unidiff-zero -` stdin 打零上下文补丁；铁律：hunk 行数计数必须准确，计数少一行时 git 静默截尾行（EOF 语法错才暴露）
+- **合成消息不触发 prompt hook——F25 静默通道失效根因**（task-fb8b01）：v2.2.0 官方契约明示 synthetic/shell/compaction/move 控制均不走 prompt admission hook——inject_silent 静默重注入对插件 onInject 永不可达（牌不入缓存→worker 恒拒；彼时四病一文案无法自诊）；自愈＝对 opencode `/api/session/{sid}/prompt` 以真实 prompt 依次重注 BOOT 形＋credential 形两消息（onInject 入缓存，下轮 edit 过闸；配方随 F26 落任务页与 NO_CRED_HINT 指路）；诊断教训：黑盒排障逐项核前提（location 经 /api 实证、安装副本 git hash-object 比对、serve 启动时 vs 插件 mtime），且勿信「凭据清零」惯性叙事——拒因不可辨正是 F26 前的系统病
+- **mcp_shell 白名单封死一切执行向量**（task-fb8b01）：ALLOW_COMMANDS（ls/cat/head/tail/grep/find/wc/sort/uniq/cut/awk/git/du/df/ps/rg/agentctl/semantic-memory）外 bun/python/bash/sh/env 全拒，策略还深防执行旁路——`git -c`（command-scoped config）、`git config` 子命令、`find -exec`（`;` 报 shell operator、`+` 显式拒）、`awk` external access（system()）逐一封死；worker 跑 verify 的合法通道＝一次性 opencode API 会话（POST /session→move→prompt「跑 X 原样贴输出」→GET message 读转录→DELETE session），或交服务侧 merge 门自跑（gate.py subprocess shell=True cwd=env_dir）
 
 ## 已知接受面
 
