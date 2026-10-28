@@ -31,6 +31,10 @@ class Transient(Exception):
     """瞬时不可达（连接拒等 OSError 族）——阻塞形态内部重试吸收。"""
 
 
+class Rejected(Transient):
+    """认牌失败（401/403）——牌换代窗口瞬态；不跟随换模时仍终局 Fail。"""
+
+
 def _pointer_home():
     """~/.agora-home 指针回退（gt-32c051 统一发现桥；board_tui 同形）。"""
     try:
@@ -59,6 +63,8 @@ def fetch(base, token, tid):
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
             t = json.loads(r.read().decode())["task"]
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403):  # 认牌失败：牌换代/撕裂对窗口，跟随形态按瞬态
+            raise Rejected(f"HTTP {e.code}: {tid}") from None
         raise Fail(f"HTTP {e.code}" + ("（任务未知）" if e.code == 404 else "")
                    + f": {tid}") from None
     except OSError as e:  # URLError（连接拒等）＝瞬时，可重试
@@ -76,18 +82,23 @@ def wait(tid, base, token, timeout=1800, once=False, interval=_INTERVAL,
     """轮询至终态：返回 (exit, stdout 行)；重试至超时仍不可达 raise Fail。
 
     reread（run_wait 注入 discover）每轮轮询前重读指针——服务换模
-    （杀旧拉新、端口/牌换代）即跟随新端点续等，不对死端口空转到超时。
+    （杀旧拉新、端口/牌换代）即跟随新端点续等，不对死端口空转到超时；
+    跟随时认牌失败（401/403，撕裂对/换代窗口）按瞬态重试。
     """
     deadline = clock() + timeout
     while True:
         if reread:
             try:
-                base, token = reread()
-            except Exception:  # 指针半写/缺失瞬间保持旧端点，下轮再读
-                pass
+                nb, nt = reread()
+                if nb and nt:  # 半写空端点/空牌不采纳，保持旧端点下轮再读
+                    base, token = nb, nt
+            except (OSError, ValueError, KeyError):
+                pass  # 指针半写/缺失瞬间保持旧端点，下轮再读
         try:
             state, commit = fetch(base, token, tid)
         except Transient as e:
+            if isinstance(e, Rejected) and reread is None:
+                raise Fail(str(e)) from None  # 不跟随换模：认牌失败维持终局
             if once or clock() >= deadline:
                 head = "服务不可达" if once else "服务不可达（重试至超时）"
                 raise Fail(f"{head}: {e}") from None

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -209,11 +210,59 @@ class TestWait(unittest.TestCase):
     def test_reread_failure_keeps_old_endpoint(self):  # Req: F14  半写/缺失瞬间
         srv = _Srv(["merged"], commit="c" * 40)
         try:
+            def broken():
+                raise FileNotFoundError("service.json")
+
             clock, pause = self._fake()
             self.assertEqual(
                 agora.wait("t1", srv.base, "tok", timeout=100,
-                           clock=clock, pause=pause, reread=lambda: 1 // 0),
+                           clock=clock, pause=pause, reread=broken),
                 (0, "merged @" + "c" * 12))
+        finally:
+            srv.stop()
+
+    def test_reread_incomplete_pair_keeps_old(self):  # Req: F14  空端点/空牌不采纳
+        srv = _Srv(["merged"], commit="c" * 40)
+        try:
+            clock, pause = self._fake()
+            self.assertEqual(
+                agora.wait("t1", srv.base, "tok", timeout=100,
+                           clock=clock, pause=pause,
+                           reread=lambda: ("", "")),
+                (0, "merged @" + "c" * 12))
+        finally:
+            srv.stop()
+
+    def test_auth_rejection_absorbed_when_following(self):  # Req: F14  撕裂对窗口
+        bad = _Srv(["running"], code=403)
+        try:
+            good = _Srv(["merged"], commit="e" * 40)
+            try:
+                reads = {"n": 0}
+
+                def reread():
+                    reads["n"] += 1
+                    return ((bad.base, "tok") if reads["n"] == 1
+                            else (good.base, "tok2"))
+
+                clock, pause = self._fake()
+                self.assertEqual(
+                    agora.wait("t1", bad.base, "tok", timeout=100,
+                               clock=clock, pause=pause, reread=reread),
+                    (0, "merged @" + "e" * 12))
+            finally:
+                good.stop()
+        finally:
+            bad.stop()
+
+    def test_auth_rejection_fatal_without_reread(self):  # Req: F14  语义保持
+        srv = _Srv(["running"], code=403)
+        try:
+            clock, pause = self._fake()
+            with self.assertRaises(agora.Fail) as cm:
+                agora.wait("t1", srv.base, "tok", timeout=100,
+                           clock=clock, pause=pause)
+            self.assertIn("403", str(cm.exception))
         finally:
             srv.stop()
 
@@ -281,16 +330,28 @@ class TestCli(unittest.TestCase):
     def test_follows_service_json_repoint_after_remodel(self):  # Req: F14
         a = _Srv(["running"])
         home = self.home(a)
-        a.stop()  # 换模：旧端点死，service.json 改指新端口上的活服务
+        a.stop()  # 换模：CLI 首轮 discover 读到的是死端口 A
         b = _Srv(["merged"], commit="d" * 40)
         try:
-            (home / ".agora" / "service.json").write_text(
-                json.dumps({"port": b.srv.server_address[1]}))
+            def repoint():  # 进程起后才改指新端口——钉住 reread=discover 接线
+                time.sleep(1)
+                (home / ".agora" / "service.json").write_text(
+                    json.dumps({"port": b.srv.server_address[1]}))
+            threading.Thread(target=repoint, daemon=True).start()
             p = run_cli(["wait", "t1", "--timeout", "30"], home)
             self.assertEqual((p.returncode, p.stdout.strip()),
                              (0, "merged @" + "d" * 12))
         finally:
             b.stop()
+
+    def test_once_auth_rejected_exit_two(self):  # Req: F14  单查认牌失败仍终局
+        srv = _Srv(["running"], code=403)
+        try:
+            p = run_cli(["wait", "t1", "--once"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("403", p.stderr)
 
     def test_missing_token_exit_two(self):  # Req: F14
         srv = _Srv(["running"])
