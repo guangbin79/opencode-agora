@@ -80,6 +80,19 @@ class TestReport(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_doctor_view_stale_candidates(self):  # Req: F5
+        s = snap(t1=row("running", created=100.0, last_seen=300.0),   # >20min 无活动→标
+                 t2=row("running", created=100.0, last_seen=1599.0),  # 刚动过→不标
+                 t3=row("dispatched", created=100.0, last_seen=None),  # 从未上报→created 基线
+                 t4=row("merged", created=0.0, last_seen=0.0),         # 终态→不标
+                 t5=row("blocked", created=0.0, last_seen=0.0),        # blocked 已拍人→不标
+                 t6=row("todo", created=100.0, last_seen=None))        # todo 无活动面→不标
+        v = doctor_view(s, Path("."), now=1600.0)
+        self.assertEqual(v["stale_candidates"],
+                         [["t3", 100.0], ["t1", 300.0]])  # 基线升序（最僵在前）
+        self.assertEqual([age for _, age in v["age_rank"]],
+                         [1600.0, 1600.0, 1500.0, 1500.0, 1500.0, 1500.0])  # age_rank 复用同一 now
+
     def test_view_html_five_buckets(self):  # Req: F10
         s = snap(t1=row("merged", disp="d1"), t2=row("running"))
         html = view_html(s)

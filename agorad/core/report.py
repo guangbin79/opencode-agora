@@ -11,6 +11,10 @@ import time
 from pathlib import Path
 
 _MERGED = {"merged", "closed"}
+_STALE_AFTER = 1200
+# 僵态候选口径（F5 决策记录 2026-10-28）：blocked 已属失控拍过人、终态与 todo
+# 无 worker 活动面——均排除。
+_STALE_STATES = {"dispatched", "running", "done", "verify_failed", "reopened"}
 
 
 def buckets(snap):
@@ -55,13 +59,23 @@ def detail(snap, store, tid):
             "done_body": done[-1]["body"] if done else None}
 
 
-def doctor_view(snap, store_home):
-    """账本侧事实：任务年龄/最后活动排行＋env_dir 在盘性（盘上孤儿扫描属②期）。"""
+def doctor_view(snap, store_home, now=None):
+    """账本侧事实：任务年龄/最后活动排行＋僵态候选＋env_dir 在盘性（盘上孤儿扫描属②期）。
+
+    僵态候选（F5）：在飞口径状态且 now-(last_seen or created)>_STALE_AFTER
+    判为 >20min 无活动，按基线升序（最僵在前）；纯显示，处置归上级判断。
+    """
+    now = time.time() if now is None else now
     home, tasks = Path(store_home), snap["tasks"]
     age = sorted(tasks.items(), key=lambda kv: kv[1].get("created", 0.0))
     stale = sorted(tasks.items(),
                    key=lambda kv: (kv[1].get("last_seen") is not None,
                                    kv[1].get("last_seen") or 0.0))
+    cand = [[tid, t.get("last_seen") or t.get("created", 0.0)]
+            for tid, t in tasks.items()
+            if t["state"] in _STALE_STATES
+            and now - (t.get("last_seen") or t.get("created", 0.0)) > _STALE_AFTER]
+    cand.sort(key=lambda kv: kv[1])
     env = []
     for tid, t in sorted(tasks.items()):
         e = t.get("env_dir")
@@ -70,9 +84,10 @@ def doctor_view(snap, store_home):
         p = Path(e)
         env.append({"tid": tid, "env_dir": e,
                     "on_disk": (p if p.is_absolute() else home / p).exists()})
-    return {"age_rank": [[tid, time.time() - t.get("created", 0.0)]
+    return {"age_rank": [[tid, now - t.get("created", 0.0)]
                          for tid, t in age],
             "last_seen_rank": [[tid, t.get("last_seen")] for tid, t in stale],
+            "stale_candidates": cand,
             "env": env}
 
 

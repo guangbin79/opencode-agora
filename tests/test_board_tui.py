@@ -16,7 +16,8 @@ import time
 import unittest
 from pathlib import Path
 
-from board_tui import Action, Row, build_rows, handle_key, rel_time, try_cancel
+from board_tui import (Action, Row, build_rows, doctor_page, handle_key,
+                       rel_time, try_cancel)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -204,6 +205,19 @@ class TestHandleKey(unittest.TestCase):
         m = model(self.ROWS, sel=1)
         self.assertEqual(handle_key(m, "z").op, "noop")
         self.assertEqual(m["sel"], 1)
+
+
+class TestDoctorPage(unittest.TestCase):
+    def test_stale_candidates_section(self):  # Req: F5
+        v = {"age_rank": [["t1", 900.0]], "last_seen_rank": [["t1", 940.0]],
+             "stale_candidates": [["t1", 100.0], ["t2", 300.0]], "env": []}
+        lines = doctor_page(v, now=NOW)
+        head = "---- 僵态候选（在飞>20min 无活动，判断归上级） ----"
+        self.assertIn(head, lines)
+        i = lines.index(head)
+        self.assertEqual(lines[i + 1:i + 3], ["t1  15m", "t2  11m"])  # 最僵在前
+        self.assertLess(lines.index("---- 最后活动（最僵在前） ----"), i)  # 位于最后活动段后
+        self.assertEqual(doctor_page({}, now=NOW).count(head), 1)  # 无键也照常渲染空段
 
 
 class _StubBoard(http.server.BaseHTTPRequestHandler):

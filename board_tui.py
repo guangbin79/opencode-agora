@@ -300,12 +300,14 @@ def detail_page(d):
 
 
 def doctor_page(v, now=None):
-    """doctor 页文本：年龄排行/最后活动排行/环境在盘性。"""
+    """doctor 页文本：年龄排行/最后活动排行/僵态候选/环境在盘性。"""
     now = time.time() if now is None else now
     lines = ["---- 任务年龄 ----"]
     lines += [f"{tid}  {rel_time(now - age, now)}" for tid, age in v.get("age_rank", [])]
     lines.append("---- 最后活动（最僵在前） ----")
     lines += [f"{tid}  {rel_time(ts, now)}" for tid, ts in v.get("last_seen_rank", [])]
+    lines.append("---- 僵态候选（在飞>20min 无活动，判断归上级） ----")
+    lines += [f"{tid}  {rel_time(ts, now)}" for tid, ts in v.get("stale_candidates", [])]
     lines.append("---- 环境 ----")
     lines += [f"{e['tid']} {'盘上' if e['on_disk'] else '缺失'} {e['env_dir']}"
               for e in v.get("env", [])]
