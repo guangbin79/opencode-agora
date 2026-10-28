@@ -50,16 +50,19 @@ class Gitx:
         env = Path(env_dir).resolve()
         try:
             main = self._main(env)  # 最先取：注销后 env 不再是 worktree，_main 会失败
-        except RuntimeError:  # 已注销半途残留：worktree list 失联，按命名铁律归位主仓
+        except (RuntimeError, FileNotFoundError):  # 含 env 已整体消失（kill 窗口残留）
             main = env.parent / env.name.partition("__wt-task-")[0]
-        self._git(["worktree", "remove", "--force", str(env)], cwd=env, check=False)
-        for _ in range(_RMT_TRIES):  # 评审环并发写撞 rmtree：重试收敛，删不掉禁假账
-            shutil.rmtree(env, ignore_errors=True)
-            if not env.exists():
-                break
-            time.sleep(_RMT_WAIT)
-        if env.exists():  # 重试走完仍残留＝并发写入未停，如实上抛（分支留给重试收敛）
-            raise RuntimeError(f"env 目录删除失败（并发写入未停）: {env}")
+        if not main.exists():  # slug≠原始仓名（.dotfiles 类）：重建失真，宁抛不盲删
+            raise RuntimeError(f"env 回收失败：主仓定位失败（{main} 不存在）: {env}")
+        if env.exists():  # env 已删净仅剩分支：跳过目录清理，直落分支级联
+            self._git(["worktree", "remove", "--force", str(env)], cwd=env, check=False)
+            for _ in range(_RMT_TRIES):  # 评审环并发写撞 rmtree：重试收敛，删不掉禁假账
+                shutil.rmtree(env, ignore_errors=True)
+                if not env.exists():
+                    break
+                time.sleep(_RMT_WAIT)
+            if env.exists():  # 重试走完仍残留＝并发写入未停，如实上抛（分支留给重试收敛）
+                raise RuntimeError(f"env 目录删除失败（并发写入未停）: {env}")
         r = self._git(["branch", "-d", env.name], cwd=main, check=False)
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)

@@ -123,6 +123,27 @@ class TestAccessGitx(unittest.TestCase):
             (env / ".review-loop").chmod(0o700)
             gitx_mod._RMT_WAIT = orig_wait
 
+    def test_remove_env_converges_when_env_gone(self):  # Req: gt-2e4829
+        env = Path(self.gx.build_env(self.repo, "gt-ya"))
+        self._git(["worktree", "remove", "--force", str(env)],
+                  cwd=self.repo)  # kill 窗口残留：目录已删净、分支仍在
+        self.gx.remove_env(str(env))  # 不抛：跳过目录清理直落分支级联
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])
+        self.assertEqual(self._git(["branch", "--list", env.name],
+                                   cwd=self.repo).stdout.strip(), "")
+
+    def test_remove_env_raises_when_main_unresolvable(self):  # Req: gt-2e4829
+        dot = self.tmp / ".dotfiles"  # slug≠原始仓名：重建主仓失真
+        self._init_repo(dot)
+        env = Path(self.gx.build_env(str(dot), "gt-yb"))
+        self._git(["worktree", "remove", "--force", str(env)], cwd=dot)
+        try:
+            with self.assertRaises(RuntimeError) as cm:
+                self.gx.remove_env(str(env))
+            self.assertIn("主仓定位失败", str(cm.exception))  # 宁抛不盲删
+        finally:
+            self._git(["branch", "-D", env.name], cwd=dot)
+
     def test_rollback_restores_bytes_and_sha(self):  # Req: F7
         env = self.gx.build_env(self.repo, "gt-x4")
         before_sha = self._head(self.repo)
