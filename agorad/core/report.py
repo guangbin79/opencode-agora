@@ -7,6 +7,7 @@ snap/store 进来、dict/list/str 出去，零状态零副作用（store 仅读�
 3 连败自动 blocked 归阻塞桶）；阻塞=blocked；已取消=cancelled。
 """
 import html
+import os
 import time
 from pathlib import Path
 
@@ -15,6 +16,28 @@ _STALE_AFTER = 1200
 # 僵态候选口径（F5 决策记录 2026-10-28）：blocked 已属失控拍过人、终态与 todo
 # 无 worker 活动面——均排除。
 _STALE_STATES = {"dispatched", "running", "done", "verify_failed", "reopened"}
+
+
+def _env_activity(env_dir):
+    """env 工作区文件活性（F15）：目录树最新 mtime（含目录）——worker 原生干活期
+    不碰工具面，文件在写即活着；缺失/不可读返 0.0。纯 stdlib（core 勿 import access）。
+    """
+    if not env_dir:
+        return 0.0
+    latest = 0.0
+    for root, _dirs, files in os.walk(env_dir):
+        for p in [root, *(os.path.join(root, f) for f in files)]:
+            try:
+                latest = max(latest, os.stat(p).st_mtime)
+            except OSError:
+                pass
+    return latest
+
+
+def _stale_baseline(t):
+    """僵态活性基线（F15）：max(last_seen or created, env 活性）——文件持续在写＝活着。"""
+    return max(t.get("last_seen") or t.get("created", 0.0),
+               _env_activity(t.get("env_dir")))
 
 
 def buckets(snap):
@@ -78,23 +101,32 @@ def forest_view(snap):
 
 
 def detail(snap, store, tid):
-    """单任务明细三件套：全字段行＋事件链＋done 正文（最新一条＝当前结论）。"""
+    """单任务明细三件套：全字段行＋事件链＋done 正文（最新一条＝当前结论）。
+
+    F15 增 env_active_seconds_ago：env 在盘时 now-最新 mtime（int 秒）；回收/缺失省略。
+    """
     done = [m for m in store.read_messages()
             if m.get("task") == tid and m.get("kind") == "done"]
-    return {"task": dict(snap["tasks"][tid]), "events": store.read_events(tid),
-            "done_body": done[-1]["body"] if done else None}
+    out = {"task": dict(snap["tasks"][tid]), "events": store.read_events(tid),
+           "done_body": done[-1]["body"] if done else None}
+    env = out["task"].get("env_dir")
+    if env and Path(env).is_dir():
+        out["env_active_seconds_ago"] = int(time.time() - _env_activity(env))
+    return out
 
 
 def stale_candidates(snap, now):
-    """僵态候选公开口径（F5 决策记录 2026-10-28）：[[tid, 基线ts],...] 基线升序（最僵在前）。
+    """僵态候选公开口径（F5；F15 融 env 活性）：[[tid, 基线ts],...] 基线升序（最僵在前）。
 
-    在飞口径状态（_STALE_STATES）且 now-(last_seen or created)>_STALE_AFTER，
-    基线＝last_seen or created；health tick 构造注入复用同一口径。
+    在飞口径状态（_STALE_STATES）且 now-_stale_baseline(t)>_STALE_AFTER，
+    基线＝max(last_seen or created, env 文件活性)；health tick 构造注入复用同一口径。
     """
-    cand = [[tid, t.get("last_seen") or t.get("created", 0.0)]
-            for tid, t in snap["tasks"].items()
-            if t["state"] in _STALE_STATES
-            and now - (t.get("last_seen") or t.get("created", 0.0)) > _STALE_AFTER]
+    cand = []
+    for tid, t in snap["tasks"].items():
+        if t["state"] in _STALE_STATES:
+            b = _stale_baseline(t)
+            if now - b > _STALE_AFTER:
+                cand.append([tid, b])
     cand.sort(key=lambda kv: kv[1])
     return cand
 
@@ -102,14 +134,14 @@ def stale_candidates(snap, now):
 def doctor_view(snap, store_home, now=None):
     """账本侧事实：任务年龄/最后活动排行＋僵态候选＋env_dir 在盘性（盘上孤儿扫描属②期）。
 
+    排行活性基线（F15）：age_rank/last_seen_rank 同取 _stale_baseline（与
+    stale_candidates 同口径），字段名不变、值改为融合基线的 now- 差与原值。
     僵态候选（F5）：同 stale_candidates 口径，纯显示，处置归上级判断。
     """
     now = time.time() if now is None else now
     home, tasks = Path(store_home), snap["tasks"]
-    age = sorted(tasks.items(), key=lambda kv: kv[1].get("created", 0.0))
-    stale = sorted(tasks.items(),
-                   key=lambda kv: (kv[1].get("last_seen") is not None,
-                                   kv[1].get("last_seen") or 0.0))
+    base = {tid: _stale_baseline(t) for tid, t in tasks.items()}
+    ranked = sorted(tasks, key=lambda tid: base[tid])
     cand = stale_candidates(snap, now)
     env = []
     for tid, t in sorted(tasks.items()):
@@ -119,9 +151,8 @@ def doctor_view(snap, store_home, now=None):
         p = Path(e)
         env.append({"tid": tid, "env_dir": e,
                     "on_disk": (p if p.is_absolute() else home / p).exists()})
-    return {"age_rank": [[tid, now - t.get("created", 0.0)]
-                         for tid, t in age],
-            "last_seen_rank": [[tid, t.get("last_seen")] for tid, t in stale],
+    return {"age_rank": [[tid, now - base[tid]] for tid in ranked],
+            "last_seen_rank": [[tid, base[tid]] for tid in ranked],
             "stale_candidates": cand,
             "env": env}
 

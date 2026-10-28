@@ -104,6 +104,12 @@ post 调用参数错误频发（gt-e103ae 三连拒：verify 未登记时序、�
 agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait 类看门狗被迫逆向内部文件（gt-9ea9 七轮误诊、poll.sh/derive-board.sh 格式假设、gt-7db149 派发会话手搓看门狗连出两 bug）。补 CLI 谓词整类逆向消失：仓根新增可执行脚本 `agora`（Python3 stdlib），子命令 `wait <task-id> [--timeout 秒] [--once]` 阻塞等待任务终态（merged/closed/blocked/cancelled，对齐 docker wait / kubectl wait 约定）。退出码 0＝终态到达（stdout `<state> @<sha 前 12 位>`，无 commit 只打状态）；1＝--timeout 到期仍在飞（缺省 1800）或 --once 下当前在飞（stdout `in-flight: <state>`）；2＝用法错/任务未知 404/root 牌缺失/重试至超时仍不可达（stderr）。内部轮询 15s；瞬时连接拒由重试吸收。取数照抄 board_tui.py 形态（AGORA_HOME/.agora/{root.token,service.json} → POST /board），零直读状态文件、零格式逆向；状态分类与 HTTP 取数分函数留测试缝。配套：MCP wait 工具 description 消歧（本地休眠≠任务条件等待，终态等待用 CLI）；install.sh 拷贝到 ~/.local/bin/agora。明确排除：--expect 谓词参数、stall/心跳分支（归看门狗层）。
 **验收**：终态四类各 exit 0 且 stdout 含状态（merged 附 sha）；--once 在飞 exit 1；--timeout 到期 exit 1；404/连接拒耗尽/用法错 exit 2；MCP schema 含 CLI 消歧行；全量测试绿。
 
+### F15 env 活性进观测与僵态判据（2026-10-28）
+生产实证两次（gt-ccd034 两轮误拍）：僵态基线只看 last_seen（agora 工具面调用），worker 原生干活期（TDD/编码/rebase/评审 LLM 重活）全程不碰工具面→健康 worker 被误报 stalled。把 env 工作区文件活性并入判据与观测面：report._env_activity（os.walk 目录树最新 mtime，缺失/异常 0.0，纯 stdlib）；stale_candidates 基线 max(last_seen or created, env 活性)——文件持续在写＝活着，签名不变（health 构造注入零改动）；report.detail 增 env_active_seconds_ago（env 回收/缺失省略该键）；doctor_view 的 age_rank/last_seen_rank 同口径融合（doctor 输出字段名不变，值改为融合基线）。
+**验收**：env 文件持续写入（mtime 新）不进僵态候选、env 静默超 20min 进候选；detail 含 env_active_seconds_ago、env 缺失省略；doctor 排行按融合基线排序；全量测试绿。
+
+> **决策记录**：残余限制已知不修（另行立项）：worker 处于长 LLM 推理/评审段（既无工具调用也无文件写入）时仍可能过早进候选——观测面下一步诚实化＝会话活性探针（oc.alive 类）。
+
 ## 5. 非功能需求
 
 - 单机、零第三方依赖（服务与 MCP：Python 3 stdlib；插件：TS on Bun）

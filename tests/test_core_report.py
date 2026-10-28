@@ -1,12 +1,15 @@
 """T10 core/report 视图契约：五桶/链视图/明细/doctor/HTML（纯函数，真文件无 mock）。"""
+import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from agorad.access.store import Store
-from agorad.core.report import (buckets, chain_view, detail, doctor_view,
-                                forest_view, view_html)
+from agorad.core.report import (_env_activity, buckets, chain_view, detail,
+                                doctor_view, forest_view, stale_candidates,
+                                view_html)
 
 
 def row(state="running", disp="d1", worker="w1", created=0.0, last_seen=None,
@@ -92,8 +95,6 @@ class TestReport(unittest.TestCase):
                             env=str(tmp / "gone")))
             v = doctor_view(s, tmp)
             self.assertEqual([tid for tid, _ in v["age_rank"]], ["t2", "t1"])
-            self.assertEqual([tid for tid, _ in v["last_seen_rank"]],
-                             ["t1", "t2"])  # 从未上报列最僵
             self.assertEqual({e["tid"]: e["on_disk"] for e in v["env"]},
                              {"t1": True, "t2": False})
         finally:
@@ -110,7 +111,76 @@ class TestReport(unittest.TestCase):
         self.assertEqual(v["stale_candidates"],
                          [["t3", 100.0], ["t1", 300.0]])  # 基线升序（最僵在前）
         self.assertEqual([age for _, age in v["age_rank"]],
-                         [1600.0, 1600.0, 1500.0, 1500.0, 1500.0, 1500.0])  # age_rank 复用同一 now
+                         [1600.0, 1600.0, 1500.0, 1500.0, 1300.0, 1.0])  # F15 融合基线：t1(300)→1300、t2(1599)→1，复用同一 now
+
+    def test_env_activity_missing_or_empty_zero(self):  # Req: F15
+        self.assertEqual(_env_activity(None), 0.0)
+        self.assertEqual(_env_activity("/nonexistent-env-dir"), 0.0)
+
+    def test_stale_candidates_env_activity(self):  # Req: F15
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            live, dead = tmp / "live", tmp / "dead"
+            live.mkdir()
+            dead.mkdir()
+            (live / "f.txt").write_text("x")
+            (dead / "f.txt").write_text("x")
+            os.utime(live / "f.txt", (2900.0, 2900.0))  # env 在写
+            os.utime(dead / "f.txt", (500.0, 500.0))  # env 静默
+            os.utime(live, (2900.0, 2900.0))
+            os.utime(dead, (500.0, 500.0))
+            s = snap(t1=row(created=100.0, last_seen=300.0, env=str(live)),
+                     t2=row(created=100.0, last_seen=300.0, env=str(dead)),
+                     t3=row(created=100.0, last_seen=300.0, env=str(tmp / "gone")))
+            self.assertEqual(stale_candidates(s, 3000.0),
+                             [["t3", 300.0], ["t2", 500.0]])  # env 在写＝活着不进候选；缺失退 last_seen 基线
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_detail_env_active_seconds_ago(self):  # Req: F15
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            env = tmp / "e1"
+            env.mkdir()
+            (env / "f.txt").write_text("x")
+            past = time.time() - 120.0
+            os.utime(env / "f.txt", (past, past))
+            os.utime(env, (past, past))
+            d = detail(snap(t1=row(env=str(env))), st, "t1")
+            self.assertGreaterEqual(d["env_active_seconds_ago"], 115)  # now-最新 mtime（int 秒）
+            self.assertLessEqual(d["env_active_seconds_ago"], 130)
+            self.assertNotIn("env_active_seconds_ago",  # env 回收→省略
+                             detail(snap(t2=row(env=str(tmp / "gone"))), st, "t2"))
+            self.assertNotIn("env_active_seconds_ago",  # 未设 env→省略
+                             detail(snap(t3=row()), st, "t3"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_doctor_view_env_fused_ranks(self):  # Req: F15
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            live, dead = tmp / "live", tmp / "dead"
+            live.mkdir()
+            dead.mkdir()
+            (live / "f.txt").write_text("x")
+            (dead / "f.txt").write_text("x")
+            os.utime(live / "f.txt", (2900.0, 2900.0))
+            os.utime(dead / "f.txt", (500.0, 500.0))
+            os.utime(live, (2900.0, 2900.0))
+            os.utime(dead, (500.0, 500.0))
+            s = snap(t1=row(created=100.0, last_seen=300.0, env=str(live)),
+                     t2=row(created=100.0, last_seen=None, env=str(dead)),
+                     t3=row(created=50.0, last_seen=999.0))
+            v = doctor_view(s, tmp, now=3000.0)
+            self.assertEqual(v["age_rank"],  # 融合基线升序（最僵在前）
+                             [["t2", 2500.0], ["t3", 2001.0], ["t1", 100.0]])
+            self.assertEqual(v["last_seen_rank"],
+                             [["t2", 500.0], ["t3", 999.0], ["t1", 2900.0]])
+            self.assertEqual(v["stale_candidates"],
+                             [["t2", 500.0], ["t3", 999.0]])  # env 在写的 t1 不进候选
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_view_html_five_buckets(self):  # Req: F10
         s = snap(t1=row("merged", disp="d1"), t2=row("running"))
