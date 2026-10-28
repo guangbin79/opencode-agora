@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""agora CLI（F14）：bash 可判定的只读条件谓词——看门狗规范条件等待。
+
+wait 子命令阻塞等待任务终态（merged/closed/blocked/cancelled），对齐
+docker wait / kubectl wait 约定。取数照抄 board_tui.py 形态：
+$AGORA_HOME/.agora/{root.token,service.json} → POST /board 单任务视图，
+零直读状态文件、零格式逆向。非 MCP agora.wait(seconds)（那是 agent
+回合内本地睡眠，两者不互替）。
+"""
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+TERMINAL = frozenset(("merged", "closed", "blocked", "cancelled"))
+_INFLIGHT = ("todo", "dispatched", "running", "done", "verify_failed", "reopened")
+_INTERVAL = 15        # 内部轮询间隔（秒）
+_HTTP_TIMEOUT = 5     # 单次请求超时（board_tui 同值）
+
+
+class Fail(Exception):
+    """终局异常（不可重试）——exit 2。"""
+
+
+class Transient(Exception):
+    """瞬时不可达（连接拒等 OSError 族）——阻塞形态内部重试吸收。"""
+
+
+def _pointer_home():
+    """~/.agora-home 指针回退（gt-32c051 统一发现桥；board_tui 同形）。"""
+    try:
+        return ((Path.home() / ".agora-home").read_text(encoding="utf-8")
+                .split("\n", 1)[0].strip() or None)
+    except (OSError, ValueError):  # ValueError＝坏字节（UnicodeDecodeError 非 OSError 族）
+        return None
+
+
+def discover(home=None):
+    """root 牌＋端口：$AGORA_HOME/.agora/{root.token,service.json}（board_tui 同形）。"""
+    home = Path(home or os.environ.get("AGORA_HOME") or _pointer_home()
+                or Path.home() / "plaza")
+    sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
+    token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
+    return f"http://127.0.0.1:{sj['port']}", token
+
+
+def fetch(base, token, tid):
+    """HTTP 取数缝：POST /board 单任务视图 → (state, commit)。"""
+    req = urllib.request.Request(
+        base + "/board", data=json.dumps({"task": tid}).encode(),
+        headers={"Content-Type": "application/json", "X-Agora-Token": token},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+            t = json.loads(r.read().decode())["task"]
+    except urllib.error.HTTPError as e:
+        raise Fail(f"HTTP {e.code}" + ("（任务未知）" if e.code == 404 else "")
+                   + f": {tid}") from None
+    except OSError as e:  # URLError（连接拒等）＝瞬时，可重试
+        raise Transient(str(e)) from None
+    return t["state"], t.get("commit")
+
+
+def classify(state):
+    """状态分类缝（exit code 决策）：终态→0，在飞（含未知态）→1。"""
+    return 0 if state in TERMINAL else 1
+
+
+def wait(tid, base, token, timeout=1800, once=False, interval=_INTERVAL,
+         clock=time.monotonic, pause=time.sleep):
+    """轮询至终态：返回 (exit, stdout 行)；重试至超时仍不可达 raise Fail。"""
+    deadline = clock() + timeout
+    while True:
+        try:
+            state, commit = fetch(base, token, tid)
+        except Transient as e:
+            if once or clock() >= deadline:
+                raise Fail(f"服务不可达（重试至超时）: {e}") from None
+        else:
+            if classify(state) == 0:
+                return 0, f"{state} @{commit[:12]}" if commit else state
+            if once or clock() >= deadline:
+                return 1, f"in-flight: {state}"
+        pause(min(interval, max(0.0, deadline - clock())))
+
+
+def run_wait(a):
+    base, token = discover()
+    if not token:
+        raise Fail("root 牌缺失")
+    code, line = wait(a.task_id, base, token, timeout=a.timeout, once=a.once)
+    print(line)
+    return code
+
+
+def _parser():
+    ap = argparse.ArgumentParser(
+        prog="agora",
+        description="agora CLI——bash 可判定的只读条件谓词（F14）。")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="command")
+    w = sub.add_parser(
+        "wait", help="阻塞等待任务终态（--once 单查）",
+        description="阻塞等待任务终态（--once 单查）；非 MCP agora.wait(seconds)"
+                    "（那是 agent 回合内本地睡眠）。",
+        epilog="退出码：0＝终态到达（merged/closed/blocked/cancelled 任一）\n"
+               f"1＝--timeout 到期仍在飞（{'/'.join(_INFLIGHT)}），"
+               "或 --once 下当前在飞\n"
+               "2＝异常（用法错/任务未知 404/root 牌缺失/重试至超时仍不可达）",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    w.add_argument("task_id", metavar="task-id", help="任务 id（gt-xxxxxx）")
+    w.add_argument("--timeout", type=float, default=1800,
+                   help="到期仍在飞退出 1（秒）；缺省 1800（防调用方永挂）")
+    w.add_argument("--once", action="store_true", help="单查形态，立即返回不阻塞")
+    w.set_defaults(fn=run_wait)
+    return ap
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        a = _parser().parse_args(argv)
+        return a.fn(a)
+    except KeyboardInterrupt:
+        return 130  # 打断≠终态：非零防看门狗误判 merged
+    except Exception as e:
+        print(f"agora: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

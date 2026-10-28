@@ -94,6 +94,11 @@ cp -f "$REPO/board_tui.py" "$AGORA_HOME/.agora/"
 chmod +x "$AGORA_HOME/.agora/board_tui.py"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
+
+# ---- 4c) agora CLI（F14：wait 阻塞谓词；bin 面拷贝同风格）----
+mkdir -p "$HOME/.local/bin"
+cp -f "$REPO/agora" "$HOME/.local/bin/agora"
+chmod +x "$HOME/.local/bin/agora"
 find "$AGORA_HOME/.agora/agorad" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---- 5) AGORA_OC_URL 发现结果落档（lift 运行时自发现同源；此处只留档不作为消费面）----

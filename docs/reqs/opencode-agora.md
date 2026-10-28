@@ -100,6 +100,10 @@ dispatcher↔worker 结构化消息，方向不限：接收方会话存活即实
 post 调用参数错误频发（gt-e103ae 三连拒：verify 未登记时序、短 sha、body 混附言均被报成 anchor 问题，指引错向）。防纠双面：①壳层 schema 充实——post.kind 枚举 note/question/answer/done/verify/verify_reject（与派发 skill 词汇对齐）、body 的 done＝纯 40 位完整 sha 契约、任务 id 形态、worker 不可用工具（task_update/task_cancel/board/doctor）与 enforce（仅 root）标注于描述；②accept_done 新增 body-format 先行拒（非 40 位 hex 报格式并附收到内容），anchor 拆无锚／≠分支 HEAD／未绿各配正确指引；③httpd 客户端 kind 白名单校验（服务内部 process/milestone/cancel 直调 Router 不经此路）；④400 与 done 拒收落审计（bad_request／done_rejected 事件）——参数错误从零记录变可计量；⑤403 拒绝文案附 worker 可用面与 task_update 退路（post(kind=question) 请派发方）。
 **验收**：短 sha／文本 body 的 done 得 rejected:body-format 且文案含收到内容与 40 位契约；sha≠HEAD 文案含双方 sha；未知 kind 得 400 且列举词汇；坏参调用后 events 含 bad_request；done 拒收后含 done_rejected；worker 403 文案含可用工具；全量测试绿。
 
+### F14 agora wait 阻塞谓词（2026-10-28）
+agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait 类看门狗被迫逆向内部文件（gt-9ea9 七轮误诊、poll.sh/derive-board.sh 格式假设、gt-7db149 派发会话手搓看门狗连出两 bug）。补 CLI 谓词整类逆向消失：仓根新增可执行脚本 `agora`（Python3 stdlib），子命令 `wait <task-id> [--timeout 秒] [--once]` 阻塞等待任务终态（merged/closed/blocked/cancelled，对齐 docker wait / kubectl wait 约定）。退出码 0＝终态到达（stdout `<state> @<sha 前 12 位>`，无 commit 只打状态）；1＝--timeout 到期仍在飞（缺省 1800）或 --once 下当前在飞（stdout `in-flight: <state>`）；2＝用法错/任务未知 404/root 牌缺失/重试至超时仍不可达（stderr）。内部轮询 15s；瞬时连接拒由重试吸收。取数照抄 board_tui.py 形态（AGORA_HOME/.agora/{root.token,service.json} → POST /board），零直读状态文件、零格式逆向；状态分类与 HTTP 取数分函数留测试缝。配套：MCP wait 工具 description 消歧（本地休眠≠任务条件等待，终态等待用 CLI）；install.sh 拷贝到 ~/.local/bin/agora。明确排除：--expect 谓词参数、stall/心跳分支（归看门狗层）。
+**验收**：终态四类各 exit 0 且 stdout 含状态（merged 附 sha）；--once 在飞 exit 1；--timeout 到期 exit 1；404/连接拒耗尽/用法错 exit 2；MCP schema 含 CLI 消歧行；全量测试绿。
+
 ## 5. 非功能需求
 
 - 单机、零第三方依赖（服务与 MCP：Python 3 stdlib；插件：TS on Bun）

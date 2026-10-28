@@ -71,7 +71,8 @@ _TOOLS = [
     {"name": "enforce", "description": "拨强制旗（仅 root；on 须布尔）",
      "inputSchema": {"type": "object", "properties": {
          "on": {"type": "boolean"}}, "required": ["on"]}},
-    {"name": "wait", "description": "本地休眠指定秒数（Code Mode 无 setTimeout 的补偿；上限 120s）",
+    {"name": "wait", "description": "本地休眠指定秒数（Code Mode 无 setTimeout 的补偿；上限 120s）。"
+                                    "本地休眠，非任务条件等待——终态等待用 CLI agora wait <task>",
      "inputSchema": {"type": "object", "properties": {
          "seconds": {"type": "integer", "minimum": 0, "maximum": 120}}}},
 ]

@@ -73,6 +73,9 @@ out="$(AGORA_HOME="$1/nonexist-home" XDG_STATE_HOME="$d/state" timeout 10 python
 rm -rf "$d"
 [ "$rc" = 2 ] && echo "$out" | grep -q "AGORA_OC_URL"' _ "$A1"
 
+chk "agora CLI 在位可执行且 help 可用 (Req: F14)" bash -c '
+[ -x "$1/.local/bin/agora" ] && "$1/.local/bin/agora" --help >/dev/null && "$1/.local/bin/agora" wait --help | grep -q "退出码"' _ "$H1"
+
 chk "冒烟不开 enforce OFF 窗（无 enforce_off 审计——复用实例安全，Req: F1）" bash -c '
 [[ ! -e "$1/events.jsonl" ]] || ! grep -q "\"event\": \"enforce_off\"" "$1/events.jsonl"' _ "$A1"
 # /health 只读冒烟可达由首装退出 0 蕴含（冒烟不过即非零）
