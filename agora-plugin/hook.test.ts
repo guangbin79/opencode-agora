@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { agoraHome, DISPATCH_HINT, READ_HINT, shouldBlock } from "./hook";
+import { agoraHome, DISPATCH_HINT, NO_CRED_HINT, READ_HINT, shouldBlock, wrongDoorHint } from "./hook";
 import { attachToken, cacheCredential, readCredential, type Cred } from "./cred";
 import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
@@ -80,24 +80,48 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("edit", join(tmpRepo, "b.md"), tmpRepo, null, true)).toBeNull();
   });
 
-  test("git 仓无凭据 edit/write→拒＋派发引导文案（write 目标可尚未存在）", () => {
-    // Req: F1
-    expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true)).toBe(DISPATCH_HINT);
-    expect(shouldBlock("write", join(repo, "new.md"), plain, null, true)).toBe(DISPATCH_HINT);
+  test("git 仓无凭据 edit/write→拒＋无凭据专属文案（write 目标可尚未存在）", () => {
+    // Req: F26
+    expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true)).toBe(NO_CRED_HINT);
+    expect(shouldBlock("write", join(repo, "new.md"), plain, null, true)).toBe(NO_CRED_HINT);
   });
 
   test("realpath 折叠：非 git 目录下符号链接指向仓内文件→拒（折叠后入链）", () => {
     // Req: F1
-    expect(shouldBlock("edit", join(plain, "link.md"), plain, null, true)).toBe(DISPATCH_HINT);
+    expect(shouldBlock("edit", join(plain, "link.md"), plain, null, true)).toBe(NO_CRED_HINT);
   });
 
-  test("持活动凭据 cwd∈env→放行；cwd∉env→拒", () => {
+  test("持活动凭据 cwd∈env→放行；cwd∉env→拒因 wrong-door（实值退化形态）", () => {
     // Req: F1
     expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toBeNull();
-    expect(shouldBlock("edit", join(repo, "a.md"), plain, worker, true)).toBe(DISPATCH_HINT);
+    expect(shouldBlock("edit", join(repo, "a.md"), plain, worker, true)).toBe(wrongDoorHint(envDir, plain));
+    // 退化形态：envDir 不符 {repo}__wt-* 命名约定→仅列两侧实值，无换算
+    expect(wrongDoorHint(envDir, plain)).toContain(plain);
+    expect(wrongDoorHint(envDir, plain)).toContain(envDir);
+    expect(wrongDoorHint(envDir, plain)).not.toContain("对应副本路径");
   });
 
-  test("主会话（root 牌）对仓库代码写入同拦", () => {
+  test("wrong-door 换算：命名约定可推导→附副本对应路径；cwd 也不在主仓→退化", () => {
+    // Req: F26
+    const envWt = join(root, "repo__wt-task-t1__1029"); // 命名约定形：{repo}__wt-*
+    const cred: Cred = { token: "tok-c", sid: "s-conv", role: "worker", envDir: envWt };
+    const cwdInRepo = join(repo, "sub");
+    const hint = shouldBlock("edit", join(repo, "a.md"), cwdInRepo, cred, true);
+    expect(hint).toBe(wrongDoorHint(envWt, cwdInRepo));
+    expect(hint).toContain(cwdInRepo); // 实值：工作目录
+    expect(hint).toContain(envWt); // 实值：任务 env
+    expect(hint).toContain(`对应副本路径＝${join(envWt, "sub")}`); // 换算：主仓相对路径映射进副本
+    // cwd 不在推导出的主仓根内→换算退化
+    expect(wrongDoorHint(envWt, plain)).not.toContain("对应副本路径");
+  });
+
+  test("生产实证形态钉死：location=env 而凭据缓存空（BOOT/credential 注册未达）→拒 a 分支", () => {
+    // Req: F26——worker 人已在 env 内、凭据没到：仍拒（安全向），但拒因自解释
+    expect(shouldBlock("edit", join(repo, "a.md"), envDir, null, true)).toBe(NO_CRED_HINT);
+    expect(shouldBlock("edit", join(repo, "a.md"), envDir, { token: "", sid: "s-e", role: "worker", envDir }, true)).toBe(NO_CRED_HINT);
+  });
+
+  test("主会话（root 牌）对仓库代码写入同拦——保留 DISPATCH_HINT 原文", () => {
     // Req: F1
     expect(shouldBlock("edit", join(repo, "a.md"), plain, rootCred, true)).toBe(DISPATCH_HINT);
   });

@@ -120,7 +120,7 @@ agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait �
 主会话（dispatcher）重启后真实 sid 滚动，root 牌经 rebind 跟随新 sid，但旧任务行 dispatcher_sid 仍记旧值——派发方 post 旧任务报「非链边」失声（F14 修订被迫 cancel＋重建）。设计（用户选⑤「sid 血统」）：①令牌记录身份沿革——rebind 把旧 sid 追加进该牌血统集随牌持久化（旧格式缺字段＝空集），same_lineage 提供判定；②链边校验接受血统——dispatcher 边判定扩为「sid 相等或 same_lineage」，血统判定经装配注入 Router 单点持有（worker 边不加，recover 已覆写 worker_sid），消息 from 仍记真实当前 sid。已知边角：doctor rotate_root 换新牌血统从零起、旧任务链边仍断——轮换属手动管理动作，文档化豁免不修。
 **验收**：rebind 累积血统且重启后在；换号后 post 旧任务达 worker（down 边）、归因记新 sid；无血缘仍拒；worker 边不放行；常规链边零变化；全量测试绿。
 
-### F17 hook 无凭据拒因指路 check_mail（2026-10-28）
+### F17 hook 无凭据拒因指路 check_mail（2026-10-28；文案形态被 F26 替代）
 **dropped（gt-958281 撤销）**：credential 直投失败是小概率事件（信箱账本 47 派发 0 落信箱）且 check_mail 需持牌构成死路（无牌 worker 在 MCP 壳即拒，recover 不覆盖活而无牌）；兜底=派发方查僵→task_cancel＋重建任务重派（新会话新签牌）。
 生产实证（本任务派发链）：worker 会话 credential 直投失败时 hook 恒拒且拒因只给「去派发」——引导错向，worker 无法自愈。拆 shouldBlock 无凭据拒因：cred?.token 为假（本会话无凭据）→DISPATCH_HINT 追加 NO_CRED_HINT「若你是被派发的 worker：凭据可能直投失败已落信箱，先调 agora_check_mail 领牌再重试」；有凭据但 cwd∉envDir 的路径维持原 DISPATCH_HINT 不变（持牌主会话同拦／持牌服务不可达默认拒文案不变；无凭据子情形走 NO_CRED_HINT 支）。附带修复 hook.test.ts BOOT 夹具腐化：夹具 BOOT 文本旧格式「[agora] BOOT task t-b」不匹配 inject.ts BOOT_MSG（/\[agora\] (gt-\S+): /）致 envDir 未登记、合流后恒 deny——夹具对齐现行 gt- 前缀格式，断言不变，inject.ts 不动。
 **验收**：cred=null 拒串含 "agora_check_mail"；有 token 而 envDir 不含 cwd 拒串严格等于原 DISPATCH_HINT；BOOT 先行＋credential 合流放行用例恢复绿；bun test agora-plugin/ 全绿。
@@ -175,3 +175,7 @@ worker 间无横向观测面（消息拓扑＝链边，兄弟协作经共同上�
 ### F25 worker 凭据周期重注入自愈（2026-10-29，task-4d9fff）
 worker 会话插件凭据缓存仅驻内存（inject.ts onInject 收 BOOT/credential 才缓存 envDir/token），会话进程或插件宿主重载即清零——hook 判 cwd 非任务 env 全拦，worker 僵死（gt-fd5bb0 僵死取消重派；gt-99ae7b 靠 mcp_shell git apply 通道自救）。F21 只修 dispatcher 侧换号，worker 侧缺口两次实锤。修法（health tick 周期性幂等重注入，走静默通道）：对每个在飞（dispatched/running/done，终态不注入）且有 worker_sid 的任务，每 N 秒（缺省 600，AGORA_CRED_REINJECT_INTERVAL 可配）重发 dispatch 同形凭据（"[agora] credential {tid}\ntoken: {tok}"）；通道用 oc.inject_silent（synthetic resume:false，落转录不调度模型回合＝零上下文污染，插件 onInject 照常命中重缓存）；牌经 auth.token_for 只读取（不改绑不轮换）；通道失败（契约 False 与抛异常两形态）走留库兜底口径不抛（check_mail 补拉）；防噪：不逐轮落审计事件、oc 不可达轮次整体免判（同僵态口径）、崩溃回退多注一次（幂等无害）。
 **验收**：首轮到期即注且 dispatch 同形＋免通知通道；周期内不重发、到期再触发；重复到达牌与任务行不变；终态/无 worker 不注入；通道失败两形态 tick 不抛且留库可补拉；零审计行；`grep -rqF "reinject_cred" tests/ && python3 -m unittest tests.test_core_recover tests.test_core_health` 绿。
+
+### F26 hook 拒因分流＋wrong-door 副本换算＋BOOT 副本行（2026-10-29，task-fb8b01）
+四病一文案致误诊传染（gt-99ae7b 与 task-4d9fff 的 worker 把拒误诊为凭据缓存清零，绕道 shell 作业并错误归因；task-fb8b01 worker 自身再实证——BOOT/credential 注册未达插件缓存恒拒 DISPATCH_HINT，无法自诊）。shouldBlock 拒面按因分流，判定语义与豁免面一字不变只改信息量：①cred 缺 token/envDir→NO_CRED_HINT「无凭据缓存——可经真实 prompt 通道重注 BOOT+credential 自愈（配方见任务页），或 post(kind=question) 求派发方」（F25 静默通道已被实证证伪：v2.2.0 synthetic 不触发 prompt hook，文案不给死路指引）；②有凭据 cwd∉env→wrongDoorHint 列两侧实值＋按 worktree 命名约定（envDir basename 形如 {repo}__wt-*，主仓根＝envDir 父目录/{repo}）尽力推导副本对应路径（{envDir}/{相对路径}），推导不出退化仅列实值；③主会话 role=root→维持 DISPATCH_HINT 原文；④服务不可达默认拒维持 index.ts lift 败态拼 LIFT_RECOVER。附 BOOT 契约预防行（task.py _boot）：「goal 中的主仓路径仅指代——你的可写区＝env 副本（同构 worktree），编辑一律用副本内对应路径」。
+**验收**：四分支文案断言（a 文案；b 实值＋换算路径＋两形态退化；c 原文；d 既有 LIFT_RECOVER 用例保持）且既有豁免面/root 例外/读引导用例全绿；`grep -qF "在任务 env" agora-plugin/hook.ts && cd agora-plugin && bun test` 双绿。
