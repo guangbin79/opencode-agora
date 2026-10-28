@@ -444,7 +444,7 @@ def draw_board(stdscr, m, status="", err=None):
         stdscr.addnstr(i + nb + 1, 0, _row_text(r), w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor"
-                   " | x cancel | 1-5 bucket",
+                   " | x cancel | 1-5 bucket | 0 all",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
                    f" r refresh | z fold | q quit | / filter[{m['filter']}]",

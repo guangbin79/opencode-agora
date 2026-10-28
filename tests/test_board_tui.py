@@ -317,6 +317,8 @@ class TestHandleKey(unittest.TestCase):
         handle_key(m, "2")                 # 输入态下数字是过滤字符
         self.assertEqual(m["buf"], "2")
         self.assertIsNone(m["bucket"])
+        self.assertIn("1-5 bucket | 0 all",
+                      (ROOT / "board_tui.py").read_text(encoding="utf-8"))  # hint 注释 0 键
 
 
 class TestClampView(unittest.TestCase):
