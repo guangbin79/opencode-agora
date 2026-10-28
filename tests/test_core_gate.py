@@ -150,6 +150,12 @@ class TestAcceptDone(TestCoreGate):
             self.assertIn(repr(bad[:20]), r)  # 收到内容前缀
         self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
 
+    def test_accept_uppercase_sha_normalized_to_lowercase(self):  # Req: F13
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA.upper()), "accepted")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")
+        self.assertEqual(t["commit"], SHA)  # 落库归一小写（锚比较同口径）
     def test_body_format_rejection_audited_done_rejected(self):  # Req: F13
         self.seed()
         self.gate.accept_done("t1", "s-w1", "bfe2bfc")

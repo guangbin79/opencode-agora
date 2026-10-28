@@ -75,6 +75,7 @@ class Gate:
                 tid, "body-format",
                 f"done body 须为纯 40 位十六进制完整 commit sha（收到 {commit[:20]!r}）"
                 "——无前缀无附言；结论文本另发 post(kind=note)")
+        commit = c  # 归一一次：锚比较与落库均用小写，大写 sha 不再伪装成锚问题（OCR）
         # 锚检查仅评审环在位时适用：缺失→放行 done，由门体 review_absent 分支驻留
         if (Path(t["env_dir"]) / ".review-loop").is_dir():
             a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
