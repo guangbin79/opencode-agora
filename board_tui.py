@@ -23,6 +23,9 @@ from pathlib import Path
 _KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead",
                     "stalled"))
 
+# 五桶固序（计数行与数字键 1-5 同序）；桶归属映射 _bucket 单点，禁两套口径
+_BUCKETS = ("已合并", "在飞", "失败", "阻塞", "已取消")
+
 Action = namedtuple("Action", "op task arg")
 Action.__new__.__defaults__ = (None, None)
 Row = namedtuple("Row", "kind tid depth state title worker last_seen note domain repo")
@@ -49,15 +52,18 @@ def _pad(s, width):
         w += cw
     return "".join(out) + " " * (width - w)
 
+def _bucket(state):
+    """桶归属唯一口径：merged+closed→已合并；blocked→阻塞；cancelled→已取消；
+    其余（dispatched/running/done/verify_failed/reopened…）→在飞。"""
+    return ("已合并" if state in ("merged", "closed")
+            else "阻塞" if state == "blocked"
+            else "已取消" if state == "cancelled" else "在飞")
+
+
 def _domain(state):
     """状态着色域：verify_failed/reopened 是续修态归在飞（同五桶口径）。"""
-    if state in ("merged", "closed"):
-        return "merged"
-    if state == "blocked":
-        return "blocked"
-    if state == "cancelled":
-        return "gone"
-    return "fly"
+    return {"已合并": "merged", "在飞": "fly",
+            "阻塞": "blocked", "已取消": "gone"}[_bucket(state)]
 
 
 def rel_time(ts, now=None):
@@ -74,12 +80,14 @@ def rel_time(ts, now=None):
     return f"{int(d // 86400)}d"
 
 
-def build_rows(snap, events, filt="", now=None, expanded=None):
+def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None):
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
     行，只取五类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
-    桶行恒在）；链深按 worker→dispatcher 边上溯，环有界。行序 DFS 子树聚簇
+    桶行恒在）；bucket＝激活桶视图（数字键 1-5）：只显该桶任务行，与文本
+    过滤 AND 叠加、同样穿透折叠，计数行恒全局口径，激活桶头加 "*"。
+    链深按 worker→dispatcher 边上溯，环有界。行序 DFS 子树聚簇
     （子代紧随父代，同层保持 chain 原序）；expanded＝展开集，任务行仅当全部
     严格祖先都在其中才显示（空集＝默认折叠只显根层），escalate 事件行随任务
     行同显隐；过滤非空时穿透折叠，命中行照常显示。
@@ -129,23 +137,21 @@ def build_rows(snap, events, filt="", now=None, expanded=None):
 
     sb = snap.get("buckets")
     if sb is not None:      # 服务端全局五桶口径（gt-6def73）
-        buckets = {name: len(sb.get(name, []))
-                   for name in ("已合并", "在飞", "失败", "阻塞", "已取消")}
-    else:                   # 旧响应无 buckets：本地计数兜底
-        buckets = {"已合并": 0, "在飞": 0, "失败": 0, "阻塞": 0, "已取消": 0}
+        buckets = {name: len(sb.get(name, [])) for name in _BUCKETS}
+    else:                   # 旧响应无 buckets：本地计数兜底（同 _bucket 口径）
+        buckets = dict.fromkeys(_BUCKETS, 0)
         for t in tasks.values():
-            buckets["已合并" if t["state"] in ("merged", "closed")
-                    else "阻塞" if t["state"] == "blocked"
-                    else "已取消" if t["state"] == "cancelled" else "在飞"] += 1
-    rows = [Row("bucket", title=f"{name} {n}", domain="bucket")
-            for name, n in buckets.items()]
+            buckets[_bucket(t["state"])] += 1
+    rows = [Row("bucket", title=f"{'*' if name == bucket else ''}{name} {n}",
+                domain="bucket") for name, n in buckets.items()]
     f = filt.lower()
     for tid in order:
         t = tasks[tid]
-        if f:                  # 过滤穿透折叠：命中行全部照常显示，不看 expanded
-            if f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
-                continue
-        elif not _shown(tid):
+        if f and f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
+            continue        # 过滤穿透折叠：命中行全部照常显示，不看 expanded
+        if bucket is not None and _bucket(t["state"]) != bucket:
+            continue        # 桶视图同语义穿透折叠（口径与计数行同源）
+        if not f and bucket is None and not _shown(tid):
             continue
         d = depth[tid]
         rows.append(Row("task", tid, d, t["state"], t.get("title", ""),
@@ -195,7 +201,8 @@ def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
     键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
-    x cancel（y/n 确认行） z 折叠/展开当前任务子树 / 过滤（单行输入态） r 即刷 q 退出。
+    x cancel（y/n 确认行） z 折叠/展开当前任务子树 / 过滤（单行输入态） 1-5 桶视图（同键/0
+    恢复全量） r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤单行输入态
         if key in ("\n", "\r", "KEY_ENTER"):
@@ -266,6 +273,12 @@ def handle_key(m, key):
     if key == "/":
         if m.get("view") == "board":
             m["input"], m["buf"] = "", ""
+        return Action("noop")
+    if key in ("0", "1", "2", "3", "4", "5"):
+        if m.get("view") == "board":
+            cur = None if key == "0" else _BUCKETS[int(key) - 1]
+            m["bucket"] = None if m.get("bucket") == cur else cur  # 同键再按复原
+            return Action("apply")             # 与过滤 apply 同路：缓存帧即时重建
         return Action("noop")
     return Action("noop")                      # 非引导键忽略
 
@@ -430,7 +443,8 @@ def draw_board(stdscr, m, status="", err=None):
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + nb + 1, 0, _row_text(r), w - 1, attr)
     stdscr.addnstr(h - 3, 0,
-                   " j/k move | g/G jump | Enter/l detail | L tail | d doctor | x cancel",
+                   " j/k move | g/G jump | Enter/l detail | L tail | d doctor"
+                   " | x cancel | 1-5 bucket",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
                    f" r refresh | z fold | q quit | / filter[{m['filter']}]",
@@ -461,7 +475,8 @@ def run(stdscr, base, token):
     _init_colors()
     stdscr.timeout(int(interval * 1000))
     m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
-         "input": None, "buf": "", "filter": "", "expanded": set()}
+         "input": None, "buf": "", "filter": "", "expanded": set(),
+         "bucket": None}
     details, snap, events = {}, None, None
     status, err, page = "载入…", None, []
 
@@ -477,7 +492,8 @@ def run(stdscr, base, token):
     def _rebuild():
         """用当前（缓存）帧按 m['filter'] 重建行＋刷新状态头。"""
         nonlocal status, err
-        m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"])
+        m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"],
+                               bucket=m["bucket"])
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
         err = None

@@ -36,7 +36,7 @@ def snap(**tasks):
 
 def model(rows=(), sel=0, **kw):
     m = {"rows": list(rows), "sel": sel, "view": "board", "confirm": None,
-         "input": None, "buf": "", "filter": ""}
+         "input": None, "buf": "", "filter": "", "bucket": None}
     m.update(kw)
     return m
 
@@ -142,6 +142,40 @@ class TestBuildRows(unittest.TestCase):
         self.assertTrue(any(r.kind == "bucket" for r in rows))  # 桶行恒在
         rows = build_rows(s, [], filt="t3", now=NOW)
         self.assertEqual([r.tid for r in task_rows(rows)], ["t3"])
+
+    def test_bucket_view_filters_by_shared_mapping(self):  # Req: gt-6a26e5
+        s = snap(t1=trow("merged"), t2=trow("closed"), t3=trow("verify_failed"),
+                 t4=trow("blocked"), t5=trow("cancelled"))
+        rows = build_rows(s, [], now=NOW, bucket="已合并")
+        self.assertEqual([r.tid for r in task_rows(rows)],
+                         ["t1", "t2"])  # merged+closed 都归"已合并"视图
+        self.assertEqual([r.tid for r in task_rows(
+            build_rows(s, [], now=NOW, bucket="在飞"))], ["t3"])
+        self.assertEqual([r.tid for r in task_rows(
+            build_rows(s, [], now=NOW, bucket="阻塞"))], ["t4"])
+        self.assertEqual([r.tid for r in task_rows(
+            build_rows(s, [], now=NOW, bucket="已取消"))], ["t5"])
+
+    def test_bucket_view_and_filter_overlap(self):  # Req: gt-6a26e5
+        s = snap(t1=trow(title="登录页"), t2=trow(title="登录重试", state="blocked"),
+                 t3=trow(title="账务", state="blocked"))
+        rows = build_rows(s, [], filt="登录", now=NOW, bucket="阻塞")  # AND：桶∩文本
+        self.assertEqual([r.tid for r in task_rows(rows)], ["t2"])
+
+    def test_bucket_view_keeps_counts_and_marks_active(self):  # Req: gt-6a26e5
+        s = snap(t1=trow("merged"), t2=trow("running"), t3=trow("blocked"))
+        rows = build_rows(s, [], now=NOW, bucket="在飞")   # 计数行不受视图切换影响
+        self.assertEqual([r.title for r in rows if r.kind == "bucket"],
+                         ["已合并 1", "*在飞 1", "失败 0", "阻塞 1", "已取消 0"])
+        rows = build_rows(s, [], now=NOW)
+        self.assertEqual([r.title for r in rows if r.kind == "bucket"],
+                         ["已合并 1", "在飞 1", "失败 0", "阻塞 1", "已取消 0"])
+
+    def test_bucket_view_penetrates_fold(self):  # Req: gt-6a26e5
+        s = snap(A=trow(disp="main", worker="wa"),
+                 A1=trow(disp="wa", worker="wa1", state="merged"))
+        rows = build_rows(s, [], now=NOW, bucket="已合并")  # 折叠下命中深层同行
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A1"])
 
 
 class TestHandleKey(unittest.TestCase):
@@ -267,6 +301,22 @@ class TestHandleKey(unittest.TestCase):
         m = model(self.ROWS, sel=1)
         self.assertEqual(handle_key(m, "v").op, "noop")  # z 已成折叠键，另取未知键
         self.assertEqual(m["sel"], 1)
+
+    def test_digit_keys_toggle_bucket_view(self):  # Req: gt-6a26e5
+        m = model(self.ROWS, sel=1)
+        a = handle_key(m, "2")
+        self.assertEqual((a.op, m["bucket"]), ("apply", "在飞"))
+        handle_key(m, "2")                 # 同键再按恢复全量
+        self.assertIsNone(m["bucket"])
+        handle_key(m, "5")
+        handle_key(m, "0")                 # 0 恢复全量
+        self.assertIsNone(m["bucket"])
+        self.assertEqual(handle_key(model(self.ROWS, sel=1, view="detail"), "2").op,
+                         "noop")           # 全屏页不切换
+        m = model(self.ROWS, sel=1, input="")
+        handle_key(m, "2")                 # 输入态下数字是过滤字符
+        self.assertEqual(m["buf"], "2")
+        self.assertIsNone(m["bucket"])
 
 
 class TestClampView(unittest.TestCase):
