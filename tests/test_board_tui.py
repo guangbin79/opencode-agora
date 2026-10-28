@@ -16,8 +16,8 @@ import time
 import unittest
 from pathlib import Path
 
-from board_tui import (Action, Row, build_rows, detail_page, doctor_page,
-                       handle_key, rel_time, try_cancel)
+from board_tui import (Action, Row, build_rows, clamp_view, detail_page,
+                       doctor_page, handle_key, rel_time, try_cancel)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -241,6 +241,60 @@ class TestHandleKey(unittest.TestCase):
         m = model(self.ROWS, sel=1)
         self.assertEqual(handle_key(m, "v").op, "noop")  # z 已成折叠键，另取未知键
         self.assertEqual(m["sel"], 1)
+
+
+class TestClampView(unittest.TestCase):
+    """视口滚动：clamp_view 就地改 top，四情形（draw_board 画前调用）。"""
+
+    ROWS = [Row("bucket", title="在飞 9", domain="bucket")] + [
+        Row("task", f"t{i}", 0, "running", "目标", "ses-9", "1m", "", "fly")
+        for i in range(9)]
+
+    def test_sel_below_window_scrolls_down(self):  # Req: gt-4cb57c
+        m = model(self.ROWS, sel=7, top=0)
+        clamp_view(m, 5)
+        self.assertEqual(m["top"], 3)          # sel>=top+visible → top=sel-visible+1
+
+    def test_sel_above_window_scrolls_up(self):  # Req: gt-4cb57c
+        m = model(self.ROWS, sel=2, top=4)
+        clamp_view(m, 5)
+        self.assertEqual(m["top"], 2)          # sel<top → top=sel
+        m = model(self.ROWS, sel=0, top=0)
+        clamp_view(m, 5)
+        self.assertEqual(m["top"], 0)          # top 不小于 0
+
+    def test_sel_inside_window_no_move(self):  # Req: gt-4cb57c
+        m = model(self.ROWS, sel=4, top=2)
+        clamp_view(m, 5)
+        self.assertEqual(m["top"], 2)          # 屏内不动（含底边界 sel=top+visible-1）
+
+    def test_gG_extremes_land_window(self):  # Req: gt-4cb57c
+        m = model(self.ROWS, sel=0, top=3)
+        handle_key(m, "G")                     # 极值跳底：sel=9 → 视口贴底
+        clamp_view(m, 5)
+        self.assertEqual((m["sel"], m["top"]), (9, 5))
+        handle_key(m, "g")                     # 极值跳顶落首任务行：sel=1 → top=sel
+        clamp_view(m, 5)
+        self.assertEqual((m["sel"], m["top"]), (1, 1))
+
+    def test_j_at_last_row_stays(self):  # Req: gt-4cb57c
+        m = model(self.ROWS, sel=9, top=5)
+        self.assertEqual(handle_key(m, "j").op, "move")
+        self.assertEqual(m["sel"], 9)          # 末行 j 不再下移
+        clamp_view(m, 5)
+        self.assertEqual((m["sel"], m["top"]), (9, 5))  # top 不越 len-visible 界
+
+    def test_k_at_first_row_stays(self):  # Req: gt-4cb57c
+        m = model(self.ROWS, sel=0, top=0)
+        self.assertEqual(handle_key(m, "k").op, "move")
+        self.assertEqual(m["sel"], 0)          # 首行 k 不再上移
+        clamp_view(m, 5)
+        self.assertEqual(m["top"], 0)          # top 不越 0 界
+
+    def test_rows_shrink_reclaims_top(self):  # Req: gt-4cb57c
+        m = model(self.ROWS[:6], sel=5, top=5)  # 滚底后过滤/轮询致行流收缩
+        clamp_view(m, 5)
+        self.assertEqual((m["sel"], m["top"]), (5, 1))  # top 回收至 len-visible
 
 
 class TestFoldTree(unittest.TestCase):

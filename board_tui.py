@@ -174,6 +174,16 @@ def _skip_bucket(m, down=True):
         m["sel"] += d
 
 
+def clamp_view(m, visible):
+    """视口滚动：保证 sel 落在 [top, top+visible) 窗口内（就地改，无返回值语义）。"""
+    if m["sel"] < m["top"]:
+        m["top"] = m["sel"]
+    elif m["sel"] >= m["top"] + visible:
+        m["top"] = m["sel"] - visible + 1
+    m["top"] = min(max(0, m["top"]),
+                   max(0, len(m.get("rows") or []) - visible))  # 行流收缩后回收 top
+
+
 def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
@@ -389,7 +399,9 @@ def draw_board(stdscr, m, status="", err=None):
     stdscr.erase()
     head = f" agora board  {status}" + (f"  离线: {err}" if err else "")
     stdscr.addnstr(0, 0, head, w - 1, curses.A_REVERSE)
-    for i, r in enumerate(m["rows"][:max(0, h - 4)]):
+    visible = max(1, h - 4)
+    clamp_view(m, visible)
+    for i, r in enumerate(m["rows"][m["top"]:m["top"] + visible]):
         attr = _color(r.domain)
         if r.kind == "bucket":
             stdscr.addnstr(i + 1, 0, f"─ {r.title}", w - 1, attr | curses.A_BOLD)
@@ -399,14 +411,14 @@ def draw_board(stdscr, m, status="", err=None):
                 + (f"  {r.repo}" if r.repo else ""))
         if r.kind == "event":
             attr |= curses.A_BOLD
-        if i == m["sel"]:
+        if m["top"] + i == m["sel"]:
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + 1, 0, text, w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor | x cancel",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
-                   f" / filter | r refresh | z fold | q quit  filter[{m['filter']}]",
+                   f" r refresh | z fold | q quit | / filter[{m['filter']}]",
                    w - 1, curses.A_DIM)
     line = f"/{m['buf']}▌" if m.get("input") is not None else \
            (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None)
@@ -433,7 +445,7 @@ def run(stdscr, base, token):
     curses.curs_set(0)
     _init_colors()
     stdscr.timeout(int(interval * 1000))
-    m = {"rows": [], "sel": 0, "view": "board", "confirm": None,
+    m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set()}
     details, snap, events = {}, None, None
     status, err, page = "载入…", None, []
@@ -507,7 +519,7 @@ def selftest():
         rows = build_rows(snap, events)
     except Exception as e:
         rows, err = [], str(e)
-    m = {"rows": rows, "sel": 0, "view": "board", "confirm": None,
+    m = {"rows": rows, "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set()}
 
     def once(stdscr):
