@@ -255,6 +255,22 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual([e for e in self.app.store.read_events()
                           if e["event"].startswith("enforce")], [])  # 无审计行
 
+    def test_task_create_verify_params_type_checked(self):  # Req: F22
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo",
+                      "verify_pending": "false"}, self.root)
+        self.assertEqual(st, 400)  # 豁免旗语义反转拒收（enforce 同口径）
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "verify_cmd": 123},
+                     self.root)
+        self.assertEqual(st, 400)  # 非串 verify_cmd 400 报因，不落 500
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo",
+                      "verify_cmd": "true", "verify_pending": True}, self.root)
+        self.assertEqual(st, 403)  # 互斥组合 core 层拒（同 after/target_branch 先例）
+        self.assertEqual([t for t in self.app.state.snapshot()["tasks"].values()
+                          if t["goal"] == "g"], [])  # 拒绝零建行
+
     def test_root_enforce_toggles_and_audits(self):  # Req: F1
         st, r = call(self.port, "POST", "/enforce", {"on": False}, self.root)
         self.assertEqual(st, 200)

@@ -377,7 +377,7 @@ def git_clean(repo):
 
 def dispatch(goal, repo, after=None):
     """建＋派一体的场景件（goal 即 worker 指令——提示词窄化走任务页）：回 (tid, wtok, env, wsid)。"""
-    body = {"goal": goal, "project_dir": f"{WORK}/{repo}", "verify_cmd": "true"}
+    body = {"goal": goal, "project_dir": f"{WORK}/{repo}", "verify_pending": True}
     if after:
         body["after"] = after
     code, body = agora("/task_create", body)
@@ -408,6 +408,19 @@ start_serve(_p)
 OC_PW = json.load(open(SVC))["password"]  # serve 重启可轮换 password（repro 实测）——agorad 同步重启
 kill_agorad()
 start_agorad()
+
+# ============================================================
+# S0 F22 派发硬闸：无 verify 无旗 dispatch 必拒＋专属审计行（快速路见 S1 后的原子登记对照）
+# ============================================================
+code, body = agora("/task_create", {"goal": "F22 gate probe",
+                                    "project_dir": f"{WORK}/repoA"})
+tidG = body["task"]
+code, body = agora("/task_dispatch", {"task": tidG})
+check(code == 403 and "verify 未登记" in body.get("error", ""),
+      f"F22 硬闸：verify 未登记派发必拒（{code} {body.get('error', '')[:40]}） # Req: F22")
+check("dispatch_rejected_verify_missing" in evs(tidG), "F22 拒因审计留行 # Req: F22")
+check(row(tidG)["state"] == "todo", "F22 拒绝零副作用（未建环境未派发） # Req: F22")
+agora("/task_cancel", {"task": tidG})
 
 # ============================================================
 # S1 全链：建→派→worker 真活→verify 提案/登记→done→门→merged→closed
@@ -525,7 +538,7 @@ code, body = agora("/task_create", {"goal": "Create a file named seen.md contain
                                     "of the file ../repoA/merged.md (relative path from your current "
                                     "directory). Commit it with git.",
                                     "project_dir": f"{WORK}/repoB", "after": tidA,
-                                    "verify_cmd": "true"})
+                                    "verify_pending": True})
 tidB = body["task"]
 code, body = agora("/task_dispatch", {"task": tidB})
 check(code == 403 and "after" in body.get("error", ""),
