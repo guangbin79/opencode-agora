@@ -9,6 +9,9 @@ import json
 import os
 from pathlib import Path
 
+TAIL_BYTES = 1 << 20  # 启动尾读窗口：load 耗时与账本大小解耦；窗内无完整行回退全扫
+COMPACT_LINES = 500  # 瘦身阈值：行数超限即原子重写仅留末完整行（flock 单写者、迁移路径时机避开启动），账本有上界
+
 
 class Store:
     def __init__(self, home: Path):
@@ -20,13 +23,29 @@ class Store:
         self._lock_fd = None
         # 单写者内存计数器；重启扫目录文件名 max+1 恢复
         self._next_mid = self.scan_max_msg_id() + 1
+        self._task_lines = None  # 懒播种的账本行数（flock 单写者安全）：免每次追加全文件重扫；崩溃漂移只挪瘦身时机
 
     def append_state(self, snap: dict) -> None:
-        self._append_line(self._tasks, json.dumps(snap, ensure_ascii=False))
+        if self._task_lines is None:  # 播种在追加前：计磁盘实有行，此后内存自增不重扫
+            self._task_lines = self._count_lines() if self._tasks.exists() else 0
+        line = json.dumps(snap, ensure_ascii=False)
+        self._append_line(self._tasks, line)  # 先追加后瘦身：崩溃至多留下超限账本，状态不丢
+        self._task_lines += 1
+        if self._task_lines > COMPACT_LINES:
+            try:
+                self._compact(line)
+                self._task_lines = 1
+            except OSError:
+                pass  # 追加已 fsync 持久化，瘦身属维护动作：失败不回滚成功语义，计数器留超阈待下次追加重试
 
     def load_state(self) -> dict | None:
         if not self._tasks.exists():
             return None
+        if self._tasks.stat().st_size > TAIL_BYTES:
+            snap = self._load_tail()
+            if snap is not None:
+                return snap
+            # 尾窗无完整行（巨行/断尾贯穿全窗）→ 回退全文件扫，末行胜出语义不变
         snap = None
         with self._tasks.open(encoding="utf-8") as f:
             for line in f:
@@ -35,6 +54,37 @@ class Store:
                 except ValueError:
                     pass
         return snap
+
+    def _load_tail(self) -> dict | None:
+        with self._tasks.open("rb") as f:
+            f.seek(-TAIL_BYTES, os.SEEK_END)
+            block = f.read()
+        i = block.find(b"\n")  # 跨窗切割的首段残行丢弃，只解析完整行
+        if i == -1:
+            return None
+        snap = None
+        for raw in block[i + 1:].split(b"\n"):
+            try:
+                snap = json.loads(raw)  # 断尾行丢弃，取最后完整行（同全扫口径）
+            except ValueError:
+                pass
+        return snap
+
+    def _count_lines(self) -> int:
+        n = 0
+        with self._tasks.open("rb") as f:
+            for chunk in iter(lambda: f.read(TAIL_BYTES), b""):
+                n += chunk.count(b"\n")
+        return n
+
+    def _compact(self, line: str) -> None:
+        # 刚追加行即末完整行（flock 单写者）；原子重写同 write_ephemeral 口径
+        tmp = self._tasks.with_name(self._tasks.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self._tasks)
 
     def append_event(self, ev: dict) -> None:
         self._append_line(self._events, json.dumps(ev, ensure_ascii=False))

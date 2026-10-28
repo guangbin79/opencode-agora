@@ -150,3 +150,7 @@ v2 全新开发，无数据迁移：任务状态从零开始。`~/plaza` wiki �
 ### F19 worker 牌换号自愈——活动任务漂移即改绑（2026-10-28）
 会话续接会更换调用 sid，dispatcher 侧已有 bind_main 自愈（R25-A），worker 牌无此待遇：续接 worker（token 仍有效）调 done 因牌面 sid 与任务行漂移死锁（实证 gt-f23e94：活已干完 done 死锁，靠 cancel＋cherry-pick 收割 gt-dba437）。设计（对齐派发方同款）：worker 牌调用携 X-Agora-Sid 且与注册 sid 漂移、注册 sid 是某活动任务（dispatched/running/done/verify_failed/reopened/blocked）的 worker_sid → auth.rebind（旧 sid 入血统，token 本体不变）＋任务行 worker_sid 同步覆写（与 recover.reinject 同口径）。守卫：终态（merged/closed/cancelled）与无主 sid 不触发；dispatcher bind_main 与 reinject 行为不变；改绑后 done 走既有五拒，验收一克不减。
 **验收**：续接 worker 调 done 受理＋行覆写＋血统入册；无牌/他牌拒且零改绑；终态不触发改绑；reinject 与 dispatcher 改绑既有测试保持绿；全量测试绿。
+
+### F20 账本尾读＋有界瘦身（2026-10-28，gt-a02ab1）
+4.4GB 写放大事故（F5 决策记录）善后加固，F6 不改写：①启动 load_state 只 seek 末 TAIL_BYTES(1MB) 解析完整行取最后完整快照（末行胜出语义一字不变），文件 ≤阈值或尾窗无完整行回退全文件扫——启动耗时与账本大小解耦；②追加路径有界保持：行数超 COMPACT_LINES(500) 即原子重写（tmp+fsync+replace）仅留刚追加的末完整行——flock 单写者安全、时机在迁移路径避开启动；此为「账本只追加」的有界例外，快照语义（§4.8）不变。
+**验收**：大文件尾读命中末行；尾窗无完整行回退；尾读断尾行回退上一完整行；超阈重写单行且无 .tmp 残留、load 往返一致；`python3 -m unittest tests.test_access_store tests.test_core_state` 绿。
