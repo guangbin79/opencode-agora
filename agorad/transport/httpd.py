@@ -137,7 +137,10 @@ class _Handler(BaseHTTPRequestHandler):
             app.task.update_verify(body["task"], token, vc)
             return {"ok": True}
         if name == "task_cancel":
-            return {"cancelled": app.task.cancel(body["task"], token)}
+            force = body.get("force", False)
+            if not isinstance(force, bool):  # "true" 字符串得 True——强杀语义反转拒收
+                raise ValueError("force 须为布尔")
+            return app.task.cancel(body["task"], token, force=force)  # F28 忙碌闸应答直透
         if name == "post":
             return self._post(sid, role, body)
         if name == "check_mail":

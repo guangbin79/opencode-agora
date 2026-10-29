@@ -81,6 +81,9 @@ class DeadInjectOc:
     def alive(self, sid):
         return False
 
+    def session(self, sid):
+        return None
+
     def probe(self):
         return {"ok": True, "oc_version": "fake"}
 
@@ -650,6 +653,48 @@ class TestGateTailCancel(unittest.TestCase):
                 if m["to"] == "w1" and m["kind"] == "cancel"]
         self.assertEqual(len(msgs), 1)
         self.assertIn("t1", msgs[0]["body"])
+
+
+class TestCancelBusyGate(HttpdTest):
+    """F28 防误杀忙碌闸全链：httpd force 校验＋透传，busy 应答 {cancelled, reason, hint}。"""
+
+    def test_busy_reject_then_force_kills(self):  # Req: F28
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        self.stub.sessions[wsid]["busy"] = True  # stub time.updated>idle＝回合进行中
+        st, r = call(self.port, "POST", "/task_cancel", {"task": tid}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["cancelled"], 0)
+        self.assertEqual(r["reason"], "worker_busy")
+        self.assertIn("force", r["hint"])
+        self.assertEqual(self.app.state.get(tid)["state"], "dispatched")
+        ev = [e for e in self.app.store.read_events(tid)
+              if e["event"] == "cancel_rejected_busy"]
+        self.assertEqual(len(ev), 1)  # 专属审计行
+        st, r = call(self.port, "POST", "/task_cancel",
+                     {"task": tid, "force": True}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["cancelled"], 1)  # 强杀照常取消
+        self.assertEqual(self.app.state.get(tid)["state"], "cancelled")
+        ev = [e for e in self.app.store.read_events(tid)
+              if e["event"] == "cancelled"]
+        self.assertIn("forced", ev[-1]["note"])  # 审计注明 forced
+
+    def test_force_must_be_bool(self):  # Req: F28（enforce/verify_pending 同口径）
+        tid = self.create_task()
+        st, r = call(self.port, "POST", "/task_cancel",
+                     {"task": tid, "force": "true"}, self.root)
+        self.assertEqual(st, 400)  # 字符串 "true" 不得反转成强杀
+        self.assertEqual(self.app.state.get(tid)["state"], "todo")
+
+    def test_stub_idle_session_cancels_unchanged(self):  # Req: F28
+        tid = self.create_task()
+        self.dispatch_task(tid)  # stub 缺省 time 0/0＝不 busy
+        st, r = call(self.port, "POST", "/task_cancel", {"task": tid}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"cancelled": 1})  # 应答形状与既有路径一致
+        self.assertEqual(self.app.state.get(tid)["state"], "cancelled")
 
 
 class TestCredentialFallback(unittest.TestCase):

@@ -4,7 +4,9 @@
 保险丝四件（F3）：链深<5、并发配额（活动任务计数）、can_spawn（oc 名册——会话
 创建不可达即拒）、B7 after 前驱终态。中止级联下级（平表：子任务
 dispatcher_sid==上级 worker_sid）、终止通知走 router.post、凭据作废、环境即回收、
-merged 不动、空链幂等。core 只 import stdlib；依赖全构造注入。
+merged 不动、空链幂等。cancel 忙碌闸防误杀（F28）：worker 回合进行中拒取消
+（health 僵态豁免同款 busy 信号），force:true 强杀，oc 探测失败 fail-open。
+core 只 import stdlib；依赖全构造注入。
 """
 import pathlib
 import secrets
@@ -19,6 +21,7 @@ _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged �
 EV_CREATED = "task_created"
 EV_DISPATCHED = "dispatched"
 EV_CANCELLED = "cancelled"
+EV_CANCEL_BUSY = "cancel_rejected_busy"  # F28 防误杀：busy 拒绝专属审计行
 EV_VERIFY = "verify_registered"
 EV_DENIED = "auth_denied"
 EV_REJECTED = "dispatch_rejected"
@@ -130,14 +133,45 @@ class TaskService:
 
     # ---- F11 中止 ----
 
-    def cancel(self, tid, actor_token):
+    def cancel(self, tid, actor_token, force=False):
         t = self._state.get(tid)
         sid, _ = self._gate(actor_token, "task_cancel", tid, t,
                             owner=t.get("dispatcher_sid"))
+        busy, probe_failed = self._worker_busy(t)
+        if busy and not force:  # F28 防误杀：worker 深潜中，抢先取消会连尾巴提交一起带走
+            self._store.append_event({"ts": time.time(), "actor": sid,
+                                      "event": EV_CANCEL_BUSY, "task": tid,
+                                      "note": "busy"})
+            return {"cancelled": 0, "reason": "worker_busy",
+                    "hint": "worker 会话回合进行中——确认强杀请携 force:true 重试"}
         n = self._cancel_one(tid, sid)
+        note = f"cancelled={n}" if n else "noop"
+        if busy:
+            note += " forced"  # F28：强杀审计注明
+        elif probe_failed:
+            note += " probe_failed"  # F28：fail-open 放行留痕
         self._store.append_event({"ts": time.time(), "actor": sid, "event": EV_CANCELLED,
-                                  "task": tid, "note": f"cancelled={n}" if n else "noop"})
-        return n
+                                  "task": tid, "note": note})
+        return {"cancelled": n}
+
+    def _worker_busy(self, t):
+        """F28 busy 探测：health 僵态豁免同款信号——oc 会话存在且回合进行中
+        （time.updated>time.idle）。回 (busy, probe_failed)。
+
+        oc 探测失败 fail-open（防 oc 故障卡死取消能力，宁误放不误卡）；
+        会话死（None）/缺 time 形状→不 busy（health 同款安全回退）。
+        """
+        wsid = t.get("worker_sid")
+        if not wsid or t["state"] in _FROZEN:
+            return False, False
+        try:
+            data = self._oc.session(wsid)
+        except Exception:  # shortcut: 裸 except 兜 access 层全部失败形态，fail-open 放行
+            return False, True
+        if data is None:
+            return False, False
+        tm = data.get("time") or {}  # 缺形状→不 busy→照判
+        return (tm.get("updated") or 0) > (tm.get("idle") or 0), False
 
     def _cancel_one(self, tid, sid):
         """中止单任务并递归下级；返回级联取消数（merged/closed/cancelled 不动）。"""

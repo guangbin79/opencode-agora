@@ -3,10 +3,11 @@
 形状对账自真 opencode v2.1.4（T5 探针 tests/e2e/oc_probe.ts，/tmp/opencode/oc-probe.json）：
 - 全路径挂 /api 前缀；POST /session {}→{data:{id}}（多余字段忽略）；move 绑目录→204；
 - prompt {text}→{data:{delivery:"steer"}}，busy 排队按序（stub 恒收）；未知/已删 sid→404
-  SessionNotFoundError；GET /session/{sid}→{data:{id,location}}；GET /session/active→{data:{}}
+  SessionNotFoundError；GET /session/{sid}→{data:{id,location,time:{created,updated,idle}}}
+  （F28：sessions[sid]["busy"]=True ⇒ updated>idle＝回合进行中）；GET /session/active→{data:{}}
   （idle 不在 map）；GET /info→{version,...}（真服务无 /health）。
 脚本化接口＝StubOpencode 实例：create 注册会话、kill() 即删（死＝GET/prompt 404）、
-sessions[sid]["injects"] 记录注入序、stop() 停机。
+sessions[sid]["injects"] 记录注入序、sessions[sid]["busy"] 拨 busy 探测面、stop() 停机。
 作进程跑：`python3 tests/stub_opencode.py`（stdout 打印监听端口，kill 进程即停）。
 """
 import json
@@ -20,7 +21,8 @@ VERSION = "stub-0.1.0"
 class StubOpencode:
     def __init__(self):
         self.lock = threading.Lock()
-        self.sessions = {}  # sid -> {"injects": [text, ...], "directory": str, "req": dict}
+        self.sessions = {}  # sid -> {"injects": [text, ...], "directory": str,
+    #                     "req": dict, "busy": bool（F28 探测面拨杆）}
         self.poison_html = False  # T5 修正：置 True 时 GET /api/info 回 200 text/html（SPA 兜底同族面）
         self.httpd = None
         self.thread = None
@@ -101,7 +103,11 @@ class StubOpencode:
                             self._json(404, self._not_found(parts[1]))
                             return
                         self._json(200, {"data": {"id": parts[1],
-                                                  "location": {"directory": s["directory"]}}})
+                                                  "location": {"directory": s["directory"]},
+                                                  # F28 busy 探测面：updated>idle＝回合进行中
+                                                  "time": {"created": 0,
+                                                           "updated": 1 if s.get("busy") else 0,
+                                                           "idle": 0}}})
                     else:
                         self._json(404, {"error": "not found"})
 

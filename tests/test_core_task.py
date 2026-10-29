@@ -41,6 +41,8 @@ class FakeOc:
     def __init__(self):
         self.sessions, self.injected = [], []
         self.fail_create = False
+        self.detail = {}  # sid -> session 详情 dict（F28 busy 探测面）；缺 sid＝死会话
+        self.down = False  # True＝oc 不可达（session 抛 OcUnavailable）
 
     def create(self, cwd, boot, title=None):
         if self.fail_create:
@@ -52,6 +54,11 @@ class FakeOc:
     def inject(self, sid, text):
         self.injected.append((sid, text))
         return True
+
+    def session(self, sid):
+        if self.down:
+            raise OcUnavailable("stub down")
+        return self.detail.get(sid)
 
 
 class TestCoreTask(unittest.TestCase):
@@ -170,7 +177,7 @@ class TestCancel(TestCoreTask):
         self.seed("t3", disp="s-w2", worker="s-w3", env="/envs/t3")
         toks = {w: self.auth.issue(f"s-{w}", "worker") for w in ("w1", "w2", "w3")}
         n = self.svc.cancel("t1", self.root)
-        self.assertEqual(n, 3)  # 两级级联
+        self.assertEqual(n["cancelled"], 3)  # 两级级联
         for tid in ("t1", "t2", "t3"):
             self.assertEqual(self.state.get(tid)["state"], "cancelled")
         for w in ("w1", "w2", "w3"):  # 各级 worker 各收一条终止通知
@@ -196,7 +203,7 @@ class TestCancel(TestCoreTask):
         self.svc.cancel(tid, self.root)  # todo 无链：置 cancelled
         self.assertEqual(self.state.get(tid)["state"], "cancelled")
         n = len(self.events())
-        self.assertEqual(self.svc.cancel(tid, self.root), 0)  # 幂等
+        self.assertEqual(self.svc.cancel(tid, self.root)["cancelled"], 0)  # 幂等
         self.assertEqual(self.state.get(tid)["state"], "cancelled")
         self.assertEqual(len(self.events()), n + 1)  # 幂等仍留审计行
 
@@ -212,9 +219,60 @@ class TestCancel(TestCoreTask):
         self.seed("t1", state="done", worker="s-w1", env="/envs/t1")
         self.seed("t2", disp="s-w1", worker="s-w2", env="/envs/t2")
         n = self.svc.cancel("t1", self.root)
-        self.assertEqual(n, 1)  # done 只排队，下级照常级联
+        self.assertEqual(n["cancelled"], 1)  # done 只排队，下级照常级联
         self.assertTrue(self.state.get("t1").get("pending_cancel"))  # T8 消费
         self.assertEqual(self.state.get("t2")["state"], "cancelled")
+
+
+class TestCancelBusyGate(TestCoreTask):
+    """F28 防误杀忙碌闸：判例链三例误杀（worker 离线评审环中被抢先 cancel，
+    env 回收连尾巴提交一起带走）。busy 信号＝health 僵态豁免同款（updated>idle）。"""
+
+    def test_busy_rejected_without_force(self):  # Req: F28
+        self.seed("t1", worker="s-w1", env="/envs/t1")
+        self.oc.detail["s-w1"] = {"time": {"updated": 100.0, "idle": 50.0}}  # 回合进行中
+        r = self.svc.cancel("t1", self.root)
+        self.assertEqual(r["cancelled"], 0)
+        self.assertEqual(r["reason"], "worker_busy")
+        self.assertIn("force", r["hint"])  # 提示文案指路 force:true
+        self.assertEqual(self.state.get("t1")["state"], "running")  # 行不动
+        self.assertEqual(self.gitx.removed, [])  # env 不回收
+        ev = [e for e in self.events() if e["event"] == "cancel_rejected_busy"]
+        self.assertEqual([e.get("task") for e in ev], ["t1"])  # 专属审计行
+
+    def test_busy_with_force_cancels_and_audits_forced(self):  # Req: F28
+        self.seed("t1", worker="s-w1", env="/envs/t1")
+        self.oc.detail["s-w1"] = {"time": {"updated": 100.0, "idle": 50.0}}
+        r = self.svc.cancel("t1", self.root, force=True)
+        self.assertEqual(r["cancelled"], 1)
+        self.assertEqual(self.state.get("t1")["state"], "cancelled")
+        ev = [e for e in self.events() if e["event"] == "cancelled"
+              and e.get("task") == "t1"]
+        self.assertIn("forced", ev[-1]["note"])  # 强杀审计注明
+
+    def test_idle_session_cancels_unchanged(self):  # Req: F28
+        self.seed("t1", worker="s-w1", env="/envs/t1")
+        self.oc.detail["s-w1"] = {"time": {"updated": 50.0, "idle": 100.0}}  # 闲置
+        self.assertEqual(self.svc.cancel("t1", self.root)["cancelled"], 1)
+        self.assertEqual(self.state.get("t1")["state"], "cancelled")  # 现行路径不变
+        self.assertTrue(any(e["event"] == "cancelled" and e.get("task") == "t1"
+                            for e in self.events()))
+        self.assertEqual([e for e in self.events()
+                          if e["event"] == "cancel_rejected_busy"], [])
+
+    def test_dead_session_cancels_unchanged(self):  # Req: F28
+        self.seed("t1", worker="s-w1", env="/envs/t1")  # FakeOc.detail 缺 sid＝会话死
+        self.assertEqual(self.svc.cancel("t1", self.root)["cancelled"], 1)
+        self.assertEqual(self.state.get("t1")["state"], "cancelled")
+
+    def test_oc_probe_failure_fails_open_with_audit(self):  # Req: F28
+        self.seed("t1", worker="s-w1", env="/envs/t1")
+        self.oc.down = True  # oc 不可达：防 oc 故障卡死取消能力（fail-open）
+        self.assertEqual(self.svc.cancel("t1", self.root)["cancelled"], 1)
+        self.assertEqual(self.state.get("t1")["state"], "cancelled")
+        ev = [e for e in self.events() if e["event"] == "cancelled"
+              and e.get("task") == "t1"]
+        self.assertIn("probe_failed", ev[-1]["note"])  # 放行留痕
 
 
 class TestVerify(TestCoreTask):

@@ -71,6 +71,54 @@ class _Srv:
         self.srv.server_close()
 
 
+def _detail_stub(task, stale=(), code=200):
+    """F28 status 双端点 stub：POST /board 单任务视图＋/doctor（僵态候选）。"""
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if code != 200:
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path.strip("/") == "board":
+                data = json.dumps({"task": task, "events": [],
+                                   "done_body": None})
+            else:
+                data = json.dumps({"age_rank": [], "last_seen_rank": [],
+                                   "stale_candidates": [[t, 0.0] for t in stale],
+                                   "env": []})
+            raw = data.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+    return H
+
+
+class _DetailSrv:
+    def __init__(self, task, stale=(), code=200):
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0),
+                                          _detail_stub(task, stale, code))
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    @property
+    def base(self):
+        return f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    @property
+    def port(self):
+        return self.srv.server_address[1]
+
+    def stop(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
 def _dead_port():  # Req: F14
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -421,6 +469,76 @@ class TestMcpSchema(unittest.TestCase):
         import agora_mcp
         tools = {t["name"]: t for t in agora_mcp._TOOLS}
         self.assertIn("agora wait", tools["wait"]["description"])
+
+
+class TestStatus(unittest.TestCase):
+    """F28 agora status 三态判读：数据 /board＋/doctor，分类客户端推导。"""
+
+    NOW = 1_000_000.0
+
+    @staticmethod
+    def _task(state, last_seen=None, worker="s-w1"):
+        return {"state": state, "last_seen": last_seen, "worker_sid": worker}
+
+    def test_status_three_classes_and_edges(self):  # Req: F28
+        cases = [
+            (self._task("running", self.NOW - 60), set(), "fresh"),  # 心跳近
+            (self._task("running", self.NOW - 3600), set(), "busy_round"),  # 心跳冷＋非候选
+            (self._task("running", self.NOW - 3600), {"t1"}, "stale_candidate"),
+            (self._task("running", None), set(), "busy_round"),  # 无心跳＝冷
+            (self._task("cancelled", self.NOW - 3600), set(), None),  # 终态无判读
+            (self._task("todo", None, worker=None), set(), None),  # 无 worker 无判读
+        ]
+        for task, stale, want in cases:
+            v = agora.status_view("t1", task, stale, self.NOW)
+            self.assertEqual(v["class"], want, task["state"])
+            self.assertEqual(v["state"], task["state"])
+
+    def test_status_last_seen_ago_seconds(self):  # Req: F28
+        v = agora.status_view("t1", self._task("running", self.NOW - 90),
+                              set(), self.NOW)
+        self.assertEqual(v["last_seen_ago"], 90)
+
+    def test_stale_after_parity_with_server(self):  # Req: F28 客户端锚不漂移
+        from agorad.core import report
+        self.assertEqual(agora._STALE_AFTER, report._STALE_AFTER)
+
+    def test_status_cli_text_and_json(self):  # Req: F28
+        srv = _DetailSrv(self._task("running", time.time() - 60))  # fresh
+        home = mkhome(srv.port)
+        try:
+            p = run_cli(["status", "t1"], home)
+            self.assertEqual((p.returncode, p.stdout.strip()),
+                             (0, "t1 state=running last_seen=60s class=fresh"))
+            p = run_cli(["status", "t1", "--json"], home)
+            self.assertEqual(p.returncode, 0)
+            v = json.loads(p.stdout)
+            self.assertEqual(v, {"task": "t1", "state": "running",
+                                 "last_seen_ago": 60, "class": "fresh"})
+        finally:
+            srv.stop()
+
+    def test_status_cli_busy_and_stale(self):  # Req: F28
+        old = time.time() - 3600
+        cases = [(_DetailSrv(self._task("running", old)), "busy_round"),
+                 (_DetailSrv(self._task("running", old), ["t1"]),
+                  "stale_candidate")]
+        for srv, want in cases:
+            try:
+                p = run_cli(["status", "t1"], mkhome(srv.port))
+                self.assertEqual(p.returncode, 0)
+                self.assertIn(f"class={want}", p.stdout)
+            finally:
+                srv.stop()
+
+    def test_status_cli_unknown_task_exit_two(self):  # Req: F28
+        srv = _DetailSrv(self._task("running"), code=404)
+        try:
+            p = run_cli(["status", "gt-none"], mkhome(srv.port))
+        finally:
+            srv.stop()
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("404", p.stderr)
 
 
 if __name__ == "__main__":

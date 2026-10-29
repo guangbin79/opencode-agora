@@ -46,9 +46,13 @@ _TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "task": _TID, "verify_cmd": _STR},
          "required": ["task", "verify_cmd"]}},
-    {"name": "task_cancel", "description": "中止任务（级联下级）（派发方/root；worker 不可用）",
-     "inputSchema": {"type": "object", "properties": {"task": _TID},
-                     "required": ["task"]}},
+    {"name": "task_cancel", "description": "中止任务（级联下级）（派发方/root；worker 不可用）"
+                                           "——worker 回合进行中拒绝（worker_busy），确认强杀携 force:true",
+     "inputSchema": {"type": "object", "properties": {
+         "task": _TID,
+         "force": {"type": "boolean",
+                   "description": "强杀旗：true＝无视忙碌闸照常取消（审计注明 forced）"}},
+         "required": ["task"]}},
     {"name": "post", "description": "链边发消息（方向服务按角色定）",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string",
