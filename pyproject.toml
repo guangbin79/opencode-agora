@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-agora"
+description = "opencode 会话间任务派发与凭据治理：agorad 服务＋opencode 插件＋agora CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dynamic = ["version"]
+
+[project.scripts]
+agorad = "agorad.main:main"
+agora-board = "board_tui:main"
+agora-mcp = "agora_mcp:main"
+agora-install = "agorad.installer:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "agorad.main._VERSION" }
+
+[tool.setuptools]
+py-modules = ["board_tui", "agora_mcp"]
+
+[tool.setuptools.packages.find]
+include = ["agorad*"]
+
+# 数据面显式清单（勿改 glob/排除语义）：新文件须同步评审把清单补上——防排除规则漂移静默漏装
+[tool.setuptools.data-files]
+"share/opencode-agora" = ["install.sh", "agora"]
+"share/opencode-agora/agora-plugin" = [
+    "agora-plugin/cred.ts",
+    "agora-plugin/envPath.ts",
+    "agora-plugin/hook.ts",
+    "agora-plugin/index.ts",
+    "agora-plugin/inject.ts",
+    "agora-plugin/lift.ts",
+    "agora-plugin/scope.ts",
+]
+"share/opencode-agora/skills/agora-dispatch" = ["skills/agora-dispatch/SKILL.md"]
+"share/opencode-agora/skills/agora-ops" = ["skills/agora-ops/SKILL.md"]

@@ -26,6 +26,13 @@ git clone https://github.com/guangbin79/opencode-agora.git
 cd opencode-agora && ./install.sh
 ```
 
+PyPI 安装路——与上等价，无需 clone（上方 git 路保留为源码形态）：
+
+```bash
+pipx install opencode-agora
+agora-install
+```
+
 装完即用。安装脚本幂等（可重复跑）；注册 MCP、复制插件与 skills，root 凭据落在 `$AGORA_HOME/.agora/root.token`（0600）。
 
 之后正常和 opencode 会话对话即可：

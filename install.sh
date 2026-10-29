@@ -14,6 +14,10 @@ except (OSError, ValueError):
     pass' "$HOME/.agora-home" 2>/dev/null || true)"  # 坏指针严格解码失败→空→缺省（读全量取首行，与 pointer_home 同契约，评审环）
 fi
 AGORA_HOME="${AGORA_HOME:-$HOME/plaza}"          # 与 agorad env_config 同缺省（设计 §3）
+# F31 pkg 分发：AGORA_PKG_ROOT 在位＝wheel 数据面（plugin/skills/install.sh/agora 拷贝源，
+# 由 agora-install 注入）；SRC 统一两模式拷贝源（repo 模式即本仓）
+PKG="${AGORA_PKG_ROOT:-}"
+SRC="${PKG:-$REPO}"
 printf '%s\n' "$AGORA_HOME" > "$HOME/.agora-home"  # gt-32c051 指针：无 env 组件统一发现（MCP 壳启动亦写）
 STATE_OC="$HOME/.local/state/opencode/service.json"  # T5 实证：serve --service 写此处 {url,password}
 OC_URL="${AGORA_OC_URL:-}"
@@ -62,8 +66,14 @@ mkdir -p "$AGORA_HOME/state/messages" "$AGORA_HOME/wiki" "$AGORA_HOME/.agora"
 [ -e "$AGORA_HOME/.agora/inactive-repos" ] || (umask 022; : > "$AGORA_HOME/.agora/inactive-repos")
 
 # ---- 3) MCP 注册（mcp 段合并不覆盖；注册形状 T5 对账）----
+# F31：pkg 模式命令走 PATH 入口 agora-mcp；repo 模式仍指本仓壳（命令 JSON bash 侧构造作 heredoc 第 4 参）
 mkdir -p "$OC_DIR"
-python3 - "$OC_DIR/opencode.json" "$REPO/agora_mcp.py" "$AGORA_HOME" <<'PY'
+if [ -n "$PKG" ]; then
+  MCP_CMD='["agora-mcp"]'
+else
+  MCP_CMD="$(python3 -c 'import json,sys;print(json.dumps([sys.argv[1],sys.argv[2]]))' python3 "$REPO/agora_mcp.py")"
+fi
+python3 - "$OC_DIR/opencode.json" "$REPO/agora_mcp.py" "$AGORA_HOME" "$MCP_CMD" <<'PY'
 import json, sys
 from pathlib import Path
 p, mcp_py, home = (Path(a) for a in sys.argv[1:4])
@@ -77,7 +87,7 @@ if not isinstance(cfg, dict):
     sys.exit(f"install: {p} 顶层须为 JSON 对象——拒改")
 cfg.setdefault("mcp", {})["agora"] = {  # 重跑同值覆写＝幂等；他 server 原样保留
     "type": "local",
-    "command": ["python3", str(mcp_py)],
+    "command": json.loads(sys.argv[4]),
     "environment": {"AGORA_HOME": str(home)},
 }
 p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -85,30 +95,37 @@ PY
 
 # ---- 4) 插件复制（opencode 只扫插件目录；整目录复制保相对导入；测试件不随装）----
 mkdir -p "$PLUGIN_DIR"
-for f in "$REPO"/agora-plugin/*.ts; do
+for f in "$SRC"/agora-plugin/*.ts; do
   case "$f" in *.test.ts) continue ;; esac
   cp -f "$f" "$PLUGIN_DIR"/
 done
 
 # ---- 4a) skills 复制（主会话编排剧本；纯 md 整目录拷，同值覆写＝幂等）----
 mkdir -p "$OC_DIR/skills"
-for d in "$REPO"/skills/*/; do
+for d in "$SRC"/skills/*/; do
   cp -rf "${d%/}" "$OC_DIR/skills/"
 done
 
 # ---- 4b) agorad 载荷随装（T5 追加项：lift 不再假定与插件同仓——独立安装场景从
 #      $AGORA_HOME/.agora/agorad/main.py 解析；env AGORAD_SCRIPT 可覆写）。
 #      递归拷贝含 access/core/transport 子包（漏子包＝ModuleNotFoundError，lift 必超时）----
-mkdir -p "$AGORA_HOME/.agora"
-rm -rf "$AGORA_HOME/.agora/agorad"
-cp -r "$REPO/agorad" "$AGORA_HOME/.agora/"
-cp -f "$REPO/board_tui.py" "$AGORA_HOME/.agora/"
-chmod +x "$AGORA_HOME/.agora/board_tui.py"
-mkdir -p "$HOME/.local/bin"
-ln -sf "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
+mkdir -p "$AGORA_HOME/.agora" "$HOME/.local/bin"
+if [ -n "$PKG" ]; then
+  # F31 pkg 模式：载荷源＝agora-install 注入的 site-packages agorad 包；
+  # board_tui 载荷＋chmod＋agora-board 符号链接三行跳过（console script 替代）
+  AD_SRC="${AGORA_AGORAD_SRC:?pkg 模式须由 agora-install 注入 AGORA_AGORAD_SRC}"
+  rm -rf "$AGORA_HOME/.agora/agorad"
+  cp -r "$AD_SRC" "$AGORA_HOME/.agora/"
+else
+  rm -rf "$AGORA_HOME/.agora/agorad"
+  cp -r "$REPO/agorad" "$AGORA_HOME/.agora/"
+  cp -f "$REPO/board_tui.py" "$AGORA_HOME/.agora/"
+  chmod +x "$AGORA_HOME/.agora/board_tui.py"
+  ln -sf "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
+fi
 
 # ---- 4c) agora CLI（F14：wait 阻塞谓词；bin 目录 4b 已建）----
-cp -f "$REPO/agora" "$HOME/.local/bin/agora"
+cp -f "$SRC/agora" "$HOME/.local/bin/agora"
 chmod +x "$HOME/.local/bin/agora"
 find "$AGORA_HOME/.agora/agorad" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
@@ -142,6 +159,10 @@ else
   (
     export AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL"
     if [ -n "$OC_PASSWORD" ]; then export AGORA_OC_PASSWORD="$OC_PASSWORD"; fi
+    if [ -n "$PKG" ]; then  # F31 pkg 模式：agorad 走 PATH console script
+      if command -v setsid >/dev/null 2>&1; then exec setsid nohup agorad; fi
+      exec nohup agorad
+    fi
     if command -v setsid >/dev/null 2>&1; then
       exec setsid nohup python3 "$REPO/agorad/main.py"
     fi

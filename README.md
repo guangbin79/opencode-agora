@@ -26,6 +26,13 @@ git clone https://github.com/guangbin79/opencode-agora.git
 cd opencode-agora && ./install.sh
 ```
 
+From PyPI instead — equivalent install, no clone needed (the git route above stays as the source-code form):
+
+```bash
+pipx install opencode-agora
+agora-install
+```
+
 That's it. The installer is idempotent (safe to re-run); it registers the MCP server, copies the plugin + skills, and leaves a root credential at `$AGORA_HOME/.agora/root.token` (0600).
 
 Now just talk to your opencode session as usual:

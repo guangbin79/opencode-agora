@@ -1,0 +1,7 @@
+# F31 sdist 清单：与 pyproject 数据面同源（源码分发可离线重装）
+include install.sh
+include agora
+recursive-include agora-plugin *.ts
+exclude agora-plugin/*.test.ts
+prune agora-plugin/tests
+recursive-include skills *

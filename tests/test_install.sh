@@ -15,7 +15,7 @@ FIX=""
 
 teardown() {
   local d p
-  for d in "${A1:-}" "${A2:-}" "${A4:-}"; do  # 按夹具 service.json pid 补杀，避免孤儿 agorad（gt-71b6af）
+  for d in "${A1:-}" "${A2:-}" "${A4:-}" "${A5:-}"; do  # 按夹具 service.json pid 补杀，避免孤儿 agorad（gt-71b6af）
     [ -n "$d" ] || continue
     p="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$d/.agora/service.json" 2>/dev/null)" || continue
     [ -n "$p" ] && kill "$p" 2>/dev/null
@@ -201,6 +201,42 @@ H4="$FIX/home"; A4="$FIX/plaza"; mkdir -p "$H4"
 run_install_pw() { HOME="$H4" AGORA_HOME="$A4" AGORA_OC_PASSWORD="pw has space" bash "$REPO/install.sh"; }
 run_install_pw >/dev/null 2>&1 || bad "带 password 安装退出 0 (Req: F1)"
 chk "带 password 安装 root.token 在位 (Req: F1)" [ -s "$A4/.agora/root.token" ]
+
+# ---------- 场景 5：pkg 模式（F31 PyPI 分发：AGORA_PKG_ROOT 数据面＋PATH agorad 入口）----------
+newfix
+H5="$FIX/home"; A5="$FIX/plaza"; PKGROOT="$FIX/pkgroot"; BIN5="$FIX/bin"
+mkdir -p "$H5" "$PKGROOT/agora-plugin" "$PKGROOT/skills/agora-dispatch" "$PKGROOT/skills/agora-ops" "$BIN5"
+for f in cred envPath hook index inject lift scope; do  # 只放 7 个非测试 ts（wheel 数据面同清单）
+  cp "$REPO/agora-plugin/$f.ts" "$PKGROOT/agora-plugin/"
+done
+cp "$REPO/skills/agora-dispatch/SKILL.md" "$PKGROOT/skills/agora-dispatch/"
+cp "$REPO/skills/agora-ops/SKILL.md" "$PKGROOT/skills/agora-ops/"
+cp "$REPO/install.sh" "$PKGROOT/install.sh"
+cp "$REPO/agora" "$PKGROOT/agora"
+cat > "$BIN5/agorad" <<EOF  # PATH stub：模拟 pipx console script（触标留痕＋转跑真载荷）
+#!/usr/bin/env bash
+touch "$BIN5/agorad-called"
+exec python3 "$REPO/agorad/main.py" "\$@"
+EOF
+chmod +x "$BIN5/agorad"
+
+out5=$(HOME="$H5" AGORA_HOME="$A5" AGORA_PKG_ROOT="$PKGROOT" AGORA_AGORAD_SRC="$REPO/agorad" \
+       PATH="$BIN5:$PATH" bash "$PKGROOT/install.sh" 2>&1)
+rc5=$?
+chk "pkg 模式 install 退出 0 (Req: F31)" [ "$rc5" -eq 0 ]
+chk "pkg: 7 个非测试 ts 落插件目录且无测试件 (Req: F31)" bash -c '
+[ "$(find "$1/plugins/agora" -name "*.ts" | wc -l)" -eq 7 ] && [[ -z "$(find "$1/plugins/agora" -name "*.test.ts")" ]]' _ "$H5/.config/opencode"
+chk "pkg: skills 两剧本在位 (Req: F31)" bash -c '
+for s in agora-dispatch agora-ops; do
+  cmp -s "$1/skills/$s/SKILL.md" "$2/skills/$s/SKILL.md" || exit 1
+done' _ "$PKGROOT" "$H5/.config/opencode"
+chk "pkg: opencode.json command==[\"agora-mcp\"] (Req: F31)" python3 -c '
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+assert cfg["mcp"]["agora"]["command"] == ["agora-mcp"], cfg["mcp"]["agora"]' "$H5/.config/opencode/opencode.json"
+chk "pkg: agorad 载荷在位（lift 契约位）(Req: F31)" [ -f "$A5/.agora/agorad/main.py" ]
+chk "pkg: PATH stub agorad 确被调用 (Req: F31)" [ -f "$BIN5/agorad-called" ]
+chk "pkg: root.token 在位 (Req: F31)" [ -s "$A5/.agora/root.token" ]
 
 # ---------- 汇总 ----------
 echo "----------------------------------------"
