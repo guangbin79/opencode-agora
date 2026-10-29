@@ -32,4 +32,9 @@ install.sh token 泄露面×3；gitx prune×1；agora CLI 解析×1）。本报�
 
 - 真且小（本单修复＋测试）：#1-#11 全部——各域净改动 ≤50 行。
 - 待立项（架构级）：无。
-- 测试：全量 `python3 -m unittest discover -q tests` 398 绿（基线 392＋新增 6）。
+- 测试：全量 `python3 -m unittest discover -q tests` 399 绿（基线 392＋新增 7）＋
+  `bash tests/test_install.sh` 53 pass 0 fail。
+- 评审环：OCR 4 轮修复至绿——R1×4（.bak 残牌面／断言虚锁）→R2×3→R3×2→R4×2→终轮 0；
+  全程零 blocker/high，各项均当轮修复（详见 .review-loop/20261029-1450-task-bb4ad2.md）。
+- 提交：e68a7df（报告＋11 项主修）＋a85018b/104d376/49776a3/a57dc43（评审环轮次修复），
+  锚 .last-reviewed == a57dc43e8fe3e2c90b3069603619abd88d67140a。
