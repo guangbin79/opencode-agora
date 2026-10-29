@@ -147,10 +147,10 @@ export default {
       if (hint) {
         // F27 拒因分诊（信息量增量，语义不变）：拉取四分支区分「等节流/服务异常/真非 worker」。
         if (hint === NO_CRED_HINT && pull && pull.reason !== "ok") {
-          const why =
-            pull.reason === "throttled" ? "拉取节流中（30s 窗，稍候重试）" :
-            pull.reason === "unreachable" ? "agorad 拉取不可达/异常（安全向拒）" :
-            "真非 worker：服务侧无在飞任务绑定本会话";
+          let why: string;
+          if (pull.reason === "throttled") why = "拉取节流中（30s 窗，稍候重试）";
+          else if (pull.reason === "unreachable") why = "agorad 拉取不可达/异常（安全向拒）";
+          else why = "真非 worker：服务侧无在飞任务绑定本会话";
           hint = `${hint}（${why}）`;
         }
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
