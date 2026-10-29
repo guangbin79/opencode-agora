@@ -57,6 +57,8 @@ done
 [ -n "$GOT" ] || kill "$AD1_PID" 2>/dev/null || true
 chk "夹具 agorad 存活（service.json 端口可连，gt-71b6af）" [ -n "$GOT" ]
 chk "install 拉起行 setsid nohup 在位（源级锁，gt-71b6af/gt-e38e41）" grep -qF 'setsid nohup python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
+chk "依赖检查不含 setsid（macOS 兼容，Req: F27）" bash -c '! grep -qE "for c in [^;]*setsid" "$1"' _ "$REPO/install.sh"
+chk "无 setsid 时 nohup 兜底分支在位（源级锁，Req: F27）" grep -qF '"${AD_ENV[@]}" nohup python3' "$REPO/install.sh"
 ADSESS=""
 [ -n "$GOT" ] && ADSESS="$(ps -o sess= -p "$adpid" 2>/dev/null | tr -d ' ')"
 chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"

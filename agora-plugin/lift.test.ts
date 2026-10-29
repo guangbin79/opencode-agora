@@ -58,7 +58,7 @@ describe("ensureService 拉起三路径", () => {
     }
   });
 
-  test("未运行：setsid 拉起 stub→写 service.json→轮询就绪，凭 env 传 AGORA_HOME", async () => {
+  test("未运行：detached 拉起 stub→写 service.json→轮询就绪，凭 env 传 AGORA_HOME", async () => {
     // Req: F4
     rmSync(sjPath(), { force: true });
     const r = await ensureService({ script: STUB, timeoutMs: 5000, intervalMs: 50 });
@@ -190,5 +190,14 @@ describe("onInject credential 提取", () => {
     // Req: F4
     onInject({ sessionID: "s-disk", text: "[agora] credential t-8\ntoken: tok-8" });
     expect(getCredential("s-disk")?.token).toBe("tok-8"); // 无落盘：重启后由 recover 重发牌兜底
+  });
+});
+
+describe("lift 拉起脱会话契约（F27：macOS 无 setsid）", () => {
+  test("spawn 不再经 setsid 包装且 detached:true（源级锁）", () => {
+    // Req: F27
+    const src = readFileSync(join(import.meta.dir, "lift.ts"), "utf8");
+    expect(src).not.toContain('["setsid"');
+    expect(src).toContain("detached: true");
   });
 });

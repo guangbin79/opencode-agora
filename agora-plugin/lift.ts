@@ -1,6 +1,6 @@
 /**
  * lift 服务拉起（F4/设计 §4.8）：探测 $AGORA_HOME/.agora/service.json→任意 HTTP 应答（含 401）
- ＝就绪；未运行则 setsid 拉起 agorad（env 带 AGORA_HOME＋AGORA_OC_URL[＋AGORA_OC_PASSWORD]）
+ ＝就绪；未运行则 detached 拉起 agorad（脱会话新会话，F27；env 带 AGORA_HOME＋AGORA_OC_URL[＋AGORA_OC_PASSWORD]）
  轮询至 10s 上限。超时拒因两态：没装（main.py 缺）vs 拉不起（起而不就绪／OC 发现落空）。
  * T5 实证接线：AGORA_OC_URL 发现源＝$XDG_STATE_HOME/opencode/service.json（serve --service 写
  {url,password,pid,version}）；API 需 Basic opencode:<password>（oc.py 消费，agorad 只透传）。
@@ -95,7 +95,8 @@ export async function ensureService(
     ocUrl = found.url;
     ocPassword ??= found.password; // T5 修正：发现的 password 必须随 env 透传（缺它＝agorad 全 401）
   }
-  const proc = Bun.spawn(["setsid", "python3", script], {
+  const proc = Bun.spawn(["python3", script], {
+    detached: true, // 脱会话＝原 setsid 包装等价（POSIX 新会话/Windows 新进程组），macOS 无 setsid 亦成立（Req: F27）
     env: {
       ...process.env,
       AGORA_HOME: home,

@@ -32,14 +32,14 @@ AD_PID=""; LOG=""
 fail() { echo "install: $*" >&2; exit 1; }
 cleanup() {
   [ -n "$AD_PID" ] && { kill "$AD_PID" 2>/dev/null || true; wait "$AD_PID" 2>/dev/null || true; }
-  [ -n "$LOG" ] && sed -i '/^AGORA_ROOT_TOKEN: /d' "$LOG" 2>/dev/null  # 取牌即抹：进程死透再抹（sed -i 换 inode，先抹＝丢 fd 后续留痕）
+  [ -n "$LOG" ] && { sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$LOG" 2>/dev/null && rm -f "$LOG.bak"; }  # 取牌即抹（GNU/BSD 通吃 -i.bak；换 inode，先抹＝丢 fd 后续留痕）
   return 0
 }
 trap cleanup EXIT
 
 # ---- 1) 依赖检查 ----
 missing=""
-for c in python3 git opencode bun setsid; do
+for c in python3 git opencode bun; do  # setsid 软依赖（F27）：macOS 原生无，缺位走拉起处 nohup 兜底
   command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
 done
 [ -z "$missing" ] || fail "缺依赖:$missing —— 安装后重试"
@@ -126,8 +126,13 @@ else
   (umask 077; : > "$LOG")  # 0600：日志含 root 牌行，不得按 umask 0644 落盘
   AD_ENV=(env AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL")  # 展开值不作赋值前缀（bash 视为命令名）
   [ -n "$OC_PASSWORD" ] && AD_ENV+=("AGORA_OC_PASSWORD=$OC_PASSWORD")
-  # setsid 脱会话：装完 shell 退出/进程组收割不再陪葬服务（gt-71b6af）；nohup 兜底启动窗——handler 就位后 SIGHUP＝留痕退出（main.py）
-  "${AD_ENV[@]}" setsid nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
+  # 脱会话（gt-71b6af）：setsid 在位原位 exec（$! 即 daemon pid）；macOS 无 setsid → nohup
+  # 兜底（F27：$! 同为 python pid，cleanup/第 8 步击杀语义两形态一致；SIGHUP 由 main.py handler 留痕退出）
+  if command -v setsid >/dev/null 2>&1; then
+    "${AD_ENV[@]}" setsid nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
+  else
+    "${AD_ENV[@]}" nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
+  fi
   AD_PID=$!
   ready=""
   for _ in {1..100}; do  # 10s 上限：等就绪行（root 牌行在其前 flush）

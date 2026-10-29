@@ -145,7 +145,7 @@ rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch
 
 **Where does my code go?** Nowhere. agorad binds to localhost, workers are local opencode sessions, there is no telemetry, no cloud, no agora API keys. Whatever models your opencode uses, agora orchestrates them.
 
-**Platforms?** Linux only. Not macOS (the installer requires `setsid`, which stock macOS lacks) and not Windows (XDG paths).
+**Platforms?** Linux (verified). macOS: the code paths are in place (the installer falls back to `nohup` where `setsid` is absent) but not yet verified on a real Mac. Windows: run inside WSL.
 
 ## License
 

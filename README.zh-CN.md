@@ -144,7 +144,7 @@ rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch
 
 **我的代码会被传到哪？** 哪都不去。agorad 只绑 localhost，worker 是本地 opencode 会话，无遥测、无云端、无需给 agora 任何 API key。opencode 配什么模型，agora 就编排什么模型。
 
-**平台支持？** 仅 Linux。macOS 不支持（安装脚本硬依赖 `setsid`，macOS 原生无），Windows 亦不支持（XDG 路径）。
+**平台支持？** Linux（已验证）。macOS：代码路径就绪（无 `setsid` 时安装脚本回落 nohup），尚未真机验证。Windows：请在 WSL 内使用。
 
 ## License
 
