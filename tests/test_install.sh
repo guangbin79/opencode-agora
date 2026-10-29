@@ -205,7 +205,8 @@ chk "带 password 安装 root.token 在位 (Req: F1)" [ -s "$A4/.agora/root.toke
 # ---------- 场景 5：pkg 模式（F31 PyPI 分发：AGORA_PKG_ROOT 数据面＋PATH agorad 入口）----------
 newfix
 H5="$FIX/home"; A5="$FIX/plaza"; PKGROOT="$FIX/pkgroot"; BIN5="$FIX/bin"
-mkdir -p "$H5" "$PKGROOT/agora-plugin" "$PKGROOT/skills/agora-dispatch" "$PKGROOT/skills/agora-ops" "$BIN5"
+mkdir -p "$H5" "$PKGROOT/agora-plugin" "$PKGROOT/skills/agora-dispatch" "$PKGROOT/skills/agora-ops" "$BIN5" "$H5/.local/bin" "$BIN5/fakevenv"
+ln -sf "$BIN5/fakevenv/agora-board" "$H5/.local/bin/agora-board"  # 模拟 pipx 同路径活链接（round-2 B 册回归锚）
 for f in cred envPath hook index inject lift scope; do  # 只放 7 个非测试 ts（wheel 数据面同清单）
   cp "$REPO/agora-plugin/$f.ts" "$PKGROOT/agora-plugin/"
 done
@@ -237,6 +238,12 @@ assert cfg["mcp"]["agora"]["command"] == ["agora-mcp"], cfg["mcp"]["agora"]' "$H
 chk "pkg: agorad 载荷在位（lift 契约位）(Req: F31)" [ -f "$A5/.agora/agorad/main.py" ]
 chk "pkg: PATH stub agorad 确被调用 (Req: F31)" [ -f "$BIN5/agorad-called" ]
 chk "pkg: root.token 在位 (Req: F31)" [ -s "$A5/.agora/root.token" ]
+chk "pkg: pipx 形态活链接不被误删（round-2 B 册回归锚）" bash -c '
+[ -L "$1/.local/bin/agora-board" ] && [ "$(readlink "$1/.local/bin/agora-board")" = "$2/fakevenv/agora-board" ]' _ "$H5" "$BIN5"
+ln -sf "$A5/.agora/board_tui.py" "$H5/.local/bin/agora-board"  # repo 残留形态：指向载荷位
+HOME="$H5" AGORA_HOME="$A5" AGORA_PKG_ROOT="$PKGROOT" AGORA_AGORAD_SRC="$REPO/agorad" \
+  PATH="$BIN5:$PATH" bash "$PKGROOT/install.sh" >/dev/null 2>&1 || bad "pkg 二装退出 0 (Req: F31)"
+chk "pkg: repo 残留形态链接被收敛（round-2 B 册回归锚）" bash -c '[ ! -L "$1" ]' _ "$H5/.local/bin/agora-board"
 
 # ---------- 汇总 ----------
 echo "----------------------------------------"

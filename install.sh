@@ -113,8 +113,12 @@ mkdir -p "$AGORA_HOME/.agora" "$HOME/.local/bin"
 if [ -n "$PKG" ]; then
   # F31 pkg 模式：载荷源＝agora-install 注入的 site-packages agorad 包；
   # board_tui 载荷＋chmod＋agora-board 符号链接三行跳过（console script 替代）
-  # 收敛 repo→pkg 迁移残留：旧载荷/符号链接不清理会遮蔽 pipx console script（混版运行）
-  rm -f "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
+  # 收敛 repo→pkg 迁移残留：旧载荷删之防混版；符号链接只清指向本仓载荷位的残留——
+  # pipx 活链接同在 ~/.local/bin（默认 bin 目录），无差别 rm 即自毁 console script（round-2 B 册）
+  rm -f "$AGORA_HOME/.agora/board_tui.py"
+  if [ -L "$HOME/.local/bin/agora-board" ] && [ "$(readlink "$HOME/.local/bin/agora-board")" = "$AGORA_HOME/.agora/board_tui.py" ]; then
+    rm -f "$HOME/.local/bin/agora-board"
+  fi
   AD_SRC="${AGORA_AGORAD_SRC:?pkg 模式须由 agora-install 注入 AGORA_AGORAD_SRC}"
   rm -rf "$AGORA_HOME/.agora/agorad"
   cp -r "$AD_SRC" "$AGORA_HOME/.agora/"
