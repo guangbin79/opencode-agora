@@ -123,12 +123,28 @@ export type LiftResult = { ok: true; port: number } | { ok: false; reason: strin
 
 let memo: Promise<LiftResult> | null = null;
 
-/** 懒调 memo 版（失败同样 memo：每进程至多一跑，防每次工具调用重吃轮询）；resetLift 后重试。 */
-export function ensureOnce(): Promise<LiftResult> {
-  memo ??= ensureService()
+function fresh(): Promise<LiftResult> {
+  return ensureService()
     .then((r): LiftResult => ({ ok: true, port: r.port }))
     .catch((e: unknown): LiftResult => ({ ok: false, reason: e instanceof Error ? e.message : String(e) }));
-  return memo;
+}
+
+/** 懒调 memo 版（失败同样 memo：每进程至多一跑，防每次工具调用重吃轮询）；resetLift 后重试。
+ * 成功 memo 每次轻校验（readPort＋probe ~1ms）：agorad 重启换口/死亡即自愈——首见者换血 memo 并重拉，
+ * 并发后来者共享在飞自愈（单飞不重 spawn；resetLift 竞态回填，结果成败照常 memo）。
+ * service.json 瞬态读失（半写/暂缺）不认陈旧：回探 memo 口，活则守 memo（防误判漂移重拉出双守护）。
+ * （事故 2026-10-29：agorad 换随机端口后 memo 指死口，全会话 401 直至重启 serve。） */
+export function ensureOnce(): Promise<LiftResult> {
+  memo ??= fresh();
+  const cached = memo;
+  return cached.then(async (r) => {
+    if (!r.ok) return r;
+    const port = readPort(agoraHome());
+    if ((port === null || port === r.port) && (await probe(port ?? r.port))) return r;
+    if (memo !== cached && memo !== null) return memo; // 他人已换血：共享在飞自愈
+    memo = fresh(); // 首见者发起自愈（或 resetLift 竞态回填）；自愈经 ensureService 自身 probe 恰一次，不递归
+    return memo;
+  });
 }
 
 /** 复位失败 memo：用户救活 agorad 后恢复本会话（T4 doctor 接线）。 */

@@ -354,7 +354,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       expect(hits).toBe(0); // 预过滤：grep 等非 agora 非引导类零 HTTP 直过
       const before = hits;
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-hot", input: {} });
-      expect(hits).toBe(before + 2); // agora_* 冷启动探活＋F27 attach 分流拉取（stub 401→unreachable 不附牌，安全向）
+      expect(hits).toBe(before + 3); // agora_* 冷启动探活＋F27 attach 分流拉取＋memo 轻校验 probe（stub 401→unreachable 不附牌，安全向）
       const cold0 = performance.now();
       await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-hot", input: { filePath: join(plain, "x.md") } });
       const cold = performance.now() - cold0;

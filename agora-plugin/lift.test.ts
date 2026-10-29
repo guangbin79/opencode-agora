@@ -137,6 +137,89 @@ describe("ensureService 拉起三路径", () => {
 });
 
 describe("ensureOnce memo/reset", () => {
+  test("成功 memo 快路：同口 probe 过→原口返回零重拉（误重拉即『未安装』败）", async () => {
+    // Req: F4
+    resetLift();
+    const srv = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 401 }) });
+    writeFileSync(sjPath(), JSON.stringify({ pid: 1, port: srv.port }));
+    const savedScript = process.env.AGORAD_SCRIPT;
+    delete process.env.AGORAD_SCRIPT; // 缺省 script 不存在：若误触拉起必败——快路须不触 ensureService
+    try {
+      await ensureOnce();
+      expect(await ensureOnce()).toEqual({ ok: true, port: srv.port }); // probe 过直返 memo
+    } finally {
+      if (savedScript === undefined) delete process.env.AGORAD_SCRIPT;
+      else process.env.AGORAD_SCRIPT = savedScript;
+      srv.stop(true);
+      resetLift();
+    }
+  });
+
+  test("成功 memo 陈旧自愈：agorad 换口（service.json 改写＋新口在服务）→解析到新口", async () => {
+    // Req: F4
+    resetLift();
+    const old = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 401 }) });
+    writeFileSync(sjPath(), JSON.stringify({ pid: 1, port: old.port }));
+    await ensureOnce(); // memo 记旧口
+    old.stop(true); // agorad 重启换口：旧口死
+    const moved = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 401 }) });
+    writeFileSync(sjPath(), JSON.stringify({ pid: 1, port: moved.port }));
+    try {
+      expect(await ensureOnce()).toEqual({ ok: true, port: moved.port }); // 自愈新口，零 serve 重启
+    } finally {
+      moved.stop(true);
+      resetLift();
+    }
+  });
+
+  test("成功 memo 服务死→复位重拉 stub 解析 ok（新口就绪）", async () => {
+    // Req: F4
+    resetLift();
+    const dead = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 401 }) });
+    writeFileSync(sjPath(), JSON.stringify({ pid: 1, port: dead.port }));
+    await ensureOnce();
+    dead.stop(true); // 服务死亡，service.json 仍指旧口
+    const savedScript = process.env.AGORAD_SCRIPT;
+    process.env.AGORAD_SCRIPT = STUB; // ensureOnce 无 opts：经 env 走 stub 重拉
+    try {
+      const r = await ensureOnce();
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        const res = await fetch(`http://127.0.0.1:${r.port}/`);
+        expect(res.status).toBe(401); // 重拉就绪
+        expect(JSON.parse(readFileSync(sjPath(), "utf8")).port).toBe(r.port);
+      }
+    } finally {
+      if (savedScript === undefined) delete process.env.AGORAD_SCRIPT;
+      else process.env.AGORAD_SCRIPT = savedScript;
+      try {
+        process.kill(JSON.parse(readFileSync(sjPath(), "utf8")).pid); // 杀 detached stub 残留
+      } catch {
+        // 重拉失败/已退：无可杀
+      }
+      resetLift();
+    }
+  });
+
+  test("成功 memo＋service.json 瞬态缺失：回探 memo 口仍活→守 memo 不重拉", async () => {
+    // Req: F4
+    resetLift();
+    const srv = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 401 }) });
+    writeFileSync(sjPath(), JSON.stringify({ pid: 1, port: srv.port }));
+    const savedScript = process.env.AGORAD_SCRIPT;
+    delete process.env.AGORAD_SCRIPT; // 若误判漂移重拉必『未安装』败：守 memo 路须不触拉起
+    try {
+      await ensureOnce();
+      rmSync(sjPath()); // service.json 瞬态缺失
+      expect(await ensureOnce()).toEqual({ ok: true, port: srv.port }); // 服务仍活：守 memo
+    } finally {
+      if (savedScript === undefined) delete process.env.AGORAD_SCRIPT;
+      else process.env.AGORAD_SCRIPT = savedScript;
+      srv.stop(true);
+      resetLift();
+    }
+  });
+
   test("失败 memo 复用同一结果；resetLift 后真执行可成功", async () => {
     // Req: F4
     resetLift();
