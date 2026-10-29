@@ -490,7 +490,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     const editArgs = (sid: string) => ({ tool: "edit", sessionID: sid, input: { filePath: join(repo, "a.md") } });
     try {
       await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/不可达\/异常/);
-      await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/节流/); // 同 sid 窗内＝等节流
+      await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/不可达\/异常/); // 窗内回放 unreachable：判据不降级（评审 high 修复）
       code = 404;
       await expect(hooks["tool.execute.before"](editArgs("s-tri-n"))).rejects.toThrow(/真非 worker/);
     } finally {
@@ -523,8 +523,10 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     resetCredPull();
     try {
       expect(await pullCredential("s-404", srv.port)).toEqual({ reason: "not_worker", cred: null });
+      expect(await pullCredential("s-404", srv.port)).toEqual({ reason: "not_worker", cred: null }); // 窗内回放判据（评审 high 修复）：不降级裸 throttled
       resetCredPull(); // 出节流窗
       expect(await pullCredential("s-5xx", srv.port)).toEqual({ reason: "unreachable", cred: null });
+      expect(await pullCredential("s-5xx", srv.port)).toEqual({ reason: "unreachable", cred: null }); // 窗内回放：fail-closed 不变向
       resetCredPull();
       expect(await pullCredential("s-shape", srv.port)).toEqual({ reason: "unreachable", cred: null }); // 形状缺归 unreachable：调用方不得回落 root
       expect(getCredential("s-shape")).toBeUndefined(); // 未填缓存
@@ -596,6 +598,10 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-main-f27", input: m });
       expect(m._token).toBe("tok-rootfile");
       expect(m._sid).toBe("s-main-f27"); // R25-A 不变
+      // 窗内第二次调用（评审 high 场景：create→dispatch 连发）：回放 not_worker，root 附牌不断
+      const m2: Record<string, unknown> = { task: "t-m2" };
+      await hooks["tool.execute.before"]({ tool: "agora_task_dispatch", sessionID: "s-main-f27", input: m2 });
+      expect(m2._token).toBe("tok-rootfile");
       // 不可达：绝不落 root→不附牌（MCP 壳 -32001 安全向）
       mode = "500";
       const d: Record<string, unknown> = { task: "t-d" };

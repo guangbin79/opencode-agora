@@ -25,10 +25,12 @@ export function getCredential(sid: string): Cred | undefined {
 // ——同宿主多 worker 会话共享插件进程，进程级窗口会让别家首拉被误堵一窗
 const PULL_INTERVAL_MS = 30_000;
 const pullSeen = new Map<string, number>(); // sid->上次拉取时刻
+const lastVerdict = new Map<string, PullReason>(); // sid->窗内回放判据（评审 high 修复）
 
 /** 测试注入口：清节流窗。 */
 export function resetCredPull(): void {
   pullSeen.clear();
+  lastVerdict.clear();
 }
 
 /** 拉取拒因四分支（F27）：ok＝命中；not_worker＝404 服务侧无在飞任务绑本会话（主会话常态）；
@@ -40,9 +42,16 @@ export type PullResult = { reason: PullReason; cred: Cred | null };
  * cred=null＝走现有默认拒文案。短超时 2s：不拖垮工具调用判定链。 */
 export async function pullCredential(sid: string, port: number): Promise<PullResult> {
   const now = Date.now();
-  if (now - (pullSeen.get(sid) ?? 0) < PULL_INTERVAL_MS) return { reason: "throttled", cred: null };
+  if (now - (pullSeen.get(sid) ?? 0) < PULL_INTERVAL_MS) {
+    // 窗内零网络但回放上次判据——裸 throttled 会把已知 not_worker 降级：root 牌永不入
+    // 缓存，主会话窗内第二次调用将断附牌/误吃 READ_HINT（≤30s 陈旧度与节流设计同界）。
+    return { reason: lastVerdict.get(sid) ?? "throttled", cred: null };
+  }
   for (const [k, ts] of pullSeen) { // 出账：只留窗内活跃 sid，防常驻进程无界增长
-    if (now - ts >= PULL_INTERVAL_MS) pullSeen.delete(k);
+    if (now - ts >= PULL_INTERVAL_MS) {
+      pullSeen.delete(k);
+      lastVerdict.delete(k);
+    }
   }
   pullSeen.set(sid, now);
   try {
@@ -52,16 +61,27 @@ export async function pullCredential(sid: string, port: number): Promise<PullRes
       body: JSON.stringify({ sid }),
       signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
     });
-    if (r.status === 404) return { reason: "not_worker", cred: null }; // 非在飞 worker：常态未命中
-    if (!r.ok) return { reason: "unreachable", cred: null };
+    if (r.status === 404) {
+      lastVerdict.set(sid, "not_worker"); // 非在飞 worker：常态未命中（窗内回放防降级）
+      return { reason: "not_worker", cred: null };
+    }
+    if (!r.ok) {
+      lastVerdict.set(sid, "unreachable");
+      return { reason: "unreachable", cred: null };
+    }
     const d = (await r.json()) as { tid?: string; env_dir?: string; token?: string };
     // 形状缺＝异常安全向（归 unreachable：调用方不得回落 root 附牌）
-    if (!d.token || !d.env_dir) return { reason: "unreachable", cred: null };
+    if (!d.token || !d.env_dir) {
+      lastVerdict.set(sid, "unreachable");
+      return { reason: "unreachable", cred: null };
+    }
     const cred: Cred = { token: d.token, sid, role: "worker", tid: d.tid, envDir: d.env_dir };
     cacheCredential(cred);
+    lastVerdict.delete(sid); // ok 判据随缓存生效（后续走缓存命中，不再进本函数）
     return { reason: "ok", cred };
   } catch {
-    return { reason: "unreachable", cred: null }; // 服务不可达/超时：默认拒（与判定链服务不可达同口径）
+    lastVerdict.set(sid, "unreachable"); // 服务不可达/超时：默认拒（与判定链服务不可达同口径）
+    return { reason: "unreachable", cred: null };
   }
 }
 
