@@ -71,7 +71,7 @@ class _Srv:
         self.srv.server_close()
 
 
-def _detail_stub(task, stale=(), code=200):
+def _detail_stub(task, stale=(), code=200, drop_stale=False):
     """F28 status 双端点 stub：POST /board 单任务视图＋/doctor（僵态候选）。"""
 
     class H(http.server.BaseHTTPRequestHandler):
@@ -88,6 +88,9 @@ def _detail_stub(task, stale=(), code=200):
             if self.path.strip("/") == "board":
                 data = json.dumps({"task": task, "events": [],
                                    "done_body": None})
+            elif drop_stale:  # 旧 daemon 版本偏差：/doctor 无 stale_candidates 键
+                data = json.dumps({"age_rank": [], "last_seen_rank": [],
+                                   "env": []})
             else:
                 data = json.dumps({"age_rank": [], "last_seen_rank": [],
                                    "stale_candidates": [[t, 0.0] for t in stale],
@@ -101,9 +104,10 @@ def _detail_stub(task, stale=(), code=200):
 
 
 class _DetailSrv:
-    def __init__(self, task, stale=(), code=200):
+    def __init__(self, task, stale=(), code=200, drop_stale=False):
         self.srv = http.server.HTTPServer(("127.0.0.1", 0),
-                                          _detail_stub(task, stale, code))
+                                          _detail_stub(task, stale, code,
+                                                       drop_stale))
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     @property
@@ -547,6 +551,16 @@ class TestStatus(unittest.TestCase):
         shutil.rmtree(home, ignore_errors=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("gt-lost", p.stderr)  # 不可达同契约：归任务不悬空
+
+    def test_status_cli_old_daemon_doctor_without_stale_key(self):  # Req: F28 版本偏差降级
+        old = time.time() - 3600
+        srv = _DetailSrv(self._task("running", old), drop_stale=True)
+        try:
+            p = run_cli(["status", "t1"], mkhome(srv.port))
+        finally:
+            srv.stop()
+        self.assertEqual(p.returncode, 0)           # 缺键不裸 KeyError→exit 2
+        self.assertIn("class=busy_round", p.stdout)  # 空集降级＝非候选，判读照常
 
 
 if __name__ == "__main__":

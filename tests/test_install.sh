@@ -59,7 +59,8 @@ chk "夹具 agorad 存活（service.json 端口可连，gt-71b6af）" [ -n "$GOT
 chk "install 拉起行 setsid nohup 在位（源级锁，gt-71b6af/gt-e38e41）" grep -qF 'exec setsid nohup python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
 chk "依赖检查不含 setsid（macOS 兼容，Req: F27）" bash -c '! grep -qE "for c in [^;]*setsid" "$1"' _ "$REPO/install.sh"
 chk "无 setsid 时 nohup 兜底分支在位（源级锁，Req: F27）" grep -qF 'exec nohup python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
-chk "凭据不进 argv（子壳 export，无 env 变参携带 OC_PASSWORD）" bash -c '! grep -qF "AD_ENV+=(\"AGORA_OC_PASSWORD=" "$1"' _ "$REPO/install.sh"
+chk "凭据经子壳 export 进 environ（正向锁——删行即断凭据投递，task-bb4ad2）" grep -qF 'export AGORA_OC_PASSWORD="$OC_PASSWORD"' "$REPO/install.sh"
+chk "凭据不进 argv（无未注释行同时携 OC_PASSWORD 赋值与启动器记号）" bash -c '! grep -qE "^[^#]*AGORA_OC_PASSWORD=.*(env|setsid|nohup|python3)" "$1"' _ "$REPO/install.sh"
 chk "启动失败转储抹牌行（流式 sed，task-bb4ad2）" grep -qF "sed '/^AGORA_ROOT_TOKEN: /d' \"\$LOG\" >&2" "$REPO/install.sh"
 chk "cleanup 连 .1 一起抹（前轮信号中断残留，task-bb4ad2）" grep -qF 'for f in "$LOG" "$LOG.1"' "$REPO/install.sh"
 ADSESS=""
@@ -138,8 +139,14 @@ cp "$OCJ2" "$FIX/oc-run1.json"
 cp "$A2/.agora/root.token" "$FIX/token-run1"
 echo "$FIX/some/repo" >> "$A2/.agora/inactive-repos"   # 模拟用户自录名册（二装不可覆盖）
 cp -r "$H2/.config/opencode/skills" "$FIX/skills-run1"
+printf 'AGORA_ROOT_TOKEN: seeded-stale\n' >> "$A2/.agora/install-agorad.log"  # 模拟前轮中断残牌（.1 留档实路径，task-bb4ad2）
 
 run_install "$H2" "$A2" >/dev/null 2>&1 || bad "二装退出 0 (Req: F1)"
+
+chk "二装 .1 留档连残牌一并抹（取牌即抹实路径，task-bb4ad2）" bash -c '
+for f in "$1/.agora/install-agorad.log" "$1/.agora/install-agorad.log.1"; do
+  [ -f "$f" ] && grep -q "^AGORA_ROOT_TOKEN: " "$f" && exit 1
+done; exit 0' _ "$A2"
 
 chk "二装 opencode.json 逐字节不变 (Req: F1)" cmp -s "$FIX/oc-run1.json" "$OCJ2"
 chk "他 server other 保留 (Req: F1)" python3 -c '
