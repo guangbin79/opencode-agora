@@ -57,4 +57,4 @@ MCP 路径的 `task_cancel` 无确认门（无 board-tui 式 y/n），确认纪�
 
 何时值得人看一眼：age 前列且状态非在飞/blocked、last_seen 长期停滞、on_disk 与任务状态矛盾。三者之外勿主动巡检——不上 cron、不做全局扫描。
 
-> 来源：F5＋2026-10-28 二批免判口径（busy/in_gate 免判、last_seen 只 worker 刷、done 滞留照拍）＋F15（env 活性融合）＋F28（status 三态）／设计§4.7（doctor 含任务年龄/最后活动排行）＋B6（孤儿永不自动删）／agorad/core/report.py:129-171（stale_candidates/_env_activity/doctor_view；孤儿扫描属②期）＋agorad/core/health.py（边沿判僵、stalled 免通知、email opt-in）
+> 来源：F5＋2026-10-28 二批免判口径（busy/in_gate 免判、last_seen 只 worker 刷、done 滞留照拍）＋F15（env 活性融合）＋F28（status 三态）／设计§4.7（doctor 含任务年龄/最后活动排行）＋B6（孤儿永不自动删）／agorad/core/report.py:21-34,129-147,149-172（_env_activity／stale_candidates／doctor_view；孤儿扫描属②期）＋agorad/core/health.py（边沿判僵、stalled 免通知、email opt-in）
