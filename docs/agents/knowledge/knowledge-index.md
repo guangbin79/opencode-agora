@@ -31,6 +31,7 @@
 - **Python 地板=3.10**（PEP 604 实证）：`str | None` 运行时注解且无 `from __future__ import annotations`（access/oc.py、access/store.py）——3.8/3.9 导入即 TypeError；README/CI matrix 以 3.10/3.12 为地板，勿回写 ≥3.8
 - **Bun.spawn detached 等价 setsid**（F27 实证）：`detached: true` 子进程 sess≠父进程（probe 实证），POSIX 新会话/Windows 新进程组——插件拉起不再依赖 setsid 包装；install.sh 侧 macOS 缺 setsid 走 nohup 兜底（$! 两形态同为 python pid，击杀语义不变）
 - **维护者自编辑通道**（F27 过程判例）：enforce ON 下 root 亦被拦（hook.ts 写入分支 root→DISPATCH_HINT，零信任设计；task-305aff 后该缓存命中分支纯防御位——root 牌生产不入缓存，主会话写面拦截实际经 pull 404 not_worker 路由送达 DISPATCH_HINT，镜像 readish 裁定 A）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离，MCP 拉牌救不了 hook 拦截）
+- **wheel 数据面两坑＋argv 假象**（F31 实证，53fb8ec）：①importlib.metadata 的 RECORD 是安装态（pip 重写带 `../../../` 前缀），`locate_file` 以 site-packages 为基——传 `find_share_dir` 尾段（`share/...`）必落 site-packages/share 幽灵路径，兜底 `Path(sys.prefix)/rel` 双态通吃；②data-files 目的地键即安装后目录名（`share/opencode-agora/plugin` 装成 `plugin/`），与 install.sh 源布局 `agora-plugin/` 名实冲突致 pkg 分支 cp 落空——目的地键须保源目录名；③`python3 -c '...sys.argv[0]...'` 里 argv[0] 是字面 `-c`，首参自 argv[1] 起（dash/bash 同），拿 argv 拼命令行须从 1 数
 
 ## 已知接受面
 
