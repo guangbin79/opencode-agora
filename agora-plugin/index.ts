@@ -9,14 +9,14 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getCredential, pullCredential } from "./cred";
+import { getCredential, pullCredential, type PullResult } from "./cred";
 import { onShellCreate, type ShellCreatePayload } from "./envPath";
 import { onInject } from "./inject";
 import {
   AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
 } from "./lift";
 import { isDormant } from "./scope";
-import { agoraHome, enforceRelevant, isWriteTool, shouldBlock } from "./hook";
+import { agoraHome, enforceRelevant, isWriteTool, NO_CRED_HINT, readishGated, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -99,14 +99,14 @@ export default {
       }
       // 服务不可达默认拒：lift 失败静默，判定链按无凭据走引导；拒因携 resetLift 恢复指引。
       // 旗按需拉取（T6 评审）：预过滤先行——非引导类工具（MCP/grep 等）零开销直过。
+      // F27：agora_* 附牌面也需 lift 端口（attach 分流拉取），不论 enforce 旗。
       const on = enforceOverride ?? (enforceRelevant(event.tool) ? await pullEnforce() : false);
       let lift: LiftResult | null = null;
-      if (on) lift = await ensureOnce();
-      if (isAgora) {
+      if (on || isAgora) lift = await ensureOnce();
+      if (isAgora && !lift.ok) {
         // 冷启动（设计 §5.4）：首个 agora_* 调用即拉起 agorad；败态即复位 memo——
         // 下轮 edit 重探自愈（免重启恢复，兑现 lift.ts LIFT_RECOVER 承诺）。
-        const l = lift ?? (await ensureOnce());
-        if (!l.ok) resetLift();
+        resetLift();
       }
       const input = event.input ?? {};
       const target =
@@ -115,12 +115,13 @@ export default {
         "";
       let cred = getCredential(event.sessionID);
       let credSrc = cred ? "cache" : "miss";
-      // F25 修正推改拉：write 判定遇缓存未命中（推送通道不触发钩子的出生竞态/宿主
-      // 重载）→节流拉取自愈；命中填缓存放行，未命中/失败 cred 保持空＝默认拒。
-      if (!cred && on && lift?.ok && isWriteTool(event.tool)) {
-        const pulled = await pullCredential(event.sessionID, lift.port);
-        if (pulled) {
-          cred = pulled;
+      let pull: PullResult | null = null;
+      // F27 拉取闭合三面：write/readish 判定面（enforce on 才消费凭据）＋agora_* 附牌面
+      // （不论旗——附牌语义独立于判定旗）。节流按 sid，多面共用不重复拉。
+      if (!cred && lift?.ok && (isAgora || (on && (isWriteTool(event.tool) || readishGated(event.tool, target))))) {
+        pull = await pullCredential(event.sessionID, lift.port);
+        if (pull.cred) {
+          cred = pull.cred;
           credSrc = "pulled";
         }
       }
@@ -128,20 +129,30 @@ export default {
       // 来源——分诊「钩子没触发」vs「缓存空」两态（2.2.0 病灶）；stderr 入服务日志不污染 TUI。
       if (process.env.AGORA_HOOK_DEBUG) {
         process.stderr.write(
-          `[agora-plugin] tool=${event.tool} sid=${event.sessionID} cred=${credSrc} enforce=${on}\n`);
+          `[agora-plugin] tool=${event.tool} sid=${event.sessionID} cred=${credSrc} pull=${pull?.reason ?? "-"} enforce=${on}\n`);
       }
-      // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token——
-      // worker credential 消息优先，未命中回落 root 牌接管文件（主会话经 MCP 调任务面）。
+      // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token。
+      // F27 attach 分流：缓存/拉取命中的 worker 牌优先；拉取 404＝非 worker 会话→维持
+      // root 牌接管文件（主会话合法路径不动）；节流/不可达/lift 败态→不附牌——绝不落
+      // root（堵破口：worker 冷缓存首调不得以 root 身份行动，task_cancel/enforce 级）。
       // _sid 携调用者真实会话 id（R25-A：服务登记主会话绑定，拍人注入真会话）。
       if (isAgora) {
-        const token = cred?.token ?? readRootToken();
+        const token = cred?.token ?? (pull?.reason === "not_worker" ? readRootToken() : null);
         if (token) {
           input._token = token;
           input._sid = event.sessionID;
         }
       }
-      const hint = shouldBlock(event.tool, target, cwd, cred, on);
+      let hint = shouldBlock(event.tool, target, cwd, cred, on, pull?.reason ?? null);
       if (hint) {
+        // F27 拒因分诊（信息量增量，语义不变）：拉取四分支区分「等节流/服务异常/真非 worker」。
+        if (hint === NO_CRED_HINT && pull && pull.reason !== "ok") {
+          const why =
+            pull.reason === "throttled" ? "拉取节流中（30s 窗，稍候重试）" :
+            pull.reason === "unreachable" ? "agorad 拉取不可达/异常（安全向拒）" :
+            "真非 worker：服务侧无在飞任务绑定本会话";
+          hint = `${hint}（${why}）`;
+        }
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
       }
     });

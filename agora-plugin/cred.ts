@@ -31,11 +31,16 @@ export function resetCredPull(): void {
   pullSeen.clear();
 }
 
-/** 缓存未命中拉取自愈（F25 修正）：命中即填缓存并返回；404/失败/节流内返回 null
- * ＝走现有默认拒文案。短超时 2s：不拖垮工具调用判定链。 */
-export async function pullCredential(sid: string, port: number): Promise<Cred | null> {
+/** 拉取拒因四分支（F27）：ok＝命中；not_worker＝404 服务侧无在飞任务绑本会话（主会话常态）；
+ * unreachable＝连接拒/超时/5xx/形状缺（异常安全向）；throttled＝节流窗内零网络。 */
+export type PullReason = "ok" | "not_worker" | "unreachable" | "throttled";
+export type PullResult = { reason: PullReason; cred: Cred | null };
+
+/** 缓存未命中拉取自愈（F25 修正推改拉）：命中即填缓存并返回；其余按拒因枚举返回
+ * cred=null＝走现有默认拒文案。短超时 2s：不拖垮工具调用判定链。 */
+export async function pullCredential(sid: string, port: number): Promise<PullResult> {
   const now = Date.now();
-  if (now - (pullSeen.get(sid) ?? 0) < PULL_INTERVAL_MS) return null;
+  if (now - (pullSeen.get(sid) ?? 0) < PULL_INTERVAL_MS) return { reason: "throttled", cred: null };
   for (const [k, ts] of pullSeen) { // 出账：只留窗内活跃 sid，防常驻进程无界增长
     if (now - ts >= PULL_INTERVAL_MS) pullSeen.delete(k);
   }
@@ -47,14 +52,16 @@ export async function pullCredential(sid: string, port: number): Promise<Cred | 
       body: JSON.stringify({ sid }),
       signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
     });
-    if (!r.ok) return null; // 404＝非在飞 worker：常态未命中
+    if (r.status === 404) return { reason: "not_worker", cred: null }; // 非在飞 worker：常态未命中
+    if (!r.ok) return { reason: "unreachable", cred: null };
     const d = (await r.json()) as { tid?: string; env_dir?: string; token?: string };
-    if (!d.token || !d.env_dir) return null; // 形状缺＝安全向拒绝
+    // 形状缺＝异常安全向（归 unreachable：调用方不得回落 root 附牌）
+    if (!d.token || !d.env_dir) return { reason: "unreachable", cred: null };
     const cred: Cred = { token: d.token, sid, role: "worker", tid: d.tid, envDir: d.env_dir };
     cacheCredential(cred);
-    return cred;
+    return { reason: "ok", cred };
   } catch {
-    return null; // 服务不可达/超时：默认拒（与判定链服务不可达同口径）
+    return { reason: "unreachable", cred: null }; // 服务不可达/超时：默认拒（与判定链服务不可达同口径）
   }
 }
 

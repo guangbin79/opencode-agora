@@ -7,7 +7,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { Cred } from "./cred";
+import type { Cred, PullReason } from "./cred";
 
 export const DISPATCH_HINT =
   "被拦：本机 git 仓直改仅限委托的隔离环境（cwd∈任务 env）。请经 agora 任务面派发（task_create/task_dispatch）持凭据作业；直接改仓仅限豁免面。";
@@ -71,6 +71,12 @@ export function isWriteTool(tool: string): boolean {
   return WRITE_TOOLS.has(tool);
 }
 
+/** read/bash 目标落 state 账本子树（READ_HINT 面才消费凭据）——F27 readish 拉取 gate，
+ * 防普通 read 每次白付拉取 HTTP。 */
+export function readishGated(tool: string, targetPath: string): boolean {
+  return READISH_TOOLS.has(tool) && under(join(agoraHome(), "state"), fold(targetPath));
+}
+
 /** wrong-door 拒因＋副本换算（尽力而为）：envDir basename 形如 {repo}__wt-* →
  * 主仓根＝envDir 父目录/{repo}；cwd 落主仓内则附副本对应路径，推导不出退化为仅列两侧实值。 */
 export function wrongDoorHint(envDir: string, cwd: string): string {
@@ -86,6 +92,10 @@ export function wrongDoorHint(envDir: string, cwd: string): string {
 /**
  * 判定链（F1）：返回引导文案＝拒，null＝放行。
  * 凭据"活动"的本地代理＝持牌＋envDir＋cwd∈envDir；活动任务终审在服务侧（T5 接线对齐）。
+ * pull＝本次拉取拒因（F27，缺省 null）：readish 面按三态判——404（not_worker）＝服务侧
+ * 非在飞 worker 绑定本会话，单用户模型下与主会话同属可信主类，按「主会话例外」放行
+ * （root 牌从不入插件缓存，404 是主会话的唯一可判据——裁定 A 救活死条文）；拉到
+ * worker 凭据或不可达/节流 → 维持 READ_HINT（fail-closed）。
  */
 export function shouldBlock(
   tool: string,
@@ -93,12 +103,14 @@ export function shouldBlock(
   cwd: string,
   cred: Cred | undefined | null,
   enforceOn: boolean,
+  pull: PullReason | null = null,
 ): string | null {
   if (!enforceOn) return null;
   const target = fold(targetPath);
   if (READISH_TOOLS.has(tool)) {
     if (!under(join(agoraHome(), "state"), target)) return null; // events/wiki/其余裸读开放
     if (cred?.role === "root") return null; // 主会话例外全开
+    if (pull === "not_worker") return null; // F27 裁定 A：非在飞 worker＝可信主类，放行
     return READ_HINT;
   }
   if (!WRITE_TOOLS.has(tool)) return null;

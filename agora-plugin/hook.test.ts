@@ -152,6 +152,17 @@ describe("shouldBlock 判定链", () => {
     // Req: F1
     expect(shouldBlock("read", join(home, "state", "tasks.jsonl"), plain, null, false)).toBeNull();
   });
+
+  test("F27 readish 三态（纯函数）：not_worker 放行；worker cred/pull 缺省/不可达/节流仍拒", () => {
+    // Req: F27
+    const ledger = join(home, "state", "tasks.jsonl");
+    expect(shouldBlock("read", ledger, plain, null, true, "not_worker")).toBeNull(); // 裁定 A：非在飞 worker＝可信主类
+    expect(shouldBlock("read", ledger, plain, worker, true, "ok")).toBe(READ_HINT); // worker 走工具面（设计本意）
+    expect(shouldBlock("read", ledger, plain, null, true, "unreachable")).toBe(READ_HINT); // fail-closed
+    expect(shouldBlock("read", ledger, plain, null, true, "throttled")).toBe(READ_HINT);
+    expect(shouldBlock("read", ledger, plain, null, true)).toBe(READ_HINT); // 缺省＝既有形态零漂移
+    expect(shouldBlock("bash", ledger, plain, null, true, "not_worker")).toBeNull(); // bash 同面
+  });
 });
 
 describe("cred 凭据管家", () => {
@@ -314,7 +325,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       expect(hits).toBe(0); // 预过滤：grep 等非 agora 非引导类零 HTTP 直过
       const before = hits;
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-hot", input: {} });
-      expect(hits).toBe(before + 1); // agora_* 冷启动探活（终审修复：首个调用即拉起，设计 §5.4）——探活 1 次不拉旗
+      expect(hits).toBe(before + 2); // agora_* 冷启动探活＋F27 attach 分流拉取（stub 401→unreachable 不附牌，安全向）
       const cold0 = performance.now();
       await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-hot", input: { filePath: join(plain, "x.md") } });
       const cold = performance.now() - cold0;
@@ -401,24 +412,130 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
-  test("pullCredential 纯函数：形状缺字段 null、非 2xx null、服务异常 null（安全向）", async () => {
-    // Req: F25
+  test("F27 readish 拉取接线三态：404 放行 state 读；worker 拉取后仍 READ_HINT；不可达仍 READ_HINT", async () => {
+    // Req: F27
+    const hooks = wire();
+    setEnforce(null); // 服务持旗拉取形态
+    let mode: "ok" | "404" | "500" = "404";
     const srv = Bun.serve({
       port: 0,
       fetch(req) {
         const url = new URL(req.url);
-        if (url.pathname === "/bad-shape") return Response.json({ tid: "t" }); // 缺 token/env_dir
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            if (mode === "ok" && sid === "s-read-w") {
+              return Response.json({ tid: "t-f27r", env_dir: envDir, token: "tok-rw" });
+            }
+            if (mode === "500") return new Response("{}", { status: 500 });
+            return new Response("{}", { status: 404 });
+          });
+        }
+        if (req.headers.get("x-agora-token") !== "tok-root") return new Response("{}", { status: 401 });
+        return Response.json({ ok: true, enforce_on: true });
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`;
+    resetLift();
+    resetCredPull();
+    const ledger = join(home, "state", "tasks.jsonl");
+    try {
+      // 404（not_worker）→按主会话例外放行（裁定 A）
+      await hooks["tool.execute.before"]({ tool: "read", sessionID: "s-read-main", input: { filePath: ledger } });
+      // worker 拉取命中→凭据入缓存，仍 READ_HINT（账本走工具面，设计本意）
+      mode = "ok";
+      await expect(
+        hooks["tool.execute.before"]({ tool: "read", sessionID: "s-read-w", input: { filePath: ledger } }),
+      ).rejects.toThrow(/账本面/);
+      expect(getCredential("s-read-w")?.token).toBe("tok-rw");
+      // 不可达→安全向仍 READ_HINT
+      mode = "500";
+      await expect(
+        hooks["tool.execute.before"]({ tool: "read", sessionID: "s-read-dead", input: { filePath: ledger } }),
+      ).rejects.toThrow(/账本面/);
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      setEnforce(false);
+      srv.stop(true);
+    }
+  });
+
+  test("F27 拒因分诊：NO_CRED_HINT 按拉取拒因附文案（服务异常/等节流/真非 worker）", async () => {
+    // Req: F27
+    const hooks = wire();
+    setEnforce(null);
+    let code = 500;
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return new Response("{}", { status: code });
+        }
+        if (req.headers.get("x-agora-token") !== "tok-root") return new Response("{}", { status: 401 });
+        return Response.json({ ok: true, enforce_on: true });
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`;
+    resetLift();
+    resetCredPull();
+    const editArgs = (sid: string) => ({ tool: "edit", sessionID: sid, input: { filePath: join(repo, "a.md") } });
+    try {
+      await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/不可达\/异常/);
+      await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/节流/); // 同 sid 窗内＝等节流
+      code = 404;
+      await expect(hooks["tool.execute.before"](editArgs("s-tri-n"))).rejects.toThrow(/真非 worker/);
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      setEnforce(false);
+      srv.stop(true);
+    }
+  });
+
+  test("pullCredential 拒因枚举：404→not_worker、500/形状缺/连接拒→unreachable、命中→ok＋入缓存、窗内→throttled（F27）", async () => {
+    // Req: F27
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            if (sid === "s-ok") return Response.json({ tid: "t-ok", env_dir: "/e", token: "tok-ok" });
+            if (sid === "s-shape") return Response.json({ tid: "t" }); // 缺 token/env_dir
+            if (sid === "s-404") return new Response("{}", { status: 404 });
+            return new Response("{}", { status: 500 });
+          });
+        }
         return new Response("{}", { status: 500 });
       },
     });
     resetCredPull();
     try {
-      expect(await pullCredential("s-a", srv.port)).toBeNull(); // 500→null
+      expect(await pullCredential("s-404", srv.port)).toEqual({ reason: "not_worker", cred: null });
       resetCredPull(); // 出节流窗
-      expect(await pullCredential("s-a", srv.port + 1)).toBeNull(); // 连接拒→null
+      expect(await pullCredential("s-5xx", srv.port)).toEqual({ reason: "unreachable", cred: null });
       resetCredPull();
-      expect(await pullCredential("s-b", srv.port)).toBeNull(); // bad-shape→null
-      expect(getCredential("s-b")).toBeUndefined(); // 未填缓存
+      expect(await pullCredential("s-shape", srv.port)).toEqual({ reason: "unreachable", cred: null }); // 形状缺归 unreachable：调用方不得回落 root
+      expect(getCredential("s-shape")).toBeUndefined(); // 未填缓存
+      resetCredPull();
+      expect(await pullCredential("s-conn", srv.port + 1)).toEqual({ reason: "unreachable", cred: null }); // 连接拒
+      resetCredPull();
+      const ok = await pullCredential("s-ok", srv.port);
+      expect(ok.reason).toBe("ok");
+      expect(ok.cred?.token).toBe("tok-ok");
+      expect(getCredential("s-ok")?.token).toBe("tok-ok"); // 命中填缓存
+      expect((await pullCredential("s-ok", srv.port)).reason).toBe("throttled"); // 窗内零网络
     } finally {
       resetCredPull();
       srv.stop(true);
@@ -440,26 +557,67 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
-  test("附牌回落：无 worker cred 的主会话调 agora_* → _token＝root.token；worker cred 命中优先；两路皆缺不附", async () => {
-    // Req: F1
+  test("F27 attach 分流：冷缓存 worker 拉取牌优先不落 root；404 root 牌保持；不可达不附牌；两路皆缺不附", async () => {
+    // Req: F27
     const hooks = wire();
-    setEnforce(false); // 本例只验附牌面，不涉判定链
+    setEnforce(false); // 本例只验附牌面：分流独立于 enforce 旗
+    let mode: "ok" | "404" | "500" = "ok";
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            if (mode === "ok" && sid === "s-cold-w") {
+              return Response.json({ tid: "t-f27", env_dir: envDir, token: "tok-pulled" });
+            }
+            if (mode === "500") return new Response("{}", { status: 500 });
+            return new Response("{}", { status: 404 });
+          });
+        }
+        return Response.json({ ok: true, enforce_on: false }); // lift 探活面
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
     writeFileSync(join(home, ".agora", "root.token"), "tok-rootfile\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`; // lift 直达探活
+    resetLift();
+    resetCredPull();
     try {
-      const main: Record<string, unknown> = { task: "t-m" };
-      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-main", input: main });
-      expect(main._token).toBe("tok-rootfile"); // getCredential 未命中→回落 root 牌接管文件
-      expect(main._sid).toBe("s-main"); // R25-A：附牌同携调用者真实会话 sid（服务绑主会话）
-      cacheCredential({ token: "tok-worker", sid: "s-prio", role: "worker", envDir: "" });
+      // 冷缓存 worker：拉取命中→附 worker 牌（root 牌文件在位也绝不落 root）
       const w: Record<string, unknown> = { task: "t-w" };
-      await hooks["tool.execute.before"]({ tool: "agora_task_create", sessionID: "s-prio", input: w });
-      expect(w._token).toBe("tok-worker"); // worker credential 消息优先级不变
-      expect(w._sid).toBe("s-prio");
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-cold-w", input: w });
+      expect(w._token).toBe("tok-pulled");
+      expect(getCredential("s-cold-w")?.token).toBe("tok-pulled"); // 拉取填缓存
+      // 404：非在飞 worker（主会话）→维持 root 牌接管文件附牌
+      mode = "404";
+      const m: Record<string, unknown> = { task: "t-m" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-main-f27", input: m });
+      expect(m._token).toBe("tok-rootfile");
+      expect(m._sid).toBe("s-main-f27"); // R25-A 不变
+      // 不可达：绝不落 root→不附牌（MCP 壳 -32001 安全向）
+      mode = "500";
+      const d: Record<string, unknown> = { task: "t-d" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-dead-f27", input: d });
+      expect(d._token).toBeUndefined();
+      // 两路皆缺（404 且 root 牌文件缺）→不附
+      mode = "404";
       rmSync(join(home, ".agora", "root.token"));
-      const none: Record<string, unknown> = { task: "t-n" };
-      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-nocred", input: none });
-      expect(none._token).toBeUndefined(); // 两路皆缺→不附牌（MCP 壳 -32001 安全向不变）
+      const n: Record<string, unknown> = { task: "t-n" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-noroot-f27", input: n });
+      expect(n._token).toBeUndefined();
+      // 缓存命中 worker 优先级不变
+      cacheCredential({ token: "tok-worker", sid: "s-prio", role: "worker", envDir: "" });
+      const p: Record<string, unknown> = { task: "t-p" };
+      await hooks["tool.execute.before"]({ tool: "agora_task_create", sessionID: "s-prio", input: p });
+      expect(p._token).toBe("tok-worker");
     } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      srv.stop(true);
       rmSync(join(home, ".agora", "root.token"), { force: true });
     }
   });

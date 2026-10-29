@@ -256,6 +256,8 @@ class _Handler(BaseHTTPRequestHandler):
                                      "task": hit[0] if tok else None})
         if not tok:
             return self._json(404, {"error": "no cred for sid"})
+        # F27 等价性注释：此处返回 token 的信任边界与直读 $AGORA_HOME/tokens 凭据文件
+        # 等价（单用户回环模型，本端点仅 127.0.0.1 可达）——未新增攻击面，勿过度加固。
         return self._json(200, {"tid": hit[0], "env_dir": hit[1]["env_dir"],
                                 "token": tok})
 
