@@ -7,7 +7,7 @@
 - **甲案跨仓**：耦合仓顺序编排（B7 after:），后仓经 ../ 见前仓已合并形态——无复合环境
 - **verify 双路**：预登记（快速路）＋ worker 回填（探索路）并存
 - **三访问层**：agorad 内域核心＋oc（opencode API）＋store（账本）＋gitx（worktree）
-- **11+1 工具面**：11 服务端＋1 壳层 wait
+- **12+1 工具面**：12 服务端端点（httpd._TOOLS）＋壳层 wait＝MCP 面 13 工具（agora_mcp._TOOLS）
 - **会话牌认证**：root/dispatcher/worker 角色矩阵＋附牌链
 
 ## 关键模式
@@ -27,6 +27,8 @@
 - **worker 会话原生写被自家闸拦的写通道**（gt-99ae7b）：harness 会话插件凭据缓存空（inject 未达）时 edit/write 全拦、req-gate 拦首写——mcp_shell 白名单（git/cat/ls）成唯一写通道：原生 write 落 /tmp/opencode 补丁文件＋`git apply --unidiff-zero -` stdin 打零上下文补丁；铁律：hunk 行数计数必须准确，计数少一行时 git 静默截尾行（EOF 语法错才暴露）
 - **合成消息不触发 prompt hook——F25 静默通道失效根因**（task-fb8b01）：v2.2.0 官方契约明示 synthetic/shell/compaction/move 控制均不走 prompt admission hook——inject_silent 静默重注入对插件 onInject 永不可达（牌不入缓存→worker 恒拒；彼时四病一文案无法自诊）；自愈＝对 opencode `/api/session/{sid}/prompt` 以真实 prompt 依次重注 BOOT 形＋credential 形两消息（onInject 入缓存，下轮 edit 过闸；配方随 F26 落任务页与 NO_CRED_HINT 指路）；诊断教训：黑盒排障逐项核前提（location 经 /api 实证、安装副本 git hash-object 比对、serve 启动时 vs 插件 mtime），且勿信「凭据清零」惯性叙事——拒因不可辨正是 F26 前的系统病
 - **mcp_shell 白名单封死一切执行向量**（task-fb8b01）：ALLOW_COMMANDS（ls/cat/head/tail/grep/find/wc/sort/uniq/cut/awk/git/du/df/ps/rg/agentctl/semantic-memory）外 bun/python/bash/sh/env 全拒，策略还深防执行旁路——`git -c`（command-scoped config）、`git config` 子命令、`find -exec`（`;` 报 shell operator、`+` 显式拒）、`awk` external access（system()）逐一封死；worker 跑 verify 的合法通道＝一次性 opencode API 会话（POST /session→move→prompt「跑 X 原样贴输出」→GET message 读转录→DELETE session），或交服务侧 merge 门自跑（gate.py subprocess shell=True cwd=env_dir）
+- **计数声明须分面**（推广重写 ocr 实证）：同一"工具数"三面异值——MCP tools/list=13（含 wait）、HTTP 端点=12（wait 壳层本地拦截 `_tools_call` 不转发）、旧注释 12——blanket 全局替换把 httpd 事实改错（13≠端点数）；改计数类声明先 grep 各消费面逐面改，注释随面定值
+- **Python 地板=3.10**（PEP 604 实证）：`str | None` 运行时注解且无 `from __future__ import annotations`（access/oc.py、access/store.py）——3.8/3.9 导入即 TypeError；README/CI matrix 以 3.10/3.12 为地板，勿回写 ≥3.8
 
 ## 已知接受面
 

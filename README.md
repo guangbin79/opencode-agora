@@ -1,114 +1,152 @@
 # opencode-agora
 
+[![CI](https://github.com/guangbin79/opencode-agora/actions/workflows/ci.yml/badge.svg)](https://github.com/guangbin79/opencode-agora/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org)
+[![made for opencode v2](https://img.shields.io/badge/made%20for-opencode%20v2-6e7bff.svg)](https://opencode.ai)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Multi-agent delegation for [opencode](https://opencode.ai) v2 — you state goals, agents deliver verified code, merges happen automatically.
+Multi-agent delegation for [opencode](https://opencode.ai) v2. You state goals in plain language; each task runs in its own git worktree; the **service itself runs your tests**; only verified work gets merged.
 
+```text
+You:    "Fix the login bug in repoB. Run pytest -q, merge when green."
+agora:   └─ spawns a worker in an isolated git worktree
+             worker fixes → service runs pytest itself → review green → ff-only merge
+You:    "How's it going?"   →   board: ✅ merged
 ```
-You: "Fix the login bug in repoB"
-     └─ agora dispatches a worker into an isolated git worktree
-        worker fixes → tests pass → code reviewed → auto-merged
-        You check the board: ✅ merged
-```
 
-## Why
-
-| Problem | Solution |
-|---------|----------|
-| Agents pollute your working tree | Every task gets its own worktree; main checkout untouched |
-| No orchestration across repos | Dependency-ordered dispatch (`after:`); unrelated repos run in parallel |
-| Dispatched agents are black boxes | Real-time board, escalation alerts, append-only audit ledger |
-| No accountability | Verify gate (real test run) + review gate + full audit trail |
+The difference in one line: **agents don't grade their own homework here.** The verify command runs under the service, not the worker — green means the tests actually passed on the merged commit.
 
 ## Quick Start
+
+Prerequisites: [opencode](https://opencode.ai) v2 (`curl -fsSL https://opencode.ai/v2/install | bash`), [bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`), `git`, `python3` ≥ 3.10 (stdlib only — zero pip dependencies).
 
 ```bash
 git clone https://github.com/guangbin79/opencode-agora.git
 cd opencode-agora && ./install.sh
 ```
 
-Requirements: `python3` (stdlib only), `git`, `opencode` v2, `bun`.
+That's it. The installer is idempotent (safe to re-run); it registers the MCP server, copies the plugin + skills, and leaves a root credential at `$AGORA_HOME/.agora/root.token` (0600).
 
-After install, talk to your opencode session normally:
+Now just talk to your opencode session as usual:
 
-- *"Have an agent fix X in repoY"* → task created, worker dispatched
-- *"How's it going?"* → board with five buckets and chain view
-- *"Stop that task"* → cascade-cancel with confirmation
+| You say | What happens |
+|---|---|
+| *"Have an agent fix X in repoY, verify with `pytest -q`"* | Task created, worker dispatched into its own worktree |
+| *"How's it going?"* | Live board: five buckets, dependency chains, escalation feed |
+| *"Stop that task"* | Cascade-cancel with confirmation |
+| *"Bump the dependency in repoA, then apply the same fix in repoB and repoC"* | `after:` dependency chain — B and C wait for A, unrelated repos run in parallel |
 
-Standalone dashboard:
-
-```bash
-agora-board    # vi-motion TUI: chain tree, buckets, escalation feed
-```
+Standalone dashboard: `agora-board` (vi-motion TUI). Update path: `git pull && ./install.sh`.
 
 ## How It Works
 
-```
-Human ──▶ Main Session (skills: agora-dispatch / agora-ops)
-              │  MCP (12 tools)
+```text
+Human ──▶ Main session (skills: agora-dispatch / agora-ops)
+              │  MCP (13 tools)
               ▼
-         agorad (Python stdlib service)
-         state authority · verify gate · auto-merge
-         message routing · crash recovery · audit
+         agorad — Python stdlib service on localhost
+         state authority · verify gate · auto-merge · message routing
+         crash recovery · audit ledger
               │
-         Per-task worktrees (git isolation)
+         Per-task git worktrees (enforced isolation)
 ```
 
-Each task: `create → dispatch → worker codes → verify → auto-merge (ff-only) → closed`
+Task lifecycle: `create → dispatch → worker codes → verify (service-run) → auto-merge (ff-only) → closed`
 
-**Verify gate**: the quality bar. Worker proposes a verify command → dispatcher validates and registers it → service runs it in the worktree → green = merge, red = worker gets output and retries. Three consecutive failures = blocked + escalation alert.
+## Two Quality Gates
 
-**Review gate**: if [review-loop](#requirements) is installed, done additionally requires a green code review at the exact commit. Without it, verify passes but **no auto-merge** — you review manually.
+**Verify gate** — the non-negotiable one. The verify command is registered at task creation (`task_create(verify_cmd="pytest -q")`, or `verify_pending: true` to defer); the **service runs it in the worktree**. Green = eligible to merge. Red = the worker gets the output and retries. Three consecutive failures = blocked + escalation ping. The worker cannot skip it, fake it, or report results itself.
 
-## Key Features
+**Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 
-- **Full autonomy**: verify green + review green = ff-only auto-merge. No human confirmation needed.
-- **Enforced isolation**: plugin-level gate blocks git-repo writes without task credentials. Single machine, zero-trust between sessions.
-- **Cross-repo orchestration**: `task_create(after: previous_task_id)` for dependency chains. Unrelated repos dispatch in parallel.
-- **Crash recovery**: `kill -9` the service at any time. State is append-only snapshots, workers re-inject with same credentials on restart.
-- **Escalation**: quality failures and gate tampering ping the main session in real time; dispatcher death is caught by the health patrol (default every 5 minutes, configurable via `AGORA_HEALTH_INTERVAL`).
-- **Session tokens**: per-session credentials with role matrix (root / dispatcher / worker). Workers can never cancel, modify verify, or access the board.
-- **Scope control**: list repos in `inactive-repos` to make agora fully dormant there.
-- **Target branch support**: `task_create(target_branch="feature/x")` merges into that branch instead of main — compatible with PR-based workflows.
-- **Atomic verify registration**: `task_create(verify_cmd="pytest -q")` registers the acceptance command at creation; dispatch without a registered verify (or `verify_pending: true` opt-out) is rejected 403 on the spot.
+- If `.review-loop/` exists in the task worktree, the last-reviewed anchor is checked at `done` and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window).
+- Anchor green + verify green = automatic ff-only merge.
+- No `.review-loop/` directory? Everything still works — tasks complete at `done` and **you merge manually**. Autonomy is earned by both gates, not assumed.
+
+Any reviewer fits — OpenCodeReview, CodeRabbit, a human checklist — agora only reads the anchor. A minimal reviewer is ~10 lines:
+
+```bash
+#!/usr/bin/env bash
+# review-loop.sh <worktree> <target_branch> — run after each commit; exit non-zero if not green
+set -euo pipefail
+cd "$1"
+base=$(git merge-base HEAD "${2:?}"); sha=$(git rev-parse HEAD)
+findings=$(your_reviewer "$(git diff "$base"..HEAD)")   # OCR / CodeRabbit / human list
+printf '%s\n' "$findings" | grep -qiE 'blocker|high' && { printf '%s\n' "$findings"; exit 1; }
+mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
+```
+
+Full spec — contract details, worker protocol, threat model, idle auto-trigger design notes: [docs/review-loop.md](docs/review-loop.md) (Chinese).
+
+## Highlights
+
+- **Verified autonomy** — auto-merge only after service-run tests pass and the review anchor is green, with the anchor re-verified at merge time
+- **Enforced isolation** — plugin-level gate blocks git-repo writes without task credentials; workers can't touch your main checkout
+- **Cross-repo orchestration** — `after:` dependency chains; unrelated repos dispatch in parallel; hard limits on nesting (5) and concurrency (8)
+- **Role-separated credentials** — root / dispatcher / worker session tokens; workers can never cancel tasks, alter verify commands, or read the board
+- **Crash recovery** — `kill -9` the service at any moment; append-only state + worker re-injection with the same credentials on restart
+- **Real-time accountability** — escalation pings to the main session, append-only JSONL audit for every state change, health patrol for dead dispatchers
+- **PR-workflow friendly** — `task_create(target_branch="feature/x")` merges into a feature branch instead of main
+- **Lightweight** — Python stdlib service, zero pip dependencies, localhost only, no telemetry
+
+## Comparison
+
+| | Manual multi-session | Swarm frameworks | opencode-agora |
+|---|---|---|---|
+| Per-task isolation | you manage worktrees | varies | enforced (plugin gate + worktree per task) |
+| "Tests pass" means | agent says so | agent says so | service ran the command itself |
+| Cross-repo dependencies | manual sequencing | yes | `after:` chains, parallel when unrelated |
+| Merge | manual | varies | automatic, only when both gates are green |
+| Audit trail | none | partial | append-only JSONL, every state change |
+| Install footprint | — | heavy runtimes | python3 stdlib + git + bun |
 
 ## Configuration
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `AGORA_HOME` | `~/plaza` | Ledger home (state, messages, audit, wiki) |
-| `$AGORA_HOME/.agora/inactive-repos` | empty | Repos where agora is dormant (one path per line) |
+| `$AGORA_HOME/.agora/inactive-repos` | empty | Repos where agora is fully dormant (one path per line) |
 | `AGORA_BOARD_INTERVAL` | `5` | Dashboard poll interval (seconds) |
+| `AGORA_HEALTH_INTERVAL` | `300` | Dispatcher health patrol (seconds) |
 | `enforce` | on | Global gate switch (root only, audited) |
-| Chain depth / quota | 5 / 8 | Hard limits on dispatch nesting and concurrency |
-| `$AGORA_HOME/.agora/root.token` | auto | Root credential (created by install, 0600) |
-| `$AGORA_HOME/.agora/email.json` | manual | 僵态提醒邮件（`{"to","command"}`，正文走 stdin；缺省不发） |
-
-## Requirements
-
-- **opencode v2** — session creation, message injection, plugin hooks
-- **git** — worktree isolation and ff-only merging
-- **python3** (≥3.8) — agorad service and MCP shell (stdlib only, zero pip dependencies)
-- **bun** — plugin runtime (TypeScript)
-- **review-loop** *(optional)* — code review gate. Without it, verify passes but tasks stay at `done` (no auto-merge). [More info](#review-loop-dependency)
-
-### Review-loop dependency
-
-Auto-merge requires a green code review at the exact commit being merged. This checks the `.review-loop/.last-reviewed` anchor in the worker environment. If the directory doesn't exist, the task stays at `done` — you review and merge manually. This is by design: autonomy is earned by having both quality gates (tests + review).
+| `$AGORA_HOME/.agora/email.json` | off | Stuck-task email alerts (`{"to","command"}`) |
 
 ## Safety Model
 
-**Enforced** (machine-checked, can't bypass):
+Honest by design — what's machine-checked vs what's trusted:
+
+**Enforced** (cannot be bypassed):
 - Git-repo writes only within task worktrees (plugin gate + session tokens)
-- Verify must actually run and pass (service executes the command)
-- Review anchor must match HEAD (if review-loop present)
+- Verify must actually run and pass, executed by the service
 - Role matrix: workers can't cancel, modify verify, or toggle enforce
-- All state changes audited to append-only JSONL
+- Every state change lands in the append-only audit ledger
 
 **Accepted risks** (single-machine trust model):
-- `bash` direct writes bypass the gate (audit backstop)
-- Token theft within same user account
-- Review anchor is self-written by the worker (service reads but doesn't verify authorship)
+- A worker using raw `bash` can bypass the write gate (audit is the backstop)
+- Token theft within the same user account
+- The review anchor is a process protocol, not an anti-cheat: the worker writes it, the service reads it. The verify gate is the real quality bar; review adds discipline, not security
+
+## FAQ
+
+**How do I update?** `git pull && ./install.sh` — the plugin and service payloads are copies, so re-running the installer is required after pulling.
+
+**How do I uninstall?**
+```bash
+rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch \
+       ~/.config/opencode/skills/agora-ops ~/.local/bin/agora ~/.local/bin/agora-board \
+       ~/plaza ~/.agora-home
+# then remove the "agora" entry from the mcp section of ~/.config/opencode/opencode.json
+```
+
+(`~/plaza` is the default `AGORA_HOME` — if you configured a custom one, remove that directory instead.)
+
+**Does it work without a review-loop?** Yes — verify still runs and gates everything; tasks finish at `done` and you merge manually. Implement the [open standard](docs/review-loop.md) to unlock auto-merge.
+
+**Where does my code go?** Nowhere. agorad binds to localhost, workers are local opencode sessions, there is no telemetry, no cloud, no agora API keys. Whatever models your opencode uses, agora orchestrates them.
+
+**Platforms?** Linux only. Not macOS (the installer requires `setsid`, which stock macOS lacks) and not Windows (XDG paths).
 
 ## License
 

@@ -3,7 +3,7 @@
 
 独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
 stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
-12 工具→`POST /<tool_name>` 根级路由；arguments 内 `_token` 剥除→
+13 工具（12 个→`POST /<tool_name>` 根级路由；`wait` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
 X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 `$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
 错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
