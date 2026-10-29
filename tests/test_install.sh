@@ -10,7 +10,10 @@ ok()   { echo "ok  - $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL- $1"; FAIL=$((FAIL+1)); }
 chk()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
 
-run_install() { HOME="$1" AGORA_HOME="$2" bash "$REPO/install.sh"; }
+run_install() { env -u AGORA_PORT -u AGORA_OC_URL -u AGORA_OC_PASSWORD HOME="$1" AGORA_HOME="$2" bash "$REPO/install.sh"; }
+# 服务态继承毒（gt-ag-fed303 verify 实证）：agorad 服务进程 env 携 AGORA_PORT（固定口被
+# 自身占用）/AGORA_OC_URL/AGORA_OC_PASSWORD，verify 子进程全继承——daemon 绑死端口
+# 无 ready 无 token、直跑探针永不走 rc=2 分支。夹具一律消毒，夹具语义只认显式注入。
 FIX=""
 
 teardown() {
@@ -40,7 +43,7 @@ if out=$(run_install "$H1" "$A1" 2>&1); then ok "首装退出 0 (Req: F1)"; else
 # 载荷，断言夹具 agorad 存活＋会话脱离测试 shell（确定性观察，无装中竞态）----
 OLDPID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$A1/.agora/service.json" 2>/dev/null || true)"
 MYSESS="$(ps -o sess= -p $$ | tr -d ' ')"
-AD_ENV=(env AGORA_HOME="$A1" AGORA_OC_URL="http://127.0.0.1:4096" PYTHONDONTWRITEBYTECODE=1)  # 占位同 install 缺省（oc 不可达不挡服务）；不写字节码免污载荷目录断言
+AD_ENV=(env -u AGORA_PORT AGORA_HOME="$A1" AGORA_OC_URL="http://127.0.0.1:4096" PYTHONDONTWRITEBYTECODE=1)  # 占位同 install 缺省（oc 不可达不挡服务）；不写字节码免污载荷目录断言；消毒 AGORA_PORT（服务态继承毒）
 "${AD_ENV[@]}" setsid python3 "$A1/.agora/agorad/main.py" >"$FIX/ad1.log" 2>&1 &
 AD1_PID=$!
 GOT=""
@@ -127,7 +130,7 @@ done
 [[ -z "$(find "$1/.agora/agorad" -name "__pycache__")" ]]' _ "$A1"
 chk "载荷可执行到 env 检查处（Req: F4）" bash -c '
 d="$(mktemp -d)"; mkdir -p "$d/state"  # 空 XDG_STATE_HOME：隔离真机 service.json（T5 发现源）
-out="$(AGORA_HOME="$1/nonexist-home" XDG_STATE_HOME="$d/state" timeout 10 python3 "$1/.agora/agorad/main.py" 2>&1)"; rc=$?
+out="$(env -u AGORA_OC_URL -u AGORA_PORT -u AGORA_OC_PASSWORD AGORA_HOME="$1/nonexist-home" XDG_STATE_HOME="$d/state" timeout 10 python3 "$1/.agora/agorad/main.py" 2>&1)"; rc=$?
 rm -rf "$d"
 [ "$rc" = 2 ] && echo "$out" | grep -q "AGORA_OC_URL"' _ "$A1"
 
@@ -198,7 +201,7 @@ chk "缺依赖早退（骨架未建）(Req: F1)" bash -c '[[ ! -e "$1/.agora" ]]
 # ---------- 场景 4：带 OC password 安装（展开值不作赋值前缀回归）----------
 newfix
 H4="$FIX/home"; A4="$FIX/plaza"; mkdir -p "$H4"
-run_install_pw() { HOME="$H4" AGORA_HOME="$A4" AGORA_OC_PASSWORD="pw has space" bash "$REPO/install.sh"; }
+run_install_pw() { env -u AGORA_PORT -u AGORA_OC_URL HOME="$H4" AGORA_HOME="$A4" AGORA_OC_PASSWORD="pw has space" bash "$REPO/install.sh"; }
 run_install_pw >/dev/null 2>&1 || bad "带 password 安装退出 0 (Req: F1)"
 chk "带 password 安装 root.token 在位 (Req: F1)" [ -s "$A4/.agora/root.token" ]
 
@@ -221,7 +224,7 @@ exec python3 "$REPO/agorad/main.py" "\$@"
 EOF
 chmod +x "$BIN5/agorad"
 
-out5=$(HOME="$H5" AGORA_HOME="$A5" AGORA_PKG_ROOT="$PKGROOT" AGORA_AGORAD_SRC="$REPO/agorad" \
+out5=$(env -u AGORA_PORT -u AGORA_OC_URL -u AGORA_OC_PASSWORD HOME="$H5" AGORA_HOME="$A5" AGORA_PKG_ROOT="$PKGROOT" AGORA_AGORAD_SRC="$REPO/agorad" \
        PATH="$BIN5:$PATH" bash "$PKGROOT/install.sh" 2>&1)
 rc5=$?
 chk "pkg 模式 install 退出 0 (Req: F31)" [ "$rc5" -eq 0 ]
@@ -241,7 +244,7 @@ chk "pkg: root.token 在位 (Req: F31)" [ -s "$A5/.agora/root.token" ]
 chk "pkg: pipx 形态活链接不被误删（round-2 B 册回归锚）" bash -c '
 [ -L "$1/.local/bin/agora-board" ] && [ "$(readlink "$1/.local/bin/agora-board")" = "$2/fakevenv/agora-board" ]' _ "$H5" "$BIN5"
 ln -sf "$A5/.agora/board_tui.py" "$H5/.local/bin/agora-board"  # repo 残留形态：指向载荷位
-HOME="$H5" AGORA_HOME="$A5" AGORA_PKG_ROOT="$PKGROOT" AGORA_AGORAD_SRC="$REPO/agorad" \
+env -u AGORA_PORT -u AGORA_OC_URL -u AGORA_OC_PASSWORD HOME="$H5" AGORA_HOME="$A5" AGORA_PKG_ROOT="$PKGROOT" AGORA_AGORAD_SRC="$REPO/agorad" \
   PATH="$BIN5:$PATH" bash "$PKGROOT/install.sh" >/dev/null 2>&1 || bad "pkg 二装退出 0 (Req: F31)"
 chk "pkg: repo 残留形态链接被收敛（round-2 B 册回归锚）" bash -c '[ ! -L "$1" ]' _ "$H5/.local/bin/agora-board"
 
