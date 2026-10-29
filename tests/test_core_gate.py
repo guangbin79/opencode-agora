@@ -36,6 +36,7 @@ class FakeGitx:
         self.warn, self.check_calls = "", []  # diff_check 告警注入（gt-83185d R3）
         self.restore_ok = True
         self.merged, self.head_sha = False, "aaa111"
+        self.head_shas = {}  # repo_dir→sha 覆盖：双头可区分（F29 拒因实值断言）
 
     def symref(self, repo_dir):
         return "main"
@@ -69,7 +70,7 @@ class FakeGitx:
 
     def head(self, repo_dir, branch=None):
         self.head_calls.append((repo_dir, branch))
-        return self.head_sha
+        return self.head_shas.get(repo_dir, self.head_sha)
 
 
 class FakeHealth:
@@ -362,11 +363,12 @@ class TestGateRun(TestCoreGate):
     def test_non_ff_rejection_message_self_evident(self):  # Req: F29
         self.runner = FakeRunner((0, "pass"))
         self.mk_gate(merge="non-ff")
+        self.gx.head_shas[str(self.env)] = "bbb222"  # 任务支头≠主干头：实值可区分
         self.in_gate()
         self.gate.run("t1")
         body = self.worker_msgs()[0]["body"]
-        self.assertIn("main@", body)  # 拒因内嵌实际比较值
-        self.assertIn("branch@", body)
+        self.assertIn("main@aaa111", body)  # 拒因内嵌实际比较值（双端各验）
+        self.assertIn("branch@bbb222", body)
         self.assertIn("post(done", body)
 
     def test_integration_fail_rolls_back_target(self):  # Req: F7

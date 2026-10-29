@@ -140,8 +140,9 @@ class Gate:
                 self._state.transition(tid, "reopened")  # 拒并不计连败（R12）
                 self._audit(tid, "reopened")
                 # F29 拒因自证：内嵌实际比较值（缺省形如 main@<sha> vs
-                # branch@<sha>；外部支任务首值＝实际目标支名），误判一眼可见
-                self._post(tid, f"non-ff 拒并：{branch or 'main'}@{before}"
+                # branch@<sha>，首值取目标支实名），误判一眼可见
+                self._post(tid, f"non-ff 拒并："
+                                f"{branch or self._gitx.symref(target)}@{before}"
                                 f" vs branch@{self._gitx.head(env)}——同步后"
                                 "重新 post(done, commit)")
                 return
