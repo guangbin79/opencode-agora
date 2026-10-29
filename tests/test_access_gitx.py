@@ -237,17 +237,6 @@ class TestAccessGitx(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.gx.ensure_clean(str(self.repo))
 
-    def test_rollback_restores_bytes_and_sha(self):  # Req: F7
-        env = self.gx.build_env(self.repo, "gt-x4")
-        before_sha = self._head(self.repo)
-        before_bytes = (self.repo / "src.py").read_bytes()
-        self._commit(Path(env), {"src.py": "changed", "extra.txt": "x"}, "task work")
-        self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "ok")
-        self.gx.rollback(str(self.repo), before_sha)
-        self.assertEqual(self._head(self.repo), before_sha)  # 字节级回退
-        self.assertEqual((self.repo / "src.py").read_bytes(), before_bytes)
-        self.assertFalse((self.repo / "extra.txt").exists())
-
     def test_target_branch_start_and_merge(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/7"], cwd=self.repo)
         issue_sha = self._commit(self.repo, {"issue.txt": "i1"}, "issue work")

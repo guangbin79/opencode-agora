@@ -33,7 +33,7 @@ class FakeGitx:
     def __init__(self, merge="ok", gate=False, crash=False, fail_remove=False):
         self.merge_result, self.gate, self.crash = merge, gate, crash
         self.fail_remove = fail_remove
-        self.merge_calls, self.rollbacks, self.removed = [], [], []
+        self.merge_calls, self.removed = [], []
         self.head_calls, self.checkouts, self.gate_calls = [], [], []
         self.warn, self.check_calls = "", []  # diff_check 告警注入（gt-83185d R3）
         self.restore_ok = True
@@ -42,10 +42,11 @@ class FakeGitx:
         self.integration_builds, self.integration_removed = [], []
         self.clean_calls, self.contains_calls = [], []
         self.contains_result, self.dirty = False, False
+        self.contains_results = []  # 逐次覆盖队列：空则回退 contains_result
 
     def contains(self, repo_dir, commit, branch=None):
         self.contains_calls.append((repo_dir, commit, branch))
-        return self.contains_result
+        return self.contains_results.pop(0) if self.contains_results else self.contains_result
 
     def ensure_clean(self, repo_dir):
         self.clean_calls.append(repo_dir)
@@ -72,9 +73,6 @@ class FakeGitx:
         self.merge_calls.append((env_dir, target, branch))
         self.merged = self.merge_result == "ok"  # 拒并不落地（无 merge commit）
         return self.merge_result
-
-    def rollback(self, target, before_sha):
-        self.rollbacks.append((target, before_sha))
 
     def remove_env(self, env_dir):
         if self.fail_remove:  # 回收失败注入：终态后异常须留痕不假账
@@ -396,7 +394,6 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "reopened")
         self.assertEqual(t["fail_streak"], 2)  # 拒并不计连败
         self.assertFalse(self.gx.merged)  # 无 merge commit 落地
-        self.assertEqual(self.gx.rollbacks, [])
         self.assertEqual(self.gx.removed, [])  # 环境保留
         self.assertEqual(len(self.runner.calls), 1)  # 不跑集成 verify
         self.assertTrue(self.worker_msgs())  # worker 收续修通知
@@ -412,6 +409,18 @@ class TestGateRun(TestCoreGate):
         self.assertIn("branch@bbb222", body)
         self.assertIn("post(done", body)
 
+    def test_non_ff_narrow_race_guard_routes_to_success(self):  # Req: F7
+        """试合并窗口内 commit 已被人工推进目标支：守卫补终态成功，绝不重开。"""
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(merge="non-ff")
+        self.gx.contains_results = [False, True]  # 门首探针 False、_non_ff 内 True
+        self.in_gate()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")  # 守卫路由 _succeed，未走 reopened
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 成功出口回收环境
+        self.assertEqual(len(self.runner.calls), 1)  # 恰一次 env verify，未跑集成
+
     def test_integration_fail_leaves_target_untouched(self):  # Req: F7
         self.runner = FakeRunner((0, "env pass"), (1, "I: broke"))
         self.mk_gate()
@@ -422,7 +431,6 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "reopened")
         self.assertEqual(t["fail_streak"], 1)  # 集成败计连败
         self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None)])
-        self.assertEqual(self.gx.rollbacks, [])  # 不再 reset --hard 主检出
         self.assertEqual(self.gx.removed, [])
         self.assertEqual(self.gx.integration_removed, [(integration, "/repo")])
         body = self.worker_msgs()[0]["body"]
@@ -442,7 +450,6 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.clean_calls, [])
-        self.assertEqual(self.gx.rollbacks, [])
         self.assertEqual(self.gx.removed, [str(self.env)])
 
     def test_dirty_target_reopens_before_verify_or_merge(self):

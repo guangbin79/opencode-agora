@@ -81,7 +81,7 @@ After install, your session gains two skills (agora-dispatch / agora-ops) and 13
 
 ## Two Quality Gates
 
-**Verify gate** — the non-negotiable one. The verify command is registered at task creation (`task_create(verify_cmd="pytest -q")`, or `verify_pending: true` to defer). The **service runs it in the task worktree**, then trial-merges into a detached integration worktree and runs it again. Only two green runs advance the target branch; integration failures and test side effects never touch your main checkout. Each run has a timeout (300 seconds by default). Red = the worker gets the output and retries. Three consecutive failures = blocked + escalation ping. The worker cannot skip it, fake it, or report results itself.
+**Verify gate** — the non-negotiable one. The verify command is registered at task creation (`task_create(verify_cmd="pytest -q")`, or `verify_pending: true` to defer). The **service runs it in the task worktree**, then trial-merges into a detached integration worktree and runs it again. Only two green runs advance the target branch; integration failures and test side effects never touch your main checkout. One hard requirement: your main checkout must be clean (no uncommitted or untracked changes) before the final push, otherwise the task reopens with a cleanup hint. Each run has a timeout (300 seconds by default). Red = the worker gets the output and retries. Three consecutive failures = blocked + escalation ping. The worker cannot skip it, fake it, or report results itself.
 
 **Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 

@@ -208,6 +208,10 @@ class Gate:
     def _non_ff(self, tid, branch, before):
         """试合并或最终推进遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""
         t = self._state.get(tid)
+        # 窄竞态守卫：试合并窗口内 commit 已被人工推进目标支，则补终态成功，绝不重开
+        if self._gitx.contains(t["project_dir"], t.get("commit"), branch):
+            self._succeed(tid)
+            return
         self._state.transition(tid, "reopened")
         self._audit(tid, "reopened")
         self._post(tid, f"non-ff 拒并："

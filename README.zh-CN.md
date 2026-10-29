@@ -80,7 +80,7 @@ cd opencode-agora && ./install.sh
 
 ## 两道质量闸
 
-**verify 门**——不可协商的那道。验收命令在建单时登记（`task_create(verify_cmd="pytest -q")`，或 `verify_pending: true` 延后登记）。**服务先在任务 worktree 真跑**，再在 detached 集成 worktree 中试合并并复跑；两次全绿才推进目标分支，集成失败和测试副作用都不会碰主检出。每次运行都有超时（缺省 300 秒）。红＝worker 收到输出重试；三连败＝blocked＋失控告警。worker 无法跳过、伪造或自报结果。
+**verify 门**——不可协商的那道。验收命令在建单时登记（`task_create(verify_cmd="pytest -q")`，或 `verify_pending: true` 延后登记）。**服务先在任务 worktree 真跑**，再在 detached 集成 worktree 中试合并并复跑；两次全绿才推进目标分支，集成失败和测试副作用都不会碰主检出。一条硬性要求：最终推进前主检出必须干净（无未提交/未跟踪改动），否则任务重开并附清理提示。每次运行都有超时（缺省 300 秒）。红＝worker 收到输出重试；三连败＝blocked＋失控告警。worker 无法跳过、伪造或自报结果。
 
 **评审门**——开放标准，评审器自带。契约只有一个锚文件：
 

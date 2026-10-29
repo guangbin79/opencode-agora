@@ -166,9 +166,6 @@ class Gitx:
         except RuntimeError:
             return False
 
-    def rollback(self, target: str, before_sha: str) -> None:
-        self._git(["reset", "--hard", before_sha], cwd=target)
-
     def touches_gate(self, env_dir: str, patterns, branch: str = None) -> bool:
         env = Path(env_dir).resolve()
         names = self._diff_names(env, branch)

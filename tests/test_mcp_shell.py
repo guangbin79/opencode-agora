@@ -37,9 +37,6 @@ class FakeGitx:
     def head(self, repo_dir, branch=None):
         return "aaa111"
 
-    def rollback(self, target, before_sha):
-        pass
-
     def touches_gate(self, env_dir, patterns, branch=None):
         return False
 
