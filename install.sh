@@ -113,6 +113,8 @@ mkdir -p "$AGORA_HOME/.agora" "$HOME/.local/bin"
 if [ -n "$PKG" ]; then
   # F31 pkg 模式：载荷源＝agora-install 注入的 site-packages agorad 包；
   # board_tui 载荷＋chmod＋agora-board 符号链接三行跳过（console script 替代）
+  # 收敛 repo→pkg 迁移残留：旧载荷/符号链接不清理会遮蔽 pipx console script（混版运行）
+  rm -f "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
   AD_SRC="${AGORA_AGORAD_SRC:?pkg 模式须由 agora-install 注入 AGORA_AGORAD_SRC}"
   rm -rf "$AGORA_HOME/.agora/agorad"
   cp -r "$AD_SRC" "$AGORA_HOME/.agora/"
@@ -210,6 +212,7 @@ if [ -n "$AD_PID" ]; then
 fi
 
 echo "install: 完成（$AGORA_HOME）"
+[ -n "$PKG" ] && echo "install: 更新＝pipx upgrade opencode-agora 后重跑 agora-install"  # pkg 用户无 git 仓，git pull 指引不适用
 echo "install: 启用域名册 $AGORA_HOME/.agora/inactive-repos（空＝全启用；仓根路径一行一个，新会话生效）"
 echo "install: 更新＝git pull 后重跑本脚本（插件与 agorad 载荷是拷贝不是引用，不重跑不生效）"
 echo "install: lift 失败可重启会话或等 doctor；工具拒因携 resetLift 恢复指引"

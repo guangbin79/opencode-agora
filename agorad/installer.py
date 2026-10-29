@@ -7,6 +7,7 @@ repo 模式（env 缺省）行为零变，pkg 分支仅由本命令的两个 env
 """
 
 import os
+import site
 import subprocess
 import sys
 from importlib import metadata
@@ -31,6 +32,9 @@ def main():
     if not os.path.isfile(script):
         # locate_file 以 site-packages 为基；数据面 RECORD 形态不带 ../.. 前缀时落 sys.prefix/share
         script = Path(sys.prefix) / rel
+    if not os.path.isfile(script):
+        # --user 安装态：数据面落 userbase（PYTHONUSERBASE 可重定向），前两态皆不中
+        script = Path(site.getuserbase()) / rel
     if not os.path.isfile(script):
         sys.exit(f"agora-install: install.sh 缺失（{script}）——分发不完整，请重装 opencode-agora")
     import agorad
