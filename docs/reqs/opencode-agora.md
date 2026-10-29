@@ -203,4 +203,3 @@ F26 分流遗留残留 finding：write 面 `cred?.role==="root"` 分支生产不
 ### F24 worktree 环境名去重 task 字面量（2026-10-29，task-5c520c）
 F24 换前缀后 build_env 拼名 `__wt-task-{tid}__` 与 tid 自带 `task-` 前缀双写（`wt-task-task-xxx`）。拼名收窄为 `__wt-{tid}__`（docstring 同步）；remove_env 兜底解析 `partition("__wt-task-")` 放宽为 `partition("__wt-")`——存量旧名亦含该子串，天然双兼容，存量 worktree 不迁移不重命名。测试面同步：单测正则 `__wt-task-gt-x1__`→`__wt-gt-x1__`；e2e 残留探测 glob `*__wt-task-*`→`*__wt-*`（t2_enforce.sh、t3_chain.sh×2，宽匹配对残留检测语义不变）。agora-plugin/hook.ts 只认 `__wt-` 前缀不动；docs 历史 wt-task 记录不改。
 **验收**：`python3 -m pytest tests/ -q` 全绿；build_env 产出名形如 `<REPO>__wt-<tid>__<MMDDHHMM><rand4>`；remove_env 兜底对存量 `__wt-task-*` 名仍能定位主仓。
-
