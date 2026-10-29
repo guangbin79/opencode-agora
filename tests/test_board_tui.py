@@ -13,11 +13,13 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
+import board_tui
 from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
-                       detail_page, doctor_page, handle_key, rel_time,
+                       detail_page, doctor_page, handle_key, rel_time, run,
                        try_cancel)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -608,6 +610,106 @@ class TestTryCancel(unittest.TestCase):
             bad = try_cancel(base, "tok", "t1")
             self.assertIn("cancel failed", bad)     # 取消失败≠离线
             self.assertNotIn("offline", bad)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+class _FlakyBoard(http.server.BaseHTTPRequestHandler):
+    """可翻转可用性：alive=False 后 /board 一律 500（err 语义回归用）。"""
+    alive = True
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if not _FlakyBoard.alive:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if "task" in body:
+            out = {"task": trow(), "events": [], "done_body": None}
+        else:
+            out = {"buckets": {}, "chain": ["t1"]}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class _FakeStdscr:
+    """run() 无 curses 夹具：录制 addnstr 行，getch 按脚本吐键。"""
+
+    def __init__(self, keys):
+        self.lines, self._keys = [], list(keys)
+
+    def getmaxyx(self):
+        return 24, 100
+
+    def erase(self):
+        self.lines.clear()
+
+    def addnstr(self, y, x, s, w, attr=0):
+        self.lines.append((y, s))
+
+    def refresh(self):
+        pass
+
+    def timeout(self, ms):
+        pass
+
+    def getch(self):
+        return self._keys.pop(0) if self._keys else ord("q")
+
+
+class _FlipStdscr(_FakeStdscr):
+    """第 2 次取键后翻转 stub 可用性：首帧 poll 成功、次轮 poll 落败的时序。"""
+
+    def __init__(self, keys, flip):
+        super().__init__(keys)
+        self._flip, self._n = flip, 0
+
+    def getch(self):
+        k = super().getch()
+        self._n += 1
+        if self._n == 2:
+            self._flip()
+        return k
+
+
+class TestRunErrSemantics(unittest.TestCase):
+    """err 语义＝轮询离线：缓存帧重建（apply/fold）不得洗掉离线横幅。"""
+
+    def setUp(self):
+        # 无头环境跑 run()：桩掉 curses 面（键全 <256，keyname 不可达）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def test_apply_on_stale_frame_keeps_offline_banner(self):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _FlakyBoard)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            _FlakyBoard.alive = True
+            keys = [-1,                     # 到点轮询：拉到首帧（成功）
+                    -1,                     # 服务翻转后轮询：置 err
+                    ord("/"), ord("x"), 13,  # 过滤输入态回车 apply：缓存帧重建
+                    ord("q")]
+            scr = _FlipStdscr(keys, flip=lambda: setattr(_FlakyBoard, "alive", False))
+            run(scr, base, "tok")
+            heads = [s for _, s in scr.lines if s.startswith(" agora board")]
+            self.assertTrue(heads)
+            self.assertIn("offline", heads[-1])  # apply 后横幅仍在：err 只由 poll 清
         finally:
             srv.shutdown()
             srv.server_close()

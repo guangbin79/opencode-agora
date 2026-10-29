@@ -64,6 +64,9 @@ class Gitx:
                 time.sleep(_RMT_WAIT)
             if env.exists():  # 重试走完仍残留＝并发写入未停，如实上抛（分支留给重试收敛）
                 raise RuntimeError(f"env 目录删除失败（并发写入未停）: {env}")
+        # kill 窗口/外部删除留下的 worktree 注册元数据（.git/worktrees/<name>）不随
+        # 目录消失收敛，分支删除亦被其挡（used by worktree）——先 prune 再级联删支
+        self._git(["worktree", "prune"], cwd=main, check=False)
         r = self._git(["branch", "-d", env.name], cwd=main, check=False)
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)

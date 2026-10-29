@@ -167,11 +167,14 @@ def run_status(a):
     try:
         task = _call(base, token, "/board", {"task": a.task_id})["task"]
         doc = _call(base, token, "/doctor", {})
+    except Fail as e:  # 报因尾附 tid（镜像 fetch：看门狗聚合 stderr 可归任务）
+        raise type(e)(f"{e}: {a.task_id}") from None
     except Transient as e:  # 单查不重试：判读要新鲜，旧数据不如报错
         head = "认牌失败" if isinstance(e, Rejected) else "服务不可达"
-        raise Fail(f"{head}: {e}") from None
+        raise Fail(f"{head}: {e}: {a.task_id}") from None
     v = status_view(a.task_id, task,
-                    {tid for tid, _ in doc["stale_candidates"]}, now)
+                    {tid for tid, _ in doc.get("stale_candidates", [])},
+                    now)  # 旧 daemon 无该键→空集降级，不裸 KeyError
     if a.json:
         print(json.dumps(v, ensure_ascii=False))
     else:

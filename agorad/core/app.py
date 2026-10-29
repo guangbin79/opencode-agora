@@ -74,8 +74,13 @@ class App:
                if t.get("worker_sid") == sid and t["state"] in _ACTIVE]
         if not hit:
             return sid
+        # 快照后门线程可能已结案：零活动行不改绑（TOCTOU 复检，镜像 bind_dispatcher）
+        if not any(self.state.get(tid)["state"] in _ACTIVE for tid in hit):
+            return sid
         self.auth.rebind(sid, caller)
         for tid in hit:
+            if self.state.get(tid)["state"] not in _ACTIVE:
+                continue  # 改绑窗内结案：终态行冻结不覆写（TOCTOU 复检）
             self.state.set_fields(tid, worker_sid=caller)
             self.store.append_event({"ts": time.time(), "actor": sid,
                                      "event": EV_WORKER_REBOUND, "task": tid,
@@ -84,6 +89,8 @@ class App:
         nested = [tid for tid, t in tasks.items()
                   if t.get("dispatcher_sid") == sid and t["state"] in _ACTIVE]
         for tid in nested:
+            if self.state.get(tid)["state"] not in _ACTIVE:
+                continue  # 同上：终态行冻结不覆写（TOCTOU 复检）
             self.state.set_fields(tid, dispatcher_sid=caller)
             self.store.append_event({"ts": time.time(), "actor": sid,
                                      "event": EV_WORKER_REBOUND, "task": tid,
@@ -114,6 +121,10 @@ class App:
             if self.oc.alive(d):
                 return  # 登记会话仍活不抢绑
         except Exception:  # oc 不可达≠会话死：本轮免判（recover.startup 同口径）
+            return
+        # 探活窗内可能已全数结案：零活动行不改牌（TOCTOU 复检——rebind 是
+        # 持久身份换绑，无活动行即无消费方，凭陈旧快照换牌＝无谓身份漂移）
+        if not any(self.state.get(tid)["state"] in _ACTIVE for tid in hit):
             return
         self.auth.rebind(d, sid)
         for tid in hit:

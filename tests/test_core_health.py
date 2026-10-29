@@ -399,6 +399,54 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(ev, [("t1", "s-w1", "ses-new"),
                               ("t2", "s-w1", "ses-new")])
 
+    # ---- 改绑窗 TOCTOU：快照后门线程结案，改绑/覆写不得凭陈旧快照落笔 ----
+
+    def _stale_snapshot(self):
+        """钉住当前快照：模拟 bind 读快照后门线程并发推进（snapshot 返回旧帧）。"""
+        stale = self.state.snapshot()
+        self.state.snapshot = lambda: stale
+
+    def test_bind_worker_stale_snapshot_terminal_row_not_overwritten(self):
+        self.seed("t1", state="dispatched", worker="s-w1")
+        tok = self.app.auth.issue("s-w1", "worker")
+        self._stale_snapshot()                      # 快照定格：hit 含 t1（在飞）
+        self.state.set_fields("t1", state="merged")  # 门线程抢先结案
+        self.assertEqual(self.app.bind_worker("s-w1", "ses-new"), "s-w1")
+        self.assertEqual(self.state.get("t1")["worker_sid"], "s-w1")  # 终态行冻结
+        self.assertEqual(self.app.auth.identify(tok), ("s-w1", "worker"))  # 零活动行不改牌
+        self.assertEqual([e for e in self.store.read_events()
+                          if e["event"] == "worker_rebound"], [])
+
+    def test_bind_worker_midwindow_settle_skips_frozen_row_only(self):
+        self.seed("t1", worker="s-w1")
+        self.seed("t2", disp="s-w1", worker="s-sub")
+        tok = self.app.auth.issue("s-w1", "worker")
+        real_rebind = self.app.auth.rebind
+
+        def settle_nested(old, new):  # 改绑瞬间门线程结案嵌套行（写窗内竞态）
+            real_rebind(old, new)
+            self.state.set_fields("t2", state="merged")
+
+        self.app.auth.rebind = settle_nested
+        self.assertEqual(self.app.bind_worker("s-w1", "ses-new"), "ses-new")
+        self.assertEqual(self.state.get("t1")["worker_sid"], "ses-new")  # 活动行照常覆写
+        self.assertEqual(self.state.get("t2")["dispatcher_sid"], "s-w1")  # 窗内结案行不覆写
+        self.assertEqual(self.app.auth.identify(tok), ("ses-new", "worker"))
+        ev = [e["task"] for e in self.store.read_events()
+              if e["event"] == "worker_rebound"]
+        self.assertEqual(ev, ["t1"])
+
+    def test_bind_dispatcher_stale_snapshot_all_settled_no_rebind(self):
+        self.seed("t1", disp="d-old")  # FakeOc liveness 缺席＝死
+        tok = self.app.auth.issue("d-old", "root")
+        self._stale_snapshot()
+        self.state.set_fields("t1", state="merged")  # 探活窗内结案：零活动行
+        self.app.bind_dispatcher("root", "ses-new", self.state.get("t1"))
+        self.assertEqual(self.state.get("t1")["dispatcher_sid"], "d-old")
+        self.assertEqual(self.app.auth.identify(tok), ("d-old", "root"))  # 无消费方不换牌
+        self.assertEqual([e for e in self.store.read_events()
+                          if e["event"] == "dispatcher_rebind"], [])
+
     # ---- gt-31ecee：dispatcher 侧换号改绑——死号愈合，活号/无牌/终态不动 ----
 
     def test_bind_dispatcher_dead_number_rebinds_and_audits(self):  # Req: F21

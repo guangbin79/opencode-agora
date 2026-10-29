@@ -15,6 +15,7 @@ import os
 import sqlite3
 import sys
 import time
+import unicodedata
 import urllib.request
 from collections import namedtuple
 from pathlib import Path
@@ -37,12 +38,6 @@ Row.__new__.__defaults__ = (None, 0, "", "", None, "", "", "", "")
 
 # ---------------- 渲染模型（纯函数） ----------------
 
-
-import unicodedata
-
-def _dw(s):
-    """Display width: CJK=2, others=1."""
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
 
 def _pad(s, width):
     """Truncate to display width then pad to width."""
@@ -548,12 +543,13 @@ def run(stdscr, base, token):
         try:
             snap, events, details = load_board(base, token)
             _rebuild()
+            err = None                     # 仅新帧成功才清离线横幅；缓存重建不洗掉 err
         except Exception as e:                     # 离线/坏帧：保旧行＋报因
             err = str(e)
 
     def _rebuild():
         """用当前（缓存）帧按 m['filter'] 重建行＋刷新状态头。"""
-        nonlocal status, err
+        nonlocal status
         m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"],
                                bucket=m["bucket"], group=m["proj"],
                                gexpanded=m["gexpanded"])
@@ -561,7 +557,6 @@ def run(stdscr, base, token):
         m["groups"] = {_gkey(t) for t in snap.get("tasks", {}).values()}
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
-        err = None
         status = f"{len(m['rows'])} rows  poll {interval:g}s"
 
     poll()                                         # 首帧先拉，免空板白等一个周期

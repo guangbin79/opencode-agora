@@ -171,6 +171,15 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(self._git(["branch", "--list", env.name],
                                    cwd=self.repo).stdout.strip(), "")
 
+    def test_remove_env_prunes_ghost_registration(self):  # Req: task-bb4ad2 gitx prune
+        env = Path(self.gx.build_env(self.repo, "gt-yc"))
+        shutil.rmtree(env)  # 外部删除（kill 窗口/手清）：git 仍持注册元数据
+        self.assertEqual(len(self._worktrees(self.repo)), 2)
+        self.gx.remove_env(str(env))  # 目录已不在：worktree remove 不可达，靠 prune 收敛
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])
+        self.assertEqual(self._git(["branch", "--list", env.name],
+                                   cwd=self.repo).stdout.strip(), "")
+
     def test_remove_env_raises_when_main_unresolvable(self):  # Req: gt-2e4829
         dot = self.tmp / ".dotfiles"  # slug≠原始仓名：重建主仓失真
         self._init_repo(dot)

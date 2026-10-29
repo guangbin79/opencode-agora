@@ -32,7 +32,10 @@ AD_PID=""; LOG=""
 fail() { echo "install: $*" >&2; exit 1; }
 cleanup() {
   [ -n "$AD_PID" ] && { kill "$AD_PID" 2>/dev/null || true; wait "$AD_PID" 2>/dev/null || true; }
-  [ -n "$LOG" ] && { sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$LOG" 2>/dev/null && rm -f "$LOG.bak"; }  # 取牌即抹（GNU/BSD 通吃 -i.bak；换 inode，先抹＝丢 fd 后续留痕）
+  # 取牌即抹（GNU/BSD 通吃 -i.bak；换 inode，先抹＝丢 fd 后续留痕）。连同 .1 一起抹：
+  # 前轮被信号打断（无 EXIT trap）时牌行滞留旧日志，本轮 mv 成 .1 后会长驻留档
+  [ -n "$LOG" ] && { for f in "$LOG" "$LOG.1"; do
+      sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$f" 2>/dev/null && rm -f "$f.bak"; done; }
   return 0
 }
 trap cleanup EXIT
@@ -124,15 +127,17 @@ else
   LOG="$AGORA_HOME/.agora/install-agorad.log"  # 稳定日志（gt-e38e41）：不随 install 清理，拉起/死因可后验
   [ -f "$LOG" ] && mv -f "$LOG" "$LOG.1"  # 上一轮留档一轮
   (umask 077; : > "$LOG")  # 0600：日志含 root 牌行，不得按 umask 0644 落盘
-  AD_ENV=(env AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL")  # 展开值不作赋值前缀（bash 视为命令名）
-  [ -n "$OC_PASSWORD" ] && AD_ENV+=("AGORA_OC_PASSWORD=$OC_PASSWORD")
   # 脱会话（gt-71b6af）：setsid 在位原位 exec（$! 即 daemon pid）；macOS 无 setsid → nohup
-  # 兜底（F27：$! 同为 python pid，cleanup/第 8 步击杀语义两形态一致；SIGHUP 由 main.py handler 留痕退出）
-  if command -v setsid >/dev/null 2>&1; then
-    "${AD_ENV[@]}" setsid nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
-  else
-    "${AD_ENV[@]}" nohup python3 "$REPO/agorad/main.py" >"$LOG" 2>&1 &
-  fi
+  # 兜底（F27：$! 同为 python pid，cleanup/第 8 步击杀语义两形态一致；SIGHUP 由 main.py handler 留痕退出）。
+  # 凭据经子壳 export 进 environ——不落 argv（env 变参形会随 /proc/<pid>/cmdline 对全体本地用户可读）
+  (
+    export AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL"
+    if [ -n "$OC_PASSWORD" ]; then export AGORA_OC_PASSWORD="$OC_PASSWORD"; fi
+    if command -v setsid >/dev/null 2>&1; then
+      exec setsid nohup python3 "$REPO/agorad/main.py"
+    fi
+    exec nohup python3 "$REPO/agorad/main.py"
+  ) >"$LOG" 2>&1 &
   AD_PID=$!
   ready=""
   for _ in {1..100}; do  # 10s 上限：等就绪行（root 牌行在其前 flush）
@@ -140,7 +145,9 @@ else
     kill -0 "$AD_PID" 2>/dev/null || break
     sleep 0.1
   done
-  [ -n "$ready" ] || { cat "$LOG" >&2; fail "agorad 启动失败（10s 未就绪，见上方输出）"; }
+  # 失败转储抹牌行：token 行先于 ready 行落日志（main.py），起而不就绪的转储
+  # 不得把 root 牌泼进终端/agent 转录（流式过滤，无 -i，GNU/BSD 同形）
+  [ -n "$ready" ] || { sed '/^AGORA_ROOT_TOKEN: /d' "$LOG" >&2; fail "agorad 启动失败（10s 未就绪，见上方输出）"; }
   tok="$(awk '/^AGORA_ROOT_TOKEN: /{print $2; exit}' "$LOG")"
   if [ -n "$tok" ]; then
     (umask 077; printf '%s\n' "$tok" > "$ROOT_TOKEN")  # 0600（F1 root 牌唯一落盘点）

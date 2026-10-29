@@ -539,6 +539,14 @@ class TestStatus(unittest.TestCase):
             srv.stop()
         self.assertEqual(p.returncode, 2)
         self.assertIn("404", p.stderr)
+        self.assertIn("gt-none", p.stderr)  # 报因尾附 tid（镜像 fetch：看门狗可归任务）
+
+    def test_status_cli_unreachable_carries_tid(self):  # Req: F28
+        home = mkhome(_dead_port())
+        p = run_cli(["status", "gt-lost"], home)
+        shutil.rmtree(home, ignore_errors=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("gt-lost", p.stderr)  # 不可达同契约：归任务不悬空
 
 
 if __name__ == "__main__":
