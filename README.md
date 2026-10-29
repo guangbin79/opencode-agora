@@ -49,6 +49,13 @@ Standalone dashboard: `agora-board` (vi-motion TUI). Update path: `git pull && .
 
 Orchestration needs the model's flexibility — real intent surfaces mid-conversation, not in an upfront plan. Merge quality must not trust the agent — it has to run where the agent can't fake it. Most projects take one side; agora is built on the bet that you need both.
 
+Making your session an orchestrator isn't unique — subagent trees do that too. The unique part, on an open-source and model-neutral stack, is the **control plane that keeps the orchestrator honest**: verify gate, role-separated credentials, and append-only audit running as an independent service the agent cannot rewrite. Native tools may absorb this tomorrow; today the gap is real.
+
+Two capabilities this control plane buys in practice:
+
+- **Single repo: enforced worktree writes.** Every agent edit is forced into the task's own worktree by the plugin gate + session tokens — your main checkout is never touched. Convention becomes mechanism.
+- **Multiple repos: one root agent, sibling repos.** A single session at the parent directory orchestrates cross-repo chains with `after:` — the downstream task sees the upstream repo's merged result through the `../` sibling layout, while unrelated repos run in parallel.
+
 **Honest trade-offs** (the same reasons you might not want this):
 
 - A wrong `verify_cmd` at creation can stall a task — it fails safe: workers can't edit verify, so the worst case is a stuck task, never a bad merge
