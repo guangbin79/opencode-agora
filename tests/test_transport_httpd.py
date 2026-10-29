@@ -390,6 +390,71 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(r["env"], [])
 
 
+class TestNestedDispatchLoop(HttpdTest):
+    def test_worker_nested_child_result_unblocks_parent_done(self):
+        parent = self.create_task({"goal": "parent", "project_dir": "/repo"})
+        parent_token = self.dispatch_task(parent)
+        parent_sid = self.app.state.get(parent)["worker_sid"]
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "child", "project_dir": "/repo",
+                      "verify_cmd": "true"}, parent_token)
+        self.assertEqual(st, 200)
+        child = r["task"]
+        self.assertEqual(self.app.state.get(child)["dispatcher_sid"], parent_sid)
+        self.assertEqual(self.app.state.get(child)["chain_depth"], 2)
+        st, r = call(self.port, "POST", "/task_dispatch",
+                     {"task": child}, parent_token)
+        self.assertEqual(st, 200)
+        child_token = r["token"]
+
+        st, r = call(self.port, "POST", "/post",
+                     {"task": parent, "kind": "done", "body": SHA}, parent_token)
+        self.assertEqual(st, 200)
+        self.assertIn("rejected:children", r["result"])
+        self.assertEqual(self.app.state.get(parent)["state"], "running")
+
+        # 父会话死亡期间子任务结案：result 先留库，恢复后的同牌会话可补拉。
+        self.stub.kill(parent_sid)
+        st, r = call(self.port, "POST", "/post",
+                     {"task": child, "kind": "done", "body": SHA}, child_token)
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"result": "accepted"})
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(child)["state"] == "closed"))
+        st, r = call(self.port, "POST", "/check_mail", {}, parent_token)
+        self.assertEqual(st, 200)
+        results = [m for m in r["messages"] if m["kind"] == "result"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["task"], child)
+        self.assertIn("已 closed", results[0]["body"])
+
+        st, r = call(self.port, "POST", "/post",
+                     {"task": parent, "kind": "done", "body": SHA}, parent_token)
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"result": "accepted"})
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(parent)["state"] == "closed"))
+
+    def test_worker_rebind_keeps_todo_child_ownership(self):
+        parent = self.create_task({"goal": "parent", "project_dir": "/repo"})
+        parent_token = self.dispatch_task(parent)
+        old_sid = self.app.state.get(parent)["worker_sid"]
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "child", "project_dir": "/repo",
+                      "verify_cmd": "true"}, parent_token)
+        self.assertEqual(st, 200)
+        child = r["task"]
+        st, _ = call(self.port, "POST", "/wiki_read",
+                     {"path": "notes/none.md"}, parent_token, sid="parent-new")
+        self.assertEqual(st, 404)
+        self.assertEqual(self.app.state.get(parent)["worker_sid"], "parent-new")
+        self.assertEqual(self.app.state.get(child)["dispatcher_sid"], "parent-new")
+        self.assertNotEqual(old_sid, "parent-new")
+        st, r = call(self.port, "POST", "/task_dispatch",
+                     {"task": child}, parent_token, sid="parent-new")
+        self.assertEqual(st, 200)  # 改绑后仍可首次派发已建未派子任务
+
+
 class TestWorkerRebind(HttpdTest):
     """gt-d55b9e：worker 牌换号自愈——持牌即身份，漂移即改绑（镜像 R25-A root 面）。"""
 
@@ -401,7 +466,7 @@ class TestWorkerRebind(HttpdTest):
                      {"task": tid, "kind": "done", "body": SHA}, wtok,
                      sid="ses-new")  # 续接换号：牌面 sid≠真实会话
         self.assertEqual(st, 200)
-        self.assertEqual(r, {"result": "accepted"})  # 五拒一克不减：受理绿
+        self.assertEqual(r, {"result": "accepted"})  # 六拒一克不减：受理绿
         self.assertEqual(self.app.auth.identify(wtok), ("ses-new", "worker"))
         self.assertTrue(self.app.auth.same_lineage("ses-new", wsid))  # 旧 sid 入血统
         self.assertEqual(self.app.state.get(tid)["worker_sid"], "ses-new")  # 行覆写

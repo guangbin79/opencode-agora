@@ -90,7 +90,7 @@ dispatcher↔worker 结构化消息，方向不限：接收方会话存活即实
 
 ### F11 中止派发链（承接 §2 人中止权）
 人可中止任一在飞或 blocked 派发链；dispatcher 可中止自己派出的子链（权力随链递减）。中止级联下级：在飞 worker 实时收到终止通知，链上任务置 cancelled，环境即回收；已 merged 任务不回滚（中止不逆转历史）。任务置 cancelled 即凭据作废、配额即释放（配额按活动任务计数）；verify/合并门临界段内的 cancel 排队、门走完生效；空链（无在飞任务）cancel 幂等成功＋审计；不做会话强杀（凭据作废即无害）。
-**验收**：中止一条两级在飞链→全部任务 cancelled、两级 worker 均收到终止、审计含 cancel 事件；中止含已 merged 任务的链→merged 保持不变；worker 调 cancel 必拒、dispatcher 中止非自己派出的链必拒（均审计留行）；cancelled 后旧凭据写入必拒；门临界段内 cancel 于门走完生效；空链 cancel 幂等＋审计留行。
+**验收**：中止一条两级在飞链→全部任务 cancelled、两级 worker 均收到终止、审计含 cancel 事件；中止含已 merged 任务的链→merged 保持不变；worker 中止父任务／他人任务必拒，dispatcher 中止非自己派出的链必拒（均审计留行）；cancelled 后旧凭据写入必拒；门临界段内 cancel 于门走完生效；空链 cancel 幂等＋审计留行。
 
 ### F12 启用域（2026-10-27 用户裁定）
 指定仓为根目录的 opencode 会话中 agora 整体休眠：普通工具（edit/write/read/bash）直通——不拦、不读引导、不拉起服务、不附牌；`agora_*` 工具拒绝（"此仓未启用 agora"）。名册＝`$AGORA_HOME/.agora/inactive-repos`（仓根绝对路径一行一个；**中央名册**，防仓内自声明标记解除 worker 武装）；名册外一切照常；委托 worktree 会话（git toplevel＝worktree 自身路径）不受名册影响。与 enforce off 正交（插件侧按仓日常形态 vs 服务侧全局紧急阀）。
@@ -207,3 +207,7 @@ F24 换前缀后 build_env 拼名 `__wt-task-{tid}__` 与 tid 自带 `task-` 前
 ### F29 任务 id 生成前缀 ag-——task 字面量退役（2026-10-29，task-de9871 用户裁定）
 接替 F24 的 task- 生成条款：生成前缀 task- 换 ag-（出处标记＋防 task 名词过载——任务/task 页/task_id 语境重叠；语义由 title 字段承担，6 hex 长度不变）。存量 gt-/task- id 终身兼容不迁移（wiki 页/账本/在飞任务不动），输入面三形态收：①生成 task.py _new_tid `"ag-"+secrets.token_hex(3)`，注释谱系更新；②高危点插件 inject BOOT 正则三前缀 `(gt-\S+|task-\S+|ag-\S+)`（字面交替写法，勿合并去字面——gt-99ae7b 前科）；③描述面如实三形态（agora_mcp.py schema×3、agora CLI help×2）；④e2e t3_chain S1 startswith 三前缀。README 生成态 task- 示例：grep 确认无，零改动。reqs 既有条目不改写，本条即替代记录。
 **验收**：新 tid 命中 `^ag-[0-9a-f]{6}$`；存量 task-/gt- id 作 after 建单派发全链通；插件 BOOT 三前缀用例绿（task-/gt- 既有用例保持）；`python3 -m pytest tests/ -q` 全绿；`cd agora-plugin && bun test` 绿。
+
+### F30 嵌套派发完整闭环＋after 失败／主动取消分义（2026-10-29，用户裁定）
+嵌套派发不能止于 worker 持有 `task_dispatch`：worker 同时是其所建子任务的 dispatcher，必须能完成建单、验收登记、取消、结果接收与恢复续管。①权限面补齐 `task_create／task_update／task_cancel`，TaskService 继续以 `dispatcher_sid==caller` 作归属终审——worker 只能管理己建子任务，父任务、他人任务及 worker 自己的 verify 仍不可改，board／doctor／enforce 不开放。②服务以 `result` 直接向子任务登记的 dispatcher 回传 `closed／blocked／cancelled`，复用“先落库、后 inject、失败留库”语义；父 worker 换号／重注入后，未结案子任务（含已建未派 `todo`）同步改绑，`check_mail` 沿牌血统补拉发往旧 sid 的离线结果。③父任务 `done` 新增子任务闸：全部嵌套子任务须为 `merged／closed` 或 dispatcher 有意 `cancelled`；`blocked`、在飞及 `dependency_failed:*` 自动取消均拒收。dispatcher 对依赖失败自动取消的子任务再显式 `task_cancel` 一次，可确认有意跳过（原因改写为 `dispatcher_confirmed:dependency_failed:*`，状态不变、审计留行），避免父任务永久无法收尾。④after 与嵌套父子关系分义：主动取消 after 前驱＝有意跳过，后继可派；前驱三连败进入 `blocked`＝终态失败，服务递归取消整条 after 后继链并记录 `dependency_failed:<失败前驱>`；门内后继的取消原因随 pending-cancel 原子传到门尾。父任务取消仍按原语义级联取消嵌套子任务。
+**验收**：真 HTTP 跑通 root 派父→父 worker 建／派子→子在飞时父 done 拒→子 closed→父收 result→父 done→closed；worker 可 update/cancel 己建子任务且不能管理他任务；普通主动取消子任务放行父 done，依赖失败取消拒收、显式确认后放行；blocked 前驱停止多层 after 链且门尾保留原因；closed／blocked／cancelled 三类 result 回传；父 worker 重注入／换号后活动与 todo 子任务归属保留，旧 sid 离线结果可补拉；全量 Python、插件与安装测试绿。

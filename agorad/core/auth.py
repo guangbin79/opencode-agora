@@ -7,9 +7,9 @@
 import secrets
 import time
 
-# worker 工具白名单＝矩阵唯一放行集；task_update/task_cancel/enforce 不在其中
+# worker 可创建并管理自己的嵌套子任务；update/cancel 的他任务隔离由 TaskService 归属终审
 WORKER_TOOLS = {"post", "check_mail", "repo_board", "wiki_read", "wiki_write",
-                "task_dispatch"}
+                "task_create", "task_dispatch", "task_update", "task_cancel"}
 # dispatcher 通用面＝worker 面＋建任务/观测；task_update/task_cancel 为 task 域单列
 DISPATCHER_TOOLS = WORKER_TOOLS | {"task_create", "board", "doctor"}
 

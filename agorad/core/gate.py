@@ -54,14 +54,14 @@ class Gate:
     """accept_done 单写者串行受理；run 为后台线程体（httpd 包 Thread 调用）。"""
 
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
-                 store, runner=None, verify_timeout=300):
+                 store, runner=None, verify_timeout=300, on_blocked=None):
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
-        self._store = store
+        self._store, self._on_blocked = store, on_blocked
         self._runner = runner or (lambda env, cmd: _subprocess_runner(
             env, cmd, timeout=verify_timeout))
 
-    # ---- done 受理（前置五拒，拒收落审计并附动作指引） ----
+    # ---- done 受理（前置六拒，拒收落审计并附动作指引） ----
 
     def accept_done(self, tid, worker_sid, commit):
         t = self._state.get(tid)
@@ -88,6 +88,16 @@ class Gate:
                 f"done body 须为纯 40 位十六进制完整 commit sha（收到 {commit[:20]!r}）"
                 "——无前缀无附言；结论文本另发 post(kind=note)")
         commit = c  # 归一一次：锚比较与落库均用小写，大写 sha 不再伪装成锚问题（OCR）
+        children = [(cid, x) for cid, x in self._state.snapshot()["tasks"].items()
+                    if x.get("dispatcher_sid") == worker_sid]
+        open_children = [cid for cid, x in children
+                         if x["state"] not in ("merged", "closed", "cancelled")
+                         or str(x.get("cancel_reason", "")).startswith("dependency_failed")]
+        if open_children:
+            return self._deny_done(
+                tid, "children",
+                f"嵌套子任务未结案：{', '.join(sorted(open_children))}——"
+                "等待 result 回传，或由你取消子任务；成功/有意跳过后再 post(done)")
         # 锚检查仅评审环在位时适用：缺失→放行 done，由门体 review_absent 分支驻留
         if (Path(t["env_dir"]) / ".review-loop").is_dir():
             a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
@@ -235,6 +245,10 @@ class Gate:
         if self._state.get(tid)["state"] == "blocked":
             self._audit(tid, "blocked")
             self._health.escalate(KIND_QUALITY, tid)
+            self._router.notify_dispatcher(
+                tid, "result", f"任务 {tid} 已 blocked；请重派或取消")
+            if self._on_blocked is not None:
+                self._on_blocked(tid)
 
     def _tail(self, tid):
         """门走完：pending-cancel 经 State.gate_tail 原子结算（merged 不逆转历史）；副作用随终态。"""
@@ -250,8 +264,12 @@ class Gate:
                 self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                   f"task {tid} cancelled at gate tail")
                 self._auth.revoke_session(t["worker_sid"])
+            self._router.notify_dispatcher(tid, "result", f"任务 {tid} 已取消")
         elif t["state"] == "closed":
             self._audit(tid, "closed")
+            self._router.notify_dispatcher(
+                tid, "result",
+                f"任务 {tid} 已 closed；commit={t.get('commit') or '-'}")
 
     def _audit(self, tid, event, **extra):
         """F8 门段审计：迁移即 events.jsonl 一行（事件名＝迁移后状态名）。"""

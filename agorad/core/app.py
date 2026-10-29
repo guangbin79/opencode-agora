@@ -8,6 +8,7 @@ EV_DISPATCHER_REBOUND = "dispatcher_rebind"
 
 # worker 换号自愈口径活动态（词汇对齐 task._ACTIVE；core 禁兄弟 import 故字面量本地定义）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
+_NESTED_OPEN = _ACTIVE | {"todo"}  # 已建未派子任务同样保留父 worker 所有权
 
 
 @dataclass
@@ -87,9 +88,9 @@ class App:
                                      "from": sid, "to": caller})
         # R2 波及：嵌套子任务行只覆写 dispatcher_sid 字段（worker_sid 行不串）
         nested = [tid for tid, t in tasks.items()
-                  if t.get("dispatcher_sid") == sid and t["state"] in _ACTIVE]
+                  if t.get("dispatcher_sid") == sid and t["state"] in _NESTED_OPEN]
         for tid in nested:
-            if self.state.get(tid)["state"] not in _ACTIVE:
+            if self.state.get(tid)["state"] not in _NESTED_OPEN:
                 continue  # 同上：终态行冻结不覆写（TOCTOU 复检）
             self.state.set_fields(tid, dispatcher_sid=caller)
             self.store.append_event({"ts": time.time(), "actor": sid,

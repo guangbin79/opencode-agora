@@ -128,16 +128,24 @@ class TestCoreHealth(unittest.TestCase):
         self.assertIn("失控[reinject-fail]", msgs[0]["body"])
         self.assertIn("任务t1", msgs[0]["body"])
 
-    def test_dispatcher_dead_reports_not_reinjected(self):  # Req: F5
+    def test_dispatcher_dead_reinjected_to_continue_nested_loop(self):
         self.seed("t1", worker="d1")
         self.seed("t2", disp="d1", worker="s-w2")
         self.oc.liveness["s-w2"] = True  # d1 死（缺席）
         self.health.tick()
-        self.assertEqual(self.recover.calls, [])  # dispatcher 死不代管
+        self.assertEqual(self.recover.calls, ["t1"])
+        self.assertEqual(self.main_msgs(), [])
+
+    def test_dispatcher_reinject_failure_reports(self):
+        self.recover.ok = False
+        self.seed("t1", worker="d1")
+        self.seed("t2", disp="d1", worker="s-w2")
+        self.oc.liveness["s-w2"] = True
+        self.health.tick()
         body = self.main_msgs()[0]["body"]
         self.assertIn("失控[dispatcher-dead]", body)
-        self.assertIn("任务t1", body)  # 死会话作为 worker 的任务为上报锚点
-        self.assertIn("running", body)  # 服务权威事实行
+        self.assertIn("任务t1", body)
+        self.assertIn("running", body)
 
     def test_tick_oc_down_neutral(self):  # Req: F5
         self.oc.down = True

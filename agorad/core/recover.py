@@ -11,6 +11,8 @@ create 成功才覆写行，不半写。core 只 import stdlib，依赖全构造
 import time
 
 _REINJECTABLE = {"dispatched", "running"}
+# 未结案嵌套子任务均随父 worker 改绑；todo 虽尚未派发，也不能在恢复后丢失所有权。
+_NESTED_OPEN = {"todo", "dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 
 EV_REINJECTED = "reinjected"
 
@@ -48,8 +50,17 @@ class Recover:
             wsid = self._oc.create(t["env_dir"], self._boot(tid, t))
         except Exception:
             return False
+        old_wsid = t.get("worker_sid")
         self._state.set_fields(tid, worker_sid=wsid)  # 新 sid 覆写
-        tok = self._auth.rebind(t.get("worker_sid"), wsid)  # 旧牌改绑新会话
+        for cid, child in self._state.snapshot()["tasks"].items():
+            if (child.get("dispatcher_sid") == old_wsid
+                    and child["state"] in _NESTED_OPEN):
+                self._state.set_fields(cid, dispatcher_sid=wsid)
+                self._store.append_event(
+                    {"ts": time.time(), "actor": "agorad",
+                     "event": "dispatcher_rebind", "task": cid,
+                     "from": old_wsid, "to": wsid})
+        tok = self._auth.rebind(old_wsid, wsid)  # 旧牌改绑新会话
         self._store.append_event({"ts": time.time(), "actor": "agorad",
                                   "event": EV_REINJECTED, "task": tid,
                                   "worker": wsid})

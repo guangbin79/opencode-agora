@@ -4,7 +4,7 @@
 transport 只 import agorad.core（R2）——access 件经 App 属性触达（store.home
 下 wiki 裸读写，无 import）。鉴权两段（R18）：X-Agora-Token→identify（无牌
 401）→may 粗判（越权 403＋审计行）；归属细判与保险丝归 TaskService。done
-特殊路径＝gate 五拒同步应答（拒收落审计），受理绿→落库→1-worker 串行队列后台跑门体。
+特殊路径＝gate 六拒同步应答（拒收落审计），受理绿→落库→1-worker 串行队列后台跑门体。
 """
 import json
 import queue
@@ -27,9 +27,9 @@ _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
                "peer")
 _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                           "reopened", "blocked"})  # 拉取面＝在飞非冻结（F25 修正；牌活性二道守卫）
-_DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/"
-                        "wiki_write/task_dispatch/wait；需登记 verify→"
-                        "post(kind=verify) 提案验收命令"}
+_DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/wiki_write/"
+                        "task_create/task_dispatch/wait；task_update/task_cancel 仅限己建子任务；"
+                        "需登记 verify→post(kind=verify) 提案验收命令"}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -224,7 +224,7 @@ class _Handler(BaseHTTPRequestHandler):
         if kind not in _POST_KINDS:  # F13 客户端 kind 白名单；内部直调 Router 不经此路
             raise ValueError(f"kind 须为 {'/'.join(_POST_KINDS)} 之一（收到 {kind!r}）")
         t = app.state.get(tid)
-        if kind == "done":  # F7 入口：五拒同步应答，受理绿才落库并入门
+        if kind == "done":  # F7 入口：六拒同步应答，受理绿才落库并入门
             if t.get("worker_sid") != sid:
                 raise NotChainEdge(f"{sid}->{tid}: done 仅任务 worker")
             r = app.gate.accept_done(tid, sid, str(body["body"]).strip())

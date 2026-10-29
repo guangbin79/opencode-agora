@@ -151,10 +151,12 @@ class TestSchemaContract(McpShellTest):
         self.assertIn("前驱任务 id", desc)
         self.assertIn("B7", desc)
 
-    def test_worker_unavailability_marked_in_descriptions(self):  # Req: F13
+    def test_worker_availability_marked_in_descriptions(self):  # Req: F13/F30
         descs = {t["name"]: t["description"] for t in
                  self.rpc("tools/list")["result"]["tools"]}
-        for name in ("task_update", "task_cancel", "board", "doctor"):
+        for name in ("task_update", "task_cancel"):
+            self.assertIn("worker 仅限己建子任务", descs[name])
+        for name in ("board", "doctor"):
             self.assertIn("worker 不可用", descs[name])
         self.assertIn("仅 root", descs["enforce"])
 

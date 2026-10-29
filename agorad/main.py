@@ -94,7 +94,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                     runner=mail_runner)  # 邮件外呼缝独立于 Gate runner：两契约不同
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
-                store=store, runner=runner, verify_timeout=verify_timeout)
+                store=store, runner=runner, verify_timeout=verify_timeout,
+                on_blocked=task.stop_after_failed)
     app.gate, app.health = gate, health
     return app
 

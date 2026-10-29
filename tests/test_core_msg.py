@@ -121,6 +121,16 @@ class TestCoreMsg(unittest.TestCase):
         with self.assertRaises(NotChainEdge):  # 无血缘 sid 仍拒
             r.post("stranger", ("down", "t1"), "note", "x")
 
+    def test_rebound_dispatcher_pulls_mail_addressed_to_old_sid(self):
+        """父 worker 死亡期间结果发往旧 sid；重注入换号后凭血统补拉，不丢闭环结果。"""
+        self.oc.online = False
+        mid = self.r.post("w1", ("up", "t1"), "result", "child closed")
+        r = Router(self.store, self.state, self.oc,
+                   same_lineage=lambda cur, old: (cur, old) == ("d2", "d1"))
+        self.assertEqual([m["id"] for m in r.check_mail("d2")], [mid])
+        self.assertEqual(r.check_mail("d2"), [])
+        self.assertEqual(r.check_mail("stranger"), [])  # 无血统不能读取他号邮件
+
     # ---- 游标推进与排序 ----
 
     def test_check_mail_cursor_and_order(self):  # Req: F4

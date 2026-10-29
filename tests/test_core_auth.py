@@ -9,7 +9,8 @@ from agorad.core.auth import Auth
 
 TOOLS = ["task_create", "task_dispatch", "task_update", "task_cancel",
          "post", "check_mail", "board", "doctor", "wiki_read", "wiki_write", "enforce"]
-WORKER_OK = {"post", "check_mail", "wiki_read", "wiki_write", "task_dispatch"}
+WORKER_OK = {"post", "check_mail", "wiki_read", "wiki_write", "task_create",
+             "task_dispatch", "task_update", "task_cancel"}
 # 目标任务快照行（State.snapshot()["tasks"][tid] 形态），供 task 域工具判定
 ROW = {"state": "running", "dispatcher_sid": "d1", "worker_sid": "w1"}
 
@@ -36,7 +37,7 @@ class TestCoreAuth(unittest.TestCase):
                 elif role == "dispatcher":
                     want = tool != "enforce"  # 仅 enforce 拒；task 域见下例行存在性用例
                 else:
-                    want = tool in WORKER_OK  # worker→五工具；task_cancel/update/enforce 恒 False
+                    want = tool in WORKER_OK  # worker 可管己建子任务；归属由 TaskService 终审
                 self.assertEqual(got, want, f"{role}×{tool}")
 
     def test_may_task_scoped_needs_task_row(self):  # Req: F1

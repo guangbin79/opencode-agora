@@ -3,8 +3,9 @@
 post 是链上唯一投递路径（cancel 终止通知也走此）：先 write_message 落库
 （库在即不丢），后 inject 一次；inject 失败仅落库，对方 check_mail 补拉。
 已投递集为内存态，与 mail_read 游标（快照持久化）配合：进程内 inject 成功
-即不再补拉，重启后由持久化游标兜底——崩溃回退口径同 State。状态迁移不在
-此——post(kind) 只管投递，状态由调用方（gate/task）驱动。
+即不再补拉，重启后由持久化游标兜底——崩溃回退口径同 State。会话换号重绑定后，
+check_mail 沿牌血统补拉发往旧 sid 的离线消息，嵌套结果不因恢复而丢失。状态迁移
+不在此——post(kind) 只管投递，状态由调用方（gate/task）驱动。
 """
 import time
 
@@ -34,7 +35,16 @@ class Router:
     def post(self, from_sid, to_edge: tuple, kind: str, body: str,
              silent: bool = False) -> int:
         to_sid = self._resolve(from_sid, to_edge)
-        tid = to_edge[1]
+        return self._deliver(from_sid, to_sid, to_edge[1], kind, body, silent)
+
+    def notify_dispatcher(self, tid, kind, body):
+        """服务侧结果回传：子任务尚无 worker 链边时也能通知其父 dispatcher。"""
+        to_sid = self._state.get(tid).get("dispatcher_sid")
+        if to_sid is None:
+            raise NotChainEdge(f"{tid}: dispatcher 未登记")
+        return self._deliver("agorad", to_sid, tid, kind, body)
+
+    def _deliver(self, from_sid, to_sid, tid, kind, body, silent=False):
         mid = self._store.write_message(  # 铁则：先落库后注入
             {"ts": time.time(), "task": tid, "kind": kind,
              "from": from_sid, "to": to_sid}, body)
@@ -58,8 +68,9 @@ class Router:
     def check_mail(self, sid: str) -> list:
         cursor = self._state.snapshot()["mail_read"].get(sid, 0.0)
         got = [m for m in self._store.read_messages()
-               if m["to"] == sid and m["id"] not in self._delivered
-               and float(m["ts"]) > cursor]
+               if (m["to"] == sid or (self._same_lineage is not None
+                                      and self._same_lineage(sid, m["to"])))
+               and m["id"] not in self._delivered and float(m["ts"]) > cursor]
         self._state.touch_mail(sid)
         self._delivered.update(m["id"] for m in got)  # 拉取即送达（无 ack）
         return got

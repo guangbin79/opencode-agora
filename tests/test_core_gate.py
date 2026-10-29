@@ -1,4 +1,4 @@
-"""T8 core/gate 契约：done 前置五拒/verify 门/隔离集成/崩溃恢复/升级调用点（R3/R9/R11/R12/F13）。
+"""T8 core/gate 契约：done 前置六拒/verify 门/隔离集成/崩溃恢复/升级调用点（R3/R9/R11/R12/F13）。
 
 真 Store/State/Router＋假 oc/gitx/health/read_anchor/runner 全注入；
 门体 run 同步调用（后台线程包装归 httpd 装配）。
@@ -142,7 +142,8 @@ class TestCoreGate(unittest.TestCase):
 
     # ---- 夹具 ----
 
-    def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False):
+    def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False,
+                on_blocked=None):
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
                            fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
@@ -150,7 +151,7 @@ class TestCoreGate(unittest.TestCase):
                               if (self.env / ".review-loop").is_dir() else None)
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
                          anchor, self.health, self.auth,
-                         self.store, runner=self.runner)
+                         self.store, runner=self.runner, on_blocked=on_blocked)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
@@ -259,6 +260,37 @@ class TestAcceptDone(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "done")
         self.assertEqual(t["commit"], SHA)  # 报告 commit 入行（merged 证据源）
+
+
+class TestNestedDoneGate(TestCoreGate):
+    def add_child(self, tid="child", state="running", cancel_reason=None):
+        self.seed(tid, state=state)
+        self.state.set_fields(tid, dispatcher_sid="s-w1", worker_sid="s-child")
+        if cancel_reason is not None:
+            self.state.set_fields(tid, cancel_reason=cancel_reason)
+
+    def test_open_child_rejects_parent_done(self):
+        self.seed()
+        self.add_child()
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:children", r)
+        self.assertIn("child", r)
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
+    def test_closed_and_intentionally_cancelled_children_accept_parent_done(self):
+        self.seed()
+        self.add_child("closed-child", state="closed")
+        self.add_child("skipped-child", state="cancelled")
+        self.add_child("confirmed-child", state="cancelled",
+                       cancel_reason="dispatcher_confirmed:dependency_failed:other")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+
+    def test_dependency_failed_cancellation_still_rejects_parent_done(self):
+        self.seed()
+        self.add_child(state="cancelled", cancel_reason="dependency_failed:other")
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:children", r)
+        self.assertEqual(self.state.get("t1")["state"], "running")
 
 
 class TestGateRun(TestCoreGate):
@@ -508,6 +540,39 @@ class TestGateRun(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # merged 二择：closed
         self.assertNotIn("pending_cancel", t)  # 不许悬挂
+
+
+class TestDispatcherResults(TestCoreGate):
+    def results(self):
+        return [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+
+    def test_closed_result_returns_to_dispatcher(self):
+        self.in_gate()
+        self.gate.run("t1")
+        (m,) = self.results()
+        self.assertEqual(m["from"], "agorad")
+        self.assertIn("已 closed", m["body"])
+        self.assertIn(SHA, m["body"])
+
+    def test_blocked_result_returns_and_triggers_failure_callback(self):
+        blocked = []
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate(on_blocked=blocked.append)
+        self.in_gate(streak=2)
+        self.gate.run("t1")
+        self.assertEqual(blocked, ["t1"])
+        (m,) = self.results()
+        self.assertIn("已 blocked", m["body"])
+
+    def test_gate_tail_cancel_result_returns_to_dispatcher(self):
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate()
+        self.in_gate()
+        self.state.set_fields("t1", pending_cancel=True)
+        self.gate.run("t1")
+        (m,) = self.results()
+        self.assertIn("已取消", m["body"])
 
 
 class TestGateAudit(TestCoreGate):

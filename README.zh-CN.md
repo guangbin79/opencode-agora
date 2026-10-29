@@ -107,8 +107,8 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 
 - **验证过的自治**——服务真跑测试＋评审锚绿才自动合并，且合并前重验锚
 - **强制隔离**——插件级闸拦截无任务凭据的 git 仓写入；worker 碰不到你的主检出
-- **跨仓编排**——`after:` 依赖链；无关仓并行；链深（5）与并发（8）硬上限
-- **角色分权**——root / dispatcher / worker 会话牌；worker 永远不能取消任务、改 verify 命令、看板
+- **跨仓与嵌套编排**——`after:` 依赖链；worker 可创建并管理自己的子任务，结果回传后才允许父任务完成；链深（5）与并发（8）硬上限
+- **角色分权**——root / dispatcher / worker 会话牌；worker 只能取消或登记自己子任务的 verify，不能管理父任务／他人任务或看板
 - **崩溃恢复**——任意时刻 `kill -9`；只追加状态＋worker 重启后凭原凭据重注入续跑
 - **实时问责**——失控实时拍主会话；每次状态变更落只追加 JSONL 审计；健康巡检兜底 dispatcher 死亡
 - **兼容 PR 工作流**——`task_create(target_branch="feature/x")` 合并进特性分支而非 main

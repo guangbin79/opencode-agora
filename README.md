@@ -108,8 +108,8 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 
 - **Verified autonomy** — auto-merge only after service-run tests pass and the review anchor is green, with the anchor re-verified at merge time
 - **Enforced isolation** — plugin-level gate blocks git-repo writes without task credentials; workers can't touch your main checkout
-- **Cross-repo orchestration** — `after:` dependency chains; unrelated repos dispatch in parallel; hard limits on nesting (5) and concurrency (8)
-- **Role-separated credentials** — root / dispatcher / worker session tokens; workers can never cancel tasks, alter verify commands, or read the board
+- **Cross-repo and nested orchestration** — `after:` dependency chains; workers can create and manage their own subtasks, and a parent can finish only after child results return; hard limits on nesting (5) and concurrency (8)
+- **Role-separated credentials** — root / dispatcher / worker session tokens; workers can cancel or register verify only for their own subtasks, never manage parents or other tasks, or read the board
 - **Crash recovery** — `kill -9` the service at any moment; append-only state + worker re-injection with the same credentials on restart
 - **Real-time accountability** — escalation pings to the main session, append-only JSONL audit for every state change, health patrol for dead dispatchers
 - **PR-workflow friendly** — `task_create(target_branch="feature/x")` merges into a feature branch instead of main

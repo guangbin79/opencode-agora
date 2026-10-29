@@ -25,7 +25,7 @@ _STR = {"type": "string"}
 _TID = {"type": "string",
         "description": "任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，task_create/task_dispatch 返回）"}
 _TOOLS = [
-    {"name": "task_create", "description": "登记任务（todo）（dispatcher/root）",
+    {"name": "task_create", "description": "登记任务（todo）（dispatcher/root；worker 创建嵌套子任务）",
      "inputSchema": {"type": "object", "properties": {
          "goal": _STR, "project_dir": _STR,
          "after": {"type": "string", "description": "前驱任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，B7 链）"},
@@ -42,11 +42,11 @@ _TOOLS = [
     {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
      "inputSchema": {"type": "object", "properties": {"task": _TID},
                      "required": ["task"]}},
-    {"name": "task_update", "description": "登记 verify 命令（仅派发方/root；worker 不可用）",
+    {"name": "task_update", "description": "登记 verify 命令（仅派发方/root；worker 仅限己建子任务）",
      "inputSchema": {"type": "object", "properties": {
          "task": _TID, "verify_cmd": _STR},
          "required": ["task", "verify_cmd"]}},
-    {"name": "task_cancel", "description": "中止任务（级联下级）（派发方/root；worker 不可用）"
+    {"name": "task_cancel", "description": "中止任务（级联下级）（派发方/root；worker 仅限己建子任务）"
                                            "——worker 回合进行中拒绝（worker_busy），确认强杀携 force:true",
      "inputSchema": {"type": "object", "properties": {
          "task": _TID,

@@ -170,6 +170,22 @@ class TestCoreRecover(unittest.TestCase):
         self.assertEqual([m["id"] for m in msgs], [mid])
         self.assertIn("续跑中", msgs[0]["body"])
 
+    def test_reinject_rebinds_nested_dispatcher_ownership(self):
+        self.seed("parent", worker="w-parent")
+        self.seed("child", worker="w-child")
+        self.seed("todo-child", state="todo", worker=None)
+        self.seed("closed-child", state="closed", worker="w-closed")
+        for tid in ("child", "todo-child", "closed-child"):
+            self.state.set_fields(tid, dispatcher_sid="w-parent")
+        self.assertTrue(self.rec.reinject("parent"))
+        new_sid = self.state.get("parent")["worker_sid"]
+        self.assertEqual(self.state.get("child")["dispatcher_sid"], new_sid)
+        self.assertEqual(self.state.get("todo-child")["dispatcher_sid"], new_sid)
+        self.assertEqual(self.state.get("closed-child")["dispatcher_sid"], "w-parent")
+        rebound = {e["task"] for e in self.events()
+                   if e["event"] == "dispatcher_rebind" and e["to"] == new_sid}
+        self.assertEqual(rebound, {"child", "todo-child"})
+
     def test_reinject_unknown_task_false(self):  # Req: F6
         self.assertFalse(self.rec.reinject("nope"))
 

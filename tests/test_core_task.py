@@ -174,6 +174,104 @@ class TestFuses(TestCoreTask):
         self.assertEqual(self.state.get(child)["state"], "dispatched")
 
 
+class TestNestedDispatch(TestCoreTask):
+    def test_worker_creates_dispatches_updates_and_cancels_own_child(self):
+        parent = self.dispatchable("parent")
+        parent_worker = self.svc.dispatch(parent, self.root)
+        parent_sid = self.state.get(parent)["worker_sid"]
+        child = self.svc.create("child", "/repo", None, parent_worker,
+                                verify_cmd="true")
+        row = self.state.get(child)
+        self.assertEqual(row["dispatcher_sid"], parent_sid)
+        self.assertEqual(row["chain_depth"], 2)
+        self.svc.update_verify(child, parent_worker, "pytest -q")
+        child_worker = self.svc.dispatch(child, parent_worker)
+        self.assertEqual(self.auth.identify(child_worker)[1], "worker")
+        self.assertEqual(self.svc.cancel(child, parent_worker), {"cancelled": 1})
+        self.assertEqual(self.state.get(child)["state"], "cancelled")
+        results = [m for m in self.store.read_messages()
+                   if m["to"] == parent_sid and m["kind"] == "result"]
+        self.assertEqual(len(results), 1)
+        self.assertIn("已取消", results[0]["body"])
+
+    def test_worker_cannot_manage_another_dispatchers_task(self):
+        parent = self.dispatchable("parent")
+        parent_worker = self.svc.dispatch(parent, self.root)
+        child = self.svc.create("child", "/repo", None, parent_worker,
+                                verify_cmd="true")
+        outsider = self.auth.issue("outsider", "worker")
+        for operation in (lambda: self.svc.dispatch(child, outsider),
+                          lambda: self.svc.update_verify(child, outsider, "false"),
+                          lambda: self.svc.cancel(child, outsider)):
+            with self.assertRaises(Rejected):
+                operation()
+        self.assertEqual(self.state.get(child)["state"], "todo")
+
+    def test_terminal_failure_stops_entire_after_chain(self):
+        self.seed("failed", state="blocked", disp="main")
+        self.seed("next", state="todo", disp="main")
+        self.seed("last", state="todo", disp="main")
+        self.state.set_fields("next", after="failed")
+        self.state.set_fields("last", after="next")
+        self.assertEqual(self.svc.stop_after_failed("failed"), ["next", "last"])
+        for tid in ("next", "last"):
+            self.assertEqual(self.state.get(tid)["state"], "cancelled")
+            self.assertEqual(self.state.get(tid)["cancel_reason"],
+                             "dependency_failed:failed")
+        stopped = [e for e in self.events() if e["event"] == "dependency_stopped"]
+        self.assertEqual([e["task"] for e in stopped], ["next", "last"])
+
+    def test_dependency_failed_cancel_does_not_unlock_new_after_task(self):
+        self.seed("failed", state="blocked", disp="main")
+        self.seed("stopped", state="cancelled", disp="main")
+        self.state.set_fields("stopped", cancel_reason="dependency_failed:failed")
+        child = self.dispatchable("new successor", after="stopped")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(child, self.root)
+        self.assertIn("after", str(cm.exception))
+        r = self.svc.cancel("stopped", self.root)
+        self.assertEqual(r["reason"], "dependency_skip_confirmed")
+        self.svc.dispatch(child, self.root)
+        self.assertEqual(self.state.get(child)["state"], "dispatched")
+
+    def test_dependency_failure_reason_survives_gate_tail(self):
+        self.seed("failed", state="blocked", disp="main")
+        self.seed("in-gate", state="done", disp="main")
+        self.state.set_fields("in-gate", after="failed")
+        self.assertEqual(self.svc.stop_after_failed("failed"), ["in-gate"])
+        self.assertTrue(self.state.get("in-gate")["pending_cancel"])
+        self.state.transition("in-gate", "verify_failed")
+        row = self.state.gate_tail("in-gate")
+        self.assertEqual(row["state"], "cancelled")
+        self.assertEqual(row["cancel_reason"], "dependency_failed:failed")
+        self.assertNotIn("pending_cancel_reason", row)
+
+    def test_explicit_cancel_overrides_pending_dependency_reason(self):
+        self.seed("failed", state="blocked", disp="main")
+        self.seed("in-gate", state="done", disp="main")
+        self.state.set_fields("in-gate", after="failed")
+        self.svc.stop_after_failed("failed")
+        self.svc.cancel("in-gate", self.root)
+        self.state.transition("in-gate", "verify_failed")
+        row = self.state.gate_tail("in-gate")
+        self.assertEqual(row["state"], "cancelled")
+        self.assertNotIn("cancel_reason", row)
+
+    def test_dispatcher_can_confirm_dependency_cancel_as_intentional_skip(self):
+        parent = self.dispatchable("parent")
+        parent_worker = self.svc.dispatch(parent, self.root)
+        child = self.svc.create("child", "/repo", None, parent_worker,
+                                verify_cmd="true")
+        self.state.transition(child, "cancelled",
+                              cancel_reason="dependency_failed:failed")
+        r = self.svc.cancel(child, parent_worker)
+        self.assertEqual(r, {"cancelled": 0,
+                             "reason": "dependency_skip_confirmed"})
+        self.assertEqual(self.state.get(child)["cancel_reason"],
+                         "dispatcher_confirmed:dependency_failed:failed")
+        self.assertEqual(self.state.get(child)["state"], "cancelled")
+
+
 class TestCancel(TestCoreTask):
     def test_two_level_cascade_with_notifications(self):  # Req: F11
         self.seed("t1", worker="s-w1", env="/envs/t1")

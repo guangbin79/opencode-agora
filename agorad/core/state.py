@@ -108,7 +108,7 @@ class State:
                 t["fail_streak"] = 0  # 对同任务再 dispatch 清零连败
             self._persist()
 
-    def queue_cancel(self, tid) -> bool:
+    def queue_cancel(self, tid, cancel_reason=None) -> bool:
         """门临界段 cancel 排队（持锁判定＋置位一体）：True=待门尾消费。
 
         done 一律排队（迁移矩阵 done 无 cancelled 出口，必经门尾）；与 gate_tail
@@ -120,6 +120,10 @@ class State:
             if t["state"] != EV_DONE:
                 return False
             t["pending_cancel"] = True
+            if cancel_reason is not None:
+                t["pending_cancel_reason"] = cancel_reason
+            else:
+                t.pop("pending_cancel_reason", None)  # 后来的主动取消覆盖自动停链原因
             t["updated"] = time.time()
             self._persist()
             return True
@@ -143,8 +147,10 @@ class State:
         with self._lock:
             t = self._tasks[tid]
             pending = bool(t.pop("pending_cancel", False))
+            cancel_reason = t.pop("pending_cancel_reason", None)
             if pending and t["state"] != EV_MERGED:
-                self.transition(tid, EV_CANCELLED, in_gate=False)
+                fields = {"cancel_reason": cancel_reason} if cancel_reason else {}
+                self.transition(tid, EV_CANCELLED, in_gate=False, **fields)
             elif t["state"] == EV_MERGED:
                 self.transition(tid, EV_CLOSED, in_gate=False)
             else:

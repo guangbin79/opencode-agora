@@ -1,7 +1,8 @@
 """健康探活与升级拍人（F5，设计 §4.4）：定时探死＋边沿判僵、失控实时拍主会话。
 
 tick 只探活动任务的直接下级会话（无全局巡检）；死下级→recover.reinject 自愈
-（静默），失败→升级；死会话若正管着在飞链（dispatcher）→不代管、直接拍人。
+（静默），失败→升级。父 worker 若正管着在飞链也优先重注入，并同步改绑嵌套
+子任务；只有无法重注入的失管 dispatcher 才直接拍人。
 worker 凭据自愈已推改拉（F25 修正）：inject_silent 推送通道证伪（v2.2.0
 synthetic 不触发 prompt 钩子），改由插件 hook 缓存未命中经 /cred_for_sid 拉取。
 边沿判僵（F5 决策记录 2026-10-28，只提醒不处置）：tick 顺带按 doctor 同口径
@@ -82,11 +83,14 @@ class Health:
                 oc_down = True
                 continue
             if data is None:
-                if any(x.get("dispatcher_sid") == wsid and x["state"] in _IN_FLIGHT
-                       for x in tasks.values()):
-                    self.escalate(KIND_DISPATCHER_DEAD, tid)  # 死会话管着在飞链——拍人不代管
-                elif t["state"] in _IN_FLIGHT and not self._recover.reinject(tid):
-                    self.escalate(KIND_REINJECT, tid)
+                manages = any(x.get("dispatcher_sid") == wsid
+                              and x["state"] in _IN_FLIGHT for x in tasks.values())
+                if t["state"] in _IN_FLIGHT:
+                    if self._recover.reinject(tid):
+                        continue  # 父 worker 一并恢复；recover 同步改绑嵌套子任务
+                    self.escalate(KIND_DISPATCHER_DEAD if manages else KIND_REINJECT, tid)
+                elif manages:
+                    self.escalate(KIND_DISPATCHER_DEAD, tid)
             else:
                 tm = data.get("time") or {}  # 缺形状→不 busy→照判（安全回退）
                 if (tm.get("updated") or 0) > (tm.get("idle") or 0):
