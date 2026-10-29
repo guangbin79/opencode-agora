@@ -199,3 +199,8 @@ worker 会话插件凭据缓存仅驻内存（inject.ts onInject 收 BOOT/creden
 ### F27 写面 not_worker 路由：root 死条文收殓（2026-10-29，task-305aff）
 F26 分流遗留残留 finding：write 面 `cred?.role==="root"` 分支生产不可达（root 牌从不入插件缓存），主会话直改仓落进无凭据分支吃 NO_CRED_HINT 死路文案（「静待重注入」对主会话永不到来）。修法镜像 F27 readish 裁定 A 路由形态（判定语义除路由外零漂移）：write 面缓存未命中按拉取判据路由——404（not_worker）→DISPATCH_HINT（主会话正确指引＝派任务勿直改）；200→填缓存走既有 worker env 判定；不可达/节流→维持 NO_CRED_HINT fail-closed（未知身份不给主会话指引）。index.ts 拒因分诊随路由收敛：not_worker 不再产 NO_CRED_HINT 附文（真非 worker 分支退役）；F25 接线用例 404 锚钉紧为 /任务面派发/。
 **验收**：main_write 三态纯函数锚（not_worker→DISPATCH_HINT；worker 拉取命中既有判定不回归；不可达/节流/缺省 fail-closed）＋既有豁免面/root 防御位/readish 用例全绿；`grep -qF "main_write" agora-plugin/hook.test.ts && cd agora-plugin && bun test` 绿。
+
+### F24 worktree 环境名去重 task 字面量（2026-10-29，task-5c520c）
+F24 换前缀后 build_env 拼名 `__wt-task-{tid}__` 与 tid 自带 `task-` 前缀双写（`wt-task-task-xxx`）。拼名收窄为 `__wt-{tid}__`（docstring 同步）；remove_env 兜底解析 `partition("__wt-task-")` 放宽为 `partition("__wt-")`——存量旧名亦含该子串，天然双兼容，存量 worktree 不迁移不重命名。测试面同步：单测正则 `__wt-task-gt-x1__`→`__wt-gt-x1__`；e2e 残留探测 glob `*__wt-task-*`→`*__wt-*`（t2_enforce.sh、t3_chain.sh×2，宽匹配对残留检测语义不变）。agora-plugin/hook.ts 只认 `__wt-` 前缀不动；docs 历史 wt-task 记录不改。
+**验收**：`python3 -m pytest tests/ -q` 全绿；build_env 产出名形如 `<REPO>__wt-<tid>__<MMDDHHMM><rand4>`；remove_env 兜底对存量 `__wt-task-*` 名仍能定位主仓。
+

@@ -1,7 +1,7 @@
 """git 唯一接触点（北向访问层）：worktree 建清/ff-only 合并/原子回滚/闸体检测。
 
 环境形态沿用全局 worktree 铁律语义：目录＝repo 同级父目录下
-`<REPO>__wt-task-<tid>__<MMDDHHMM><rand4>`（REPO 经 _slug 消毒为 ref 安全名），分支同名，保证 `../` 相对拓扑等价；
+`<REPO>__wt-<tid>__<MMDDHHMM><rand4>`（REPO 经 _slug 消毒为 ref 安全名），分支同名，保证 `../` 相对拓扑等价；
 线性历史——merge 只走 --ff-only，绝不产生 merge commit。
 """
 import secrets
@@ -38,7 +38,7 @@ class Gitx:
     def build_env(self, project_dir: str, tid: str, branch: str = None) -> str:
         repo = Path(project_dir).resolve()
         stamp = datetime.now().strftime("%m%d%H%M")
-        name = f"{self._slug(repo.name)}__wt-task-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
+        name = f"{self._slug(repo.name)}__wt-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
         env = repo.parent / name  # repo 同级父目录＝../ 相对拓扑等价
         # branch＝起点分支（外部工作流，如 issue/N-fix）；缺省＝仓默认支。
         # 起点全限定 refs/heads/<branch>：裸名解析 tag 优先（同名 tag 遮蔽致错基线）
@@ -51,7 +51,7 @@ class Gitx:
         try:
             main = self._main(env)  # 最先取：注销后 env 不再是 worktree，_main 会失败
         except (RuntimeError, FileNotFoundError):  # 含 env 已整体消失（kill 窗口残留）
-            main = env.parent / env.name.partition("__wt-task-")[0]
+            main = env.parent / env.name.partition("__wt-")[0]
         if not main.exists():  # slug≠原始仓名（.dotfiles 类）：重建失真，宁抛不盲删
             raise RuntimeError(f"env 回收失败：主仓定位失败（{main} 不存在）: {env}")
         if env.exists():  # env 已删净仅剩分支：跳过目录清理，直落分支级联

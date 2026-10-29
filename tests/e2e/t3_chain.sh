@@ -372,7 +372,7 @@ def env_of(tid):
 
 def git_clean(repo):
     wt = len(git(["worktree", "list"], repo).splitlines())
-    br = git(["branch", "--list", "*__wt-task-*"], repo)
+    br = git(["branch", "--list", "*__wt-*"], repo)
     return wt == 1 and not br
 
 def dispatch(goal, repo, after=None):
@@ -845,7 +845,7 @@ ok = True
 for repo in sorted(glob.glob(sys.argv[1] + "/*")):
     wt = subprocess.run(["git", "worktree", "list"], cwd=repo,
                         capture_output=True, text=True).stdout.strip().splitlines()
-    br = subprocess.run(["git", "branch", "--list", "*__wt-task-*"], cwd=repo,
+    br = subprocess.run(["git", "branch", "--list", "*__wt-*"], cwd=repo,
                         capture_output=True, text=True).stdout.strip()
     if len(wt) != 1 or br:
         print(f" residue in {repo}: wt={len(wt)} br={br!r}")

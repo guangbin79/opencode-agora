@@ -55,7 +55,7 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(Path(env).parent, self.repo.parent)  # repo 同级父目录，../ 拓扑等价
         self.assertRegex(
             Path(env).name,
-            re.escape(self.repo.name) + r"__wt-task-gt-x1__\d{8}[0-9a-z]{4}$",
+            re.escape(self.repo.name) + r"__wt-gt-x1__\d{8}[0-9a-z]{4}$",
         )
         self._commit(self.repo, {"src.py": "v2"}, "advance main")  # 主干已推进
         before = self._head(self.repo)

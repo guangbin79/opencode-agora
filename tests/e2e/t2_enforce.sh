@@ -355,7 +355,7 @@ sleep 1.5
 if python3 - "$WORK/proj" <<'PY'
 import subprocess, sys
 wt = subprocess.run(["git", "worktree", "list"], cwd=sys.argv[1], capture_output=True, text=True).stdout.strip().splitlines()
-br = subprocess.run(["git", "branch", "--list", "*__wt-task-*"], cwd=sys.argv[1], capture_output=True, text=True).stdout.strip()
+br = subprocess.run(["git", "branch", "--list", "*__wt-*"], cwd=sys.argv[1], capture_output=True, text=True).stdout.strip()
 sys.exit(0 if len(wt) == 1 and not br else 1)
 PY
 then note "PASS 残留：任务 worktree/分支清净（worktree list＝1）"; else note "FAIL 残留：worktree 残留"; RC=1; fi
