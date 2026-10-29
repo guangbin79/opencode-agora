@@ -75,17 +75,22 @@ class Gitx:
         head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
         # F29 分类先于合并：merge rc 混杂脏工作区拒绝等环境失败，曾把 FF 可并
         # 分支误拒 non-ff（task-bbf257 R2-R4）。祖先判定才是唯一真判据——
-        # 主干已含 env 头或非祖先＝真 non-ff；祖先成立而 merge 仍败＝环境病，
-        # 如实上抛禁伪装 non-ff（门内 except 口径回 worker，含 git 原文）。
-        if head == env_sha or self._git(
-                ["merge-base", "--is-ancestor", head, src],
-                cwd=target, check=False).returncode != 0:
+        # 主干已超前（env 为真祖先）＝真 non-ff；祖先成立而 merge 仍败＝环境病，
+        # 如实上抛禁伪装 non-ff（merge-base 自身 rc=128 病同此，禁并入 non-ff）。
+        anc = self._git(["merge-base", "--is-ancestor", head, src],
+                        cwd=target, check=False)
+        if anc.returncode == 1:
             return "non-ff"
+        if anc.returncode != 0:
+            raise RuntimeError(
+                f"git merge-base --is-ancestor {head} {src}: {anc.stderr.strip()}")
         r = self._git(["merge", "--ff-only", src], cwd=target, check=False)
-        if r.returncode != 0 or self._git(
-                ["rev-parse", "HEAD"], cwd=target).stdout.strip() != env_sha:
-            raise RuntimeError(f"git merge --ff-only {src}: {r.stderr.strip()}")
-        return "ok"
+        new_head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
+        if r.returncode != 0 or new_head != env_sha:
+            detail = r.stderr.strip() or r.stdout.strip()  # already-up-to-date 走 stdout
+            raise RuntimeError(f"git merge --ff-only {src}: rc={r.returncode}, "
+                               f"head@{new_head} vs expected@{env_sha}: {detail}")
+        return "ok"  # head==env_sha（目标支已在任务提交上）亦达此：幂等续走集成 verify
 
     def head(self, repo_dir: str, branch: str = None) -> str:
         # 全限定 refs/heads/<branch>：裸名 rev-parse tag 优先，同名 tag 会给出错误回滚点

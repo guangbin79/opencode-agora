@@ -139,10 +139,11 @@ class Gate:
             if self._gitx.merge_ff(env, target, branch) != "ok":
                 self._state.transition(tid, "reopened")  # 拒并不计连败（R12）
                 self._audit(tid, "reopened")
-                # F29 拒因自证：内嵌实际比较值，误判一眼可见
-                self._post(tid, f"non-ff 拒并：main@{before} vs branch@"
-                                f"{self._gitx.head(env)}——同步主干后重新"
-                                " post(done, commit)")
+                # F29 拒因自证：内嵌实际比较值（缺省形如 main@<sha> vs
+                # branch@<sha>；外部支任务首值＝实际目标支名），误判一眼可见
+                self._post(tid, f"non-ff 拒并：{branch or 'main'}@{before}"
+                                f" vs branch@{self._gitx.head(env)}——同步后"
+                                "重新 post(done, commit)")
                 return
             irc, iout = self._runner(target, cmd)  # 集成 verify 在目标仓
             if irc != 0:

@@ -98,6 +98,23 @@ class TestAccessGitx(unittest.TestCase):
         self.assertIn("local changes", str(cm.exception))  # 环境病如实上抛禁伪装 non-ff
         self.assertEqual(self._head(self.repo), before)  # 主干未动
 
+    def test_merge_ff_target_at_env_head_is_ok(self):  # Req: F29
+        env = self.gx.build_env(self.repo, "gt-f2a")  # env 头＝主干头（无任务提交）
+        self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "ok")  # 幂等续走集成 verify
+
+    def test_merge_ff_ancestor_probe_env_failure_raises_not_nonff(self):  # Req: F29
+        class BoomGitx(Gitx):  # merge-base 自身病（rc=128 对象损坏类）宁抛不伪装 non-ff
+            def _git(self, args, cwd, check=True):
+                if "--is-ancestor" in args:
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+                return Gitx._git(args, cwd, check)
+
+        env = BoomGitx().build_env(self.repo, "gt-f2b")
+        self._commit(Path(env), {"src.py": "v1\ntask"}, "task work")
+        with self.assertRaises(RuntimeError) as cm:
+            BoomGitx().merge_ff(env, str(self.repo))
+        self.assertIn("bad object", str(cm.exception))
+
     def test_remove_env_cascades_branch(self):  # Req: F1
         env = self.gx.build_env(self.repo, "gt-x3")
         self._commit(Path(env), {"src.py": "dirty"}, "unmerged work")  # 未合并分支也须级联清掉
