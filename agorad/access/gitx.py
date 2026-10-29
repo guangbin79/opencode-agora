@@ -51,7 +51,8 @@ class Gitx:
         try:
             main = self._main(env)  # 最先取：注销后 env 不再是 worktree，_main 会失败
         except (RuntimeError, FileNotFoundError):  # 含 env 已整体消失（kill 窗口残留）
-            main = env.parent / env.name.partition("__wt-")[0]
+            # rpartition 锚最后一个 __wt-：仓名自身含该字面量时 partition 会提前切错（终闸 B 册 probe）
+            main = env.parent / env.name.rpartition("__wt-")[0]
         if not main.exists():  # slug≠原始仓名（.dotfiles 类）：重建失真，宁抛不盲删
             raise RuntimeError(f"env 回收失败：主仓定位失败（{main} 不存在）: {env}")
         if env.exists():  # env 已删净仅剩分支：跳过目录清理，直落分支级联
