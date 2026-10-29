@@ -6,7 +6,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Multi-agent delegation for [opencode](https://opencode.ai) v2. You state goals in plain language; each task runs in its own git worktree; the **service itself runs your tests**; only verified work gets merged.
+Multi-agent delegation for [opencode](https://opencode.ai) v2. Installing it upgrades your main session into an **orchestration agent** — **the LLM plans, the machine verifies**. Each task runs in its own git worktree; only verified work gets merged.
 
 ```text
 You:    "Fix the login bug in repoB. Run pytest -q, merge when green."
@@ -15,7 +15,7 @@ agora:   └─ spawns a worker in an isolated git worktree
 You:    "How's it going?"   →   board: ✅ merged
 ```
 
-The difference in one line: **agents don't grade their own homework here.** The verify command runs under the service, not the worker — green means the tests actually passed on the merged commit.
+The difference in one line: **the LLM holds the steering wheel; the machine holds the brakes.** Orchestration — what to run, in what order, when to replan — stays in your conversation, so mid-flight intent (*"now apply the same fix to repoB and repoC"*) becomes a new schedule on the spot. And agents don't grade their own homework here: the verify command runs under the service, not the worker — green means the tests actually passed on the exact commit being merged.
 
 ## Quick Start
 
@@ -39,6 +39,22 @@ Now just talk to your opencode session as usual:
 
 Standalone dashboard: `agora-board` (vi-motion TUI). Update path: `git pull && ./install.sh`.
 
+## Where It Sits
+
+| | LLM-led orchestration | Machine-run quality gate |
+|---|:---:|:---:|
+| Task-graph orchestrators (plan once, execute a static graph) | ✗ | ✓ |
+| Agent-swarm frameworks | ✓ | ✗ (agents self-report) |
+| **opencode-agora** | ✓ | ✓ |
+
+Orchestration needs the model's flexibility — real intent surfaces mid-conversation, not in an upfront plan. Merge quality must not trust the agent — it has to run where the agent can't fake it. Most projects take one side; agora is built on the bet that you need both.
+
+**Honest trade-offs** (the same reasons you might not want this):
+
+- A wrong `verify_cmd` at creation can stall a task — it fails safe: workers can't edit verify, so the worst case is a stuck task, never a bad merge
+- Your main session's context is the orchestration bottleneck — that's why `agora-board` exists: five-bucket state at a glance without spending conversation window
+- Every scheduling decision is a model call — if your work pre-decomposes into a clean static graph, a zero-token orchestrator is cheaper and more reproducible
+
 ## How It Works
 
 ```text
@@ -53,6 +69,8 @@ Human ──▶ Main session (skills: agora-dispatch / agora-ops)
 ```
 
 Task lifecycle: `create → dispatch → worker codes → verify (service-run) → auto-merge (ff-only) → closed`
+
+After install, your session gains two skills (agora-dispatch / agora-ops) and 13 MCP tools. There is no background planner: the model you talk to **is** the orchestrator — task creation, `after:` chains, cancels, escalation replies are all model decisions from conversation context. agorad stays the state authority: verify executor, merge gate, message router, audit ledger.
 
 ## Two Quality Gates
 

@@ -6,7 +6,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-[opencode](https://opencode.ai) v2 的多 agent 委托协作层。你用自然语言说目标；每个任务在自己的 git worktree 里跑；**测试由服务亲自跑**；只有验证过的代码才会被合并。
+[opencode](https://opencode.ai) v2 的多 agent 委托协作层。装上即把你的主会话升级为**编排 agent**——**LLM 规划，机器验证**。每任务独立 git worktree，只有验证过的代码才会被合并。
 
 ```text
 你：  "修一下 repoB 的登录 bug，跑 pytest -q，绿了就合并"
@@ -15,7 +15,7 @@ agora：  └─ 在隔离的 git worktree 里派一个 worker
 你：  "进展如何？"   →   看板：✅ 已合并
 ```
 
-一句话说清差异：**这里 agent 不能给自己的作业打分。** verify 命令在服务侧执行而非 worker 侧——绿＝测试真的在合并提交上跑过。
+一句话说清差异：**LLM 握方向盘，机器握刹车。** 编排权——跑什么、什么顺序、何时重排——留在对话里，运行中浮现的意图（*"把同样的修复再应用到 repoB 和 repoC"*）当场变成新调度。而这里 agent 不能给自己的作业打分：verify 命令在服务侧执行而非 worker 侧——绿＝测试真的在要合并的那个提交上跑过。
 
 ## 快速开始
 
@@ -39,6 +39,22 @@ cd opencode-agora && ./install.sh
 
 独立仪表盘：`agora-board`（vi 键位 TUI）。更新：`git pull && ./install.sh`。
 
+## 定位
+
+| | LLM 主导编排 | 机器执行质量门 |
+|---|:---:|:---:|
+| 任务图编排器（一次规划、执行静态图） | ✗ | ✓ |
+| Agent 集群框架 | ✓ | ✗（agent 自报） |
+| **opencode-agora** | ✓ | ✓ |
+
+编排需要模型的灵活性——真实意图在对话中浮现，不在预先的计划里；合并质量不能信任 agent——必须在 agent 伪造不了的地方执行。多数项目只占一边；agora 押注你两者都要。
+
+**诚实的代价**（同样是你可能不选它的理由）：
+
+- 建单时 `verify_cmd` 写错会卡死任务——安全方向失败：worker 改不了 verify，最坏是卡任务、绝不是脏合并
+- 主会话上下文是编排瓶颈——所以才有 `agora-board`：五桶状态一眼尽收，不烧对话窗口
+- 每个调度决策都是一次模型调用——任务能预先分解成干净静态图的场景，零 token 编排器更便宜也更可复现
+
 ## 工作原理
 
 ```text
@@ -52,6 +68,8 @@ cd opencode-agora && ./install.sh
 ```
 
 任务生命周期：`创建 → 派发 → worker 干活 → verify（服务真跑）→ 自动合并（ff-only）→ 关闭`
+
+装好后，你的会话获得两个 skill（agora-dispatch / agora-ops）与 13 个 MCP 工具。没有后台规划器：与你对话的模型**就是**编排者——建单、`after:` 链、取消、失控应答，全部是模型基于对话上下文的实时决策。agorad 只做状态权威：verify 执行者、合并门、消息路由、审计账本。
 
 ## 两道质量闸
 
