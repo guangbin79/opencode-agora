@@ -72,8 +72,13 @@ chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n
 # ---- 复用实例轮（agorad_alive→LOG 空）：cleanup 残牌扫尾实路径（task-bb4ad2）----
 # AD1 仍活着：此轮走复用分支不拉起，seed 的残 .bak 只能由 AGORA_HOME 键扫尾收敛
 printf 'AGORA_ROOT_TOKEN: seeded-reuse-bak\n' > "$A1/.agora/install-agorad.log.bak"
+printf 'AGORA_ROOT_TOKEN: seeded-reuse-1\n留档行 keep me\n' > "$A1/.agora/install-agorad.log.1"
 run_install "$H1" "$A1" >/dev/null 2>&1 || bad "复用轮退出 0 (Req: F1)"
 chk "复用轮 .bak 残牌扫尾净（AGORA_HOME 键实路径，task-bb4ad2）" bash -c '[ ! -e "$1/.agora/install-agorad.log.bak" ]' _ "$A1"
+chk "复用轮 .1 牌行抹净且留档行保留（AD_LOG.1 sed 实路径——删行即红，task-bb4ad2）" bash -c '
+f="$1/.agora/install-agorad.log.1"
+[ -f "$f" ] && ! grep -q "^AGORA_ROOT_TOKEN: " "$f" && grep -q "留档行 keep me" "$f"' _ "$A1"
+chk "复用轮 .1.bak 消失（sed 换 inode 残壳扫净，task-bb4ad2）" bash -c '[ ! -e "$1/.agora/install-agorad.log.1.bak" ]' _ "$A1"
 chk "复用轮存活实例不受累（AD1 仍可连）" bash -c 'exec 3<>/dev/tcp/127.0.0.1/$1' _ "$adport"
 
 chk "骨架 state/messages (Req: F1)" [ -d "$A1/state/messages" ]

@@ -38,8 +38,10 @@ cleanup() {
   [ -n "$LOG" ] && { for f in "$LOG" "$LOG.1"; do
       sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$f" 2>/dev/null && rm -f "$f.bak"; done; }
   # 残牌无条件扫尾（键 AGORA_HOME——复用实例轮 LOG 空亦压着前轮被杀 cleanup 的残留）：
-  # .bak 全清；.1 不被活实例持 fd，换 inode 抹牌安全；活 .log 本体不抹（sed -i 换
-  # inode 会吞活实例后续留痕，gt-e38e41）——活轮残牌属接受面，下一轮启动路径必抹
+  # .bak 全清；.1 通常不被活实例持 fd（例外：前轮信号打断的孤儿实例在 alive 探测
+  # 0.5s 窗内恰不可达时仍持 .1 fd——换 inode 会吞其尾部留痕，牌行已不可经路径触达，
+  # 无暴露面，属接受面）；活 .log 本体不抹（sed -i 换 inode 会吞活实例后续留痕，
+  # gt-e38e41）——活轮残牌属接受面，下一轮启动路径必抹
   [ -n "$AGORA_HOME" ] && {
     sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$AD_LOG.1" 2>/dev/null || true
     rm -f "$AD_LOG.bak" "$AD_LOG.1.bak"; }
