@@ -163,6 +163,19 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("read", ledger, plain, null, true)).toBe(READ_HINT); // 缺省＝既有形态零漂移
     expect(shouldBlock("bash", ledger, plain, null, true, "not_worker")).toBeNull(); // bash 同面
   });
+
+  test("F27 收殓 write 面 main_write 三态：not_worker→DISPATCH_HINT；worker 凭据判定不回归；不可达/节流 fail-closed", () => {
+    // Req: F27
+    expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "not_worker")).toBe(DISPATCH_HINT); // 主会话直改：正确指引＝派任务
+    expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true, "not_worker")).toBe(DISPATCH_HINT); // edit 同面
+    // 拉取 200 命中：worker 牌已填缓存，走既有 env 判定（零漂移）
+    expect(shouldBlock("write", join(repo, "a.md"), envDir, worker, true, "ok")).toBeNull();
+    expect(shouldBlock("edit", join(repo, "a.md"), plain, worker, true, "ok")).toBe(wrongDoorHint(envDir, plain));
+    // 不可达/节流/缺省：未知身份 fail-closed，不给主会话指引
+    expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "unreachable")).toBe(NO_CRED_HINT);
+    expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "throttled")).toBe(NO_CRED_HINT);
+    expect(shouldBlock("write", join(repo, "a.md"), plain, null, true)).toBe(NO_CRED_HINT);
+  });
 });
 
 describe("cred 凭据管家", () => {
@@ -393,14 +406,15 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       // 未命中→拉取命中→填缓存→cwd∈env 放行（s-boot* 前缀＝wire 桩回任务 env cwd）
       await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-w", input: { filePath: join(repo, "a.md") } });
       expect(getCredential("s-boot-pull-w")?.token).toBe("tok-pull");
-      // 404 未命中→现有默认拒文案；同 sid 立即重试→节流窗内不再拉
+      // 404 未命中→主会话路由 DISPATCH_HINT（F27 收殓，不是 NO_CRED_HINT 死路文案）；
+      // 同 sid 立即重试→节流窗内不再拉
       await expect(
         hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-none", input: { filePath: join(repo, "a.md") } }),
-      ).rejects.toThrow(/派发/);
+      ).rejects.toThrow(/任务面派发/);
       expect(pulls).toEqual(["s-boot-pull-w", "s-boot-pull-none"]);
       await expect(
         hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-none", input: { filePath: join(repo, "a.md") } }),
-      ).rejects.toThrow(/派发/);
+      ).rejects.toThrow(/任务面派发/); // 窗内回放 not_worker：路由不降级
       expect(pulls.length).toBe(2); // 节流：同 sid 窗内零新拉
     } finally {
       if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
@@ -465,7 +479,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
-  test("F27 拒因分诊：NO_CRED_HINT 按拉取拒因附文案（服务异常/等节流/真非 worker）", async () => {
+  test("F27 拒因分诊：NO_CRED_HINT 按拉取拒因附文案（服务异常/等节流）；404 写面走 main_write 路由", async () => {
     // Req: F27
     const hooks = wire();
     setEnforce(null);
@@ -492,7 +506,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/不可达\/异常/);
       await expect(hooks["tool.execute.before"](editArgs("s-tri-u"))).rejects.toThrow(/不可达\/异常/); // 窗内回放 unreachable：判据不降级（评审 high 修复）
       code = 404;
-      await expect(hooks["tool.execute.before"](editArgs("s-tri-n"))).rejects.toThrow(/真非 worker/);
+      await expect(hooks["tool.execute.before"](editArgs("s-tri-n"))).rejects.toThrow(/任务面派发/); // not_worker＝主会话：DISPATCH_HINT，非 NO_CRED_HINT 附文
     } finally {
       if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
       else process.env.AGORA_OC_URL = savedUrl;

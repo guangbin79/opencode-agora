@@ -92,10 +92,12 @@ export function wrongDoorHint(envDir: string, cwd: string): string {
 /**
  * 判定链（F1）：返回引导文案＝拒，null＝放行。
  * 凭据"活动"的本地代理＝持牌＋envDir＋cwd∈envDir；活动任务终审在服务侧（T5 接线对齐）。
- * pull＝本次拉取拒因（F27，缺省 null）：readish 面按三态判——404（not_worker）＝服务侧
- * 非在飞 worker 绑定本会话，单用户模型下与主会话同属可信主类，按「主会话例外」放行
- * （root 牌从不入插件缓存，404 是主会话的唯一可判据——裁定 A 救活死条文）；拉到
- * worker 凭据或不可达/节流 → 维持 READ_HINT（fail-closed）。
+ * pull＝本次拉取拒因（F27，缺省 null）：404（not_worker）＝服务侧无在飞 worker 绑定本会话，
+ * 单用户模型下即主会话（root 牌从不入插件缓存，404 是主会话的唯一可判据——裁定 A）。
+ * readish 面：404→按「主会话例外」放行；worker 凭据/不可达/节流→READ_HINT（fail-closed）。
+ * write 面（F27 收殓残留 finding，裁定 A 镜像）：404→DISPATCH_HINT（主会话直改的正确指引
+ * ＝派任务，替代生产不可达的 root 缓存死条文路由）；200→已填缓存按 worker env 判定；
+ * 不可达/节流→NO_CRED_HINT（fail-closed，未知身份不给主会话指引）。
  */
 export function shouldBlock(
   tool: string,
@@ -116,9 +118,15 @@ export function shouldBlock(
   if (!WRITE_TOOLS.has(tool)) return null;
   if (under(TMP_ROOT, target) || !inGitRepo(target)) return null; // 豁免面 B3
   if (cred?.token && cred.envDir && under(cred.envDir, cwd)) return null;
-  // 拒因分流（语义不变只改信息量）：主会话／无凭据／wrong-door 各吐专属文案；
+  // 拒因分流：缓存命中 root 牌＝防御位（生产不入缓存）维持 DISPATCH_HINT；无凭据按拉取
+  // 判据路由（F27 收殓残留 finding，裁定 A 镜像）——404（not_worker）＝主会话直改→
+  // DISPATCH_HINT（「静待重注入」对主会话是死路，正确指引是派任务）；200 命中已填缓存
+  // 走上行 worker env 判定；不可达/节流＝未知身份维持 NO_CRED_HINT fail-closed。
   // 服务不可达默认拒由 index 在 lift 败态时拼 LIFT_RECOVER 附着，不在此分支。
   if (cred?.role === "root") return DISPATCH_HINT;
-  if (!cred?.token || !cred.envDir) return NO_CRED_HINT;
+  if (!cred?.token || !cred.envDir) {
+    if (pull === "not_worker") return DISPATCH_HINT; // F27 裁定 A 镜像：救活写面死条文路由
+    return NO_CRED_HINT;
+  }
   return wrongDoorHint(cred.envDir, cwd);
 }
