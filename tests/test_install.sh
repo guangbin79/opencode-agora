@@ -64,10 +64,17 @@ chk "AD_ENV 数组形不回归（整体禁标识符：两行拆分形也落本�
 chk "凭据不进 argv（无未注释行同时携 OC_PASSWORD 赋值与启动器记号）" bash -c '! grep -qE "^[^#]*AGORA_OC_PASSWORD=.*(env|setsid|nohup|python3)" "$1"' _ "$REPO/install.sh"
 chk "启动失败转储抹牌行（流式 sed，task-bb4ad2）" grep -qF "sed '/^AGORA_ROOT_TOKEN: /d' \"\$LOG\" >&2" "$REPO/install.sh"
 chk "cleanup 连 .1 一起抹（前轮信号中断残留，task-bb4ad2）" grep -qF 'for f in "$LOG" "$LOG.1"' "$REPO/install.sh"
-chk ".bak 残牌无条件扫尾在位（复用实例轮亦扫，task-bb4ad2）" grep -qF 'install-agorad.log.bak' "$REPO/install.sh"
+chk ".bak 残牌无条件扫尾在位（AD_LOG 键，与 step6 同源防漂移，task-bb4ad2）" grep -qF 'rm -f "$AD_LOG.bak" "$AD_LOG.1.bak"' "$REPO/install.sh"
 ADSESS=""
 [ -n "$GOT" ] && ADSESS="$(ps -o sess= -p "$adpid" 2>/dev/null | tr -d ' ')"
 chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"
+
+# ---- 复用实例轮（agorad_alive→LOG 空）：cleanup 残牌扫尾实路径（task-bb4ad2）----
+# AD1 仍活着：此轮走复用分支不拉起，seed 的残 .bak 只能由 AGORA_HOME 键扫尾收敛
+printf 'AGORA_ROOT_TOKEN: seeded-reuse-bak\n' > "$A1/.agora/install-agorad.log.bak"
+run_install "$H1" "$A1" >/dev/null 2>&1 || bad "复用轮退出 0 (Req: F1)"
+chk "复用轮 .bak 残牌扫尾净（AGORA_HOME 键实路径，task-bb4ad2）" bash -c '[ ! -e "$1/.agora/install-agorad.log.bak" ]' _ "$A1"
+chk "复用轮存活实例不受累（AD1 仍可连）" bash -c 'exec 3<>/dev/tcp/127.0.0.1/$1' _ "$adport"
 
 chk "骨架 state/messages (Req: F1)" [ -d "$A1/state/messages" ]
 chk "骨架 wiki (Req: F1)"           [ -d "$A1/wiki" ]

@@ -27,6 +27,7 @@ OC_DIR="$HOME/.config/opencode"
 PLUGIN_DIR="$OC_DIR/plugins/agora"
 SERVICE_JSON="$AGORA_HOME/.agora/service.json"
 ROOT_TOKEN="$AGORA_HOME/.agora/root.token"
+AD_LOG="$AGORA_HOME/.agora/install-agorad.log"  # 拉起稳定日志唯一权威路径（step6 与 cleanup 扫尾同源，防单侧改名漂移）
 AD_PID=""; LOG=""
 
 fail() { echo "install: $*" >&2; exit 1; }
@@ -36,9 +37,12 @@ cleanup() {
   # 前轮被信号打断（无 EXIT trap）时牌行滞留旧日志，本轮 mv 成 .1 后会长驻留档
   [ -n "$LOG" ] && { for f in "$LOG" "$LOG.1"; do
       sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$f" 2>/dev/null && rm -f "$f.bak"; done; }
-  # .bak 无条件扫尾（键 AGORA_HOME——复用实例轮 LOG 空亦可能压着前轮被杀 cleanup 的残 .bak）
-  [ -n "$AGORA_HOME" ] && rm -f "$AGORA_HOME/.agora/install-agorad.log.bak" \
-    "$AGORA_HOME/.agora/install-agorad.log.1.bak"
+  # 残牌无条件扫尾（键 AGORA_HOME——复用实例轮 LOG 空亦压着前轮被杀 cleanup 的残留）：
+  # .bak 全清；.1 不被活实例持 fd，换 inode 抹牌安全；活 .log 本体不抹（sed -i 换
+  # inode 会吞活实例后续留痕，gt-e38e41）——活轮残牌属接受面，下一轮启动路径必抹
+  [ -n "$AGORA_HOME" ] && {
+    sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$AD_LOG.1" 2>/dev/null || true
+    rm -f "$AD_LOG.bak" "$AD_LOG.1.bak"; }
   return 0
 }
 trap cleanup EXIT
@@ -127,7 +131,7 @@ PY
 if agorad_alive; then
   echo "install: agorad 已在运行——复用既有实例与 root.token"
 else
-  LOG="$AGORA_HOME/.agora/install-agorad.log"  # 稳定日志（gt-e38e41）：不随 install 清理，拉起/死因可后验
+  LOG="$AD_LOG"  # 稳定日志（gt-e38e41）：不随 install 清理，拉起/死因可后验
   [ -f "$LOG" ] && mv -f "$LOG" "$LOG.1"  # 上一轮留档一轮
   (umask 077; : > "$LOG")  # 0600：日志含 root 牌行，不得按 umask 0644 落盘
   # 脱会话（gt-71b6af）：setsid 在位原位 exec（$! 即 daemon pid）；macOS 无 setsid → nohup
