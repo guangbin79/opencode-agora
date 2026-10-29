@@ -413,6 +413,7 @@ class TestVerifyGate(TestCoreTask):
         boot = self.oc.sessions[-1][2]
         self.assertIn("开工: 进 env 后首个动作 post(kind=note", boot)
         self.assertIn("shell: mcp_shell（shell_execute）按 argv 数组执行", boot)
+        self.assertIn("ALLOW_COMMANDS", boot)
 
     def test_redispatch_revokes_old_token(self):  # Req: F3
         tid, disp, old = self.dispatched_pair()
