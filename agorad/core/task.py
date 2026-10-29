@@ -236,8 +236,9 @@ class TaskService:
 
     def _new_tid(self):
         tasks = self._state.snapshot()["tasks"]
-        # F24：新前缀 task-（用户裁定望文生义）；存量 gt- id 终身兼容，输入面双形态收
-        while (tid := "task-" + secrets.token_hex(3)) in tasks:
+        # 前缀谱系：gt-→task-（F24）→ag-（Req: F29，2026-10-29 用户裁定防 task 名词过载，语义由 title 承担）；
+        # 存量 gt-/task- id 终身兼容，输入面三形态收
+        while (tid := "ag-" + secrets.token_hex(3)) in tasks:
             pass
         return tid
 

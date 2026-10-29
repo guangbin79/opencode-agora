@@ -275,6 +275,22 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
+  test("BOOT ag- 新前缀同链登记（F29 三前缀兼容）", async () => {
+    // Req: F29
+    const hooks = wire();
+    await hooks["session.prompt"]({
+      sessionID: "s-boot-a",
+      prompt: { text: `[agora] ag-t-f29: F29 三前缀\npage: p.md\nenv: ${envDir}\ncontract: x` },
+    });
+    await hooks["session.prompt"]({ sessionID: "s-boot-a", prompt: { text: "[agora] credential t-f29\ntoken: tok-f29" } });
+    setEnforce(true);
+    try {
+      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot-a", input: { filePath: join(repo, "a.md") } });
+    } finally {
+      setEnforce(false);
+    }
+  });
+
   test("enforce 服务持旗拉取：/health on→拒；off→放行；root.token 缺失默认拒（T6 接线）", async () => {
     // Req: F1
     const hooks = wire();

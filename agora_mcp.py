@@ -23,12 +23,12 @@ _VERSION = "0.1.0"
 
 _STR = {"type": "string"}
 _TID = {"type": "string",
-        "description": "任务 id（task-xxxxxx 或历史 gt-xxxxxx，task_create/task_dispatch 返回）"}
+        "description": "任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，task_create/task_dispatch 返回）"}
 _TOOLS = [
     {"name": "task_create", "description": "登记任务（todo）（dispatcher/root）",
      "inputSchema": {"type": "object", "properties": {
          "goal": _STR, "project_dir": _STR,
-         "after": {"type": "string", "description": "前驱任务 id（task-xxxxxx 或历史 gt-xxxxxx，B7 链）"},
+         "after": {"type": "string", "description": "前驱任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，B7 链）"},
          "target_branch": {"type": "string",
                            "description": "合入目标分支（外部工作流；缺省＝仓默认支）"},
          "verify_cmd": {"type": "string",
@@ -56,7 +56,7 @@ _TOOLS = [
     {"name": "post", "description": "链边发消息（方向服务按角色定）",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string",
-                  "description": "任务 id（task-xxxxxx 或历史 gt-xxxxxx；kind=peer 时省略）"},
+                  "description": "任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx；kind=peer 时省略）"},
          "kind": {"type": "string",
                   "enum": ["note", "question", "answer", "done", "verify",
                            "verify_reject", "peer"],

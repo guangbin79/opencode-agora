@@ -203,3 +203,7 @@ F26 分流遗留残留 finding：write 面 `cred?.role==="root"` 分支生产不
 ### F24 worktree 环境名去重 task 字面量（2026-10-29，task-5c520c）
 F24 换前缀后 build_env 拼名 `__wt-task-{tid}__` 与 tid 自带 `task-` 前缀双写（`wt-task-task-xxx`）。拼名收窄为 `__wt-{tid}__`（docstring 同步）；remove_env 兜底解析 `partition("__wt-task-")` 放宽为 `partition("__wt-")`——存量旧名亦含该子串，天然双兼容，存量 worktree 不迁移不重命名。测试面同步：单测正则 `__wt-task-gt-x1__`→`__wt-gt-x1__`；e2e 残留探测 glob `*__wt-task-*`→`*__wt-*`（t2_enforce.sh、t3_chain.sh×2，宽匹配对残留检测语义不变）。agora-plugin/hook.ts 只认 `__wt-` 前缀不动；docs 历史 wt-task 记录不改。
 **验收**：`python3 -m pytest tests/ -q` 全绿；build_env 产出名形如 `<REPO>__wt-<tid>__<MMDDHHMM><rand4>`；remove_env 兜底对存量 `__wt-task-*` 名仍能定位主仓。
+
+### F29 任务 id 生成前缀 ag-——task 字面量退役（2026-10-29，task-de9871 用户裁定）
+接替 F24 的 task- 生成条款：生成前缀 task- 换 ag-（出处标记＋防 task 名词过载——任务/task 页/task_id 语境重叠；语义由 title 字段承担，6 hex 长度不变）。存量 gt-/task- id 终身兼容不迁移（wiki 页/账本/在飞任务不动），输入面三形态收：①生成 task.py _new_tid `"ag-"+secrets.token_hex(3)`，注释谱系更新；②高危点插件 inject BOOT 正则三前缀 `(gt-\S+|task-\S+|ag-\S+)`（字面交替写法，勿合并去字面——gt-99ae7b 前科）；③描述面如实三形态（agora_mcp.py schema×3、agora CLI help×2）；④e2e t3_chain S1 startswith 三前缀。README 生成态 task- 示例：grep 确认无，零改动。reqs 既有条目不改写，本条即替代记录。
+**验收**：新 tid 命中 `^ag-[0-9a-f]{6}$`；存量 task-/gt- id 作 after 建单派发全链通；插件 BOOT 三前缀用例绿（task-/gt- 既有用例保持）；`python3 -m pytest tests/ -q` 全绿；`cd agora-plugin && bun test` 绿。

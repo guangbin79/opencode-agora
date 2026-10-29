@@ -15,7 +15,7 @@ export interface OcInject {
 }
 
 const CRED_MSG = /\[agora\] credential (\S+)\ntoken: (\S+)/;
-const BOOT_MSG = /\[agora\] (gt-\S+|task-\S+): /;
+const BOOT_MSG = /\[agora\] (gt-\S+|task-\S+|ag-\S+): /;
 const BOOT_ENV = /^env: (\S+)$/m;
 
 export function onInject(msg: OcInject): void {

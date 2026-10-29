@@ -433,7 +433,7 @@ check(code == 200 and row(tidG)["state"] == "cancelled",
 tid1, wtok1, env1, wsid1 = dispatch(
     "Create a file named feature.md containing exactly one line: s1-feature. Commit it with git.",
     "proj")
-check(tid1.startswith(("gt-", "task-")) and wtok1 and env1 and wsid1  # F24 双前缀（新单 task-，存量 gt-）
+check(tid1.startswith(("gt-", "task-", "ag-")) and wtok1 and env1 and wsid1  # F24/F29 三前缀（新单 ag-，存量 task-/gt-）
       and row(tid1)["state"] == "dispatched" and os.path.isdir(env1),
       "S1 dispatch（worker 牌回传＋env worktree＋真会话登记） # Req: F3")
 check(api(f"/session/{wsid1}")["data"]["id"] == wsid1,
