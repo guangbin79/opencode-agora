@@ -33,11 +33,12 @@ fail() { echo "install: $*" >&2; exit 1; }
 cleanup() {
   [ -n "$AD_PID" ] && { kill "$AD_PID" 2>/dev/null || true; wait "$AD_PID" 2>/dev/null || true; }
   # 取牌即抹（GNU/BSD 通吃 -i.bak；换 inode，先抹＝丢 fd 后续留痕）。连同 .1 一起抹：
-  # 前轮被信号打断（无 EXIT trap）时牌行滞留旧日志，本轮 mv 成 .1 后会长驻留档。
-  # .bak 无条件扫尾：前轮 cleanup 中途被杀时牌行滞留 .bak，后续轮 sed 触不到它
+  # 前轮被信号打断（无 EXIT trap）时牌行滞留旧日志，本轮 mv 成 .1 后会长驻留档
   [ -n "$LOG" ] && { for f in "$LOG" "$LOG.1"; do
-      sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$f" 2>/dev/null && rm -f "$f.bak"; done
-      rm -f "$LOG.bak" "$LOG.1.bak"; }
+      sed -i.bak '/^AGORA_ROOT_TOKEN: /d' "$f" 2>/dev/null && rm -f "$f.bak"; done; }
+  # .bak 无条件扫尾（键 AGORA_HOME——复用实例轮 LOG 空亦可能压着前轮被杀 cleanup 的残 .bak）
+  [ -n "$AGORA_HOME" ] && rm -f "$AGORA_HOME/.agora/install-agorad.log.bak" \
+    "$AGORA_HOME/.agora/install-agorad.log.1.bak"
   return 0
 }
 trap cleanup EXIT

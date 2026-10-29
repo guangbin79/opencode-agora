@@ -60,9 +60,11 @@ chk "install 拉起行 setsid nohup 在位（源级锁，gt-71b6af/gt-e38e41）"
 chk "依赖检查不含 setsid（macOS 兼容，Req: F27）" bash -c '! grep -qE "for c in [^;]*setsid" "$1"' _ "$REPO/install.sh"
 chk "无 setsid 时 nohup 兜底分支在位（源级锁，Req: F27）" grep -qF 'exec nohup python3 "$REPO/agorad/main.py"' "$REPO/install.sh"
 chk "凭据经子壳 export 进 environ（正向锁——删行即断凭据投递，task-bb4ad2）" grep -qF 'export AGORA_OC_PASSWORD="$OC_PASSWORD"' "$REPO/install.sh"
+chk "AD_ENV 数组形不回归（整体禁标识符：两行拆分形也落本锁，task-bb4ad2）" bash -c '! grep -q "AD_ENV" "$1"' _ "$REPO/install.sh"
 chk "凭据不进 argv（无未注释行同时携 OC_PASSWORD 赋值与启动器记号）" bash -c '! grep -qE "^[^#]*AGORA_OC_PASSWORD=.*(env|setsid|nohup|python3)" "$1"' _ "$REPO/install.sh"
 chk "启动失败转储抹牌行（流式 sed，task-bb4ad2）" grep -qF "sed '/^AGORA_ROOT_TOKEN: /d' \"\$LOG\" >&2" "$REPO/install.sh"
 chk "cleanup 连 .1 一起抹（前轮信号中断残留，task-bb4ad2）" grep -qF 'for f in "$LOG" "$LOG.1"' "$REPO/install.sh"
+chk ".bak 残牌无条件扫尾在位（复用实例轮亦扫，task-bb4ad2）" grep -qF 'install-agorad.log.bak' "$REPO/install.sh"
 ADSESS=""
 [ -n "$GOT" ] && ADSESS="$(ps -o sess= -p "$adpid" 2>/dev/null | tr -d ' ')"
 chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"
@@ -140,12 +142,17 @@ cp "$A2/.agora/root.token" "$FIX/token-run1"
 echo "$FIX/some/repo" >> "$A2/.agora/inactive-repos"   # 模拟用户自录名册（二装不可覆盖）
 cp -r "$H2/.config/opencode/skills" "$FIX/skills-run1"
 printf 'AGORA_ROOT_TOKEN: seeded-stale\n' >> "$A2/.agora/install-agorad.log"  # 模拟前轮中断残牌（.1 留档实路径，task-bb4ad2）
+printf 'AGORA_ROOT_TOKEN: seeded-bak\n' > "$A2/.agora/install-agorad.log.bak"  # 模拟前轮 cleanup 被杀 mid-sed（.bak 扫尾实路径）
 
 run_install "$H2" "$A2" >/dev/null 2>&1 || bad "二装退出 0 (Req: F1)"
 
 chk "二装 .1 留档连残牌一并抹（取牌即抹实路径，task-bb4ad2）" bash -c '
 for f in "$1/.agora/install-agorad.log" "$1/.agora/install-agorad.log.1"; do
   [ -f "$f" ] && grep -q "^AGORA_ROOT_TOKEN: " "$f" && exit 1
+done; exit 0' _ "$A2"
+chk "二装 .bak 残牌扫尾净（断言不存在，task-bb4ad2）" bash -c '
+for f in "$1/.agora/install-agorad.log.bak" "$1/.agora/install-agorad.log.1.bak"; do
+  [ -e "$f" ] && exit 1
 done; exit 0' _ "$A2"
 
 chk "二装 opencode.json 逐字节不变 (Req: F1)" cmp -s "$FIX/oc-run1.json" "$OCJ2"
