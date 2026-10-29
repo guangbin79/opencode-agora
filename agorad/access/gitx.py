@@ -72,10 +72,20 @@ class Gitx:
         if branch:  # 合入指定分支（外部工作流）；缺省＝仓默认支
             self._git(["checkout", branch], cwd=target)
         env_sha = self._git(["rev-parse", src], cwd=target).stdout.strip()
-        r = self._git(["merge", "--ff-only", src], cwd=target, check=False)
-        # env 分支为祖先时 git 返回 0 但主干未动（Already up to date）——不算 ok
         head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
-        return "ok" if r.returncode == 0 and head == env_sha else "non-ff"
+        # F29 分类先于合并：merge rc 混杂脏工作区拒绝等环境失败，曾把 FF 可并
+        # 分支误拒 non-ff（task-bbf257 R2-R4）。祖先判定才是唯一真判据——
+        # 主干已含 env 头或非祖先＝真 non-ff；祖先成立而 merge 仍败＝环境病，
+        # 如实上抛禁伪装 non-ff（门内 except 口径回 worker，含 git 原文）。
+        if head == env_sha or self._git(
+                ["merge-base", "--is-ancestor", head, src],
+                cwd=target, check=False).returncode != 0:
+            return "non-ff"
+        r = self._git(["merge", "--ff-only", src], cwd=target, check=False)
+        if r.returncode != 0 or self._git(
+                ["rev-parse", "HEAD"], cwd=target).stdout.strip() != env_sha:
+            raise RuntimeError(f"git merge --ff-only {src}: {r.stderr.strip()}")
+        return "ok"
 
     def head(self, repo_dir: str, branch: str = None) -> str:
         # 全限定 refs/heads/<branch>：裸名 rev-parse tag 优先，同名 tag 会给出错误回滚点

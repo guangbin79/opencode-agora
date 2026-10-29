@@ -359,6 +359,16 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(len(self.runner.calls), 1)  # 不跑集成 verify
         self.assertTrue(self.worker_msgs())  # worker 收续修通知
 
+    def test_non_ff_rejection_message_self_evident(self):  # Req: F29
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(merge="non-ff")
+        self.in_gate()
+        self.gate.run("t1")
+        body = self.worker_msgs()[0]["body"]
+        self.assertIn("main@", body)  # 拒因内嵌实际比较值
+        self.assertIn("branch@", body)
+        self.assertIn("post(done", body)
+
     def test_integration_fail_rolls_back_target(self):  # Req: F7
         self.runner = FakeRunner((0, "env pass"), (1, "I: broke"))
         self.mk_gate()

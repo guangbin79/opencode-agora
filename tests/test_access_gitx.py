@@ -88,6 +88,16 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual((self.repo / "src.py").read_bytes(), b"v2\nfeature")
         self.assertNotEqual(before, b"v2\nfeature")
 
+    def test_merge_ff_dirty_worktree_raises_not_nonff(self):  # Req: F29
+        env = self.gx.build_env(self.repo, "gt-f29")
+        self._commit(Path(env), {"src.py": "v1\ntask"}, "task work")  # FF 可并
+        (self.repo / "src.py").write_text("v1\nlocal dirty")  # 主干同文件未提交修改
+        before = self._head(self.repo)
+        with self.assertRaises(RuntimeError) as cm:
+            self.gx.merge_ff(env, str(self.repo))
+        self.assertIn("local changes", str(cm.exception))  # 环境病如实上抛禁伪装 non-ff
+        self.assertEqual(self._head(self.repo), before)  # 主干未动
+
     def test_remove_env_cascades_branch(self):  # Req: F1
         env = self.gx.build_env(self.repo, "gt-x3")
         self._commit(Path(env), {"src.py": "dirty"}, "unmerged work")  # 未合并分支也须级联清掉
