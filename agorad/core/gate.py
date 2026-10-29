@@ -1,22 +1,20 @@
-"""verify 门与自动合并（F7，设计 §4.5）：done 前置受理→隔离 verify→ff 合并→集成 verify。
+"""verify 门与自动合并：任务环境验收→集成环境试合并/验收→目标支最终推进。
 
-受理五拒（R3/R9/F13，均经 _deny_done 落 done_rejected 审计并附动作指引）：state
-非 running／verify 未登记／verify 命令空／body-format done body 非纯 40 位 hex 完整
-sha（先行，防参数错伪装成锚问题）／anchor——锚拒收仅评审环在位时适用（env 有
-.review-loop/ 才查锚；锚由服务经注入的 read_anchor 自取，无 anchor 入参），拆无锚·
-≠分支 HEAD·未绿三支各配指引；评审环缺失→放行 done，verify 绿驻留 done 人工审合并
-（门体既有分支接管）。门体（run 后台线程体）：
-env 跑 verify→败 verify_failed＋输出尾部（截 2000 字符）实时回 worker＋计连败；
-绿→合并前锚重验：锚缺失/落后/未绿驻留 done（review_absent_no_merge 审计＋
-回 worker——合并充分条件＝.review-loop/ 锚绿于报告 commit，堵 accept→run
-窗口 TOCTOU 与 done 后偷提交）→ff-only 合并→non-ff 拒并 reopened（fail_streak 不动）→集成 verify 败→原子回滚
-（合并前 sha）＋reopened＋计连败；全绿→fail_streak_reset＋merged（commit 证据落行）
-＋环境回收＋尾部置 closed。每处迁移落 events.jsonl 一行（F8 门段审计，事件名＝
-迁移后状态名，merged 带 commit）。全程 in-gate 门闩（accept 即置位）＋
-pending-cancel 门走完生效（结算经 State.gate_tail 原子完成，merged 不逆转历史）。
-3 连败自动 blocked 与闸体变更经 health.escalate 拍人。core 只 import
-stdlib，依赖全构造注入（runner 缺省为 subprocess 真跑）。
+done 受理仍执行状态、verify、commit 格式与评审锚前置校验。门体先在任务 env 跑
+verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-only 试合并
+并重跑 verify；只有全绿且目标主检出两次干净检查通过，才推进真实目标分支。集成
+失败不再依赖 reset --hard 回滚，用户未提交工作与目标分支均不受测试副作用影响。
+
+默认 runner 以独立进程组执行命令，超时杀全组并返回 124，避免单个挂死验证永久
+堵住串行门。崩溃重排先探测目标支是否已含任务 commit：已含说明上轮最终推进已
+完成，只补 merged/closed 终态，不重验后假 reopened。gate_env 与 target_branch 的
+原始分支位随任务快照持久化，集成环境和分支位均可跨重启收敛。
+
+全程 in-gate 门闩、pending-cancel 门尾原子结算、三连败 blocked 与事件审计保持
+不变。core 只 import stdlib，依赖全构造注入。
 """
+import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -33,21 +31,35 @@ _GATE_PATTERNS = ("Makefile", "*.mk", "pyproject.toml", "setup.py", "setup.cfg",
                   ".github/workflows/*")
 
 
-def _subprocess_runner(env_dir, cmd):
-    """真 runner：env_dir 内 shell 跑 verify.cmd，返回 (rc, 合并输出)。"""
-    r = subprocess.run(cmd, shell=True, cwd=env_dir, capture_output=True, text=True)
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
+def _subprocess_runner(env_dir, cmd, timeout=300):
+    """真 runner：独立进程组跑 verify；超时杀全组，rc=124 按质量败处理。"""
+    proc = subprocess.Popen(cmd, shell=True, cwd=env_dir,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+        out, err = proc.communicate()
+        return 124, ((out or "") + (err or "") +
+                     f"\nverify 超时（>{timeout:g}s）——已终止验证进程组；"
+                     "可用 AGORA_VERIFY_TIMEOUT 调整上限")
+    return proc.returncode, (out or "") + (err or "")
 
 
 class Gate:
     """accept_done 单写者串行受理；run 为后台线程体（httpd 包 Thread 调用）。"""
 
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
-                 store, runner=None):
+                 store, runner=None, verify_timeout=300):
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store = store
-        self._runner = runner or _subprocess_runner
+        self._runner = runner or (lambda env, cmd: _subprocess_runner(
+            env, cmd, timeout=verify_timeout))
 
     # ---- done 受理（前置五拒，拒收落审计并附动作指引） ----
 
@@ -109,11 +121,19 @@ class Gate:
         t = self._state.get(tid)
         branch = t.get("target_branch")  # 合入目标支（外部工作流）；缺省＝仓默认支
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
-        self._state.set_fields(tid, in_gate=True)
-        origin = None
+        integration = t.get("gate_env") or f"{env}__gate"
+        origin = t.get("gate_origin_branch")  # 崩溃重排沿用首轮分支位，不采信漂移后的现场
+        self._state.set_fields(tid, in_gate=True, gate_env=integration)
         try:
+            # kill 落在“目标已推进、merged 未落库”窗口：任务提交已在目标支即只补终态，
+            # 绝不重跑集成 verify 后把已合法合并的任务假 reopened，更不需要 reset --hard。
+            if self._gitx.contains(target, t["commit"], branch):
+                self._succeed(tid)
+                return
+            self._gitx.ensure_clean(target)  # 主检出写前硬闸：用户未提交/未跟踪工作一律不碰
             if branch:
-                origin = self._gitx.symref(target)  # 合入前分支位；门毕还原（try 内防静默卡死）
+                origin = origin or self._gitx.symref(target)
+                self._state.set_fields(tid, gate_origin_branch=origin)
             if self.gate_files_touched(tid):  # 闸体变更：拍人不拦门
                 self._health.escalate(KIND_GATEFILES, tid)
             warn = self._gitx.diff_check(env, branch)  # 冲突标记机械检查，先于用户 verify
@@ -135,30 +155,25 @@ class Gate:
                                 "任务驻留 done 待人工审阅合并（dispatcher 可 "
                                 "cancel 或人工 git 合并）")
                 return
-            before = self._gitx.head(target, branch)  # 回滚点＝合并前目标分支 HEAD
-            if self._gitx.merge_ff(env, target, branch) != "ok":
-                self._state.transition(tid, "reopened")  # 拒并不计连败（R12）
-                self._audit(tid, "reopened")
-                # F29 拒因自证：内嵌实际比较值（缺省形如 main@<sha> vs
-                # branch@<sha>，首值取目标支实名），误判一眼可见
-                self._post(tid, f"non-ff 拒并："
-                                f"{branch or self._gitx.symref(target)}@{before}"
-                                f" vs branch@{self._gitx.head(env)}——同步后"
-                                "重新 post(done, commit)")
+            # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
+            self._gitx.build_integration(target, integration, branch)
+            before = self._gitx.head(integration)
+            if self._gitx.merge_ff(env, integration) != "ok":
+                self._non_ff(tid, branch, before)
                 return
-            irc, iout = self._runner(target, cmd)  # 集成 verify 在目标仓
+            irc, iout = self._runner(integration, cmd)
             if irc != 0:
-                self._gitx.rollback(target, before)  # 原子回滚（并发推进守卫基点）
                 self._quality_fail(tid, "reopened",
-                                   f"集成 verify 失败，目标分支已回滚——修复后重新"
+                                   f"集成 verify 失败，目标分支未改动——修复后重新"
                                    f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}")
                 return
-            self._state.fail_streak_reset(tid)  # 全绿清连败（R12）
-            self._state.transition(tid, "merged", commit=t.get("commit"))
-            self._audit(tid, "merged", commit=t.get("commit"))
-            self._gitx.remove_env(env)
-            self._post(tid, f"merged @{t.get('commit')}——环境已回收")
-        except Exception as e:  # 门内崩（checkout 拒/分支失）：转 reopened 通知，防静默卡死
+            # 集成验证可能耗时较长，最终推进前复查，关闭“开始干净、结束时变脏”窗口。
+            self._gitx.ensure_clean(target)
+            if self._gitx.merge_ff(env, target, branch) != "ok":
+                self._non_ff(tid, branch, self._gitx.head(target, branch))
+                return
+            self._succeed(tid)
+        except Exception as e:  # 门内崩（checkout 拒/分支失/脏工作区）：转 reopened 通知
             if self._state.get(tid)["state"] == "done":
                 self._state.transition(tid, "reopened")
                 self._audit(tid, "reopened")
@@ -169,9 +184,36 @@ class Gate:
                 self._router.post(t["worker_sid"], ("up", tid), "milestone",
                                   f"环境回收失败：{e}——任务终态不变，残留目录需人工清理")
         finally:
-            if origin and not self._gitx.checkout(target, origin):
-                self._audit(tid, "restore_failed")  # 还原败留痕：主仓停外部支，缺省任务将漂移
+            try:
+                self._gitx.remove_integration(integration, target)
+                self._state.set_fields(tid, gate_env=None)
+            except Exception as e:  # 回收失败不掩盖门结果；gate_env 保留供下轮/人工定位
+                self._audit(tid, "reclaim_failed", note=f"integration: {e}"[:200])
+            if origin:
+                if not self._gitx.checkout(target, origin):
+                    self._audit(tid, "restore_failed")  # 还原败留痕并保留原分支位供下轮复用
+                else:
+                    self._state.set_fields(tid, gate_origin_branch=None)
             self._tail(tid)
+
+    def _succeed(self, tid):
+        """唯一成功出口：目标支已含任务 commit，补终态、审计与任务环境回收。"""
+        t = self._state.get(tid)
+        self._state.fail_streak_reset(tid)  # 全绿清连败（R12）
+        self._state.transition(tid, "merged", commit=t.get("commit"))
+        self._audit(tid, "merged", commit=t.get("commit"))
+        self._gitx.remove_env(t["env_dir"])
+        self._post(tid, f"merged @{t.get('commit')}——环境已回收")
+
+    def _non_ff(self, tid, branch, before):
+        """试合并或最终推进遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""
+        t = self._state.get(tid)
+        self._state.transition(tid, "reopened")
+        self._audit(tid, "reopened")
+        self._post(tid, f"non-ff 拒并："
+                        f"{branch or self._gitx.symref(t['project_dir'])}@{before}"
+                        f" vs branch@{self._gitx.head(t['env_dir'])}——同步后"
+                        "重新 post(done, commit)")
 
     def gate_files_touched(self, tid):
         t = self._state.get(tid)

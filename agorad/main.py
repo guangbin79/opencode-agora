@@ -4,6 +4,7 @@ flock 单实例→装配 App（root 牌于此授予）→recover.startup 复查�
 service.json（$AGORA_HOME/.agora/ 下，pid/port/started/version/oc_version）→
 health 后台定时线程（默认 300s，AGORA_HEALTH_INTERVAL 可配）→serve_forever。
 """
+import math
 import os
 import signal
 import sys
@@ -59,8 +60,21 @@ def env_config():
     return home, url, password
 
 
+def verify_timeout_from_env():
+    """单次 env/集成 verify 上限（秒）；坏值/非有限值/非正数 fail-fast。"""
+    raw = os.environ.get("AGORA_VERIFY_TIMEOUT", "300")
+    try:
+        timeout = float(raw)
+    except ValueError:
+        raise ValueError(f"AGORA_VERIFY_TIMEOUT 须为正数秒（收到 {raw!r}）") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"AGORA_VERIFY_TIMEOUT 须为正数秒（收到 {raw!r}）")
+    return timeout
+
+
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
-             runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None):
+             runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
+             verify_timeout=300):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -80,7 +94,7 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                     runner=mail_runner)  # 邮件外呼缝独立于 Gate runner：两契约不同
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
-                store=store, runner=runner)
+                store=store, runner=runner, verify_timeout=verify_timeout)
     app.gate, app.health = gate, health
     return app
 
@@ -132,11 +146,17 @@ def main():
         print("需要 AGORA_OC_URL（或 $XDG_STATE_HOME/opencode/service.json 服务发现）",
               file=sys.stderr)
         return 2
+    try:
+        verify_timeout = verify_timeout_from_env()
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     store = Store(Path(home))
     if not store.flock_singleton():
         print("agorad 已在运行", file=sys.stderr)
         return 1
-    app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store)
+    app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store,
+                   verify_timeout=verify_timeout)
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）

@@ -1,16 +1,18 @@
-"""T8 core/gate 契约：done 前置五拒/verify 门/自动合并/回滚/升级调用点（R3/R9/R11/R12/F13）。
+"""T8 core/gate 契约：done 前置五拒/verify 门/隔离集成/崩溃恢复/升级调用点（R3/R9/R11/R12/F13）。
 
 真 Store/State/Router＋假 oc/gitx/health/read_anchor/runner 全注入；
 门体 run 同步调用（后台线程包装归 httpd 装配）。
 """
+import shlex
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from agorad.access.store import Store
 from agorad.core.auth import Auth
-from agorad.core.gate import Gate
+from agorad.core.gate import Gate, _subprocess_runner
 from agorad.core.msg import Router
 from agorad.core.state import State
 
@@ -37,6 +39,25 @@ class FakeGitx:
         self.restore_ok = True
         self.merged, self.head_sha = False, "aaa111"
         self.head_shas = {}  # repo_dir→sha 覆盖：双头可区分（F29 拒因实值断言）
+        self.integration_builds, self.integration_removed = [], []
+        self.clean_calls, self.contains_calls = [], []
+        self.contains_result, self.dirty = False, False
+
+    def contains(self, repo_dir, commit, branch=None):
+        self.contains_calls.append((repo_dir, commit, branch))
+        return self.contains_result
+
+    def ensure_clean(self, repo_dir):
+        self.clean_calls.append(repo_dir)
+        if self.dirty:
+            raise RuntimeError("目标仓工作区不干净")
+
+    def build_integration(self, target_dir, integration_dir, branch=None):
+        self.integration_builds.append((target_dir, integration_dir, branch))
+        return integration_dir
+
+    def remove_integration(self, integration_dir, target_dir):
+        self.integration_removed.append((integration_dir, target_dir))
 
     def symref(self, repo_dir):
         return "main"
@@ -88,6 +109,19 @@ class FakeRunner:
     def __call__(self, cwd, cmd):
         self.calls.append((cwd, cmd))
         return self.results.pop(0)
+
+
+class TestSubprocessRunner(unittest.TestCase):
+    def test_timeout_kills_whole_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late-write"
+            cmd = f"(sleep 0.5; printf survived > {shlex.quote(str(marker))}) & wait"
+            rc, out = _subprocess_runner(tmp, cmd, timeout=0.1)
+            self.assertEqual(rc, 124)
+            self.assertIn("verify 超时", out)
+            self.assertIn("AGORA_VERIFY_TIMEOUT", out)
+            time.sleep(0.6)  # 若只杀 shell 而漏杀子进程，此处会出现迟到写入
+            self.assertFalse(marker.exists())
 
 
 class TestCoreGate(unittest.TestCase):
@@ -270,10 +304,15 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "closed")  # 尾部置 closed
         self.assertEqual(t["commit"], SHA)  # merged 行含 commit
         self.assertEqual(t["fail_streak"], 0)  # 绿清连败（R12）
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
+        integration = f"{self.env}__gate"
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
+                                               (str(self.env), "/repo", None)])
         self.assertEqual(self.gx.removed, [str(self.env)])  # 环境即回收
-        self.assertEqual(self.runner.calls,  # env verify→目标仓集成 verify
-                         [(str(self.env), "pytest -q"), ("/repo", "pytest -q")])
+        self.assertEqual(self.runner.calls,  # env verify→detached 集成环境 verify
+                         [(str(self.env), "pytest -q"), (integration, "pytest -q")])
+        self.assertEqual(self.gx.clean_calls, ["/repo", "/repo"])  # 开始前＋最终推进前复查
+        self.assertEqual(self.gx.integration_removed, [(integration, "/repo")])
+        self.assertIsNone(t.get("gate_env"))
         self.assertEqual(self.health.calls, [])
         self.assertTrue(self.worker_msgs())  # worker 收 merged 回执
         self.assertFalse(t.get("in_gate"))
@@ -344,7 +383,9 @@ class TestGateRun(TestCoreGate):
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # merged→closed
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
+        integration = f"{self.env}__gate"
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
+                                               (str(self.env), "/repo", None)])
 
     def test_non_ff_reopens_without_merge_or_bump(self):  # Req: F7
         self.runner = FakeRunner((0, "pass"))
@@ -371,20 +412,51 @@ class TestGateRun(TestCoreGate):
         self.assertIn("branch@bbb222", body)
         self.assertIn("post(done", body)
 
-    def test_integration_fail_rolls_back_target(self):  # Req: F7
+    def test_integration_fail_leaves_target_untouched(self):  # Req: F7
         self.runner = FakeRunner((0, "env pass"), (1, "I: broke"))
         self.mk_gate()
         self.in_gate()
         self.gate.run("t1")
         t = self.state.get("t1")
+        integration = f"{self.env}__gate"
         self.assertEqual(t["state"], "reopened")
         self.assertEqual(t["fail_streak"], 1)  # 集成败计连败
-        self.assertEqual(self.gx.rollbacks,  # 目标分支回退到合并前 sha
-                         [("/repo", "aaa111")])
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None)])
+        self.assertEqual(self.gx.rollbacks, [])  # 不再 reset --hard 主检出
         self.assertEqual(self.gx.removed, [])
+        self.assertEqual(self.gx.integration_removed, [(integration, "/repo")])
         body = self.worker_msgs()[0]["body"]
         self.assertIn("I: broke", body)
+        self.assertIn("目标分支未改动", body)
         self.assertIn("post(done", body)
+
+    def test_crash_after_final_merge_only_repairs_terminal_state(self):
+        """目标已含任务 commit＝上轮推进完成：不得重验、重并或把任务假重开。"""
+        self.in_gate(streak=2)
+        self.gx.contains_result = True
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(t["fail_streak"], 0)
+        self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None)])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.gx.merge_calls, [])
+        self.assertEqual(self.gx.clean_calls, [])
+        self.assertEqual(self.gx.rollbacks, [])
+        self.assertEqual(self.gx.removed, [str(self.env)])
+
+    def test_dirty_target_reopens_before_verify_or_merge(self):
+        self.in_gate(streak=1)
+        self.gx.dirty = True
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(t["fail_streak"], 1)  # 环境病不计质量连败
+        self.assertEqual(self.gx.clean_calls, ["/repo"])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.gx.merge_calls, [])
+        self.assertEqual(self.gx.integration_builds, [])
+        self.assertIn("工作区不干净", self.worker_msgs()[0]["body"])
 
     def test_three_failures_block_and_escalate_quality(self):  # Req: F7
         self.runner = FakeRunner((1, "boom"))
@@ -415,7 +487,9 @@ class TestGateRun(TestCoreGate):
         self.state.set_fields("t1", pending_cancel=True)
         self.gate.run("t1")
         t = self.state.get("t1")
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])  # 照常合并
+        integration = f"{self.env}__gate"
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
+                                               (str(self.env), "/repo", None)])  # 照常合并
         self.assertEqual(t["state"], "closed")  # merged 不逆转历史，走完置 closed
         self.assertNotEqual(t["state"], "cancelled")
 
@@ -467,8 +541,11 @@ class TestGateAudit(TestCoreGate):
         self.seed(tb="issue/7")
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         self.gate.run("t1")
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", "issue/7")])
-        self.assertEqual(self.gx.head_calls, [("/repo", "issue/7")])  # 回滚点取目标支
+        integration = f"{self.env}__gate"
+        self.assertEqual(self.gx.integration_builds, [("/repo", integration, "issue/7")])
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
+                                               (str(self.env), "/repo", "issue/7")])
+        self.assertEqual(self.gx.head_calls, [(integration, None)])  # 试合并前取集成环境头
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("merged", names)
         self.assertEqual(self.state.get("t1")["state"], "closed")
@@ -476,8 +553,10 @@ class TestGateAudit(TestCoreGate):
     def test_target_branch_absent_keeps_default_target(self):  # Req: gt-132747
         self.in_gate()
         self.gate.run("t1")
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), "/repo", None)])
-        self.assertEqual(self.gx.head_calls, [("/repo", None)])  # 缺省＝仓默认支
+        integration = f"{self.env}__gate"
+        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
+                                               (str(self.env), "/repo", None)])
+        self.assertEqual(self.gx.head_calls, [(integration, None)])
         self.assertEqual(self.state.get("t1")["state"], "closed")
 
     def test_green_path_audits_done_merged_closed_with_commit(self):  # Req: F8

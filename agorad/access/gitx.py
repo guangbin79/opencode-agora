@@ -1,4 +1,4 @@
-"""git 唯一接触点（北向访问层）：worktree 建清/ff-only 合并/原子回滚/闸体检测。
+"""git 唯一接触点（北向访问层）：worktree 建清/ff-only 合并/集成隔离/闸体检测。
 
 环境形态沿用全局 worktree 铁律语义：目录＝repo 同级父目录下
 `<REPO>__wt-<tid>__<MMDDHHMM><rand4>`（REPO 经 _slug 消毒为 ref 安全名），分支同名，保证 `../` 相对拓扑等价；
@@ -45,6 +45,41 @@ class Gitx:
         self._git(["worktree", "add", "-b", name, str(env)]
                   + ([f"refs/heads/{branch}"] if branch else []), cwd=repo)
         return str(env)
+
+    def build_integration(self, target_dir: str, integration_dir: str,
+                          branch: str = None) -> str:
+        """在目标分支当前 HEAD 建 detached 集成环境，供试合并与集成 verify。
+
+        复跑先收敛 kill 窗口留下的目录/注册元数据；detached 避免与主检出争用分支。
+        """
+        target = Path(target_dir).resolve()
+        integration = Path(integration_dir).resolve()
+        self.remove_integration(str(integration), str(target))
+        start = f"refs/heads/{branch}" if branch else "HEAD"
+        self._git(["worktree", "add", "--detach", str(integration), start], cwd=target)
+        return str(integration)
+
+    def remove_integration(self, integration_dir: str, target_dir: str) -> None:
+        """回收 detached 集成环境；不删任务分支，幂等处理 kill 窗口残留。"""
+        integration = Path(integration_dir).resolve()
+        target = Path(target_dir).resolve()
+        if integration.exists():
+            self._git(["worktree", "remove", "--force", str(integration)],
+                      cwd=target, check=False)
+            for _ in range(_RMT_TRIES):
+                shutil.rmtree(integration, ignore_errors=True)
+                if not integration.exists():
+                    break
+                time.sleep(_RMT_WAIT)
+            if integration.exists():
+                raise RuntimeError(f"integration 目录删除失败（并发写入未停）: {integration}")
+        self._git(["worktree", "prune"], cwd=target, check=False)
+
+    def ensure_clean(self, repo_dir: str) -> None:
+        """主检出写前硬闸：任何已跟踪或未跟踪变更都拒绝，防合并/回滚伤用户工作。"""
+        r = self._git(["status", "--porcelain", "--untracked-files=normal"], cwd=repo_dir)
+        if r.stdout.strip():
+            raise RuntimeError("目标仓工作区不干净——请先提交、stash 或清理后重新 post(done, commit)")
 
     def remove_env(self, env_dir: str) -> None:
         env = Path(env_dir).resolve()
@@ -94,7 +129,18 @@ class Gitx:
             detail = r.stderr.strip() or r.stdout.strip()  # already-up-to-date 走 stdout
             raise RuntimeError(f"git merge --ff-only {src}: rc={r.returncode}, "
                                f"head@{new_head} vs expected@{env_sha}: {detail}")
-        return "ok"  # head==env_sha（目标支已在任务提交上）亦达此：幂等续走集成 verify
+        return "ok"  # head==env_sha（目标支已在任务提交上）亦达此：幂等推进
+
+    def contains(self, repo_dir: str, commit: str, branch: str = None) -> bool:
+        """目标分支是否已含任务提交：崩溃重排时识别合并已落，禁止重复验收后假重开。"""
+        target = f"refs/heads/{branch}" if branch else "HEAD"
+        r = self._git(["merge-base", "--is-ancestor", commit, target],
+                      cwd=repo_dir, check=False)
+        if r.returncode == 0:
+            return True
+        if r.returncode == 1:
+            return False
+        raise RuntimeError(f"git merge-base --is-ancestor {commit} {target}: {r.stderr.strip()}")
 
     def head(self, repo_dir: str, branch: str = None) -> str:
         # 全限定 refs/heads/<branch>：裸名 rev-parse tag 优先，同名 tag 会给出错误回滚点

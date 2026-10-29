@@ -192,6 +192,51 @@ class TestAccessGitx(unittest.TestCase):
         finally:
             self._git(["branch", "-D", env.name], cwd=dot)
 
+    def test_integration_side_effects_never_touch_target(self):
+        env = self.gx.build_env(self.repo, "gt-gate1")
+        env_sha = self._commit(Path(env), {"src.py": "task"}, "task work")
+        target_sha = self._head(self.repo)
+        target_bytes = (self.repo / "src.py").read_bytes()
+        integration = Path(self.tmp / "integration")
+
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self._head(integration), target_sha)  # 从目标 HEAD 隔离起步
+        self.assertFalse(self.gx.contains(str(self.repo), env_sha))
+        self.assertEqual(self.gx.merge_ff(env, str(integration)), "ok")
+        (integration / "verify.side-effect").write_text("test garbage")
+
+        self.assertEqual(self._head(self.repo), target_sha)  # 试合并不推进目标
+        self.assertEqual((self.repo / "src.py").read_bytes(), target_bytes)
+        self.assertFalse((self.repo / "verify.side-effect").exists())
+        self.gx.remove_integration(str(integration), str(self.repo))
+        self.assertFalse(integration.exists())
+        self.assertNotIn(str(integration), self._worktrees(self.repo))
+
+        self.assertEqual(self.gx.merge_ff(env, str(self.repo)), "ok")  # 全绿后才最终推进
+        self.assertTrue(self.gx.contains(str(self.repo), env_sha))
+
+    def test_build_integration_converges_ghost_registration(self):
+        integration = Path(self.tmp / "integration-ghost")
+        self.gx.build_integration(str(self.repo), str(integration))
+        shutil.rmtree(integration)  # kill 留下注册元数据
+        self.gx.build_integration(str(self.repo), str(integration))  # 重排先 prune 再建
+        self.assertEqual(self._head(integration), self._head(self.repo))
+        self.gx.remove_integration(str(integration), str(self.repo))
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])
+
+    def test_ensure_clean_rejects_tracked_and_untracked_changes(self):
+        self.gx.ensure_clean(str(self.repo))
+        untracked = self.repo / "local.note"
+        untracked.write_text("keep me")
+        with self.assertRaises(RuntimeError) as cm:
+            self.gx.ensure_clean(str(self.repo))
+        self.assertIn("工作区不干净", str(cm.exception))
+        self.assertEqual(untracked.read_text(), "keep me")  # 拒绝而非清掉用户文件
+        untracked.unlink()
+        (self.repo / "src.py").write_text("uncommitted")
+        with self.assertRaises(RuntimeError):
+            self.gx.ensure_clean(str(self.repo))
+
     def test_rollback_restores_bytes_and_sha(self):  # Req: F7
         env = self.gx.build_env(self.repo, "gt-x4")
         before_sha = self._head(self.repo)
@@ -211,8 +256,16 @@ class TestAccessGitx(unittest.TestCase):
         env = self.gx.build_env(self.repo, "gt-b1", "issue/7")
         self.assertEqual(self._head(Path(env)), issue_sha)  # 起点＝指定分支头
         env_sha = self._commit(Path(env), {"feat.txt": "f"}, "task work")
-        self.assertEqual(self.gx.head(str(self.repo), "issue/7"), issue_sha)  # 回滚点可取
+        self.assertEqual(self.gx.head(str(self.repo), "issue/7"), issue_sha)
+        integration = str(self.tmp / "issue-integration")
+        self.gx.build_integration(str(self.repo), integration, "issue/7")
+        self.assertEqual(self._head(Path(integration)), issue_sha)  # 指定支为集成基点
+        self.assertEqual(self.gx.merge_ff(env, integration), "ok")
+        self.assertEqual(self.gx.head(str(self.repo), "issue/7"), issue_sha)  # 目标支仍未动
+        self.assertFalse(self.gx.contains(str(self.repo), env_sha, "issue/7"))
+        self.gx.remove_integration(integration, str(self.repo))
         self.assertEqual(self.gx.merge_ff(env, str(self.repo), "issue/7"), "ok")
+        self.assertTrue(self.gx.contains(str(self.repo), env_sha, "issue/7"))
         self.assertEqual(self._git(["rev-parse", "issue/7"],
                                    cwd=self.repo).stdout.strip(), env_sha)  # 合入指定支
         self.assertEqual(self._git(["rev-parse", "main"],

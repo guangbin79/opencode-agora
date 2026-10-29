@@ -53,6 +53,19 @@ class FakeGitx:
     def check_branch(self, repo_dir, branch):
         pass
 
+    def contains(self, repo_dir, commit, branch=None):
+        return False
+
+    def ensure_clean(self, repo_dir):
+        pass
+
+    def build_integration(self, target_dir, integration_dir, branch=None):
+        Path(integration_dir).mkdir(parents=True, exist_ok=True)
+        return integration_dir
+
+    def remove_integration(self, integration_dir, target_dir):
+        shutil.rmtree(integration_dir, ignore_errors=True)
+
     def merge_ff(self, env_dir, target, branch=None):
         return "ok"
 

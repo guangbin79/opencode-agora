@@ -80,7 +80,7 @@ cd opencode-agora && ./install.sh
 
 ## 两道质量闸
 
-**verify 门**——不可协商的那道。验收命令在建单时登记（`task_create(verify_cmd="pytest -q")`，或 `verify_pending: true` 延后登记）；**服务在 worktree 里真跑**。绿＝可合并；红＝worker 收到输出重试；三连败＝blocked＋失控告警。worker 无法跳过、伪造或自报结果。
+**verify 门**——不可协商的那道。验收命令在建单时登记（`task_create(verify_cmd="pytest -q")`，或 `verify_pending: true` 延后登记）。**服务先在任务 worktree 真跑**，再在 detached 集成 worktree 中试合并并复跑；两次全绿才推进目标分支，集成失败和测试副作用都不会碰主检出。每次运行都有超时（缺省 300 秒）。红＝worker 收到输出重试；三连败＝blocked＋失控告警。worker 无法跳过、伪造或自报结果。
 
 **评审门**——开放标准，评审器自带。契约只有一个锚文件：
 
@@ -133,6 +133,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 | `$AGORA_HOME/.agora/inactive-repos` | 空 | agora 完全休眠的仓（一行一个路径） |
 | `AGORA_BOARD_INTERVAL` | `5` | 仪表盘轮询间隔（秒） |
 | `AGORA_HEALTH_INTERVAL` | `300` | dispatcher 健康巡检（秒） |
+| `AGORA_VERIFY_TIMEOUT` | `300` | 单次任务／集成 verify 超时（秒）；超时终止整个进程组 |
 | `enforce` | on | 强制闸总开关（仅 root，开关留审计） |
 | `$AGORA_HOME/.agora/email.json` | 关 | 僵态任务邮件提醒（`{"to","command"}`） |
 

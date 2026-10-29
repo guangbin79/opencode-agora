@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agorad.main import env_config, main
+from agorad.main import env_config, main, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,6 +51,22 @@ class TestEnvConfig(unittest.TestCase):
                 rc = main()
         self.assertEqual(rc, 2)
         self.assertIn("AGORA_OC_URL", err.getvalue())
+
+
+class TestVerifyTimeoutConfig(unittest.TestCase):
+    def test_default_and_positive_fraction(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(verify_timeout_from_env(), 300)
+        with mock.patch.dict(os.environ, {"AGORA_VERIFY_TIMEOUT": "0.25"}, clear=True):
+            self.assertEqual(verify_timeout_from_env(), 0.25)
+
+    def test_invalid_values_fail_fast(self):
+        for raw in ("", "abc", "0", "-1", "nan", "inf", "-inf"):
+            with self.subTest(raw=raw), \
+                 mock.patch.dict(os.environ, {"AGORA_VERIFY_TIMEOUT": raw}, clear=True):
+                with self.assertRaises(ValueError) as cm:
+                    verify_timeout_from_env()
+                self.assertIn("AGORA_VERIFY_TIMEOUT", str(cm.exception))
 
 
 class TestBoot(unittest.TestCase):
