@@ -1,6 +1,5 @@
 # opencode-agora
 
-[![CI](https://github.com/guangbin79/opencode-agora/actions/workflows/ci.yml/badge.svg)](https://github.com/guangbin79/opencode-agora/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org)
 [![made for opencode v2](https://img.shields.io/badge/made%20for-opencode%20v2-6e7bff.svg)](https://opencode.ai)
