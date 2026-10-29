@@ -5,7 +5,7 @@ description: agora 收摊与治理快操作。用户说"取消任务/停掉/关�
 
 # agora-ops——收摊与治理快操作
 
-本 skill 管收摊操作：中止链、治理 enforce、启用域名册、doctor 体检。干活流程（派发/goal/verify/监控/失控三选一）见 agora-dispatch——触发词以动词分界：派发与问进展属 dispatch，停掉与治理属本 skill。工具面即 MCP 11 件中与本 skill 相关的四件：`task_cancel`／`board`／`doctor`／`enforce`。
+本 skill 管收摊操作：中止链、治理 enforce、启用域名册、doctor 体检。干活流程（派发/goal/verify/监控/失控三选一）见 agora-dispatch——触发词以动词分界：派发与问进展属 dispatch，停掉与治理属本 skill。工具面即 MCP 13 件中与本 skill 相关的四件：`task_cancel`／`board`／`doctor`／`enforce`（防误杀判读另配 `agora status` CLI）。
 
 ## 1. 取消级联确认纪律
 
@@ -18,7 +18,7 @@ MCP 路径的 `task_cancel` 无确认门（无 board-tui 式 y/n），确认纪�
 
 **裁定：级联数 0（叶子任务）免确认直执行**——无人受连带，确认门空转。判断依据即第 1 步 board 链视图中该任务无下级。
 
-服务侧语义（已定，勿臆测勿替代）：级联递归中止全部下级，在飞 worker 实时收终止通知，任务置 cancelled，环境即回收；merged/closed/cancelled 不动（已 merged 不回滚）；done 在 verify/合并门临界段内→cancel 排队（pending_cancel），门走完生效；空链 cancel 幂等成功＋审计；凭据即作废、配额即释放；不做会话强杀。权限：人可中止任一在飞或 blocked 链；dispatcher 只能中止自己派出的子链（越权必拒＋审计）；worker 调 cancel 必拒。
+服务侧语义（已定，勿臆测勿替代）：级联递归中止全部下级，在飞 worker 实时收终止通知，任务置 cancelled，环境即回收；merged/closed/cancelled 不动（已 merged 不回滚）；done 在 verify/合并门临界段内→cancel 排队（pending_cancel），门走完生效；空链 cancel 幂等成功＋审计；凭据即作废、配额即释放；不做会话强杀。取消前有忙碌闸（F28）：目标 worker 会话回合进行中（oc updated>idle）→拒绝 {cancelled:0, reason:"worker_busy"}＋审计 cancel_rejected_busy＋hint 指 force；force:true 强制照常（审计注 forced）；oc 探测失败 fail-open 放行（审计注 probe_failed）。权限：人可中止任一在飞或 blocked 链；dispatcher 只能中止自己派出的子链（越权必拒＋审计）；worker 调 cancel 必拒。
 
 > 来源：F11／设计§4.1（task_cancel 语义）／agorad/core/task.py:106-131（级联递归＋queue_cancel＋noop 审计）；级联数 0 免确认＝本 skill 裁定（T3）
 
@@ -46,14 +46,15 @@ MCP 路径的 `task_cancel` 无确认门（无 board-tui 式 y/n），确认纪�
 
 ## 4. doctor 快查解读
 
-`doctor` 无参直调，返回账本侧事实三组，逐组解读：
+`doctor` 无参直调，返回账本侧事实四组（age_rank／last_seen_rank／stale_candidates／env），逐组解读：
 
 - **`age_rank`**：任务年龄排行（创建至今）——前列者占额嫌疑。
-- **`last_seen_rank`**：最后活动排行——worker 每次调用服务即刷新 last_seen，活着但排名垫底（久未动）＝**僵态候选**。"僵"不自动处置（无巡检、无 stalled 定时器），由人判断后转 dispatch 失控三选一（cancel／再 dispatch／放任）。
+- **`last_seen_rank`**：最后活动排行——last_seen 仅 worker 服务调用刷新（人查看不续命），值＝融合基线 max(last_seen, env 工作区文件活性)（F15：文件在写＝活着）；垫底且超 20min＝**僵态候选**（in_gate 免判；done 滞留照拍＝催合并）。"僵"不自动处置，由人判断后转 dispatch 失控三选一（cancel／再 dispatch／放任）。
+- **僵态提醒（health tick，只提醒不处置）**：tick 边沿判僵（doctor 同口径再剔 busy——oc 会话 updated>idle 回合进行中免判），新进候选集→主会话收 stalled 升级（落转录不弹窗，gt-5bc312）＋可选邮件（$AGORA_HOME/.agora/email.json opt-in，未配置零行为）；离开候选复位、再僵再拍。doctor 候选是纯账本口径（可能含 busy 深潜误标），人工排除用 `agora status <tid>`（fresh／busy_round 均非僵，stale_candidate 才算）。
 - **`env`**：每任务 env_dir 在盘性（`on_disk`）——false＝登记环境已不在盘（merged/cancelled 回收后属正常）。
 - **孤儿目录**：盘上无任务对应的环境目录永不自动删；当前 doctor 只报在册环境的在盘性，盘上孤儿扫描属②期——on_disk 与状态对不上、或人目视发现无主目录时，才值得人 `ls` 复核一圈。
 - **不手动删 worktree 目录**——服务 `remove_env` 负责回收（含 rmtree 兜底）。手动 rm 可能误伤在飞任务的环境（gt-3e7301 事故）。残留排查用 doctor 确认 closed 后由服务清理，不人手 rm。
 
 何时值得人看一眼：age 前列且状态非在飞/blocked、last_seen 长期停滞、on_disk 与任务状态矛盾。三者之外勿主动巡检——不上 cron、不做全局扫描。
 
-> 来源：F5（僵不自动处置、last_seen 刷新）／设计§4.7（doctor 含任务年龄/最后活动排行）＋B6（孤儿永不自动删）／agorad/core/report.py:58-76（age_rank/last_seen_rank/env on_disk；孤儿扫描属②期＝:59）
+> 来源：F5＋2026-10-28 二批免判口径（busy/in_gate 免判、last_seen 只 worker 刷、done 滞留照拍）＋F15（env 活性融合）＋F28（status 三态）／设计§4.7（doctor 含任务年龄/最后活动排行）＋B6（孤儿永不自动删）／agorad/core/report.py:129-171（stale_candidates/_env_activity/doctor_view；孤儿扫描属②期）＋agorad/core/health.py（边沿判僵、stalled 免通知、email opt-in）
