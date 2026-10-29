@@ -30,7 +30,7 @@
 - **计数声明须分面**（推广重写 ocr 实证）：同一"工具数"三面异值——MCP tools/list=13（含 wait）、HTTP 端点=12（wait 壳层本地拦截 `_tools_call` 不转发）、旧注释 12——blanket 全局替换把 httpd 事实改错（13≠端点数）；改计数类声明先 grep 各消费面逐面改，注释随面定值
 - **Python 地板=3.10**（PEP 604 实证）：`str | None` 运行时注解且无 `from __future__ import annotations`（access/oc.py、access/store.py）——3.8/3.9 导入即 TypeError；README/CI matrix 以 3.10/3.12 为地板，勿回写 ≥3.8
 - **Bun.spawn detached 等价 setsid**（F27 实证）：`detached: true` 子进程 sess≠父进程（probe 实证），POSIX 新会话/Windows 新进程组——插件拉起不再依赖 setsid 包装；install.sh 侧 macOS 缺 setsid 走 nohup 兜底（$! 两形态同为 python pid，击杀语义不变）
-- **维护者自编辑通道**（F27 过程判例）：enforce ON 下 root 亦被拦（hook.ts 写入分支 root→DISPATCH_HINT，零信任设计）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离，MCP 拉牌救不了 hook 拦截）
+- **维护者自编辑通道**（F27 过程判例）：enforce ON 下 root 亦被拦（hook.ts 写入分支 root→DISPATCH_HINT，零信任设计；task-305aff 后该缓存命中分支纯防御位——root 牌生产不入缓存，主会话写面拦截实际经 pull 404 not_worker 路由送达 DISPATCH_HINT，镜像 readish 裁定 A）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离，MCP 拉牌救不了 hook 拦截）
 
 ## 已知接受面
 
