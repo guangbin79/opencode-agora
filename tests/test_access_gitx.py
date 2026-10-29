@@ -134,6 +134,18 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(self._git(["branch", "--list", env.name],
                                    cwd=self.repo).stdout.strip(), "")  # 分支清掉
 
+    def test_remove_env_fallback_anchors_last_wt_when_repo_name_has_literal(self):  # Req: F24
+        repo = self.tmp / "proj__wt-x"  # 仓名自身含 __wt-：partition 提前切错，rpartition 锚真边界
+        self._init_repo(repo)
+        env = Path(self.gx.build_env(repo, "gt-y1"))
+        self._git(["worktree", "remove", "--force", str(env)],
+                  cwd=repo)  # 注销使 _main 失败，逼兜底解析
+        self.gx.remove_env(str(env))
+        self.assertFalse(env.exists())
+        self.assertEqual(self._worktrees(repo), [str(repo)])
+        self.assertEqual(self._git(["branch", "--list", env.name],
+                                   cwd=repo).stdout.strip(), "")
+
     def test_remove_env_raises_when_delete_blocked(self):  # Req: gt-2e4829
         env = Path(self.gx.build_env(self.repo, "gt-x9"))
         (env / ".review-loop").mkdir()
