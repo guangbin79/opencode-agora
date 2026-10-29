@@ -290,6 +290,16 @@ class TestCancel(TestCoreTask):
                          ["/envs/t1", "/envs/t2", "/envs/t3"])  # 环境即回收
         self.assertTrue(any(e["event"] == "cancelled" for e in self.events()))
 
+    def test_direct_cancel_notifies_worker_cancel_and_dispatcher_result(self):  # Req: F30
+        """双通道契约（F30 跟进）：直路径取消＝worker 收 cancel 终止通知＋dispatcher 收 result 回执。"""
+        self.seed("t1", worker="s-w1", env="/envs/t1")
+        self.svc.cancel("t1", self.root)
+        self.assertEqual(len(cancel_msgs(self.store, "s-w1")), 1)
+        results = [m for m in self.store.read_messages()
+                   if m["to"] == "disp1" and m["kind"] == "result"]
+        self.assertEqual(len(results), 1)
+        self.assertIn("已取消", results[0]["body"])
+
     def test_cancel_spares_merged_descendant(self):  # Req: F11
         self.seed("t1", worker="s-w1", env="/envs/t1")
         self.seed("t2", disp="s-w1", worker="s-w2", state="merged")

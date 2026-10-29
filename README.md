@@ -107,7 +107,7 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 ## Highlights
 
 - **Verified autonomy** — auto-merge only after service-run tests pass and the review anchor is green, with the anchor re-verified at merge time
-- **Enforced isolation** — plugin-level gate blocks git-repo writes without task credentials; workers can't touch your main checkout
+- **Enforced isolation** — plugin-level gate blocks git-repo writes without task credentials; workers can't touch your main checkout. Accepted risk: nested dispatch lets a worker create subtasks on any local repo path with a self-chosen verify — worker-created task targets are not path-clamped
 - **Cross-repo and nested orchestration** — `after:` dependency chains; workers can create and manage their own subtasks, and a parent can finish only after child results return; hard limits on nesting (5) and concurrency (8)
 - **Role-separated credentials** — root / dispatcher / worker session tokens; workers can cancel or register verify only for their own subtasks, never manage parents or other tasks, or read the board
 - **Crash recovery** — `kill -9` the service at any moment; append-only state + worker re-injection with the same credentials on restart

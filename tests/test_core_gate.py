@@ -555,6 +555,16 @@ class TestDispatcherResults(TestCoreGate):
         self.assertIn("已 closed", m["body"])
         self.assertIn(SHA, m["body"])
 
+    def test_closed_splits_milestone_to_worker_and_result_to_dispatcher(self):
+        """双通道契约（F30 跟进）：关单 milestone（人读）归 worker，result（机器读）归 dispatcher，各恰一条。"""
+        self.in_gate()
+        self.gate.run("t1")
+        routed = sorted((m["to"], m["kind"]) for m in self.store.read_messages())
+        self.assertEqual(routed, [("disp1", "result"), ("s-w1", "milestone")])
+        milestone, = [m["body"] for m in self.store.read_messages()
+                      if m["kind"] == "milestone"]
+        self.assertIn("merged @", milestone)
+
     def test_blocked_result_returns_and_triggers_failure_callback(self):
         blocked = []
         self.runner = FakeRunner((1, "boom"))
