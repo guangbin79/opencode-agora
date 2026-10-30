@@ -224,3 +224,7 @@ Python 运行件与插件/skills/install.sh 全部进 wheel：`pipx install open
 
 同仓并行后合并者试合并必真 non-ff（F29 祖先判定），现行 reopened 弹回 worker 手动同步重走全轮 verify。改法（设计文档 `docs/superpowers/specs/2026-10-30-gate-auto-rebase-design.md`）：门内试合并遇真 non-ff 即在 integration worktree（detached）内把任务提交 `rebase --onto <目标 HEAD>` 重放（mb=merge-base）——零临时分支、env 分支与 `.review-loop` 锚不动、最终推进仍 ff-only（线性历史不变）；rebase 后集成 verify 跑在新内容上（验证内容＝推进内容），绿则 set_fields(commit=R, rebased_from=E) 先落库再 ff 推进，审计 rebased 事件成对留痕；崩溃矩阵三态 contains 幂等不假重开。分类纪律沿用 F29：冲突→abort→reopened 不计连败（文案注明同步冲突），环境病如实上抛。等价提交全被 drop→R==目标 HEAD＝幂等推进零增量 merged。质量口径：干净 rebase 重测不重审（patch 等价），冲突 reopen 全量重走。非目标：条件重审、放松 ff-only。
 **验收**：干净重放成功且 env 分支 sha 不动；冲突 abort→reopened 不计连败；环境病如实上抛；等价提交 drop 形态 no-op merged；集成 verify 败→reopened 计连败目标分支字节级不动；崩溃三态 contains 幂等；integration 回收无 rebase 残留；全量 pytest 绿（Req: F32）。
+
+### F33 agora 闸豁免面收编 req-gate 门记录目录（2026-10-30，ag-deef8f）
+req-gate-enforcer（dotfiles 插件，伴生任务改记 `.req-gate/`）门过时写 `<repo>/.req-gate/<sessionID>.md`；agora 所有权闸拦 edit/write 致两钩子死锁——门记录写本身被拦（本仓 10 条存量 `.omo/req-gate/` 记录早于 enforce 即实证）。修法：插件写面豁免收编门记录目录，basename 级路径任一段命中即豁免，旧 `.omo` 与新 `.req-gate` 同收；其余判定语义与既有豁免面零漂移。配套 `.gitignore` 增 `.req-gate/`（`.omo/` 旁并存）。
+**验收**：F33 用例——write/edit 落 `<repo>/.omo/**` 与 `<repo>/.req-gate/**` 放行、控制组非豁免 dotdir 仍拒；`python3 -m pytest tests/ -q`＋`cd agora-plugin && bun test` 全绿（Req: F33）。

@@ -83,6 +83,15 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("edit", join(tmpRepo, "b.md"), tmpRepo, null, true)).toBeNull();
   });
 
+  test("F33 门记录目录豁免：.omo/ 与 .req-gate/ 写入放行（新旧同收）；控制组非豁免 dotdir 仍拒", () => {
+    // Req: F33
+    expect(shouldBlock("write", join(repo, ".omo", "req-gate", "s1.md"), plain, null, true)).toBeNull();
+    expect(shouldBlock("edit", join(repo, ".req-gate", "s2.md"), plain, null, true)).toBeNull();
+    expect(shouldBlock("write", join(repo, ".not-gate", "x.md"), plain, null, true)).toBe(NO_CRED_HINT);
+    // ocr 评审钉死：嵌套同名目录亦豁免＝刻意广度（basename 级，与 .gitignore 任意深度同形）
+    expect(shouldBlock("write", join(repo, "src", ".omo", "x.md"), plain, null, true)).toBeNull();
+  });
+
   test("git 仓无凭据 edit/write→拒＋无凭据专属文案（write 目标可尚未存在）", () => {
     // Req: F26
     expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true)).toBe(NO_CRED_HINT);

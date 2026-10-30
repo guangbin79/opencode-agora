@@ -2,6 +2,7 @@
  * hook 强制判定链（F1，设计 §5.1）：拦截判定纯函数，opencode 接线形状 T5 已实证收紧
  * （tool.execute.before 覆盖 MCP 工具＋改参直达；cwd＝会话 location，异步取）。
  * 语义与 agorad 服务侧一致：豁免面 B3（非 git、/tmp/opencode、enforce off）、
+ * F33 门记录目录（.omo/.req-gate，插件侧新增——门记录写本身即被闸死锁面）、
  * 读引导（state 账本经工具面，events/wiki 开放，主会话例外）、主会话对仓写入同拦。
  */
 import { existsSync, realpathSync } from "node:fs";
@@ -17,6 +18,7 @@ export const READ_HINT =
   "被拦：tasks.jsonl 与 messages/ 属账本面，请走工具面（board/check_mail）；events.jsonl 与 wiki 可直接读。主会话不受此限。";
 
 const TMP_ROOT = "/tmp/opencode"; // B3 设计定值
+const GATE_RECORD_DIRS = new Set([".omo", ".req-gate"]); // F33：req-gate 门记录目录（新旧同收）
 const WRITE_TOOLS = new Set(["edit", "write"]);
 const READISH_TOOLS = new Set(["read", "bash"]);
 
@@ -47,6 +49,11 @@ function fold(p: string): string {
 function under(root: string, p: string): boolean {
   const r = fold(root);
   return p === r || p.startsWith(r + sep);
+}
+
+/** F33 豁免面：req-gate 门记录目录（basename 级，路径任一段命中即豁免）。 */
+function inGateRecordDir(p: string): boolean {
+  return resolve(p).split(sep).some((seg) => GATE_RECORD_DIRS.has(seg));
 }
 
 /** git 仓判定：沿目标向上找 .git（目录或文件——worktree/submodule 形态）。 */
@@ -116,7 +123,7 @@ export function shouldBlock(
     return READ_HINT;
   }
   if (!WRITE_TOOLS.has(tool)) return null;
-  if (under(TMP_ROOT, target) || !inGitRepo(target)) return null; // 豁免面 B3
+  if (under(TMP_ROOT, target) || !inGitRepo(target) || inGateRecordDir(target)) return null; // 豁免面 B3＋F33 门记录
   if (cred?.token && cred.envDir && under(cred.envDir, cwd)) return null;
   // 拒因分流：缓存命中 root 牌＝防御位（生产不入缓存）维持 DISPATCH_HINT；无凭据按拉取
   // 判据路由（F27 收殓残留 finding，裁定 A 镜像）——404（not_worker）＝主会话直改→
