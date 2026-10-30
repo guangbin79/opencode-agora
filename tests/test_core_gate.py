@@ -595,6 +595,25 @@ class TestGateRun(TestCoreGate):
                       if e["event"] == "merged")
         self.assertEqual(merged["rebased_from"], SHA)
 
+    def test_crash_residual_r_ff_pass_through_aligns_ledger(self):  # Req: F32
+        """崩溃态②残值（commit=R、rebased_from=E）遇直通（目标支回退使 E 可 ff）：
+        合入的是 env 头 E——落账对齐 E 并清留痕，防 merged 账面与验证内容脱节。"""
+        self.runner = FakeRunner((0, "pass"), (0, "pass"))
+        self.mk_gate(merge="ok")  # 目标支已回退：试合并直通，无 rebase
+        self.gx.head_shas[str(self.env)] = SHA  # env 分支头＝E
+        self.seed()
+        self.state.transition("t1", "done", commit=R_SHA, rebased_from=SHA)  # 上轮残值
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(t["commit"], SHA)  # 落账＝实际合入的 env 头，非陈旧 R
+        self.assertIsNone(t.get("rebased_from"))  # 残留留痕同步清
+        merged = next(e for e in self.store.read_events("t1")
+                      if e["event"] == "merged")
+        self.assertEqual(merged["commit"], SHA)
+        self.assertNotIn("rebased_from", merged)  # 无伪造留痕
+        self.assertNotIn("rebased", [e["event"] for e in self.store.read_events("t1")])
+
     def test_accept_done_clears_stale_rebased_from(self):  # Req: F32
         """裁定②：受理即清 rebased_from——陈旧留痕不得毒化锚判定或伪造下一轮。"""
         self.seed()

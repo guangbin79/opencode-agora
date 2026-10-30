@@ -151,6 +151,20 @@ class TestAccessGitx(unittest.TestCase):
         self.gx.remove_integration(str(integration), str(self.repo))
         self.assertNotIn(str(integration), self._worktrees(self.repo))  # 回收无残留
 
+    def test_rebase_onto_apply_backend_conflict_still_classified(self):  # Req: F32
+        """apply backend（rebase.backend=apply）冲突停 rebase-apply：同判 conflict 不误报环境病。"""
+        self._git(["config", "rebase.backend", "apply"], cwd=self.repo)  # integration 共享主仓 config
+        env = self.gx.build_env(self.repo, "gt-f32e")
+        self._commit(Path(env), {"src.py": "task edit"}, "task edit")
+        self._commit(self.repo, {"src.py": "main edit"}, "main edit")  # 同文件真冲突
+        integration = Path(self.tmp / "gate-e")
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self.gx.merge_ff(env, str(integration)), "non-ff")
+        self.assertEqual(self.gx.rebase_onto(env, str(integration)), "conflict")
+        apply_dir = self._git(["rev-parse", "--git-path", "rebase-apply"],
+                              cwd=integration).stdout.strip()
+        self.assertFalse((integration / apply_dir).exists())  # abort 已收敛
+
     def test_rebase_onto_environment_disease_raises_not_conflict(self):  # Req: F32
         class BoomGitx(Gitx):  # rebase 自身病（rc=128 对象损坏类）宁抛不并入冲突
             def _git(self, args, cwd, check=True):

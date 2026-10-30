@@ -152,13 +152,15 @@ class Gitx:
         self._git(["checkout", "--detach", src], cwd=integration)
         r = self._git(["rebase", "--onto", onto, mb], cwd=integration, check=False)
         if r.returncode != 0:
-            # 冲突态判据：per-worktree sequencer 目录在位＝rebase 停在冲突；
-            # 无状态目录＝环境病，禁并入冲突（分类先于动作）
-            p = self._git(["rev-parse", "--git-path", "rebase-merge"],
-                          cwd=integration).stdout.strip()
-            if p and (integration / p).exists():
-                self._git(["rebase", "--abort"], cwd=integration, check=False)
-                return "conflict"
+            # 冲突态判据：per-worktree sequencer 目录在位＝rebase 停在冲突——
+            # merge backend 停 rebase-merge、apply backend 停 rebase-apply，两态
+            # 目录皆缺＝环境病，禁并入冲突（分类先于动作）
+            for state_dir in ("rebase-merge", "rebase-apply"):
+                p = self._git(["rev-parse", "--git-path", state_dir],
+                              cwd=integration).stdout.strip()
+                if p and (integration / p).exists():
+                    self._git(["rebase", "--abort"], cwd=integration, check=False)
+                    return "conflict"
             raise RuntimeError(f"git rebase --onto {onto} {mb}: "
                                f"rc={r.returncode}: {r.stderr.strip()}")
         return self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()

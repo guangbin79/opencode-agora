@@ -210,9 +210,15 @@ class Gate:
                 if self._gitx.ff_sha(target, r, branch) != "ok":
                     self._non_ff(tid, branch, self._gitx.head(target, branch))
                     return
-            elif self._gitx.merge_ff(env, target, branch) != "ok":
-                self._non_ff(tid, branch, self._gitx.head(target, branch))
-                return
+            else:
+                if t.get("rebased_from"):
+                    # 崩溃态②残值遇直通（目标支回退使 E 可 ff）：合入的是 env 头，
+                    # 落账对齐之并清留痕——防 merged 账面 sha 与验证内容脱节（反目标）
+                    self._state.set_fields(tid, commit=self._gitx.head(env),
+                                           rebased_from=None)
+                if self._gitx.merge_ff(env, target, branch) != "ok":
+                    self._non_ff(tid, branch, self._gitx.head(target, branch))
+                    return
             self._succeed(tid)
         except Exception as e:  # 门内崩（checkout 拒/分支失/脏工作区）：转 reopened 通知
             if self._state.get(tid)["state"] == "done":
