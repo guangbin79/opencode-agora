@@ -92,7 +92,7 @@ agora-install
 **评审门**——开放标准，评审器自带。契约只有一个锚文件：
 
 - 任务 worktree 内存在 `.review-loop/` 目录时，`done` 受理检查锚，**合并前重验**（堵住"评审过又偷提交"的窗口）。
-- 锚绿＋verify 绿 = 自动 ff-only 合并。
+- 锚绿＋verify 绿 = 自动 ff-only 合并——任务支落后（non-ff）时门内自动 rebase 干净同步自愈，同步冲突才重开。
 - 没有 `.review-loop/` 目录？一切照常——任务完成驻留 `done`，**你手动合并**。自治是两道闸挣来的，不是默认送的。
 
 任何评审器都行——OpenCodeReview、CodeRabbit、人工清单——agora 只认锚。最小评审器约 10 行：

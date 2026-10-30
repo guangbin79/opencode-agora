@@ -115,6 +115,71 @@ class TestAccessGitx(unittest.TestCase):
             BoomGitx().merge_ff(env, str(self.repo))
         self.assertIn("bad object", str(cm.exception))
 
+    def test_rebase_onto_clean_replay_env_branch_untouched(self):  # Req: F32
+        """F32 干净同步：重放成功、env 分支 sha 不动、R 踩在新基线上可 ff 推进。"""
+        env = self.gx.build_env(self.repo, "gt-f32a")
+        env_sha = self._commit(Path(env), {"feat.py": "task"}, "task work")
+        self._commit(self.repo, {"src.py": "v2"}, "advance main")  # 主干超前＝真 non-ff
+        integration = Path(self.tmp / "gate-a")
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self.gx.merge_ff(env, str(integration)), "non-ff")
+        r = self.gx.rebase_onto(env, str(integration))
+        self.assertNotEqual(r, env_sha)  # R＝重放新提交
+        self.assertEqual(self._head(integration), r)  # integration 停在 R
+        self.assertEqual((integration / "feat.py").read_text(), "task")
+        self.assertEqual((integration / "src.py").read_text(), "v2")  # 重放在新基线上
+        self.assertEqual(self._head(Path(env)), env_sha)  # env 分支 sha 不动
+        self.assertEqual(self.gx.ff_sha(str(self.repo), r), "ok")  # R 可 ff 推进
+        self.assertEqual(self._head(self.repo), r)
+        self.assertTrue(self.gx.contains(str(self.repo), r))
+
+    def test_rebase_onto_conflict_aborts_classifies_and_cleans(self):  # Req: F32
+        """冲突分类：abort＋回 conflict；env 分支与主干不动；回收后无 sequencer 残留。"""
+        env = self.gx.build_env(self.repo, "gt-f32b")
+        env_sha = self._commit(Path(env), {"src.py": "task edit"}, "task edit")
+        self._commit(self.repo, {"src.py": "main edit"}, "main edit")  # 同文件真冲突
+        before = self._head(self.repo)
+        integration = Path(self.tmp / "gate-b")
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self.gx.merge_ff(env, str(integration)), "non-ff")
+        self.assertEqual(self.gx.rebase_onto(env, str(integration)), "conflict")
+        self.assertEqual(self._head(Path(env)), env_sha)  # env 分支不动
+        self.assertEqual(self._head(self.repo), before)  # 主干不动
+        state = self._git(["rev-parse", "--git-path", "rebase-merge"],
+                          cwd=integration).stdout.strip()
+        self.assertFalse((integration / state).exists())  # abort 已收敛冲突态
+        self.gx.remove_integration(str(integration), str(self.repo))
+        self.assertNotIn(str(integration), self._worktrees(self.repo))  # 回收无残留
+
+    def test_rebase_onto_environment_disease_raises_not_conflict(self):  # Req: F32
+        class BoomGitx(Gitx):  # rebase 自身病（rc=128 对象损坏类）宁抛不并入冲突
+            def _git(self, args, cwd, check=True):
+                if "rebase" in args and "--onto" in args:
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+                return Gitx._git(args, cwd, check)
+
+        env = BoomGitx().build_env(self.repo, "gt-f32c")
+        self._commit(Path(env), {"src.py": "v1\ntask"}, "task work")
+        self._commit(self.repo, {"src.py": "v2"}, "advance main")
+        integration = Path(self.tmp / "gate-c")
+        BoomGitx().build_integration(str(self.repo), str(integration))
+        with self.assertRaises(RuntimeError) as cm:
+            BoomGitx().rebase_onto(env, str(integration))
+        self.assertIn("bad object", str(cm.exception))
+
+    def test_rebase_onto_all_equivalent_drops_to_target_head(self):  # Req: F32
+        """等价提交边界：全部 drop→R＝目标 HEAD，ff 推进＝幂等（零增量 merged）。"""
+        env = self.gx.build_env(self.repo, "gt-f32d")
+        self._commit(Path(env), {"src.py": "v2"}, "same change")
+        self._commit(self.repo, {"src.py": "v2"}, "advance main")  # 上游已含同变更
+        integration = Path(self.tmp / "gate-d")
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self.gx.merge_ff(env, str(integration)), "non-ff")
+        r = self.gx.rebase_onto(env, str(integration))
+        self.assertEqual(r, self._head(self.repo))  # no-op 形态：R＝目标 HEAD
+        self.assertEqual(self.gx.ff_sha(str(self.repo), r), "ok")  # 幂等推进
+        self.assertEqual(self._head(self.repo), r)
+
     def test_remove_env_cascades_branch(self):  # Req: F1
         env = self.gx.build_env(self.repo, "gt-x3")
         self._commit(Path(env), {"src.py": "dirty"}, "unmerged work")  # 未合并分支也须级联清掉

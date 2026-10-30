@@ -2,7 +2,8 @@
 
 环境形态沿用全局 worktree 铁律语义：目录＝repo 同级父目录下
 `<REPO>__wt-<tid>__<MMDDHHMM><rand4>`（REPO 经 _slug 消毒为 ref 安全名），分支同名，保证 `../` 相对拓扑等价；
-线性历史——merge 只走 --ff-only，绝不产生 merge commit。
+线性历史——merge 只走 --ff-only，绝不产生 merge commit；rebase_onto（F32）
+仅门内 detached 干净同步自愈，不碰 env 分支与目标检出。
 """
 import secrets
 import re
@@ -108,9 +109,16 @@ class Gitx:
 
     def merge_ff(self, env_dir: str, target: str, branch: str = None) -> str:
         src = Path(env_dir).resolve().name
+        sha = self._git(["rev-parse", src], cwd=target).stdout.strip()
+        return self._ff(target, src, sha, branch)
+
+    def ff_sha(self, target: str, sha: str, branch: str = None) -> str:
+        """sha 级 ff 推进（F32 rebase 后 R 推进）：源＝重放 sha，零临时分支，语义同 merge_ff。"""
+        return self._ff(target, sha, sha, branch)
+
+    def _ff(self, target: str, src: str, sha: str, branch: str = None) -> str:
         if branch:  # 合入指定分支（外部工作流）；缺省＝仓默认支
             self._git(["checkout", branch], cwd=target)
-        env_sha = self._git(["rev-parse", src], cwd=target).stdout.strip()
         head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
         # F29 分类先于合并：merge rc 混杂脏工作区拒绝等环境失败，曾把 FF 可并
         # 分支误拒 non-ff（task-bbf257 R2-R4）。祖先判定才是唯一真判据——
@@ -125,11 +133,35 @@ class Gitx:
                 f"git merge-base --is-ancestor {head} {src}: {anc.stderr.strip()}")
         r = self._git(["merge", "--ff-only", src], cwd=target, check=False)
         new_head = self._git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
-        if r.returncode != 0 or new_head != env_sha:
+        if r.returncode != 0 or new_head != sha:
             detail = r.stderr.strip() or r.stdout.strip()  # already-up-to-date 走 stdout
             raise RuntimeError(f"git merge --ff-only {src}: rc={r.returncode}, "
-                               f"head@{new_head} vs expected@{env_sha}: {detail}")
-        return "ok"  # head==env_sha（目标支已在任务提交上）亦达此：幂等推进
+                               f"head@{new_head} vs expected@{sha}: {detail}")
+        return "ok"  # head==sha（目标支已在提交上）亦达此：幂等推进
+
+    def rebase_onto(self, env_dir: str, integration: str) -> str:
+        """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交
+        rebase --onto 目标 HEAD 重放（mb=merge-base），返回重放后 sha R。
+        detached 零临时分支：不碰 env 分支、不碰目标检出；等价提交全 drop 时
+        R＝目标 HEAD（no-op 形态）。分类（F29 纪律）：冲突（sequencer 态在位）
+        → abort 后回 "conflict"；其余非零（对象损坏等环境病）如实 RuntimeError。"""
+        integration = Path(integration).resolve()
+        src = Path(env_dir).resolve().name
+        onto = self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()
+        mb = self._git(["merge-base", "HEAD", src], cwd=integration).stdout.strip()
+        self._git(["checkout", "--detach", src], cwd=integration)
+        r = self._git(["rebase", "--onto", onto, mb], cwd=integration, check=False)
+        if r.returncode != 0:
+            # 冲突态判据：per-worktree sequencer 目录在位＝rebase 停在冲突；
+            # 无状态目录＝环境病，禁并入冲突（分类先于动作）
+            p = self._git(["rev-parse", "--git-path", "rebase-merge"],
+                          cwd=integration).stdout.strip()
+            if p and (integration / p).exists():
+                self._git(["rebase", "--abort"], cwd=integration, check=False)
+                return "conflict"
+            raise RuntimeError(f"git rebase --onto {onto} {mb}: "
+                               f"rc={r.returncode}: {r.stderr.strip()}")
+        return self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()
 
     def contains(self, repo_dir: str, commit: str, branch: str = None) -> bool:
         """目标分支是否已含任务提交：崩溃重排时识别合并已落，禁止重复验收后假重开。"""

@@ -93,7 +93,7 @@ After install, your session gains two skills (agora-dispatch / agora-ops) and 13
 **Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 
 - If `.review-loop/` exists in the task worktree, the last-reviewed anchor is checked at `done` and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window).
-- Anchor green + verify green = automatic ff-only merge.
+- Anchor green + verify green = automatic ff-only merge — a behind task branch is rebased onto the target in-gate first (clean sync self-heals; only sync conflicts reopen).
 - No `.review-loop/` directory? Everything still works — tasks complete at `done` and **you merge manually**. Autonomy is earned by both gates, not assumed.
 
 Any reviewer fits — OpenCodeReview, CodeRabbit, a human checklist — agora only reads the anchor. A minimal reviewer is ~10 lines:

@@ -15,7 +15,7 @@ description: 主会话委托编排剧本。用户说"派发/委托/让 agent 修
 - **verify 建单原子登记（F23 硬闸）**：预写验收的派发（绝大多数）create 时传 `verify_cmd` 即登记，dispatch 放行；漏传则 dispatch 403 拒派（`dispatch_rejected_verify_missing`）。探索路（验收需进 env 勘察才知）建单传 `verify_pending: true` 豁免，worker 提案后 `task_update(task, verify_cmd)` 登记——两步舞旧形态仍合法，但无旗无 verify 的 dispatch 必被拍回。
 - 无关仓各自建任务并行派发；耦合仓用甲案顺序编排：`task_create(..., after: 前任务id)`，前驱未终态 dispatch 会被硬拒（403 报因）——等前仓 merged／closed 再派后仓，后仓 worker 经 `../前仓` 相对路径见已合并形态。dispatcher **主动取消**前驱表示有意跳过，后继可继续；前驱三连败进入 `blocked` 则服务自动取消整条 after 后继链（`cancel_reason=dependency_failed:*`）。
 - **嵌套派发闭环**：worker 也是其子任务的 dispatcher，可 `task_create(verify_cmd)→task_dispatch`，并仅能对自己的子任务 `task_update／task_cancel`；父任务、他人任务和 worker 自己的 verify 仍不可改。子任务 `closed／blocked／cancelled` 由服务以 `result` 回传父 worker（离线留库，恢复后 `check_mail` 补拉）。父 worker 必须等全部子任务 `merged／closed` 或有意取消后才能 `post(done)`；`blocked` 子任务须重派或取消，依赖失败造成的自动取消须由 dispatcher 再 `task_cancel` 一次显式确认跳过。父 worker 恢复／换号会保留未结案子任务所有权。
-- 同仓并行任务后合并者可能 non-ff 拒并→reopened，worker 自动续修——这是门的自愈，勿人工介入。
+- 同仓并行任务后合并者遇 non-ff：干净同步门内 rebase 自愈；同步冲突才 reopened 弹回 worker 解冲突重报 done——这是门的自愈，勿人工介入。
 - **多任务或含 after: 的编排：先写编排单再执行**——`wiki_write` 到 `wiki/orch/<主题>-<日期>.md`，内容＝任务清单（每条 goal 草案＋目标仓）＋after 边＋并行分组；写完后照单逐条 task_create/task_dispatch。执行中偏离（增删任务、改 goal）在编排单**追加一行记因**，不回改原文。单任务直接派发免单。
 - 无 task 时"进展如何"走第 4 节 board，"取消任务"走第 5/6 节。
 

@@ -2,7 +2,9 @@
 
 done 受理仍执行状态、verify、commit 格式与评审锚前置校验。门体先在任务 env 跑
 verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-only 试合并
-并重跑 verify；只有全绿且目标主检出两次干净检查通过，才推进真实目标分支。集成
+并重跑 verify；试合并遇真 non-ff 先门内 detached rebase 干净自愈（F32：重放后
+集成 verify 跑在新内容上，绿则 sha 级 ff 推进），同步冲突才弹回；只有全绿且目标
+主检出两次干净检查通过，才推进真实目标分支。集成
 失败不再依赖 reset --hard 回滚，用户未提交工作与目标分支均不受测试副作用影响。
 
 默认 runner 以独立进程组执行命令，超时杀全组并返回 124，避免单个挂死验证永久
@@ -127,7 +129,8 @@ class Gate:
                     tid, "anchor",
                     f"任务 {tid} 评审环未绿——修复 blocker/high 后"
                     "重新 post(done, commit)")
-        self._state.transition(tid, "done", commit=commit)
+        self._state.transition(tid, "done", commit=commit,
+                               rebased_from=None)  # F32：受理即清陈旧留痕（唯一清点）
         self._audit(tid, "done", commit=commit)
         return "accepted"
 
@@ -170,7 +173,10 @@ class Gate:
                                    f"\n输出尾部:\n{out[-_TAIL:]}")
                 return
             a = self._read_anchor(env)  # 合并前锚重验：堵 accept→run 窗口 TOCTOU
-            if not a or a.get("head") != t.get("commit") or not a.get("clean"):
+            # 锚比对对象＝rebased_from or commit（F32 裁定①）：崩溃重排的 done 任务
+            # （commit=R、锚=E）重入门用留痕 E 判过，才能走到再 rebase，不死锁。
+            if not a or a.get("head") != (t.get("rebased_from") or t.get("commit")) \
+                    or not a.get("clean"):
                 self._audit(tid, "review_absent_no_merge")
                 self._post(tid, "verify 绿但合并时 .review-loop 锚缺失/落后/未绿——"
                                 "任务驻留 done 待人工审阅合并（dispatcher 可 "
@@ -179,18 +185,32 @@ class Gate:
             # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
             self._gitx.build_integration(target, integration, branch)
             before = self._gitx.head(integration)
+            r = None  # R＝F32 重放后任务提交（None＝ff 试合并直通）
             if self._gitx.merge_ff(env, integration) != "ok":
-                self._non_ff(tid, branch, before)
-                return
+                # F32 真非 ff：门内 detached rebase 干净自愈（env 分支与锚不动），
+                # 同步冲突才弹回（不计连败）；环境病如实上抛走门内 except。
+                if self._gitx.rebase_onto(env, integration) == "conflict":
+                    self._non_ff(tid, branch, before, conflict=True)
+                    return
+                # E＝锚对齐的 env 提交：崩溃重排时留痕值优先于落库残值 R
+                e = t.get("rebased_from") or t.get("commit")
+                r = self._gitx.head(integration)
+                self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
+                self._audit(tid, "rebased", **{"from": e, "to": r})
             irc, iout = self._runner(integration, cmd)
             if irc != 0:
+                where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
                 self._quality_fail(tid, "reopened",
-                                   f"集成 verify 失败，目标分支未改动——修复后重新"
+                                   f"{where}，目标分支未改动——修复后重新"
                                    f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}")
                 return
             # 集成验证可能耗时较长，最终推进前复查，关闭“开始干净、结束时变脏”窗口。
             self._gitx.ensure_clean(target)
-            if self._gitx.merge_ff(env, target, branch) != "ok":
+            if r is not None:  # 重放推进：sha 级 ff（env 分支仍在 E，不可再作合并源）
+                if self._gitx.ff_sha(target, r, branch) != "ok":
+                    self._non_ff(tid, branch, self._gitx.head(target, branch))
+                    return
+            elif self._gitx.merge_ff(env, target, branch) != "ok":
                 self._non_ff(tid, branch, self._gitx.head(target, branch))
                 return
             self._succeed(tid)
@@ -222,22 +242,25 @@ class Gate:
         t = self._state.get(tid)
         self._state.fail_streak_reset(tid)  # 全绿清连败（R12）
         self._state.transition(tid, "merged", commit=t.get("commit"))
-        self._audit(tid, "merged", commit=t.get("commit"))
+        # F32：rebased_from 从 state 读（裁定②）——崩溃补终态路径才有值可取
+        extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
+        self._audit(tid, "merged", commit=t.get("commit"), **extra)
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
 
-    def _non_ff(self, tid, branch, before):
-        """试合并或最终推进遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""
+    def _non_ff(self, tid, branch, before, conflict=False):
+        """F32 同步冲突或最终推进窄竞态遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""
         t = self._state.get(tid)
-        # 窄竞态守卫：试合并窗口内 commit 已被人工推进目标支，则补终态成功，绝不重开
+        # 窄竞态守卫：试合并/推进窗口内 commit 已被人工推进目标支，则补终态成功，绝不重开
         if self._gitx.contains(t["project_dir"], t.get("commit"), branch):
             self._succeed(tid)
             return
         self._state.transition(tid, "reopened")
         self._audit(tid, "reopened")
-        self._post(tid, f"non-ff 拒并："
+        why, act = (("同步冲突", "解冲突后") if conflict else ("non-ff 拒并", "同步后"))
+        self._post(tid, f"{why}："
                         f"{branch or self._gitx.symref(t['project_dir'])}@{before}"
-                        f" vs branch@{self._gitx.head(t['env_dir'])}——同步后"
+                        f" vs branch@{self._gitx.head(t['env_dir'])}——{act}"
                         "重新 post(done, commit)")
 
     def gate_files_touched(self, tid):

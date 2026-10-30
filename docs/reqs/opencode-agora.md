@@ -219,3 +219,8 @@ Python 运行件与插件/skills/install.sh 全部进 wheel：`pipx install open
 ### F32 门环境消毒＋凭据半条缓存拉取放宽（2026-10-30，用户裁定"都修"）
 两处实证缺口（F31 任务 ag-fed303 撞实）：①agorad 服务 env（AGORA_PORT/AGORA_OC_URL/AGORA_OC_PASSWORD）被 verify 子进程链整条继承，install.sh 类自测拉起的 daemon 硬绑服务在用端口即崩（门 54.8s 即败根因，f9cf8fb 已测试侧消毒——治标）；②F25 修正的 cred_for_sid 拉取自愈触发条件 !cred 被"半条缓存"（BOOT env 位已缓存、token 缺失——会话创建期注入与插件加载竞态的产物）短路，worker 写面恒拒。修法：①gate._subprocess_runner 构造 verify env 时剥除上述三枚服务自身态变量（AGORA_HOME 明示不剥——无事故面且夹具自设各自值；剥除落显式副本不动 os.environ）；②插件凭据"未命中"判定从 !cred 放宽为缺 token 即未命中，既有 write 拉取点即自愈——半条缓存者首次写尝试即补全放行，竞态无害化（竞态属 opencode 平台时序不可消除，push 修复路线已由 F25 修正记录证伪）。F25 既有语义全保：节流（每 sid 30s）、loopback 无牌放行、失败留库兜底、404 主会话路由。
 **验收**：插件 bun 测试——半条缓存形态（env 位有 token 空）写判定触发拉取并同调用放行、全缺形态回归不破、404 主会话路由不变；agorad 单测——runner env 三变量被剥、其余变量照常继承、os.environ 本体不被污染、既有 gate 测试全绿；`python3 -m pytest tests/ -q`＋`bash tests/test_install.sh`＋`(cd agora-plugin && bun test)` 全绿。
+
+### F32 门内自动 rebase——同仓并行 non-ff 干净同步（2026-10-30，用户裁定）
+
+同仓并行后合并者试合并必真 non-ff（F29 祖先判定），现行 reopened 弹回 worker 手动同步重走全轮 verify。改法（设计文档 `docs/superpowers/specs/2026-10-30-gate-auto-rebase-design.md`）：门内试合并遇真 non-ff 即在 integration worktree（detached）内把任务提交 `rebase --onto <目标 HEAD>` 重放（mb=merge-base）——零临时分支、env 分支与 `.review-loop` 锚不动、最终推进仍 ff-only（线性历史不变）；rebase 后集成 verify 跑在新内容上（验证内容＝推进内容），绿则 set_fields(commit=R, rebased_from=E) 先落库再 ff 推进，审计 rebased 事件成对留痕；崩溃矩阵三态 contains 幂等不假重开。分类纪律沿用 F29：冲突→abort→reopened 不计连败（文案注明同步冲突），环境病如实上抛。等价提交全被 drop→R==目标 HEAD＝幂等推进零增量 merged。质量口径：干净 rebase 重测不重审（patch 等价），冲突 reopen 全量重走。非目标：条件重审、放松 ff-only。
+**验收**：干净重放成功且 env 分支 sha 不动；冲突 abort→reopened 不计连败；环境病如实上抛；等价提交 drop 形态 no-op merged；集成 verify 败→reopened 计连败目标分支字节级不动；崩溃三态 contains 幂等；integration 回收无 rebase 残留；全量 pytest 绿（Req: F32）。
