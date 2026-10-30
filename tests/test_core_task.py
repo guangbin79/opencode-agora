@@ -539,5 +539,46 @@ class TestVerifyGate(TestCoreTask):
         self.assertEqual(self.gitx.removed, [])
 
 
+class TestReqId(TestCoreTask):
+    """F34 req 编号服务端发放：发放登记＋查重拒绝（含已发指针）＋种子扫描。"""
+
+    def req_repo(self, text):
+        repo = self.tmp / "repo"
+        (repo / "docs" / "reqs").mkdir(parents=True)
+        (repo / "docs" / "reqs" / "opencode-agora.md").write_text(text)
+        return str(repo)
+
+    def test_create_registers_req_id(self):  # Req: F34
+        tid = self.svc.create("g", "/repo", None, self.root, req_id="F34")
+        self.assertEqual(self.state.get(tid)["req_id"], "F34")
+        tid2 = self.svc.create("g", "/repo", None, self.root)  # 无自动默认发放
+        self.assertIsNone(self.state.get(tid2)["req_id"])
+
+    def test_duplicate_rejected_with_holder_pointer(self):  # Req: F34
+        repo = self.req_repo("### F33 x\n")
+        t1 = self.svc.create("g", repo, None, self.root, req_id="F34")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", repo, None, self.root, req_id="F34")
+        self.assertIn(t1, str(cm.exception))  # 报因含已发任务指针
+        self.assertEqual(self.state.snapshot()["tasks"][t1]["req_id"], "F34")
+
+    def test_seed_scan_takes_max_on_dual_entry(self):  # Req: F34
+        repo = self.req_repo("### F32 a\n### F32 b\n### F33 c\n")  # F32 双条目实证
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", repo, None, self.root, req_id="F32")
+        self.assertIn("F33", str(cm.exception))  # 在案：报因含现存最大
+        t = self.svc.create("g", repo, None, self.root, req_id="F34")
+        self.assertEqual(self.state.get(t)["req_id"], "F34")  # max+1 放行
+
+    def test_doc_missing_seeds_zero(self):  # Req: F34
+        tid = self.svc.create("g", "/repo", None, self.root, req_id="F1")
+        self.assertEqual(self.state.get(tid)["req_id"], "F1")
+
+    def test_bad_format_rejected(self):  # Req: F34
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, req_id="REQ-7")
+        self.assertIn("req_id", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

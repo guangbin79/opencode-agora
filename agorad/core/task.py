@@ -9,6 +9,7 @@ merged 不动、空链幂等。cancel 忙碌闸防误杀（F28）：worker 回�
 core 只 import stdlib；依赖全构造注入。
 """
 import pathlib
+import re
 import secrets
 import time
 
@@ -17,6 +18,9 @@ _QUOTA = 8  # 并发配额默认（护栏默认值，②期核定）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _AFTER_OK = {"merged", "closed", "cancelled"}  # cancelled 还须非 dependency_failed；派发处终审
 _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged 不逆转历史）
+_REQ_DOC = pathlib.Path("docs") / "reqs" / "opencode-agora.md"
+_REQ_ID_RE = re.compile(r"^F\d+$")
+_REQ_NUM_RE = re.compile(r"F(\d+)")
 
 EV_CREATED = "task_created"
 EV_DISPATCHED = "dispatched"
@@ -42,7 +46,8 @@ class TaskService:
     # ---- F2 建任务 ----
 
     def create(self, goal, project_dir, after, actor_token, title=None,
-               target_branch=None, verify_cmd=None, verify_pending=False):
+               target_branch=None, verify_cmd=None, verify_pending=False,
+               req_id=None):
         sid, _ = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
@@ -59,6 +64,8 @@ class TaskService:
                 self._gitx.check_branch(project_dir, target_branch)
             except Exception as e:
                 self._reject(tid, sid, f"target_branch: {e}")
+        if req_id is not None:  # F34 发放面查重：服务串行单写者，并行撞号根治
+            self._req_check(tid, sid, project_dir, req_id)
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
         tid = self._new_tid()
@@ -71,6 +78,7 @@ class TaskService:
         self._state.add(tid, {
             "title": (title or goal.splitlines()[0][:40]) if (title or goal) else tid, "goal": goal,
             "project_dir": project_dir, "target_branch": target_branch,
+            "req_id": req_id,
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
@@ -258,6 +266,30 @@ class TaskService:
                 pass  # worker 不活则留库补拉（消息先落库铁则）
 
     # ---- 内部 ----
+
+    def _req_check(self, tid, sid, project_dir, req_id):
+        """F34 发放面查重：已发集＝任务行 req_id 字段（随账本持久）＋首用种子
+        （docs/reqs 台账现存最大 F<n>）。重复/在案即拒，报因含已发任务指针。"""
+        if not _REQ_ID_RE.match(req_id):
+            self._reject(tid, sid, f"req_id 须为 F<数字> 形态（收到 {req_id!r}）")
+        holder = next((t for t, x in self._state.snapshot()["tasks"].items()
+                       if x.get("req_id") == req_id), None)
+        if holder is not None:
+            self._reject(tid, sid, f"req_id {req_id} 已发放（任务 {holder}）")
+        seed = self._req_seed(project_dir)
+        if int(req_id[1:]) <= seed:
+            self._reject(tid, sid,
+                         f"req_id {req_id} 已在案（docs/reqs 现存最大 F{seed}）")
+
+    @staticmethod
+    def _req_seed(project_dir):
+        """种子＝扫 project_dir 台账现存最大 F<n>（F32 双条目场景取 max）；缺文档
+        视为 0。每次发放重扫——台账只增，等价「首用种子」且免持久化种子态。"""
+        try:
+            text = (pathlib.Path(project_dir) / _REQ_DOC).read_text(encoding="utf-8")
+        except OSError:
+            return 0
+        return max((int(n) for n in _REQ_NUM_RE.findall(text)), default=0)
 
     def _gate(self, token, tool, tid, state, owner=None):
         """鉴权两段：牌有效→may 粗判→归属细判（R18）。返回 (sid, role)。"""

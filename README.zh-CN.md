@@ -119,6 +119,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 - **崩溃恢复**——任意时刻 `kill -9`；只追加状态＋worker 重启后凭原凭据重注入续跑
 - **实时问责**——失控实时拍主会话；每次状态变更落只追加 JSONL 审计；健康巡检兜底 dispatcher 死亡
 - **兼容 PR 工作流**——`task_create(target_branch="feature/x")` 合并进特性分支而非 main
+- **req 编号服务端发放**——`task_create(req_id="F34")` 登记发放并查重（种子扫 `docs/reqs/`，重复发放拒绝）。服务端分配＝权威号源，worker 从任务页取号；不阻止绕过（先例约束，非闸）
 - **轻量**——Python stdlib 服务，零 pip 依赖，只绑 localhost，无遥测
 
 ## 对比

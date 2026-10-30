@@ -35,6 +35,10 @@ class TestAccessPages(unittest.TestCase):
         self.assertIn("state: dispatched", text)
         self.assertIn("/envs/gt-x1", text)
 
+    def test_req_id_on_page_for_worker_pickup(self):  # Req: F34
+        p = write_task_page(self.tmp, "ag-x1", dict(ROW, req_id="F34"))
+        self.assertIn("req_id: F34", p.read_text(encoding="utf-8"))  # worker 从任务页取号
+
 
 if __name__ == "__main__":
     unittest.main()

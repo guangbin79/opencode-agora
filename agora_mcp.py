@@ -37,6 +37,10 @@ _TOOLS = [
          "verify_pending": {"type": "boolean",
                             "description": "探索路豁免旗：true＝未登记 verify 也可先派发，"
                                            "worker 提案后 task_update 登记"},
+         "req_id": {"type": "string",
+                    "description": "req 编号领取（如 F34）：服务端查重发放，重复/在案号拒"
+                                   "（报因含已发任务指针）——服务端分配＝权威号源，worker 从"
+                                   "任务页取号；不阻止绕过（先例约束）"},
          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
          "required": ["goal", "project_dir"]}},
     {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",

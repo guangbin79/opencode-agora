@@ -966,5 +966,34 @@ class TestCredForSid(HttpdTest):
         self.assertEqual(st, 400)  # body 非 JSON 对象
 
 
+class TestReqIdPassthrough(HttpdTest):
+    """F34：req_id httpd→task 全链透传＋重复发放非 200 拒。"""
+
+    def req_repo(self):
+        repo = self.tmp / "repo"
+        (repo / "docs" / "reqs").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "reqs" / "opencode-agora.md").write_text("### F33 x\n")
+        return str(repo)
+
+    def test_create_and_duplicate_403_with_pointer(self):  # Req: F34
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": self.req_repo(),
+                      "req_id": "F34"}, self.root)
+        self.assertEqual(st, 200)
+        tid = r["task"]
+        self.assertEqual(self.app.state.get(tid)["req_id"], "F34")
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": self.req_repo(),
+                      "req_id": "F34"}, self.root)
+        self.assertEqual(st, 403)  # 重复发放非 200
+        self.assertIn(tid, r["error"])  # 报因含已发任务指针
+
+    def test_non_string_req_id_400(self):  # Req: F34
+        st, _ = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "req_id": 34},
+                     self.root)
+        self.assertEqual(st, 400)  # 非串 400 报因（同 verify_cmd 口径）
+
+
 if __name__ == "__main__":
     unittest.main()

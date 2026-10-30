@@ -118,15 +118,19 @@ class _Handler(BaseHTTPRequestHandler):
         if name == "task_create":
             vp = body.get("verify_pending", False)
             vc = body.get("verify_cmd")
+            rq = body.get("req_id")
             if not isinstance(vp, bool):  # "false" 字符串得 True——豁免旗语义反转拒收
                 raise ValueError("verify_pending 须为布尔")
             if vc is not None and not isinstance(vc, str):  # 非串 500 裸奔→400 报因
                 raise ValueError("verify_cmd 须为字符串")
+            if rq is not None and not isinstance(rq, str):  # 同 verify_cmd 口径
+                raise ValueError("req_id 须为字符串")
             return {"task": app.task.create(body["goal"], body["project_dir"],
                                             body.get("after"), token,
                                             title=body.get("title"),
                                             target_branch=body.get("target_branch"),
-                                            verify_cmd=vc, verify_pending=vp)}
+                                            verify_cmd=vc, verify_pending=vp,
+                                            req_id=rq)}
         if name == "task_dispatch":
             return {"task": body["task"],
                     "token": app.task.dispatch(body["task"], token)}

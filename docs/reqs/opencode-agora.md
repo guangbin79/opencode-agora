@@ -235,3 +235,7 @@ req-gate-enforcer（dotfiles 插件，伴生任务改记 `.req-gate/`）门过�
 ### F32 令牌/易失件落盘权限——write_ephemeral 建 tmp 即 0600（2026-10-30，安全评审收尾，裁定记录 ag-20898a 消息 649）
 write_ephemeral（agorad/access/store.py）建 tmp 即 0600：os.open mode 0o600＋os.fchmod 兜底——O_CREAT mode 仅建时生效，复用旧版崩溃遗留 0644 .tmp 时显式收紧，自愈才闭环；tokens 含 root 全量牌，不得按 umask 0644 落盘。实现 a72eab2 已随 F6 落地，本条收编台账、测试锚自 F6 归位 F32。
 **验收**：tests/test_access_store.py 的 test_write_ephemeral_owner_only_perms——umask 0o022 下预置遗留 0644 终件＋遗留 0644 中转件，重写后 st_mode&0o077==0（两路自愈）；`python3 -m pytest tests/ -q` 全绿。
+
+### F34 req 编号服务端发放——并行撞号根治（2026-10-30，ag-76ad62）
+req 编号历来派发方各自手扫台账领取，同仓并行即撞号（本仓实证 F32 两案并存；史有 F24×2/F27×3）。修法：task_create 新可选参 req_id，传入即在任务行登记发放；发放面服务端查重——已发集＝任务行 req_id 字段（随状态账本持久），种子＝扫 project_dir docs/reqs/opencode-agora.md 现存最大 F<n>（F32 双条目场景取 max；每次发放重扫，台账只增等价首用种子且免持久化种子态），重复发放拒绝（403 报因含已发任务指针）、格式限 F<数字>、缺文档种子记 0。无自动默认发放：是否领号由派发方决定（大量任务无需 req 号），服务只保证「发出去的号不重」。约束力口径如实：服务端分配＝权威号源，worker 从任务页 frontmatter 取号（req_id 行）；不阻止绕过（先例约束，非闸）。MCP 壳 schema 透传（httpd→task 全链，F23 先例形态）。不做：历史编号 renumber、文档迁移、wiki 计数器页。
+**验收**：F34 用例（Req: F34 锚）——发放登记、无 req_id 行缺省 None、重复拒绝含已发指针、种子扫描双条目取 max、缺文档种子 0、坏格式拒、httpd 透传 403/400、任务页 req_id 行、MCP schema properties；`python3 -m pytest tests/ -q` 全绿。

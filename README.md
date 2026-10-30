@@ -120,6 +120,7 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 - **Crash recovery** — `kill -9` the service at any moment; append-only state + worker re-injection with the same credentials on restart
 - **Real-time accountability** — escalation pings to the main session, append-only JSONL audit for every state change, health patrol for dead dispatchers
 - **PR-workflow friendly** — `task_create(target_branch="feature/x")` merges into a feature branch instead of main
+- **Server-side req numbering** — `task_create(req_id="F34")` registers and de-duplicates feature numbers (seeded from `docs/reqs/`, duplicate issuance rejected). Server allocation is the authoritative number source; workers take the number from the task page. Bypassing is not prevented — a convention, not a gate
 - **Lightweight** — Python stdlib service, zero pip dependencies, localhost only, no telemetry
 
 ## Comparison

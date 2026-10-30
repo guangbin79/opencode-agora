@@ -120,6 +120,8 @@ class TestHandshakeAndList(McpShellTest):
                          ["kind", "body"])  # F22：kind=peer 无 task（其余缺 task 服务侧 400）
         self.assertEqual(schema["task_create"]["inputSchema"]["properties"]
                          ["target_branch"]["type"], "string")  # gt-132747 外部工作流
+        self.assertEqual(schema["task_create"]["inputSchema"]["properties"]
+                         ["req_id"]["type"], "string")  # F34 req 编号服务端发放
 
     def test_notification_silent_parse_error_reported(self):  # Req: F2
         out = io.StringIO()
