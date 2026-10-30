@@ -13,7 +13,7 @@ def write_task_page(home, tid, snap) -> Path:
     home = Path(home)
     page = home / "wiki" / "tasks" / f"{tid}.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    fm = "\n".join(f"{k}: {snap.get(k, '')}" for k in _FM_KEYS)
+    fm = "\n".join(f"{k}: {snap.get(k) or ''}" for k in _FM_KEYS)  # None＝空（round-1）
     v = snap.get("verify") or {}
     vline = "verify: " + v.get("state", "pending")
     if v.get("cmd"):

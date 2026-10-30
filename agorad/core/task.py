@@ -19,7 +19,7 @@ _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocke
 _AFTER_OK = {"merged", "closed", "cancelled"}  # cancelled 还须非 dependency_failed；派发处终审
 _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged 不逆转历史）
 _REQ_DOC = pathlib.Path("docs") / "reqs" / "opencode-agora.md"
-_REQ_ID_RE = re.compile(r"^F\d+$")
+_REQ_ID_RE = re.compile(r"F[0-9]+")  # fullmatch；\d 放 Unicode 数字、$ 放尾换行（round-1）
 _REQ_NUM_RE = re.compile(r"F(\d+)")
 
 EV_CREATED = "task_created"
@@ -269,15 +269,18 @@ class TaskService:
 
     def _req_check(self, tid, sid, project_dir, req_id):
         """F34 发放面查重：已发集＝任务行 req_id 字段（随账本持久）＋首用种子
-        （docs/reqs 台账现存最大 F<n>）。重复/在案即拒，报因含已发任务指针。"""
-        if not _REQ_ID_RE.match(req_id):
+        （docs/reqs 台账现存最大 F<n>）。重复/在案即拒，报因含已发任务指针。
+        查重一律按数值——拼写变体（尾换行/前导零）不构成新号（round-1）。"""
+        if not _REQ_ID_RE.fullmatch(req_id):
             self._reject(tid, sid, f"req_id 须为 F<数字> 形态（收到 {req_id!r}）")
+        num = int(req_id[1:])
         holder = next((t for t, x in self._state.snapshot()["tasks"].items()
-                       if x.get("req_id") == req_id), None)
+                       if x.get("req_id")
+                       and int(x["req_id"][1:]) == num), None)
         if holder is not None:
             self._reject(tid, sid, f"req_id {req_id} 已发放（任务 {holder}）")
         seed = self._req_seed(project_dir)
-        if int(req_id[1:]) <= seed:
+        if num <= seed:
             self._reject(tid, sid,
                          f"req_id {req_id} 已在案（docs/reqs 现存最大 F{seed}）")
 
@@ -287,7 +290,7 @@ class TaskService:
         视为 0。每次发放重扫——台账只增，等价「首用种子」且免持久化种子态。"""
         try:
             text = (pathlib.Path(project_dir) / _REQ_DOC).read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):  # 坏字节同缺文档口径：种子 0（round-1）
             return 0
         return max((int(n) for n in _REQ_NUM_RE.findall(text)), default=0)
 

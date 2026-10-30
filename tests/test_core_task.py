@@ -579,6 +579,14 @@ class TestReqId(TestCoreTask):
             self.svc.create("g", "/repo", None, self.root, req_id="REQ-7")
         self.assertIn("req_id", str(cm.exception))
 
+    def test_non_canonical_spelling_is_same_number(self):  # Req: F34
+        # 尾换行/前导零/Unicode 数字：数值判重同号（round-1 评审实证串判重漏放）
+        repo = self.req_repo("### F33 x\n")
+        self.svc.create("g", repo, None, self.root, req_id="F34")
+        for bad in ("F34\n", "F034", "F٣٤"):
+            with self.assertRaises(Rejected):
+                self.svc.create("g", repo, None, self.root, req_id=bad)
+
 
 if __name__ == "__main__":
     unittest.main()
