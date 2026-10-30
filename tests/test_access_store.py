@@ -124,7 +124,7 @@ class TestAccessStore(unittest.TestCase):
         self.st.write_ephemeral("service.json", {"pid": 2})
         self.assertEqual(json.loads(self.tmp.joinpath("service.json").read_text()), {"pid": 2})
 
-    def test_write_ephemeral_owner_only_perms(self):  # Req: F6
+    def test_write_ephemeral_owner_only_perms(self):  # Req: F32
         """tokens 含 root 牌：落盘须 owner-only，umask 放不开；遗留 0644 终件/中转件重写即自愈。"""
         old = os.umask(0o022)
         try:

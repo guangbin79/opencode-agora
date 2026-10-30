@@ -228,3 +228,7 @@ Python 运行件与插件/skills/install.sh 全部进 wheel：`pipx install open
 ### F33 agora 闸豁免面收编 req-gate 门记录目录（2026-10-30，ag-deef8f）
 req-gate-enforcer（dotfiles 插件，伴生任务改记 `.req-gate/`）门过时写 `<repo>/.req-gate/<sessionID>.md`；agora 所有权闸拦 edit/write 致两钩子死锁——门记录写本身被拦（本仓 10 条存量 `.omo/req-gate/` 记录早于 enforce 即实证）。修法：插件写面豁免收编门记录目录，basename 级路径任一段命中即豁免，旧 `.omo` 与新 `.req-gate` 同收；其余判定语义与既有豁免面零漂移。配套 `.gitignore` 增 `.req-gate/`（`.omo/` 旁并存）。
 **验收**：F33 用例——write/edit 落 `<repo>/.omo/**` 与 `<repo>/.req-gate/**` 放行、控制组非豁免 dotdir 仍拒；`python3 -m pytest tests/ -q`＋`cd agora-plugin && bun test` 全绿（Req: F33）。
+
+### F32 令牌/易失件落盘权限——write_ephemeral 建 tmp 即 0600（2026-10-30，安全评审收尾，裁定记录 ag-20898a 消息 649）
+write_ephemeral（agorad/access/store.py）建 tmp 即 0600：os.open mode 0o600＋os.fchmod 兜底——O_CREAT mode 仅建时生效，复用旧版崩溃遗留 0644 .tmp 时显式收紧，自愈才闭环；tokens 含 root 全量牌，不得按 umask 0644 落盘。实现 a72eab2 已随 F6 落地，本条收编台账、测试锚自 F6 归位 F32。
+**验收**：tests/test_access_store.py 的 test_write_ephemeral_owner_only_perms——umask 0o022 下预置遗留 0644 终件＋遗留 0644 中转件，重写后 st_mode&0o077==0（两路自愈）；`python3 -m pytest tests/ -q` 全绿。
