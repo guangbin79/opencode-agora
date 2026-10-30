@@ -1,5 +1,6 @@
 """T1 访问层契约：store 账本四原语＋flock（真文件，无 mock）。"""
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -122,6 +123,19 @@ class TestAccessStore(unittest.TestCase):
         self.st.write_ephemeral("service.json", {"pid": 1})
         self.st.write_ephemeral("service.json", {"pid": 2})
         self.assertEqual(json.loads(self.tmp.joinpath("service.json").read_text()), {"pid": 2})
+
+    def test_write_ephemeral_owner_only_perms(self):  # Req: F6
+        """tokens 含 root 牌：落盘须 owner-only，umask 放不开；遗留 0644 终件/中转件重写即自愈。"""
+        old = os.umask(0o022)
+        try:
+            (self.tmp / "tokens").write_text("{}", encoding="utf-8")
+            os.chmod(self.tmp / "tokens", 0o644)  # 模拟旧版落盘遗留件
+            (self.tmp / "tokens.tmp").write_text("{}", encoding="utf-8")
+            os.chmod(self.tmp / "tokens.tmp", 0o644)  # 模拟旧版崩溃遗留中转件：O_CREAT mode 对已存在件失效
+            self.st.write_ephemeral("tokens", {"tk": ["s1", "root"]})
+            self.assertEqual(os.stat(self.tmp / "tokens").st_mode & 0o077, 0)
+        finally:
+            os.umask(old)
 
     def test_read_ephemeral_roundtrip(self):  # Req: F6
         self.assertIsNone(self.st.read_ephemeral("tokens"))

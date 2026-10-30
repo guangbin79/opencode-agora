@@ -144,7 +144,9 @@ class Store:
         path = self.home / name
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 建时即 0600：tokens 含 root 牌，umask 只能收紧
+        os.fchmod(fd, 0o600)  # O_CREAT mode 仅建时生效：复用旧版崩溃遗留 .tmp 时显式收紧，自愈才闭环
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
