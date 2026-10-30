@@ -505,6 +505,61 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
+  test("F25 逆半条缓存自愈：credential 牌已入而 envDir 缺（BOOT 撞 location 冷注册表，ag-442743 实证）→写判定触发拉取→同调用放行；404 仍 DISPATCH_HINT", async () => {
+    // Req: F25
+    const hooks = wire();
+    setEnforce(null); // 服务持旗拉取形态
+    const pulls: string[] = [];
+    let credMode: "ok" | "404" = "ok";
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            pulls.push(sid);
+            if (credMode === "ok" && sid === "s-boot-half-inv") {
+              return Response.json({ tid: "t-half", env_dir: envDir, token: "tok-half-inv" });
+            }
+            return new Response("{}", { status: 404 });
+          });
+        }
+        if (req.headers.get("x-agora-token") !== "tok-root") return new Response("{}", { status: 401 });
+        return Response.json({ ok: true, enforce_on: true });
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`; // lift 直达探活
+    resetLift();
+    resetCredPull();
+    try {
+      // 伪造逆半条缓存：credential 牌已入（MCP 附牌可用）而 BOOT env 位缺——v2.2.2
+      // PluginHooks 按 location 冷启（prepare 只等全局激活闸），BOOT 静默丢、credential
+      // 后至命中（ag-442743 探针实证：裸 NO_CRED_HINT＋零 cred_pull 审计行）
+      cacheCredential({ token: "tok-half-inv", sid: "s-boot-half-inv", role: "worker", tid: "t-half" });
+      // 写判定路径触发拉取→env 位补全→同调用放行（cwd∈env）
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-half-inv", input: { filePath: join(repo, "a.md") } });
+      expect(getCredential("s-boot-half-inv")?.envDir).toBe(envDir);
+      expect(pulls).toEqual(["s-boot-half-inv"]);
+      // 404 形态：无在飞绑定→拉取分流后仍拒，路由 DISPATCH_HINT（非 NO_CRED_HINT 死路文案）
+      credMode = "404";
+      cacheCredential({ token: "tok-half-inv", sid: "s-boot-half-inv404", role: "worker", tid: "t-half" });
+      await expect(
+        hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-half-inv404", input: { filePath: join(repo, "a.md") } }),
+      ).rejects.toThrow(/任务面派发/);
+      expect(pulls).toEqual(["s-boot-half-inv", "s-boot-half-inv404"]);
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      setEnforce(false);
+      srv.stop(true);
+    }
+  });
+
   test("F27 readish 拉取接线三态：404 放行 state 读；worker 拉取后仍 READ_HINT；不可达仍 READ_HINT", async () => {
     // Req: F27
     const hooks = wire();

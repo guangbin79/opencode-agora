@@ -114,14 +114,17 @@ export default {
         (typeof input.path === "string" && input.path) ||
         "";
       let cred = getCredential(event.sessionID);
-      let credSrc = cred?.token ? "cache" : "miss";
+      let credSrc = !cred?.token || !cred.envDir ? "miss" : "cache"; // 与拉取未命中判定同口径（半条缓存＝miss，分诊不误报 cache）
       let pull: PullResult | null = null;
       // F27 拉取闭合三面：write/readish 判定面（enforce on 才消费凭据）＋agora_* 附牌面
       // （不论旗——附牌语义独立于判定旗）。节流按 sid，多面共用不重复拉。
-      // F32 半条缓存竞态无害化：未命中判定从 !cred 放宽为缺 token 即未命中——BOOT env 位
-      // 已缓存而 credential token 未入（会话创建期注入与插件加载竞速，平台时序不可消除）
-      // 时，写判定即触发 cred_for_sid 拉取自愈；节流（每 sid 30s）/2s 短超时/404 路由不动。
-      if (!cred?.token && lift?.ok && (isAgora || (on && (isWriteTool(event.tool) || readishGated(event.tool, target))))) {
+      // F32 半条缓存竞态无害化：未命中判定从 !cred 放宽为缺 token 或缺 envDir 即未命中——
+      // v2.2.2 PluginHooks 注册表按 location 冷启（SessionPrompt.prepare 只等全局激活闸，
+      // supervisor 激活另带 100ms debounce），dispatch 两注任一可撞空窗：BOOT 缺→envDir 缺
+      // （ag-442743 实证，缓存={token,envDir缺}→MCP 可用而写恒拒），credential 缺→token 缺
+      // （ag-fed303/F32 实证）。写判定即触发 cred_for_sid 拉取自愈；节流（每 sid 30s）/
+      // 2s 短超时/404 路由不动。
+      if ((!cred?.token || !cred?.envDir) && lift?.ok && (isAgora || (on && (isWriteTool(event.tool) || readishGated(event.tool, target))))) {
         pull = await pullCredential(event.sessionID, lift.port);
         if (pull.cred) {
           cred = pull.cred;
