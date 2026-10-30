@@ -130,7 +130,7 @@ class Gate:
                     f"任务 {tid} 评审环未绿——修复 blocker/high 后"
                     "重新 post(done, commit)")
         self._state.transition(tid, "done", commit=commit,
-                               rebased_from=None)  # F32：受理即清陈旧留痕（唯一清点）
+                               rebased_from=None)  # F32：受理即清陈旧留痕（门内直通对齐处亦清）
         self._audit(tid, "done", commit=commit)
         return "accepted"
 

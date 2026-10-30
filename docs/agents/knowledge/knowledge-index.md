@@ -33,6 +33,7 @@
 - **维护者自编辑通道**（F27 过程判例）：enforce ON 下 root 亦被拦（hook.ts 写入分支 root→DISPATCH_HINT，零信任设计；task-305aff 后该缓存命中分支纯防御位——root 牌生产不入缓存，主会话写面拦截实际经 pull 404 not_worker 路由送达 DISPATCH_HINT，镜像 readish 裁定 A）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离，MCP 拉牌救不了 hook 拦截）
 - **wheel 数据面两坑＋argv 假象**（F31 实证，53fb8ec）：①importlib.metadata 的 RECORD 是安装态（pip 重写带 `../../../` 前缀），`locate_file` 以 site-packages 为基——传 `find_share_dir` 尾段（`share/...`）必落 site-packages/share 幽灵路径，兜底 `Path(sys.prefix)/rel` 双态通吃；②data-files 目的地键即安装后目录名（`share/opencode-agora/plugin` 装成 `plugin/`），与 install.sh 源布局 `agora-plugin/` 名实冲突致 pkg 分支 cp 落空——目的地键须保源目录名；③`python3 -c '...sys.argv[0]...'` 里 argv[0] 是字面 `-c`，首参自 argv[1] 起（dash/bash 同），拿 argv 拼命令行须从 1 数
 - **O_CREAT mode 仅建时生效**（ag-20898a 三评审合证）：`os.open(..., 0o600)` 对已存在件不收紧权限、O_TRUNC 只清内容——旧版 `open("w")` 崩溃残留 0644 `.tmp` 被复用时，tokens 落盘再 0644 且此后每次写持续复现，「重写自愈」静默失效；定式：权限敏感中转件建后必补 `os.fchmod(fd, 目标 mode)`，测试须预置遗留终件＋遗留中转件两路各断言
+- **rebase 冲突态检测须双 backend 目录**（F32/ag-4b300d 终闸 B 册 git 2.43/2.55 实证）：`git rebase` 停冲突的 per-worktree sequencer 目录随 backend 分叉——merge backend（2.26+ 缺省）停 `rebase-merge`、apply backend（`rebase.backend=apply`，integration worktree 共享主仓 config）停 `rebase-apply`，单查其一即把真冲突误分类环境病（rc=1＋所查目录缺席）；定式：判据＝`rev-parse --git-path` 两目录逐一探测、任一在位→abort→冲突，皆缺才按环境病如实上抛（分类先于动作）
 
 ## 已知接受面
 
