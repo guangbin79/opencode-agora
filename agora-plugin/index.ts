@@ -114,11 +114,14 @@ export default {
         (typeof input.path === "string" && input.path) ||
         "";
       let cred = getCredential(event.sessionID);
-      let credSrc = cred ? "cache" : "miss";
+      let credSrc = cred?.token ? "cache" : "miss";
       let pull: PullResult | null = null;
       // F27 拉取闭合三面：write/readish 判定面（enforce on 才消费凭据）＋agora_* 附牌面
       // （不论旗——附牌语义独立于判定旗）。节流按 sid，多面共用不重复拉。
-      if (!cred && lift?.ok && (isAgora || (on && (isWriteTool(event.tool) || readishGated(event.tool, target))))) {
+      // F32 半条缓存竞态无害化：未命中判定从 !cred 放宽为缺 token 即未命中——BOOT env 位
+      // 已缓存而 credential token 未入（会话创建期注入与插件加载竞速，平台时序不可消除）
+      // 时，写判定即触发 cred_for_sid 拉取自愈；节流（每 sid 30s）/2s 短超时/404 路由不动。
+      if (!cred?.token && lift?.ok && (isAgora || (on && (isWriteTool(event.tool) || readishGated(event.tool, target))))) {
         pull = await pullCredential(event.sessionID, lift.port);
         if (pull.cred) {
           cred = pull.cred;

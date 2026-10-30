@@ -3,6 +3,7 @@
 真 Store/State/Router＋假 oc/gitx/health/read_anchor/runner 全注入；
 门体 run 同步调用（后台线程包装归 httpd 装配）。
 """
+import os
 import shlex
 import shutil
 import tempfile
@@ -120,6 +121,33 @@ class TestSubprocessRunner(unittest.TestCase):
             self.assertIn("AGORA_VERIFY_TIMEOUT", out)
             time.sleep(0.6)  # 若只杀 shell 而漏杀子进程，此处会出现迟到写入
             self.assertFalse(marker.exists())
+
+    def test_runner_strips_service_env_vars(self):  # Req: F32
+        """F32 门环境消毒：verify 子进程 env 剥服务自身态三变量；其余照常继承；
+        os.environ 本体不被污染（剥除落显式副本）。"""
+        strip = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD", "AGORA_HOME")
+        saved = {k: os.environ.get(k) for k in strip}
+        os.environ["AGORA_PORT"] = "4096"
+        os.environ["AGORA_OC_URL"] = "http://127.0.0.1:4096"
+        os.environ["AGORA_OC_PASSWORD"] = "sekrit"
+        os.environ["AGORA_HOME"] = "/fixture-home"
+        snapshot = dict(os.environ)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                rc, out = _subprocess_runner(
+                    tmp, 'printf "[PORT=%s][URL=%s][PW=%s][HOME=%s]" '
+                         '"${AGORA_PORT-}" "${AGORA_OC_URL-}" '
+                         '"${AGORA_OC_PASSWORD-}" "${AGORA_HOME-}"')
+            self.assertEqual(dict(os.environ), snapshot)  # os.environ 本体不被污染
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertEqual(rc, 0)
+        # 三枚服务自身态被剥（空）；AGORA_HOME 明示不剥——夹具自设值照常继承
+        self.assertEqual(out, "[PORT=][URL=][PW=][HOME=/fixture-home]")
 
 
 class TestCoreGate(unittest.TestCase):

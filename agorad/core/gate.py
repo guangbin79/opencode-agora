@@ -31,9 +31,20 @@ _GATE_PATTERNS = ("Makefile", "*.mk", "pyproject.toml", "setup.py", "setup.cfg",
                   ".github/workflows/*")
 
 
+# F32 门环境消毒：服务自身态三变量不随 env 泄入 verify 子进程链——test_install.sh
+# 类自测拉起的 daemon 经 main.py os.environ.get("AGORA_PORT","0") 硬绑服务在用端口即崩。
+# AGORA_HOME 明示不剥：无事故面，夹具本就自设各自值。
+_GATE_ENV_STRIP = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD")
+
+
 def _subprocess_runner(env_dir, cmd, timeout=300):
-    """真 runner：独立进程组跑 verify；超时杀全组，rc=124 按质量败处理。"""
-    proc = subprocess.Popen(cmd, shell=True, cwd=env_dir,
+    """真 runner：独立进程组跑 verify；超时杀全组，rc=124 按质量败处理。
+
+    F32 门环境消毒：剥除 _GATE_ENV_STRIP 三枚服务自身态变量后以显式副本传子进程
+    （不改 os.environ 本体）。
+    """
+    child_env = {k: v for k, v in os.environ.items() if k not in _GATE_ENV_STRIP}
+    proc = subprocess.Popen(cmd, shell=True, cwd=env_dir, env=child_env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, start_new_session=True)
     try:
