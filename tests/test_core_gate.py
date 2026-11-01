@@ -780,6 +780,18 @@ class TestGateVerifyOverrun(TestCoreGate):
         self.assertIn("itail", m["body"])
         self.assertEqual(self.worker_msgs(), [])
 
+    def test_overrun_parked_done_settles_queued_cancel(self):  # Req: F36
+        """评审环 R1：驻留 done＋排队取消（软顶文案邀请的挂死 cancel）门尾合法结算——
+        矩阵 done 无 cancelled 出口，gate_tail 直结防 InvalidTransition 吞取消。"""
+        self.runner = FakeRunner((124, "hang"))
+        self.mk_gate()
+        self.in_gate()
+        self.state.set_fields("t1", pending_cancel=True)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "cancelled")
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 取消副作用照常：环境回收
+
     def test_default_runner_soft_notifies_once(self):  # Req: F36
         """未注入 runner：run() 按 tid 构造默认 runner，软顶提醒派发方恰一次。"""
         self.seed(cmd="sleep 0.3; echo ok")

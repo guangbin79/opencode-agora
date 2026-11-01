@@ -150,7 +150,16 @@ class State:
             cancel_reason = t.pop("pending_cancel_reason", None)
             if pending and t["state"] != EV_MERGED:
                 fields = {"cancel_reason": cancel_reason} if cancel_reason else {}
-                self.transition(tid, EV_CANCELLED, in_gate=False, **fields)
+                if t["state"] == EV_DONE:
+                    # F36/评审环 R1：驻留 done（verify_overrun/锚缺失）＋排队取消——
+                    # 矩阵 done 无 cancelled 出口，门尾直结防 InvalidTransition 吞取消
+                    t["state"] = EV_CANCELLED
+                    t["in_gate"] = False
+                    t["updated"] = time.time()
+                    t.update(fields)
+                    self._persist()
+                else:
+                    self.transition(tid, EV_CANCELLED, in_gate=False, **fields)
             elif t["state"] == EV_MERGED:
                 self.transition(tid, EV_CLOSED, in_gate=False)
             else:

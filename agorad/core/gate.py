@@ -89,18 +89,25 @@ def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
             return proc.returncode, (out or "") + (err or "")
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - start
-            if not soft_fired and elapsed >= timeout and proc.poll() is None:
-                soft_fired = True  # 软顶拍不杀：提醒恰一次，verify 继续跑
-                if on_soft is not None:
+            if not soft_fired and elapsed >= timeout:
+                soft_fired = True  # 软顶拍不杀：提醒恰一次（进程已退则免提醒）
+                if proc.poll() is None and on_soft is not None:
                     on_soft()
             if elapsed >= ceiling:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass  # 超时与正常退出竞速：进程组已消失即无需补杀
-                out, err = proc.communicate()
+                try:  # 有限宽限收尾：逃逸后代持管道时弃读，防门线程挂死
+                    out, err = proc.communicate(timeout=2 * _VERIFY_POLL)
+                except subprocess.TimeoutExpired:
+                    for pipe in (proc.stdout, proc.stderr):
+                        if pipe:
+                            pipe.close()
+                    out, err = "", "（逃逸进程仍持有输出管道，已弃采）"
+                overrun = "" if soft_fired else f"（软顶 {timeout:g}s 未提醒：硬顶≤软顶）"
                 return 124, ((out or "") + (err or "") +
-                             f"\nverify 超硬顶（>{ceiling:g}s，软顶 {timeout:g}s 已提醒）"
+                             f"\nverify 超硬顶（>{ceiling:g}s{overrun}）"
                              "——已终止验证进程组；可用 AGORA_VERIFY_CEILING 调整上限")
 
 
