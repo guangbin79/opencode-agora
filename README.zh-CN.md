@@ -87,7 +87,7 @@ agora-install
 
 ## 两道质量闸
 
-**verify 门**——不可协商的那道。验收命令在建单时登记（`task_create(verify_cmd="pytest -q")`，或 `verify_pending: true` 延后登记）。**服务先在任务 worktree 真跑**，再在 detached 集成 worktree 中试合并并复跑；两次全绿才推进目标分支，集成失败和测试副作用都不会碰主检出。一条硬性要求：最终推进前主检出必须干净（无未提交/未跟踪改动），否则任务重开并附清理提示。门先把 `$AGORA_HOME/.agora/ignore.roster` 名册（一行一个 gitignore 模式）幂等写入仓 `.git/info/exclude`，名册路径不计入未跟踪脏。每次运行都有超时（缺省 300 秒）。红＝worker 收到输出重试；三连败＝blocked＋失控告警。worker 无法跳过、伪造或自报结果。
+**verify 门**——不可协商的那道。验收命令在建单时登记（`task_create(verify_cmd="pytest -q")`，或 `verify_pending: true` 延后登记）。**服务先在任务 worktree 真跑**，再在 detached 集成 worktree 中试合并并复跑；两次全绿才推进目标分支，集成失败和测试副作用都不会碰主检出。一条硬性要求：最终推进前主检出必须干净（无未提交/未跟踪改动），否则任务重开并附清理提示。门先把 `$AGORA_HOME/.agora/ignore.roster` 名册（一行一个 gitignore 模式）幂等写入仓 `.git/info/exclude`，名册路径不计入未跟踪脏。每次运行有双顶：软顶（缺省 300 秒）到点只提醒派发方一次——仍在跑、无需操作；硬顶（缺省 4× 软顶）到点终止进程组。硬顶击穿（rc=124）附输出尾路由派发方：不弹 worker、不计连败、任务驻留 done。红＝worker 收到输出重试；三连败＝blocked＋失控告警。worker 无法跳过、伪造或自报结果。
 
 **评审门**——开放标准，评审器自带。契约只有一个锚文件：
 
@@ -141,7 +141,8 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 | `$AGORA_HOME/.agora/inactive-repos` | 空 | agora 完全休眠的仓（一行一个路径） |
 | `AGORA_BOARD_INTERVAL` | `5` | 仪表盘轮询间隔（秒） |
 | `AGORA_HEALTH_INTERVAL` | `300` | dispatcher 健康巡检（秒） |
-| `AGORA_VERIFY_TIMEOUT` | `300` | 单次任务／集成 verify 超时（秒）；超时终止整个进程组 |
+| `AGORA_VERIFY_TIMEOUT` | `300` | 单次任务／集成 verify 软顶（秒）：到点提醒派发方、不杀 |
+| `AGORA_VERIFY_CEILING` | `4× 软顶` | 硬顶（秒）：到点终止验证进程组；超顶路由派发方（不弹 worker、任务驻留 done） |
 | `enforce` | on | 强制闸总开关（仅 root，开关留审计） |
 | `$AGORA_HOME/.agora/email.json` | 关 | 僵态任务邮件提醒（`{"to","command"}`） |
 

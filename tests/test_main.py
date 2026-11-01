@@ -15,7 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agorad.main import env_config, main, verify_timeout_from_env
+from agorad.main import assemble, env_config, main, verify_ceiling_from_env, \
+    verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,6 +68,37 @@ class TestVerifyTimeoutConfig(unittest.TestCase):
                 with self.assertRaises(ValueError) as cm:
                     verify_timeout_from_env()
                 self.assertIn("AGORA_VERIFY_TIMEOUT", str(cm.exception))
+
+
+class TestVerifyCeilingConfig(unittest.TestCase):
+    def test_unset_returns_none_and_value_parses(self):  # Req: F36
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(verify_ceiling_from_env())  # 未设＝None（缺省 4×软顶）
+        with mock.patch.dict(os.environ, {"AGORA_VERIFY_CEILING": "9600"}, clear=True):
+            self.assertEqual(verify_ceiling_from_env(), 9600.0)
+
+    def test_invalid_values_fail_fast(self):  # Req: F36
+        for raw in ("", "abc", "0", "-1", "nan", "inf"):
+            with self.subTest(raw=raw), \
+                 mock.patch.dict(os.environ, {"AGORA_VERIFY_CEILING": raw}, clear=True):
+                with self.assertRaises(ValueError) as cm:
+                    verify_ceiling_from_env()
+                self.assertIn("AGORA_VERIFY_CEILING", str(cm.exception))
+
+
+class TestAssembleWiring(unittest.TestCase):
+    def test_gate_gets_ceiling_and_default_roster_path(self):  # Req: F36
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw",
+                           verify_ceiling=9600.0)
+            self.assertEqual(app.gate._verify_ceiling, 9600.0)  # 装配透传
+            self.assertEqual(app.gate._roster_path,
+                             str(Path(tmp) / ".agora" / "ignore.roster"))
+            app2 = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            self.assertIsNone(app2.gate._verify_ceiling)  # 未设＝None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestBoot(unittest.TestCase):

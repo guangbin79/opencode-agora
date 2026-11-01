@@ -7,10 +7,12 @@ verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-
 主检出两次干净检查通过，才推进真实目标分支。集成
 失败不再依赖 reset --hard 回滚，用户未提交工作与目标分支均不受测试副作用影响。
 
-默认 runner 以独立进程组执行命令，超时杀全组并返回 124，避免单个挂死验证永久
-堵住串行门。崩溃重排先探测目标支是否已含任务 commit：已含说明上轮最终推进已
-完成，只补 merged/closed 终态，不重验后假 reopened。gate_env 与 target_branch 的
-原始分支位随任务快照持久化，集成环境和分支位均可跨重启收敛。
+默认 runner 以独立进程组执行命令，双顶（F36）：软顶到点提醒派发方一次不杀继续
+跑，硬顶（缺省 4×软顶）到点杀全组返回 124；rc=124 分类路由派发方（不计 worker
+连败、任务驻留 done），避免单个挂死验证永久堵住串行门。崩溃重排先探测目标支是否
+已含任务 commit：已含说明上轮最终推进已完成，只补 merged/closed 终态，不重验后
+假 reopened。gate_env 与 target_branch 的原始分支位随任务快照持久化，集成环境和
+分支位均可跨重启收敛。
 
 全程 in-gate 门闩、pending-cancel 门尾原子结算、三连败 blocked 与事件审计保持
 不变。core 只 import stdlib，依赖全构造注入。
@@ -26,6 +28,8 @@ KIND_QUALITY = "quality"
 KIND_GATEFILES = "gatefiles"
 
 _TAIL = 2000
+# F36 软硬双顶轮询步长：硬顶判死及时性 0.5s 级（秒）
+_VERIFY_POLL = 0.5
 # 闸体＝verify 依赖面（构建/测试配置）：任务 diff 触及即升级拍人
 _GATE_PATTERNS = ("Makefile", "*.mk", "pyproject.toml", "setup.py", "setup.cfg",
                   "requirements*.txt", "package.json", "package-lock.json",
@@ -61,42 +65,57 @@ def _roster_gate_patterns(roster):
     return out
 
 
-def _subprocess_runner(env_dir, cmd, timeout=300):
-    """真 runner：独立进程组跑 verify；超时杀全组，rc=124 按质量败处理。
+def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
+    """真 runner：独立进程组跑 verify，F36 软硬双顶。
 
-    F32 门环境消毒：剥除 _GATE_ENV_STRIP 三枚服务自身态变量后以显式副本传子进程
-    （不改 os.environ 本体）。
+    软顶＝timeout：到点不杀，on_soft() 恰一次（None 跳过），继续等；硬顶＝ceiling
+    （缺省 4×软顶）：到点 SIGKILL 全组 rc=124。循环 communicate（CPython 契约：
+    TimeoutExpired 后重试不丢已读输出）。F32 门环境消毒：剥除 _GATE_ENV_STRIP
+    三枚服务自身态变量后以显式副本传子进程（不改 os.environ 本体）。
     """
+    ceiling = 4 * timeout if ceiling is None else ceiling
     child_env = {k: v for k, v in os.environ.items() if k not in _GATE_ENV_STRIP}
     proc = subprocess.Popen(cmd, shell=True, cwd=env_dir, env=child_env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, start_new_session=True)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    soft_fired, start = False, time.monotonic()
+    while True:
+        now = time.monotonic()
+        waits = [_VERIFY_POLL, ceiling - (now - start)]
+        if not soft_fired:
+            waits.append(timeout - (now - start))
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # 超时与正常退出竞速：进程组已消失即无需补杀
-        out, err = proc.communicate()
-        return 124, ((out or "") + (err or "") +
-                     f"\nverify 超时（>{timeout:g}s）——已终止验证进程组；"
-                     "可用 AGORA_VERIFY_TIMEOUT 调整上限")
-    return proc.returncode, (out or "") + (err or "")
+            out, err = proc.communicate(timeout=max(min(waits), 0.001))
+            return proc.returncode, (out or "") + (err or "")
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - start
+            if not soft_fired and elapsed >= timeout and proc.poll() is None:
+                soft_fired = True  # 软顶拍不杀：提醒恰一次，verify 继续跑
+                if on_soft is not None:
+                    on_soft()
+            if elapsed >= ceiling:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+                out, err = proc.communicate()
+                return 124, ((out or "") + (err or "") +
+                             f"\nverify 超硬顶（>{ceiling:g}s，软顶 {timeout:g}s 已提醒）"
+                             "——已终止验证进程组；可用 AGORA_VERIFY_CEILING 调整上限")
 
 
 class Gate:
     """accept_done 单写者串行受理；run 为后台线程体（httpd 包 Thread 调用）。"""
 
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
-                 store, runner=None, verify_timeout=300, on_blocked=None,
-                 roster_path=None):  # F35：门侧名册（$AGORA_HOME/.agora/ignore.roster）
+                 store, runner=None, verify_timeout=300, verify_ceiling=None,
+                 on_blocked=None, roster_path=None):  # F35：门侧名册（$AGORA_HOME/.agora/ignore.roster）
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
         self._roster_path = roster_path
-        self._runner = runner or (lambda env, cmd: _subprocess_runner(
-            env, cmd, timeout=verify_timeout))
+        self._verify_timeout, self._verify_ceiling = verify_timeout, verify_ceiling
+        self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
 
     # ---- done 受理（前置六拒，拒收落审计并附动作指引） ----
 
@@ -171,6 +190,12 @@ class Gate:
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         integration = t.get("gate_env") or f"{env}__gate"
         origin = t.get("gate_origin_branch")  # 崩溃重排沿用首轮分支位，不采信漂移后的现场
+        runner = self._runner
+        if runner is None:  # F36 默认 runner：软顶提醒闭包绑本任务
+            runner = lambda env, cmd: _subprocess_runner(  # noqa: E731
+                env, cmd, timeout=self._verify_timeout,
+                ceiling=self._verify_ceiling,
+                on_soft=lambda: self._notify_verify_soft(tid))
         self._state.set_fields(tid, in_gate=True, gate_env=integration)
         try:
             # kill 落在“目标已推进、merged 未落库”窗口：任务提交已在目标支即只补终态，
@@ -196,7 +221,14 @@ class Gate:
                                    "diff 检查发现冲突标记/空白错误——清理后重新"
                                    f" post(done, commit)\n输出尾部:\n{warn[-_TAIL:]}")
                 return
-            rc, out = self._runner(env, cmd)
+            rc, out = runner(env, cmd)
+            if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
+                self._audit(tid, "verify_overrun")
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"verify 超硬顶——进程组已终止（非质量败，无需 worker 重试）；"
+                    f"输出尾部:\n{out[-_TAIL:]}")
+                return
             if rc != 0:
                 self._quality_fail(tid, "verify_failed",
                                    f"verify 失败——修复后重新 post(done, commit)"
@@ -227,7 +259,14 @@ class Gate:
                 r = self._gitx.head(integration)
                 self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
                 self._audit(tid, "rebased", **{"from": e, "to": r})
-            irc, iout = self._runner(integration, cmd)
+            irc, iout = runner(integration, cmd)
+            if irc == 124:  # F36 集成超硬顶：同款分类路由，目标分支未改动
+                self._audit(tid, "verify_overrun")
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"集成 verify 超硬顶，目标分支未改动——进程组已终止"
+                    f"（非质量败，无需 worker 重试）；输出尾部:\n{iout[-_TAIL:]}")
+                return
             if irc != 0:
                 where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
                 self._quality_fail(tid, "reopened",
@@ -306,6 +345,15 @@ class Gate:
             t.get("target_branch"))
 
     # ---- 内部 ----
+
+    def _notify_verify_soft(self, tid):
+        """F36 软顶提醒线：不杀只提醒恰一次（gt-961483/gt-018676 误报诱导 cancel
+        前科→文案显式仍在跑、无需操作）。"""
+        self._audit(tid, "verify_soft_timeout")
+        self._router.notify_dispatcher(
+            tid, "milestone",
+            f"任务 {tid} verify 超软顶（>{self._verify_timeout:g}s）——仍在跑、"
+            "无需操作、确认挂死才 cancel")
 
     def _quality_fail(self, tid, to, body):
         """质量败（verify 败/集成败）：迁移＋审计＋实时回 worker＋计连败（3 连败拍人）。"""

@@ -88,7 +88,7 @@ After install, your session gains two skills (agora-dispatch / agora-ops) and 13
 
 ## Two Quality Gates
 
-**Verify gate** — the non-negotiable one. The verify command is registered at task creation (`task_create(verify_cmd="pytest -q")`, or `verify_pending: true` to defer). The **service runs it in the task worktree**, then trial-merges into a detached integration worktree and runs it again. Only two green runs advance the target branch; integration failures and test side effects never touch your main checkout. One hard requirement: your main checkout must be clean (no uncommitted or untracked changes) before the final push, otherwise the task reopens with a cleanup hint. The gate first idempotently writes the `$AGORA_HOME/.agora/ignore.roster` roster (one gitignore pattern per line) into the repo's `.git/info/exclude`; rostered paths don't count as untracked dirt. Each run has a timeout (300 seconds by default). Red = the worker gets the output and retries. Three consecutive failures = blocked + escalation ping. The worker cannot skip it, fake it, or report results itself.
+**Verify gate** — the non-negotiable one. The verify command is registered at task creation (`task_create(verify_cmd="pytest -q")`, or `verify_pending: true` to defer). The **service runs it in the task worktree**, then trial-merges into a detached integration worktree and runs it again. Only two green runs advance the target branch; integration failures and test side effects never touch your main checkout. One hard requirement: your main checkout must be clean (no uncommitted or untracked changes) before the final push, otherwise the task reopens with a cleanup hint. The gate first idempotently writes the `$AGORA_HOME/.agora/ignore.roster` roster (one gitignore pattern per line) into the repo's `.git/info/exclude`; rostered paths don't count as untracked dirt. Each run has two caps: a soft top (300 seconds by default) that only pings the dispatcher once — still running, no action needed — and a hard top (4× soft by default) that kills the process group. A hard-top kill (rc=124) routes to the dispatcher with the output tail: no worker retry loop, no fail streak, the task stays in done. Red = the worker gets the output and retries. Three consecutive failures = blocked + escalation ping. The worker cannot skip it, fake it, or report results itself.
 
 **Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 
@@ -142,7 +142,8 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 | `$AGORA_HOME/.agora/inactive-repos` | empty | Repos where agora is fully dormant (one path per line) |
 | `AGORA_BOARD_INTERVAL` | `5` | Dashboard poll interval (seconds) |
 | `AGORA_HEALTH_INTERVAL` | `300` | Dispatcher health patrol (seconds) |
-| `AGORA_VERIFY_TIMEOUT` | `300` | Timeout per task/integration verify run (seconds); expiry kills the process group |
+| `AGORA_VERIFY_TIMEOUT` | `300` | Soft top per task/integration verify run (seconds): notify the dispatcher on expiry, no kill |
+| `AGORA_VERIFY_CEILING` | `4× soft top` | Hard top (seconds): expiry kills the verify process group; overrun routes to the dispatcher (no worker retry, task stays done) |
 | `enforce` | on | Global gate switch (root only, audited) |
 | `$AGORA_HOME/.agora/email.json` | off | Stuck-task email alerts (`{"to","command"}`) |
 

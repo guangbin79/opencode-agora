@@ -131,16 +131,28 @@ class FakeRunner:
 
 
 class TestSubprocessRunner(unittest.TestCase):
-    def test_timeout_kills_whole_process_group(self):
+    def test_hard_ceiling_kills_whole_process_group(self):  # Req: F36
+        """硬顶到点 SIGKILL 全组 rc=124：迟到写入不存在（F32 杀净语义不变）。"""
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "late-write"
             cmd = f"(sleep 0.5; printf survived > {shlex.quote(str(marker))}) & wait"
-            rc, out = _subprocess_runner(tmp, cmd, timeout=0.1)
+            rc, out = _subprocess_runner(tmp, cmd, timeout=0.1, ceiling=0.3)
             self.assertEqual(rc, 124)
-            self.assertIn("verify 超时", out)
-            self.assertIn("AGORA_VERIFY_TIMEOUT", out)
+            self.assertIn("verify 超硬顶", out)
+            self.assertIn("AGORA_VERIFY_CEILING", out)
             time.sleep(0.6)  # 若只杀 shell 而漏杀子进程，此处会出现迟到写入
             self.assertFalse(marker.exists())
+
+    def test_soft_timeout_notifies_without_kill(self):  # Req: F36
+        """软顶到点 on_soft 恰一次、不杀：进程跑完 rc=0 全输出在手。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fired = []
+            rc, out = _subprocess_runner(tmp, "sleep 0.3; printf done",
+                                         timeout=0.1, ceiling=5,
+                                         on_soft=lambda: fired.append(1))
+            self.assertEqual(rc, 0)
+            self.assertEqual(fired, [1])  # 恰一次
+            self.assertIn("done", out)
 
     def test_runner_strips_service_env_vars(self):  # Req: F32
         """F32 门环境消毒：verify 子进程 env 剥服务自身态三变量；其余照常继承；
@@ -202,11 +214,12 @@ class TestCoreGate(unittest.TestCase):
                          self.store, runner=self.runner, on_blocked=on_blocked,
                          roster_path=roster_path)
 
-    def seed(self, tid="t1", state="running", streak=0, tb=None):
+    def seed(self, tid="t1", state="running", streak=0, tb=None,
+             cmd="pytest -q"):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
                              "env_dir": str(self.env), "after": None,
                              "target_branch": tb,
-                             "verify": {"cmd": "pytest -q", "state": "registered",
+                             "verify": {"cmd": cmd, "state": "registered",
                                         "registered_by": "disp1", "registered_at": 1.0},
                              "state": state, "dispatcher_sid": "disp1",
                              "worker_sid": "s-w1", "chain_depth": 1,
@@ -730,6 +743,58 @@ class TestGateRun(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # merged 二择：closed
         self.assertNotIn("pending_cancel", t)  # 不许悬挂
+
+
+class TestGateVerifyOverrun(TestCoreGate):
+    """F36 rc=124 分类路由：不 transition、不弹 worker、不计连败，驻留 done 到派发方。"""
+
+    def results(self):
+        return [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+
+    def test_env_verify_overrun_routes_to_dispatcher(self):  # Req: F36
+        self.runner = FakeRunner((124, "x" * 3000))
+        self.mk_gate()
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留：不 transition
+        self.assertEqual(t["fail_streak"], 1)  # 不 bump
+        (m,) = self.results()
+        self.assertIn("超硬顶", m["body"])
+        self.assertIn("x" * 100, m["body"])  # 输出尾在手（截断内）
+        self.assertEqual(self.worker_msgs(), [])  # worker 无「重新 post(done, commit)」
+        events = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("verify_overrun", events)
+
+    def test_integration_verify_overrun_routes_to_dispatcher(self):  # Req: F36
+        self.runner = FakeRunner((0, "pass"), (124, "itail"))
+        self.mk_gate()
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "done")
+        self.assertEqual(self.state.get("t1")["fail_streak"], 0)
+        (m,) = self.results()
+        self.assertIn("超硬顶", m["body"])
+        self.assertIn("目标分支未改动", m["body"])
+        self.assertIn("itail", m["body"])
+        self.assertEqual(self.worker_msgs(), [])
+
+    def test_default_runner_soft_notifies_once(self):  # Req: F36
+        """未注入 runner：run() 按 tid 构造默认 runner，软顶提醒派发方恰一次。"""
+        self.seed(cmd="sleep 0.3; echo ok")
+        shutil.rmtree(self.env / ".review-loop")  # 锚缺失驻留：仅 env verify 一跑
+        gate = Gate(self.state, self.gx, self.router, self.oc,
+                    lambda env: None, self.health, self.auth, self.store,
+                    runner=None, verify_timeout=0.05, verify_ceiling=5)
+        self.assertEqual(gate.accept_done("t1", "s-w1", SHA), "accepted")
+        gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "done")  # verify 绿（rc=0）
+        soft = [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and "仍在跑" in m["body"]]
+        self.assertEqual(len(soft), 1)
+        self.assertIn("t1", soft[0]["body"])
+        self.assertIn("无需操作", soft[0]["body"])
 
 
 class TestGateIgnoreRoster(TestCoreGate):

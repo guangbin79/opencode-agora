@@ -72,9 +72,23 @@ def verify_timeout_from_env():
     return timeout
 
 
+def verify_ceiling_from_env():
+    """F36 verify 硬顶（秒）；未设＝None（Gate 内缺省 4×软顶）；坏值 fail-fast 同款。"""
+    raw = os.environ.get("AGORA_VERIFY_CEILING")
+    if raw is None:
+        return None
+    try:
+        ceiling = float(raw)
+    except ValueError:
+        raise ValueError(f"AGORA_VERIFY_CEILING 须为正数秒（收到 {raw!r}）") from None
+    if not math.isfinite(ceiling) or ceiling <= 0:
+        raise ValueError(f"AGORA_VERIFY_CEILING 须为正数秒（收到 {raw!r}）")
+    return ceiling
+
+
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
-             verify_timeout=300, roster_path=None):
+             verify_timeout=300, verify_ceiling=None, roster_path=None):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -95,6 +109,7 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
                 store=store, runner=runner, verify_timeout=verify_timeout,
+                verify_ceiling=verify_ceiling,
                 on_blocked=task.stop_after_failed,
                 roster_path=roster_path or str(Path(home) / ".agora" / "ignore.roster"))
     app.gate, app.health = gate, health
@@ -150,6 +165,7 @@ def main():
         return 2
     try:
         verify_timeout = verify_timeout_from_env()
+        verify_ceiling = verify_ceiling_from_env()
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -158,7 +174,7 @@ def main():
         print("agorad 已在运行", file=sys.stderr)
         return 1
     app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store,
-                   verify_timeout=verify_timeout)
+                   verify_timeout=verify_timeout, verify_ceiling=verify_ceiling)
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）
