@@ -39,6 +39,27 @@ _GATE_PATTERNS = ("Makefile", "*.mk", "pyproject.toml", "setup.py", "setup.cfg",
 _GATE_ENV_STRIP = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD")
 
 
+def _roster_from_file(path):
+    """F35 名册解析：按行 strip，丢空行与 # 注释行；缺文件/不可读（OSError）＝空名册。"""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _roster_gate_patterns(roster):
+    """F35 名册并入闸体检测面：目录形条目（/ 结尾）展开「本目录＋子树」两条，其余逐字。"""
+    out = []
+    for entry in roster:
+        if entry.endswith("/"):
+            base = entry.rstrip("/")
+            out += [base, base + "/*"]
+        else:
+            out.append(entry)
+    return out
+
+
 def _subprocess_runner(env_dir, cmd, timeout=300):
     """真 runner：独立进程组跑 verify；超时杀全组，rc=124 按质量败处理。
 
@@ -67,10 +88,12 @@ class Gate:
     """accept_done 单写者串行受理；run 为后台线程体（httpd 包 Thread 调用）。"""
 
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
-                 store, runner=None, verify_timeout=300, on_blocked=None):
+                 store, runner=None, verify_timeout=300, on_blocked=None,
+                 roster_path=None):  # F35：门侧名册（$AGORA_HOME/.agora/ignore.roster）
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
+        self._roster_path = roster_path
         self._runner = runner or (lambda env, cmd: _subprocess_runner(
             env, cmd, timeout=verify_timeout))
 
@@ -154,11 +177,17 @@ class Gate:
             if self._gitx.contains(target, t["commit"], branch):
                 self._succeed(tid)
                 return
+            # F35：首道干净检查前把名册幂等写入目标仓 info/exclude——exclude 后
+            # 名册路径不进 status，ensure_clean 谓词零改动、全净口径不变。
+            roster = _roster_from_file(self._roster_path) if self._roster_path else []
+            if roster:
+                self._gitx.apply_ignore_roster(target, roster)
             self._gitx.ensure_clean(target)  # 主检出写前硬闸：用户未提交/未跟踪工作一律不碰
             if branch:
                 origin = origin or self._gitx.symref(target)
                 self._state.set_fields(tid, gate_origin_branch=origin)
-            if self.gate_files_touched(tid):  # 闸体变更：拍人不拦门
+            if self.gate_files_touched(tid, list(_GATE_PATTERNS)
+                                       + _roster_gate_patterns(roster)):  # 闸体变更：拍人不拦门
                 self._health.escalate(KIND_GATEFILES, tid)
             warn = self._gitx.diff_check(env, branch)  # 冲突标记机械检查，先于用户 verify
             if warn:  # gt-83185d R3：非空走 verify_failed 口径（截 2000 与 verify 败一致）
@@ -269,10 +298,11 @@ class Gate:
                         f" vs branch@{self._gitx.head(t['env_dir'])}——{act}"
                         "重新 post(done, commit)")
 
-    def gate_files_touched(self, tid):
+    def gate_files_touched(self, tid, patterns=None):
         t = self._state.get(tid)
         return bool(t.get("env_dir")) and self._gitx.touches_gate(
-            t["env_dir"], _GATE_PATTERNS, t.get("target_branch"))
+            t["env_dir"], patterns if patterns is not None else _GATE_PATTERNS,
+            t.get("target_branch"))
 
     # ---- 内部 ----
 

@@ -74,7 +74,7 @@ def verify_timeout_from_env():
 
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
-             verify_timeout=300):
+             verify_timeout=300, roster_path=None):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -95,7 +95,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
                 store=store, runner=runner, verify_timeout=verify_timeout,
-                on_blocked=task.stop_after_failed)
+                on_blocked=task.stop_after_failed,
+                roster_path=roster_path or str(Path(home) / ".agora" / "ignore.roster"))
     app.gate, app.health = gate, health
     return app
 

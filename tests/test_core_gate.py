@@ -44,6 +44,8 @@ class FakeGitx:
         self.head_shas = {}  # repo_dir→sha 覆盖：双头可区分（F29 拒因实值断言）
         self.integration_builds, self.integration_removed = [], []
         self.clean_calls, self.contains_calls = [], []
+        self.roster_calls = []  # F35 apply_ignore_roster 调用（repo_dir, patterns）
+        self.events = []  # F35 公共事件序：apply/ensure_clean 各推一格
         self.contains_result, self.dirty = False, False
         self.contains_results = []  # 逐次覆盖队列：空则回退 contains_result
         self.rebase_result = "conflict"  # F32 缺省冲突：既有 non-ff 用例保持弹回口径
@@ -64,8 +66,13 @@ class FakeGitx:
 
     def ensure_clean(self, repo_dir):
         self.clean_calls.append(repo_dir)
+        self.events.append("clean")
         if self.dirty:
             raise RuntimeError("目标仓工作区不干净")
+
+    def apply_ignore_roster(self, repo_dir, patterns):  # Req: F35
+        self.roster_calls.append((repo_dir, list(patterns)))
+        self.events.append("apply")
 
     def build_integration(self, target_dir, integration_dir, branch=None):
         self.integration_builds.append((target_dir, integration_dir, branch))
@@ -184,7 +191,7 @@ class TestCoreGate(unittest.TestCase):
     # ---- 夹具 ----
 
     def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False,
-                on_blocked=None):
+                on_blocked=None, roster_path=None):
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
                            fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
@@ -192,7 +199,8 @@ class TestCoreGate(unittest.TestCase):
                               if (self.env / ".review-loop").is_dir() else None)
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
                          anchor, self.health, self.auth,
-                         self.store, runner=self.runner, on_blocked=on_blocked)
+                         self.store, runner=self.runner, on_blocked=on_blocked,
+                         roster_path=roster_path)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
@@ -722,6 +730,37 @@ class TestGateRun(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # merged 二择：closed
         self.assertNotIn("pending_cancel", t)  # 不许悬挂
+
+
+class TestGateIgnoreRoster(TestCoreGate):
+    """F35 门干净检查未跟踪名册：apply 先于首道干净检查；名册并入闸体检测面。"""
+
+    def roster(self, text):
+        p = self.tmp / "ignore.roster"
+        p.write_text(text)
+        return str(p)
+
+    def test_roster_applied_before_clean_and_patterns_extended(self):  # Req: F35
+        self.mk_gate(roster_path=self.roster("# 注释\n.req-gate/\nbook/\n"))
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 照常 merged
+        self.assertEqual(self.gx.roster_calls,
+                         [("/repo", [".req-gate/", "book/"])])  # 解析后名册（注释丢）
+        self.assertEqual(self.gx.events,
+                         ["apply", "clean", "clean"])  # apply 先于首道干净检查
+        patterns = self.gx.gate_calls[-1][1]
+        self.assertIn(".req-gate", patterns)  # 目录形展开「本体＋子树」两条
+        self.assertIn(".req-gate/*", patterns)
+        self.assertIn("book", patterns)
+        self.assertIn("book/*", patterns)
+
+    def test_roster_absent_zero_apply_merges_as_usual(self):  # Req: F35
+        self.mk_gate(roster_path=str(self.tmp / "absent.roster"))
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.roster_calls, [])  # 缺文件＝空名册＝零 apply
 
 
 class TestDispatcherResults(TestCoreGate):

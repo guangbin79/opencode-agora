@@ -417,6 +417,29 @@ class TestAccessGitx(unittest.TestCase):
         self.assertTrue(self.gx.touches_gate(env, ["my file.conf"]))
         self.assertFalse(self.gx.touches_gate(env, ["file.conf"]))  # 碎片不得误报
 
+    def test_apply_ignore_roster_idempotent_keeps_lines_and_status_clean(self):  # Req: F35
+        """F35 名册 exclude 机制化：无尾换行接写不粘连＋幂等零重排＋既有行保留；
+        名册路径不进 status，ensure_clean 放行未跟踪名册目录。"""
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("*.log")  # 预置无尾换行
+        self.gx.apply_ignore_roster(str(self.repo), [".req-gate/", "*.log"])
+        self.assertEqual(exclude.read_text(), "*.log\n.req-gate/\n")  # 补换行＋追加＋尾换行
+        self.gx.apply_ignore_roster(str(self.repo), [".req-gate/", "*.log"])  # 幂等
+        self.assertEqual(exclude.read_text(), "*.log\n.req-gate/\n")  # 零追加不重排
+        (self.repo / ".req-gate").mkdir()
+        (self.repo / ".req-gate" / "s1.md").write_text("gate log")
+        self.assertEqual(self._git(["status", "--porcelain"],
+                                   cwd=self.repo).stdout.strip(), "")  # 名册路径不进 status
+        self.gx.ensure_clean(str(self.repo))  # 全净谓词放行（不抛）
+
+    def test_apply_ignore_roster_empty_patterns_zero_action(self):  # Req: F35
+        """空名册零动作：缺文件也不建 exclude（缺名册＝现状全净语义）。"""
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.unlink(missing_ok=True)
+        self.gx.apply_ignore_roster(str(self.repo), [])
+        self.assertFalse(exclude.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

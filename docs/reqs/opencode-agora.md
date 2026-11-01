@@ -239,3 +239,7 @@ write_ephemeral（agorad/access/store.py）建 tmp 即 0600：os.open mode 0o600
 ### F34 req 编号服务端发放——并行撞号根治（2026-10-30，ag-76ad62）
 req 编号历来派发方各自手扫台账领取，同仓并行即撞号（本仓实证 F32 两案并存；史有 F24×2/F27×3）。修法：task_create 新可选参 req_id，传入即在任务行登记发放；发放面服务端查重——已发集＝任务行 req_id 字段（随状态账本持久），种子＝扫 project_dir docs/reqs/opencode-agora.md 现存最大 F<n>（F32 双条目场景取 max；每次发放重扫，台账只增等价首用种子且免持久化种子态），重复发放拒绝（403 报因含已发任务指针）、格式限 F<数字>、缺文档种子记 0。无自动默认发放：是否领号由派发方决定（大量任务无需 req 号），服务只保证「发出去的号不重」。约束力口径如实：服务端分配＝权威号源，worker 从任务页 frontmatter 取号（req_id 行）；不阻止绕过（先例约束，非闸）。MCP 壳 schema 透传（httpd→task 全链，F23 先例形态）。不做：历史编号 renumber、文档迁移、wiki 计数器页。
 **验收**：F34 用例（Req: F34 锚）——发放登记、无 req_id 行缺省 None、重复拒绝含已发指针、种子扫描双条目取 max、缺文档种子 0、坏格式拒、httpd 透传 403/400、任务页 req_id 行、MCP schema properties；`python3 -m pytest tests/ -q` 全绿。
+
+### F35 门干净检查未跟踪名册——.git/info/exclude 机制化（2026-11-01，用户裁定）
+合并门 ensure_clean 全净谓词对主检出未跟踪文件一刀切，多会话簿记目录（.req-gate/ 等）误伤 reopened（2026-10-30 两例）。修法：门侧名册配置 `$AGORA_HOME/.agora/ignore.roster`（一行一个 gitignore 模式，`#` 注释；缺文件/不可读＝空名册＝现状全净；无 env 变量，单通道）。门体首道干净检查前把名册幂等写入目标仓 `.git/info/exclude`（`git rev-parse --git-path` 定位，worktree 场景指向主 .git；缺则补行、不重排不删既有条目、无尾换行不粘连）——exclude 后名册路径不进 status，ensure_clean 谓词零改动、全净口径不变。名册条目动态并入闸体检测面（目录形条目展开「本目录＋子树」前缀两条，其余逐字）——git 对 ignored 路径静默覆盖的兜底缺口由既有 gatefiles 升级通道接住。落点必须是 exclude 而非 tracked .gitignore：追加即脏、紧随的全净检查自败。
+**验收**：配名册→主检出含名册未跟踪目录照常 merged；未配名册→现状全拒零 apply；exclude 幂等且保留既有行（无尾换行接写不粘连）；名册路径自此不进 status；闸体检测 patterns 含名册前缀两条；`python3 -m pytest tests/ -q` 全绿（Req: F35）。

@@ -82,6 +82,27 @@ class Gitx:
         if r.stdout.strip():
             raise RuntimeError("目标仓工作区不干净——请先提交、stash 或清理后重新 post(done, commit)")
 
+    def apply_ignore_roster(self, repo_dir: str, patterns) -> None:  # Req: F35
+        """F35：名册幂等写入 info/exclude——空名册零动作（不建文件）；
+        `git rev-parse --git-path` 定位（worktree 场景指向主 .git），相对路径按
+        repo_dir 解析；缺行补写、不重排不删既有条目；既有文本无尾换行先补换行
+        防粘连，追加后以换行结尾。"""
+        patterns = list(patterns)
+        if not patterns:
+            return
+        r = self._git(["rev-parse", "--git-path", "info/exclude"], cwd=repo_dir)
+        p = Path(r.stdout.strip())
+        if not p.is_absolute():
+            p = Path(repo_dir) / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        missing = [pat for pat in patterns if pat not in set(existing.splitlines())]
+        if not missing:  # 幂等：全在册零追加（不重排不删既有行）
+            return
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        p.write_text(existing + "\n".join(missing) + "\n", encoding="utf-8")
+
     def remove_env(self, env_dir: str) -> None:
         env = Path(env_dir).resolve()
         try:
