@@ -11,6 +11,7 @@
 - **三访问层**：agorad 内域核心＋oc（opencode API）＋store（账本）＋gitx（worktree）
 - **12+1 工具面**：12 服务端端点（httpd._TOOLS）＋壳层 wait＝MCP 面 13 工具（agora_mcp._TOOLS）
 - **会话牌认证**：root/dispatcher/worker 角色矩阵＋附牌链
+- **验收授权全局角色判定**（F37，2026-11-01）：worker 牌保留嵌套建单/派发，但对 verify_cmd 写面（task_create 携带＋task_update 登记）一律按 token 全局 role 拒——子任务局部 dispatcher 归属不构成授权（否则自开单自审批仅差一次调用）；worker 建单 project_dir/target_branch 强制继承现役父任务（非冻结行，终态父残牌不算上下文），verify_pending 自旗拒且豁免旗不随父，子任务验证配置（verify 字典）缺省随父——未获配置 dispatch 照旧硬闸拒
 
 ## 关键模式
 
