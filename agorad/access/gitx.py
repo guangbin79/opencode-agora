@@ -197,20 +197,27 @@ class Gitx:
     def _materialize_lfs(self, tree: Path) -> str:
         r = self._git(["lfs", "ls-files"], cwd=tree, check=False)
         if r.returncode != 0:
-            return ("lfs: git-lfs 不可用，跳过"
-                    if "is not a git command" in r.stderr else "")
+            if "is not a git command" in r.stderr:  # git 报错文案随 locale 变体（R2）
+                return "lfs: git-lfs 不可用，跳过"
+            return f"lfs: ls-files 失败（rc={r.returncode}）: {r.stderr.strip()[:200]}"
         if not r.stdout.strip():
             return ""
         self._git(["lfs", "checkout"], cwd=tree, check=False)  # 缺对象 rc=0 留指针（实证）
-        after = self._git(["lfs", "ls-files"], cwd=tree, check=False).stdout.splitlines()
+        rr = self._git(["lfs", "ls-files"], cwd=tree, check=False)
+        if rr.returncode != 0:  # 复查败＝未知态，宁报失败不假绿（R2）
+            return (f"lfs: 复查 ls-files 失败（rc={rr.returncode}）: "
+                    f"{rr.stderr.strip()[:200]}")
+        after = rr.stdout.splitlines()
         # 行形＝<oid> <marker> <path>：marker `-`＝工作文件仍是指针（实证 3.6.1）
         missing = [parts[2] for ln in after
                    if len(parts := ln.split(None, 2)) == 3 and parts[1] == "-"]
         total = len(after)
         if not missing:
             return f"lfs: {total} tracked, all materialized"
+        shown = ", ".join(missing[:50]) + (
+            f" …共 {len(missing)} 个" if len(missing) > 50 else "")  # R2：报告面截断
         return (f"lfs: {total - len(missing)}/{total} materialized, "
-                f"missing: {', '.join(missing)}")
+                f"missing: {shown}")
 
     def merge_ff(self, env_dir: str, target: str, branch: str = None) -> str:
         src = Path(env_dir).resolve().name
@@ -244,7 +251,7 @@ class Gitx:
                                f"head@{new_head} vs expected@{sha}: {detail}")
         return "ok"  # head==sha（目标支已在提交上）亦达此：幂等推进
 
-    def push(self, repo_dir: str, branch: str) -> tuple:  # Req: ag-0d2daa
+    def push(self, repo_dir: str, branch: str) -> tuple[str, str]:  # Req: ag-0d2daa
         """ag-0d2daa 服务侧 origin 同步：推 refs/heads/<branch>（只此一引用，不 force）。
 
         幂等（已同步＝up-to-date 仍 "ok"）；无 origin remote＝"none"（本地仓
