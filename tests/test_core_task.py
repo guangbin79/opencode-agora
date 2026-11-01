@@ -5,6 +5,7 @@
 """
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -299,6 +300,24 @@ class TestNestedDispatch(TestCoreTask):
         self.assertEqual(self.state.get("failed")["state"], "blocked")  # 起点未被自链取消
         stopped = [e for e in self.events() if e["event"] == "dependency_stopped"]
         self.assertEqual([e["task"] for e in stopped], ["mid"])
+
+    def test_stop_after_failed_deep_chain_iterative(self):  # Req: F38
+        """终闸 C 册收口：visited 只消环不消链深——无环长链在低递归限下照常
+        走完整链（显式栈版不付 RecursionError；递归版 200 节点×限 100 即引爆）。"""
+        chain, prev = [], "head"
+        self.seed("head", state="blocked", disp="main")
+        for i in range(200):
+            self.seed(f"c{i}", state="todo", disp="main")
+            self.state.set_fields(f"c{i}", after=prev)
+            prev = f"c{i}"
+            chain.append(f"c{i}")
+        old = sys.getrecursionlimit()
+        sys.setrecursionlimit(100)
+        try:
+            self.assertEqual(self.svc.stop_after_failed("head"), chain)
+        finally:
+            sys.setrecursionlimit(old)
+        self.assertEqual(self.state.get(chain[-1])["state"], "cancelled")
 
     def test_dependency_failed_cancel_does_not_unlock_new_after_task(self):
         self.seed("failed", state="blocked", disp="main")

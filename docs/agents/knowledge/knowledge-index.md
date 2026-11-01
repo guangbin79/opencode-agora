@@ -12,6 +12,7 @@
 - **12+1 工具面**：12 服务端端点（httpd._TOOLS）＋壳层 wait＝MCP 面 13 工具（agora_mcp._TOOLS）
 - **会话牌认证**：root/dispatcher/worker 角色矩阵＋附牌链
 - **验收授权全局角色判定**（F37，2026-11-01）：worker 牌保留嵌套建单/派发，但对 verify_cmd 写面（task_create 携带＋task_update 登记）一律按 token 全局 role 拒——子任务局部 dispatcher 归属不构成授权（否则自开单自审批仅差一次调用）；worker 建单 project_dir/target_branch 强制继承现役父任务（非冻结行，终态父残牌不算上下文），verify_pending 自旗拒且豁免旗不随父，子任务验证配置（verify 字典）缺省随父——未获配置 dispatch 照旧硬闸拒
+- **门记录豁免面位置约束**（F38，2026-11-01）：basename 级豁免（.omo/.req-gate/.review-loop）必须配作用域腿——写目标 ∈ 当前 env（cred.envDir）或当前仓根（cwd 所在 git 根）才豁免，跨 env/跨仓命中一律拒（GATE_SCOPE_HINT，先于 cwd∈env 放行不落穿）；「路径含字样即放行」类豁免是投毒面，放宽只认工作区＋具体路径精确授权
 
 ## 关键模式
 
@@ -37,6 +38,8 @@
 - **wheel 数据面两坑＋argv 假象**（F31 实证，53fb8ec）：①importlib.metadata 的 RECORD 是安装态（pip 重写带 `../../../` 前缀），`locate_file` 以 site-packages 为基——传 `find_share_dir` 尾段（`share/...`）必落 site-packages/share 幽灵路径，兜底 `Path(sys.prefix)/rel` 双态通吃；②data-files 目的地键即安装后目录名（`share/opencode-agora/plugin` 装成 `plugin/`），与 install.sh 源布局 `agora-plugin/` 名实冲突致 pkg 分支 cp 落空——目的地键须保源目录名；③`python3 -c '...sys.argv[0]...'` 里 argv[0] 是字面 `-c`，首参自 argv[1] 起（dash/bash 同），拿 argv 拼命令行须从 1 数
 - **O_CREAT mode 仅建时生效**（ag-20898a 三评审合证）：`os.open(..., 0o600)` 对已存在件不收紧权限、O_TRUNC 只清内容——旧版 `open("w")` 崩溃残留 0644 `.tmp` 被复用时，tokens 落盘再 0644 且此后每次写持续复现，「重写自愈」静默失效；定式：权限敏感中转件建后必补 `os.fchmod(fd, 目标 mode)`，测试须预置遗留终件＋遗留中转件两路各断言
 - **rebase 冲突态检测须双 backend 目录**（F32/ag-4b300d 终闸 B 册 git 2.43/2.55 实证）：`git rebase` 停冲突的 per-worktree sequencer 目录随 backend 分叉——merge backend（2.26+ 缺省）停 `rebase-merge`、apply backend（`rebase.backend=apply`，integration worktree 共享主仓 config）停 `rebase-apply`，单查其一即把真冲突误分类环境病（rc=1＋所查目录缺席）；定式：判据＝`rev-parse --git-path` 两目录逐一探测、任一在位→abort→冲突，皆缺才按环境病如实上抛（分类先于动作）
+- **递归引用图遍历必带 visited＋显式栈**（F38 W-2）：create 面不校验 after 环→stop_after_failed 无条件下钻即 RecursionError（经门体 except 落假 reclaim_failed 审计）；定式：遍历起点自身入 seen（免被自链取消）、已访问不再下钻、入口面（dispatch）沿 after 链查自引用/重复成环拒派报因含路径；visited 只消环不消链深——遍历本体用显式栈，递归版无环长链 >1000 节点仍引爆（终闸 C 册实证）
+- **网络子进程超时杀按进程组**（F-1）：git push 类会派生 ssh/传输孙进程——start_new_session 启动＋TimeoutExpired 时 os.killpg(SIGKILL)＋有限宽限收尸（逃逸后代持管道弃读防挂死）；只杀直接子进程＝孤儿逐次累积（gate runner 同款形态对齐）
 
 ## 已知接受面
 

@@ -290,9 +290,10 @@ class TaskService:
     def stop_after_failed(self, tid):
         """前驱终态失败：停止整条 after 后继链；主动 cancel 的跳过语义不适用此处。"""
         stopped = []
-        seen = {tid}  # W-2：create 不校验 after 环——已访问不再下钻（起点自身免取消），消递归引爆
-
-        def visit(parent):
+        seen = {tid}  # W-2：create 不校验 after 环——已访问不再下钻（起点自身免取消）
+        pending = [tid]  # 显式栈：visited 只消环不消链深，递归版无环长链 >1000 节点仍引爆（F38 终闸 C 册）
+        while pending:
+            parent = pending.pop()
             for child, t in self._state.snapshot()["tasks"].items():
                 if t.get("after") != parent or child in seen:
                     continue
@@ -305,9 +306,7 @@ class TaskService:
                         {"ts": time.time(), "actor": "gate",
                          "event": "dependency_stopped", "task": child,
                          "note": reason})
-                visit(child)
-
-        visit(tid)
+                pending.append(child)
         return stopped
 
     # ---- F2 verify 登记（登记即锁定，worker 必拒） ----

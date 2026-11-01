@@ -79,13 +79,7 @@ function gateDirInScope(target: string, cwd: string, envDir: string | undefined)
 
 /** git 仓判定：沿目标向上找 .git（目录或文件——worktree/submodule 形态）。 */
 function inGitRepo(p: string): boolean {
-  let cur = resolve(p);
-  for (;;) {
-    if (existsSync(join(cur, ".git"))) return true;
-    const parent = dirname(cur);
-    if (parent === cur) return false;
-    cur = parent;
-  }
+  return gitRoot(p) !== null;
 }
 
 /** 该工具是否落在判定链可能产出 hint 的类（write 引导面＋read/bash 账本读引导面）——
