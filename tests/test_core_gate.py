@@ -762,6 +762,17 @@ class TestGateIgnoreRoster(TestCoreGate):
         self.assertEqual(self.state.get("t1")["state"], "closed")
         self.assertEqual(self.gx.roster_calls, [])  # 缺文件＝空名册＝零 apply
 
+    def test_roster_decode_error_degrades_to_empty(self):  # Req: F35
+        """F35 round-1 评审修复：名册非 UTF-8 解码败＝不可读＝空名册＝零 apply
+        （不得穿到 run() 宽 except 致 reopened 循环）。"""
+        p = self.tmp / "gbk.roster"
+        p.write_bytes(b"# \xd6\xd0\xce\xc4\n.req-gate/\n")  # GBK 注释字节
+        self.mk_gate(roster_path=str(p))
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.roster_calls, [])  # 空名册＝现状全净
+
 
 class TestDispatcherResults(TestCoreGate):
     def results(self):

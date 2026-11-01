@@ -440,6 +440,16 @@ class TestAccessGitx(unittest.TestCase):
         self.gx.apply_ignore_roster(str(self.repo), [])
         self.assertFalse(exclude.exists())
 
+    def test_apply_ignore_roster_non_utf8_exclude_preserved(self):  # Req: F35
+        """F35 round-1 评审修复：既有 exclude 含非 UTF-8 字节——字节级无损读写，
+        名册行照常追加（文本模式抛 UnicodeDecodeError、errors=replace 会改写损坏）。"""
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_bytes(b"*.log\n# \xd6\xd0\xce\xc4")  # 无尾换行＋GBK 注释字节
+        self.gx.apply_ignore_roster(str(self.repo), [".req-gate/"])
+        self.assertEqual(exclude.read_bytes(),
+                         b"*.log\n# \xd6\xd0\xce\xc4\n.req-gate/\n")
+
 
 if __name__ == "__main__":
     unittest.main()

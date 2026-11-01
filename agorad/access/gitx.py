@@ -86,7 +86,8 @@ class Gitx:
         """F35：名册幂等写入 info/exclude——空名册零动作（不建文件）；
         `git rev-parse --git-path` 定位（worktree 场景指向主 .git），相对路径按
         repo_dir 解析；缺行补写、不重排不删既有条目；既有文本无尾换行先补换行
-        防粘连，追加后以换行结尾。"""
+        防粘连，追加后以换行结尾。既有内容按字节读写零解码（git 该文件本按字节
+        处理；文本模式遇非 UTF-8 既有字节会抛解码错、errors=replace 会改写损坏）。"""
         patterns = list(patterns)
         if not patterns:
             return
@@ -95,13 +96,14 @@ class Gitx:
         if not p.is_absolute():
             p = Path(repo_dir) / p
         p.parent.mkdir(parents=True, exist_ok=True)
-        existing = p.read_text(encoding="utf-8") if p.exists() else ""
-        missing = [pat for pat in patterns if pat not in set(existing.splitlines())]
+        existing = p.read_bytes() if p.exists() else b""
+        have = set(existing.splitlines())
+        missing = [pat for pat in patterns if pat.encode("utf-8") not in have]
         if not missing:  # 幂等：全在册零追加（不重排不删既有行）
             return
-        if existing and not existing.endswith("\n"):
-            existing += "\n"
-        p.write_text(existing + "\n".join(missing) + "\n", encoding="utf-8")
+        if existing and not existing.endswith(b"\n"):
+            existing += b"\n"
+        p.write_bytes(existing + "\n".join(missing).encode("utf-8") + b"\n")
 
     def remove_env(self, env_dir: str) -> None:
         env = Path(env_dir).resolve()

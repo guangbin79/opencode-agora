@@ -40,10 +40,11 @@ _GATE_ENV_STRIP = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD")
 
 
 def _roster_from_file(path):
-    """F35 名册解析：按行 strip，丢空行与 # 注释行；缺文件/不可读（OSError）＝空名册。"""
+    """F35 名册解析：按行 strip，丢空行与 # 注释行；缺文件/不可读（OSError 与
+    非 UTF-8 解码败）＝空名册＝现状全净。"""
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return []
     return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
