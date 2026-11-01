@@ -46,9 +46,9 @@ class FakeGitx:
         (env / ".review-loop").mkdir(parents=True)
         return str(env)
 
-    def seed_submodules(self, tree_dir, source_dir):  # Req: ag-0d2daa
-        self.seeds = getattr(self, "seeds", [])
-        self.seeds.append((tree_dir, source_dir))
+    def materialize_checkout(self, tree_dir, source_dir):  # Req: ag-0d2daa
+        self.materials = getattr(self, "materials", [])
+        self.materials.append((tree_dir, source_dir))
         return ""
 
     def symref(self, repo_dir):
@@ -57,7 +57,7 @@ class FakeGitx:
     def push(self, repo_dir, branch):
         self.pushes = getattr(self, "pushes", [])
         self.pushes.append((repo_dir, branch))
-        return "none"
+        return "none", ""
 
     def remove_env(self, env_dir):
         self.removed.append(env_dir)

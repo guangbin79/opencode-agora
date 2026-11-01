@@ -133,18 +133,26 @@ class Gitx:
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)
 
-    def seed_submodules(self, tree_dir: str, source_dir: str) -> str:  # Req: ag-0d2daa
-        """ag-0d2daa 检出后 submodule 预置：HEAD 树 gitlink pin 级本地填充，零网络零凭据。
+    def materialize_checkout(self, tree_dir: str, source_dir: str) -> str:  # Req: ag-0d2daa
+        """检出后依赖物化（submodule gitlink 预置＋LFS 实体还原）：零网络零凭据。
 
-        参考源＝source_dir 主检出的同名 submodule 检出（--reference alternates
-        覆盖 pin 不在源 refs 可达面的场景）。url 用一次性 `-c` 覆写——worktree
-        里 `git config` 落共享 config 会改写主检出（实证），禁用；`protocol.file`
-        放开为 submodule 间接 clone 本地路径的必要位。源缺 pin／缺 .gitmodules
-        映射：跳过留报告不阻断其余；git 机械病如实上抛。返回人读报告（空串＝
-        无 gitlink 零动作）；只铺顶层（libs/* 级），嵌套层归 verify 自理。
+        submodule：HEAD 树 gitlink pin 级本地填充，参考源＝source_dir 主检出的
+        同名 submodule 检出（--reference alternates 覆盖 pin 不在源 refs 可达面的
+        场景）。url 用一次性 `-c` 覆写——worktree 里 `git config` 落共享 config
+        会改写主检出（实证），禁用；`protocol.file` 放开为 submodule 间接 clone
+        本地路径的必要位。源缺 pin／缺 .gitmodules 映射：跳过留报告不阻断其余；
+        git 机械病如实上抛。只铺顶层（libs/* 级），嵌套层归 verify 自理。
+        LFS：worktree 与主检出共享 `<common>/.git/lfs` 对象库（实证），`git lfs
+        checkout` 即零网络还原；缺对象 rc=0 静默留指针（实证）——逐文件复查
+        marker，残留如实入报告，绝不联网 fetch。git-lfs 缺席＝跳过留痕。
+        返回人读报告（空串＝无依赖物零动作）；审计由调用方落。
         """
         tree = Path(tree_dir).resolve()
-        src_root = Path(source_dir).resolve()
+        parts = [self._seed_submodules(tree, Path(source_dir).resolve()),
+                 self._materialize_lfs(tree)]
+        return "; ".join(p for p in parts if p)
+
+    def _seed_submodules(self, tree: Path, src_root: Path) -> str:
         entries = []
         for line in self._git(["ls-files", "--stage"], cwd=tree).stdout.splitlines():
             mode, sha, _stage, path = line.split(None, 3)  # <mode> <sha> <stage>\t<path>
@@ -153,7 +161,7 @@ class Gitx:
         if not entries:
             return ""
         if not (tree / ".gitmodules").is_file():
-            return ("skipped all: gitlink 无 .gitmodules 映射（"
+            return ("submodule skipped all: gitlink 无 .gitmodules 映射（"
                     + ", ".join(p for p, _ in entries) + "）")
         names = {}
         r = self._git(["config", "--file", ".gitmodules", "--get-regexp",
@@ -165,15 +173,15 @@ class Gitx:
         for path, sha in entries:
             name = names.get(path)
             if not name:
-                report.append(f"skipped {path}: 无 .gitmodules 映射")
+                report.append(f"submodule skipped {path}: 无 .gitmodules 映射")
                 continue
             src = src_root / path
             if not (src / ".git").exists():
-                report.append(f"skipped {path}: 参考源未检出（{src}）")
+                report.append(f"submodule skipped {path}: 参考源未检出（{src}）")
                 continue
             if self._git(["cat-file", "-e", f"{sha}^{{commit}}"],
                          cwd=src, check=False).returncode != 0:
-                report.append(f"skipped {path}: pin {sha[:12]} 不在参考源")
+                report.append(f"submodule skipped {path}: pin {sha[:12]} 不在参考源")
                 continue
             self._git(["-c", f"submodule.{name}.url={src}",
                        "-c", "protocol.file.allow=always",
@@ -183,8 +191,26 @@ class Gitx:
             if got != sha:  # 预检已过仍错位＝机械病，宁抛不交残树
                 raise RuntimeError(
                     f"submodule {path} 预置校验败：HEAD@{got[:12]} ≠ pin {sha[:12]}")
-            report.append(f"seeded {path}@{sha[:12]}")
+            report.append(f"submodule seeded {path}@{sha[:12]}")
         return "; ".join(report)
+
+    def _materialize_lfs(self, tree: Path) -> str:
+        r = self._git(["lfs", "ls-files"], cwd=tree, check=False)
+        if r.returncode != 0:
+            return ("lfs: git-lfs 不可用，跳过"
+                    if "is not a git command" in r.stderr else "")
+        if not r.stdout.strip():
+            return ""
+        self._git(["lfs", "checkout"], cwd=tree, check=False)  # 缺对象 rc=0 留指针（实证）
+        after = self._git(["lfs", "ls-files"], cwd=tree, check=False).stdout.splitlines()
+        # 行形＝<oid> <marker> <path>：marker `-`＝工作文件仍是指针（实证 3.6.1）
+        missing = [parts[2] for ln in after
+                   if len(parts := ln.split(None, 2)) == 3 and parts[1] == "-"]
+        total = len(after)
+        if not missing:
+            return f"lfs: {total} tracked, all materialized"
+        return (f"lfs: {total - len(missing)}/{total} materialized, "
+                f"missing: {', '.join(missing)}")
 
     def merge_ff(self, env_dir: str, target: str, branch: str = None) -> str:
         src = Path(env_dir).resolve().name
@@ -218,25 +244,28 @@ class Gitx:
                                f"head@{new_head} vs expected@{sha}: {detail}")
         return "ok"  # head==sha（目标支已在提交上）亦达此：幂等推进
 
-    def push(self, repo_dir: str, branch: str) -> str:  # Req: ag-0d2daa
+    def push(self, repo_dir: str, branch: str) -> tuple:  # Req: ag-0d2daa
         """ag-0d2daa 服务侧 origin 同步：推 refs/heads/<branch>（只此一引用，不 force）。
 
         幂等（已同步＝up-to-date 仍 "ok"）；无 origin remote＝"none"（本地仓
         静默）；被拒输出含 non-fast-forward/fetch first＝"non-ff"；其余失败
-        （含超时）＝"failed"。只报告不重试，告警与终态语义归调用方。
+        （含超时）＝"failed"。返回 (status, tail)——tail＝失败时 git 输出尾，
+        供调用方落审计与告警（同 verify 输出尾部惯例）；只报告不重试。
         """
         if self._git(["remote", "get-url", "origin"],
                      cwd=repo_dir, check=False).returncode != 0:
-            return "none"
+            return "none", ""
         try:
             r = self._git(["push", "origin", f"refs/heads/{branch}"],
                           cwd=repo_dir, check=False, timeout=_PUSH_TIMEOUT)
         except subprocess.TimeoutExpired:
-            return "failed"
+            return "failed", f"push 超时（>{_PUSH_TIMEOUT}s）"
         if r.returncode == 0:
-            return "ok"
-        out = (r.stderr or "") + (r.stdout or "")
-        return "non-ff" if ("non-fast-forward" in out or "fetch first" in out) else "failed"
+            return "ok", ""
+        out = ((r.stderr or "") + (r.stdout or "")).strip()
+        status = "non-ff" if ("non-fast-forward" in out
+                              or "fetch first" in out) else "failed"
+        return status, out
 
     def rebase_onto(self, env_dir: str, integration: str) -> str:
         """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交

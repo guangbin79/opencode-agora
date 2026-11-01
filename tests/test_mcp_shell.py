@@ -31,14 +31,14 @@ class FakeGitx:
     def remove_env(self, env_dir):
         pass
 
-    def seed_submodules(self, tree_dir, source_dir):  # Req: ag-0d2daa
+    def materialize_checkout(self, tree_dir, source_dir):  # Req: ag-0d2daa
         return ""
 
     def symref(self, repo_dir):
         return "main"
 
     def push(self, repo_dir, branch):
-        return "none"
+        return "none", ""
 
     def merge_ff(self, env_dir, target, branch=None):
         return "ok"

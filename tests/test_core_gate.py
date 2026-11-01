@@ -52,7 +52,9 @@ class FakeGitx:
         self.rebase_calls = []
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
         self.push_calls, self.push_result = [], "ok"  # Req: ag-0d2daa
-        self.seed_calls, self.seed_result = [], ""  # ag-0d2daa 缺省零 gitlink＝空报告
+        self.push_tail = ""  # push 失败输出尾（审计/告警外带）
+        self.materialize_calls = []  # F: 检出后物化调用记录
+        self.materialize_result = ""  # 缺省零依赖物＝空报告
 
     def rebase_onto(self, env_dir, integration):
         self.rebase_calls.append((env_dir, integration))
@@ -116,11 +118,11 @@ class FakeGitx:
 
     def push(self, repo_dir, branch):  # Req: ag-0d2daa
         self.push_calls.append((repo_dir, branch))
-        return self.push_result
+        return self.push_result, self.push_tail
 
-    def seed_submodules(self, tree_dir, source_dir):
-        self.seed_calls.append((tree_dir, source_dir))
-        return self.seed_result
+    def materialize_checkout(self, tree_dir, source_dir):
+        self.materialize_calls.append((tree_dir, source_dir))
+        return self.materialize_result
 
 
 class FakeHealth:
@@ -756,24 +758,26 @@ class TestGateRun(TestCoreGate):
 
 
 class TestGateSupply(TestCoreGate):
-    """ag-0d2daa gate env 供给：集成树 submodule 预置＋merged 后服务侧 origin push。"""
+    """ag-0d2daa gate env 供给：集成树依赖物化＋merged 后服务侧 origin push。"""
 
-    def test_gate_seeds_integration_before_verify(self):  # Req: ag-0d2daa
-        self.gx.seed_result = "seeded libs/sub@0123456789ab"
+    def test_gate_materializes_integration_before_verify(self):  # Req: ag-0d2daa
+        self.gx.materialize_result = "submodule seeded libs/sub@0123456789ab"
         self.in_gate()
         self.gate.run("t1")
-        self.assertEqual(self.gx.seed_calls,
-                         [(f"{self.env}__gate", "/repo")])  # 推进后按任务 pin 预置
-        ev = [e for e in self.store.read_events("t1") if e["event"] == "submodule_seed"]
-        self.assertEqual([e["note"] for e in ev], ["seeded libs/sub@0123456789ab"])
+        self.assertEqual(self.gx.materialize_calls,
+                         [(f"{self.env}__gate", "/repo")])  # 推进后按任务 pin 物化
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "checkout_materialize"]
+        self.assertEqual([e["note"] for e in ev],
+                         ["submodule seeded libs/sub@0123456789ab"])
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 供给不碍门结果
 
-    def test_gate_seed_silent_when_zero_gitlinks(self):  # Req: ag-0d2daa
+    def test_gate_materialize_silent_when_zero_dependencies(self):  # Req: ag-0d2daa
         self.in_gate()
         self.gate.run("t1")
-        self.assertEqual(self.gx.seed_calls, [(f"{self.env}__gate", "/repo")])
+        self.assertEqual(self.gx.materialize_calls, [(f"{self.env}__gate", "/repo")])
         self.assertEqual([e for e in self.store.read_events("t1")
-                          if e["event"] == "submodule_seed"], [])  # 零 gitlink 无审计行
+                          if e["event"] == "checkout_materialize"], [])  # 零依赖物无审计行
 
     def test_merged_pushes_default_branch(self):  # Req: ag-0d2daa
         self.in_gate()
@@ -788,24 +792,32 @@ class TestGateSupply(TestCoreGate):
 
     def test_push_nonff_warns_dispatcher_keeps_merged(self):  # Req: ag-0d2daa
         self.gx.push_result = "non-ff"
+        self.gx.push_tail = "! [rejected] main -> main (non-fast-forward)"
         self.in_gate()
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 终态不受 push 拒影响
-        names = [e["event"] for e in self.store.read_events("t1")]
-        self.assertIn("push_rejected", names)
+        ev = [e for e in self.store.read_events("t1") if e["event"] == "push_rejected"]
+        self.assertEqual([e["note"] for e in ev],
+                         ["! [rejected] main -> main (non-fast-forward)"])  # 尾随审计
         notes = [m["body"] for m in self.store.read_messages()
                  if m["to"] == "disp1" and "non-ff" in m["body"]]
-        self.assertEqual(len(notes), 1)  # 告警恰一次，不 force 文案在场
+        self.assertEqual(len(notes), 1)  # 告警恰一次，不 force 文案＋输出尾在场
         self.assertIn("不 force", notes[0])
+        self.assertIn("non-fast-forward", notes[0])
 
     def test_push_failed_notifies_keeps_merged(self):  # Req: ag-0d2daa
         self.gx.push_result = "failed"
+        self.gx.push_tail = "fatal: Could not read from remote repository"
         self.in_gate()
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
-        self.assertIn("push_failed", [e["event"] for e in self.store.read_events("t1")])
-        self.assertEqual(len([m for m in self.store.read_messages()
-                              if m["to"] == "disp1" and "push 失败" in m["body"]]), 1)
+        ev = [e for e in self.store.read_events("t1") if e["event"] == "push_failed"]
+        self.assertEqual([e["note"] for e in ev],
+                         ["fatal: Could not read from remote repository"])
+        notes = [m["body"] for m in self.store.read_messages()
+                 if m["to"] == "disp1" and "push 失败" in m["body"]]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Could not read from remote repository", notes[0])  # 因随告警
 
     def test_push_none_silent(self):  # Req: ag-0d2daa
         self.gx.push_result = "none"

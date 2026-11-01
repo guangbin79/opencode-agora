@@ -124,14 +124,15 @@ class TaskService:
         if env is None:
             env = self._gitx.build_env(t["project_dir"], tid, t.get("target_branch"))
             try:
-                seed = self._gitx.seed_submodules(env, t["project_dir"])  # Req: ag-0d2daa
-            except Exception as e:  # 预置败＝拒派并回收新 env（不交残树给 worker）
+                report = self._gitx.materialize_checkout(
+                    env, t["project_dir"])  # Req: ag-0d2daa
+            except Exception as e:  # 物化败＝拒派并回收新 env（不交残树给 worker）
                 self._gitx.remove_env(env)
-                self._reject(tid, sid, f"submodule_seed: {e}")
-            if seed:  # ag-0d2daa：检出后即预置，worker 首轮构建与 gate env verify 不再撞空 submodule
+                self._reject(tid, sid, f"checkout_materialize: {e}")
+            if report:  # 检出后即物化，worker 首轮构建与 gate env verify 不再撞空依赖
                 self._store.append_event({"ts": time.time(), "actor": sid,
-                                          "event": "submodule_seed",
-                                          "task": tid, "note": seed})
+                                          "event": "checkout_materialize",
+                                          "task": tid, "note": report})
         try:
             wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
                                     title=f"{tid}: {t.get('title', tid)}")

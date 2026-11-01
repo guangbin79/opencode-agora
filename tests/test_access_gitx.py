@@ -450,7 +450,7 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(exclude.read_bytes(),
                          b"*.log\n# \xd6\xd0\xce\xc4\n.req-gate/\n")
 
-    # ---- ag-0d2daa gate env 供给：submodule 预置＋服务侧 push（ag-0d2daa） ----
+    # ---- ag-0d2daa gate env 供给：依赖物化（submodule＋LFS）＋服务侧 push ----
 
     _SUB_URL = "ssh://git@127.0.0.1:1/t/sub.git"  # 无凭据假源：一旦真拉取即秒拒
 
@@ -495,8 +495,8 @@ class TestAccessGitx(unittest.TestCase):
         成 no-op（ssh 假 url 下零拉取）；主检出 config 与工作区零被动。"""
         main, sub, pin1, pin2 = self._init_with_submodule()
         env = self.gx.build_env(main, "gt-s1")
-        report = self.gx.seed_submodules(env, main)
-        self.assertIn(f"seeded libs/sub@{pin2[:12]}", report)
+        report = self.gx.materialize_checkout(env, main)
+        self.assertIn(f"submodule seeded libs/sub@{pin2[:12]}", report)
         self.assertTrue((Path(env) / "libs" / "sub" / "impl.h").exists())
         self.assertEqual(self._head(Path(env) / "libs" / "sub"), pin2)
         self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
@@ -510,8 +510,8 @@ class TestAccessGitx(unittest.TestCase):
         main, sub, pin1, pin2 = self._init_with_submodule()
         integ = self.tmp / "integ"
         self._git(["worktree", "add", "--detach", str(integ), "HEAD"], cwd=main)
-        report = self.gx.seed_submodules(str(integ), main)
-        self.assertIn("seeded libs/sub", report)
+        report = self.gx.materialize_checkout(str(integ), main)
+        self.assertIn("submodule seeded libs/sub", report)
         self.assertEqual(self._head(integ / "libs" / "sub"), pin2)
         self.assertEqual(self._git(["status", "--porcelain"], cwd=integ).stdout, "")
 
@@ -526,8 +526,8 @@ class TestAccessGitx(unittest.TestCase):
                    f"160000,{pin3},libs/sub"], cwd=main)
         self._git(["commit", "-q", "-m", "bump"], cwd=main)
         env = self.gx.build_env(main, "gt-s2")
-        report = self.gx.seed_submodules(env, main)
-        self.assertIn(f"skipped libs/sub: pin {pin3[:12]} 不在参考源", report)
+        report = self.gx.materialize_checkout(env, main)
+        self.assertIn(f"submodule skipped libs/sub: pin {pin3[:12]} 不在参考源", report)
         self.assertFalse((Path(env) / "libs" / "sub" / "api.h").exists())  # 树未被半拉子填充
         self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
 
@@ -546,30 +546,30 @@ class TestAccessGitx(unittest.TestCase):
                    f"160000,{pin3},libs/sub"], cwd=main)
         self._git(["commit", "-q", "-m", "bump-orphan"], cwd=main)
         env = self.gx.build_env(main, "gt-s3")
-        report = self.gx.seed_submodules(env, main)
-        self.assertIn(f"seeded libs/sub@{pin3[:12]}", report)
+        report = self.gx.materialize_checkout(env, main)
+        self.assertIn(f"submodule seeded libs/sub@{pin3[:12]}", report)
         self.assertTrue((Path(env) / "libs" / "sub" / "extra.h").exists())
         self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
 
     def test_seed_submodules_no_gitlinks_zero_action(self):  # Req: ag-0d2daa
         env = self.gx.build_env(self.repo, "gt-s4")
-        self.assertEqual(self.gx.seed_submodules(env, self.repo), "")
+        self.assertEqual(self.gx.materialize_checkout(env, self.repo), "")
 
     def test_push_ok_advances_origin(self):  # Req: ag-0d2daa
         origin = self.tmp / "origin.git"
         self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
         self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
         self._commit(self.repo, {"src.py": "v2"}, "advance")
-        self.assertEqual(self.gx.push(str(self.repo), "main"), "ok")
+        self.assertEqual(self.gx.push(str(self.repo), "main"), ("ok", ""))
         self.assertEqual(self._head(origin), self._head(self.repo))
-        self.assertEqual(self.gx.push(str(self.repo), "main"), "ok")  # 幂等：已同步仍 ok
+        self.assertEqual(self.gx.push(str(self.repo), "main"), ("ok", ""))  # 幂等：已同步仍 ok
 
     def test_push_non_ff_classified_not_forced(self):  # Req: ag-0d2daa
         origin = self.tmp / "origin.git"
         self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
         self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
         self._commit(self.repo, {"src.py": "v2"}, "advance")
-        self.assertEqual(self.gx.push(str(self.repo), "main"), "ok")
+        self.assertEqual(self.gx.push(str(self.repo), "main"), ("ok", ""))
         peer = self.tmp / "peer"
         self._git(["clone", "-q", str(origin), str(peer)], cwd=self.tmp)
         self._git(["config", "user.email", "t@t"], cwd=peer)
@@ -577,16 +577,80 @@ class TestAccessGitx(unittest.TestCase):
         self._commit(peer, {"src.py": "v3"}, "peer advance")
         self._git(["push", "-q", "origin", "main"], cwd=peer)  # 远端被第三方推进
         local = self._commit(self.repo, {"src.py": "v2-local"}, "local advance")
-        self.assertEqual(self.gx.push(str(self.repo), "main"), "non-ff")
+        status, tail = self.gx.push(str(self.repo), "main")
+        self.assertEqual(status, "non-ff")
+        self.assertRegex(tail, r"non-fast-forward|fetch first")  # 输出尾随分类外带
         self.assertEqual(self._head(self.repo), local)  # 本地合并未被 force 回滚
 
     def test_push_none_without_origin(self):  # Req: ag-0d2daa
-        self.assertEqual(self.gx.push(str(self.repo), "main"), "none")
+        self.assertEqual(self.gx.push(str(self.repo), "main"), ("none", ""))
 
     def test_push_failure_classified(self):  # Req: ag-0d2daa
         self._git(["remote", "add", "origin", str(self.tmp / "nope.git")],
                   cwd=self.repo)
-        self.assertEqual(self.gx.push(str(self.repo), "main"), "failed")
+        status, tail = self.gx.push(str(self.repo), "main")
+        self.assertEqual(status, "failed")
+        self.assertIn("nope.git", tail)  # 失败因随输出尾
+
+    # ---- LFS 实体物化（ag-c1aa63 同族：指针文件≠内容） ----
+
+    def _init_lfs_repo(self):
+        """主仓＋model.bin（lfs tracked，实体在主检出对象库）。返回 (main, oid)。"""
+        main = self.tmp / "projl"
+        main.mkdir()
+        self._git(["init", "-b", "master"], cwd=main)
+        self._git(["config", "user.email", "t@t"], cwd=main)
+        self._git(["config", "user.name", "t"], cwd=main)
+        self._git(["lfs", "install", "--local"], cwd=main)
+        self._git(["lfs", "track", "*.bin"], cwd=main)
+        self._git(["add", ".gitattributes"], cwd=main)
+        (main / "model.bin").write_bytes(b"\0" * 2048)
+        self._git(["add", "model.bin"], cwd=main)
+        self._git(["commit", "-q", "-m", "lfs file"], cwd=main)
+        r = self._git(["lfs", "ls-files", "-l"], cwd=main)
+        oid = r.stdout.split()[0]
+        return main, oid
+
+    def _to_pointer(self, cwd, name="model.bin"):
+        """工作文件覆写为其仓库内指针 blob（构造事故态：checkout 拿到指针）。"""
+        ptr = self._git(["cat-file", "blob", f"HEAD:{name}"], cwd=cwd).stdout
+        (Path(cwd) / name).write_text(ptr)
+
+    def test_materialize_lfs_restores_pointer_from_shared_store(self):  # Req: ag-0d2daa
+        if shutil.which("git-lfs") is None:
+            self.skipTest("git-lfs 不可用")
+        main, oid = self._init_lfs_repo()
+        env = self.gx.build_env(main, "gt-l1")
+        self._to_pointer(env)  # 事故态：env 只有指针
+        report = self.gx.materialize_checkout(env, main)
+        self.assertIn("lfs: 1 tracked, all materialized", report)
+        self.assertTrue((Path(env) / "model.bin").read_bytes()[:2] == b"\0\0")  # 实体还原
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=main).stdout, "")
+
+    def test_materialize_lfs_reports_missing_object_without_network(self):  # Req: ag-0d2daa
+        if shutil.which("git-lfs") is None:
+            self.skipTest("git-lfs 不可用")
+        main, oid = self._init_lfs_repo()
+        env = self.gx.build_env(main, "gt-l2")
+        obj = next(p for p in (main / ".git" / "lfs" / "objects").rglob("*")
+                   if p.is_file())
+        missing = obj.parent / obj.name
+        obj.rename(missing.with_suffix(".gone"))  # 参考库缺对象（免凭据路径不可达）
+        self._to_pointer(env)
+        report = self.gx.materialize_checkout(env, main)
+        self.assertIn("lfs: 0/1 materialized, missing: model.bin", report)
+        self.assertTrue((Path(env) / "model.bin").read_text().startswith(
+            "version https://git-lfs"))  # 绝不联网 fetch：留指针如实报告
+        missing.with_suffix(".gone").rename(missing)  # 还原夹具
+        self.assertEqual(self.gx.materialize_checkout(env, main),
+                         "lfs: 1 tracked, all materialized")  # 对象归还后可还原
+
+    def test_materialize_lfs_zero_tracked_zero_action(self):  # Req: ag-0d2daa
+        if shutil.which("git-lfs") is None:
+            self.skipTest("git-lfs 不可用")
+        env = self.gx.build_env(self.repo, "gt-l3")
+        self.assertEqual(self.gx.materialize_checkout(env, self.repo), "")
 
 
 if __name__ == "__main__":

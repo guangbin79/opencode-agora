@@ -271,9 +271,9 @@ class Gate:
                 r = self._gitx.head(integration)
                 self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
                 self._audit(tid, "rebased", **{"from": e, "to": r})
-            seed = self._gitx.seed_submodules(integration, target)  # Req: ag-0d2daa
-            if seed:  # ag-0d2daa：推进后按任务 pin 预置（含 gitlink bump 的任务 pin），留痕
-                self._audit(tid, "submodule_seed", note=seed)
+            report = self._gitx.materialize_checkout(integration, target)  # Req: ag-0d2daa
+            if report:  # 检出后依赖物化：推进后按任务 pin 预置（含 gitlink bump 的任务 pin）
+                self._audit(tid, "checkout_materialize", note=report)
             irc, iout = runner(integration, cmd)
             if irc == 124:  # F36 集成超硬顶：同款分类路由，目标分支未改动
                 self._audit(tid, "verify_overrun")
@@ -349,19 +349,21 @@ class Gate:
         try:
             t = self._state.get(tid)
             branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
-            r = self._gitx.push(t["project_dir"], branch)
+            r, tail = self._gitx.push(t["project_dir"], branch)
             if r == "non-ff":
-                self._audit(tid, "push_rejected", branch=branch)
+                self._audit(tid, "push_rejected", branch=branch, note=tail[:200])
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"origin push 被拒（non-ff）——本地合并保持不动、不 force，"
-                    f"请人工核对远端: refs/heads/{branch}")
+                    f"请人工核对远端: refs/heads/{branch}"
+                    + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
             elif r == "failed":
-                self._audit(tid, "push_failed", branch=branch)
+                self._audit(tid, "push_failed", branch=branch, note=tail[:200])
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"origin push 失败（不影响任务终态，本地合并保持不动）: "
-                    f"refs/heads/{branch}")
+                    f"refs/heads/{branch}"
+                    + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
         except Exception as e:
             self._audit(tid, "push_failed", note=str(e)[:200])
 
