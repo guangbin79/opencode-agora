@@ -45,4 +45,16 @@ describe("onInject 单消息双标记自举", () => {
     onInject({ sessionID: "s-inj-plain", text: "普通消息，无任何标记" });
     expect(getCredential("s-inj-plain")).toEqual(seeded);
   });
+
+  test("⑤dotfiles daemon 逐字前缀（issue#222 生产者真实字节）→一次缓存三值齐", () => {
+    // Req: F33 终审——消费端正则吃下生产者真实字节（tid=task- 前缀＋真实 env 绝对路径＋32hex 牌）
+    onInject({
+      sessionID: "s-inj-dotfiles",
+      text: "[agora] task-issue-222: issue-agent round\nenv: /home/guangbin/Documents/TitanNavi\n[agora] credential task-issue-222\ntoken: b4f8e2a1c6d395708fa1b2c3d4e5f678",
+    });
+    expect(getCredential("s-inj-dotfiles")).toEqual({
+      token: "b4f8e2a1c6d395708fa1b2c3d4e5f678", sid: "s-inj-dotfiles", role: "worker",
+      tid: "task-issue-222", envDir: "/home/guangbin/Documents/TitanNavi",
+    });
+  });
 });
