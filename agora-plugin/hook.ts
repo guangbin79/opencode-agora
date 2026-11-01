@@ -18,7 +18,7 @@ export const READ_HINT =
   "被拦：tasks.jsonl 与 messages/ 属账本面，请走工具面（board/check_mail）；events.jsonl 与 wiki 可直接读。主会话不受此限。";
 
 const TMP_ROOT = "/tmp/opencode"; // B3 设计定值
-const GATE_RECORD_DIRS = new Set([".omo", ".req-gate"]); // F33：req-gate 门记录目录（新旧同收）
+const GATE_RECORD_DIRS = new Set([".omo", ".req-gate", ".review-loop"]); // F33：门记录目录（新旧同收；.review-loop=评审环证据，2026-11-01 issue#222 实测误伤面）
 const WRITE_TOOLS = new Set(["edit", "write"]);
 const READISH_TOOLS = new Set(["read", "bash"]);
 
