@@ -132,6 +132,17 @@ class TaskService:
             self._reject(tid, sid, f"quota: 活动任务 {active}>={_QUOTA}")
         after = t.get("after")
         if after is not None:
+            # W-2：create 不校验 after 环——派发前沿沿 after 链查自引用/重复，
+            # 成环拒派报因含环路径（防停链递归引爆于门体失败路径）
+            seen, chain, cur = {tid}, [], after
+            tasks = self._state.snapshot()["tasks"]
+            while cur is not None:
+                if cur in seen:
+                    self._reject(tid, sid, f"after: 链成环（{' → '.join(chain + [cur])}）"
+                                           "——修正任务依赖后重派")
+                chain.append(cur)
+                seen.add(cur)
+                cur = tasks.get(cur, {}).get("after")
             predecessor = self._state.get(after)
             reason = str(predecessor.get("cancel_reason", ""))
             failed_cancel = (predecessor["state"] == "cancelled"
@@ -279,11 +290,13 @@ class TaskService:
     def stop_after_failed(self, tid):
         """前驱终态失败：停止整条 after 后继链；主动 cancel 的跳过语义不适用此处。"""
         stopped = []
+        seen = {tid}  # W-2：create 不校验 after 环——已访问不再下钻（起点自身免取消），消递归引爆
 
         def visit(parent):
             for child, t in self._state.snapshot()["tasks"].items():
-                if t.get("after") != parent:
+                if t.get("after") != parent or child in seen:
                     continue
+                seen.add(child)
                 if t["state"] not in _FROZEN:
                     reason = f"dependency_failed:{tid}"
                     self._cancel_one(child, "agorad", reason)

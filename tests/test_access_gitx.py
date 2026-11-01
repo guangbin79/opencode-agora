@@ -1,10 +1,13 @@
 """T5 访问层契约：gitx worktree 建清/ff-only/回滚/闸体检测（真实 git，tmp 夹具，零 mock）。"""
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import agorad.access.gitx as gitx_mod
 from agorad.access.gitx import Gitx
@@ -591,6 +594,45 @@ class TestAccessGitx(unittest.TestCase):
         status, tail = self.gx.push(str(self.repo), "main")
         self.assertEqual(status, "failed")
         self.assertIn("nope.git", tail)  # 失败因随输出尾
+
+    def test_push_timeout_kills_process_group(self):  # Req: F38
+        """F-1：push 超时按进程组杀（start_new_session＋killpg）——ssh/传输孙进程
+        不孤儿泄漏；杀后有限宽限收尸，分类仍 failed。"""
+        origin = self.tmp / "origin.git"
+        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
+        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
+        popen_kw, killpg = [], []
+
+        class FakePopen:
+            pid = 4242
+            stdout = stderr = None
+            returncode = None
+            raised = False
+
+            def __init__(self, argv, **kw):
+                popen_kw.append((argv, kw))
+
+            def communicate(self, timeout=None):
+                if timeout is not None and not FakePopen.raised:
+                    FakePopen.raised = True  # 首次（超时顶）抛，二次（收尸）成功返回
+                    raise subprocess.TimeoutExpired("git", timeout)
+                FakePopen.returncode = -9
+                return "", ""
+
+        # shim 只换 Popen：_git 的 remote get-url 仍走真 run；killpg 打桩记录调用
+        shim = SimpleNamespace(run=subprocess.run, Popen=FakePopen,
+                               PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired)
+        with mock.patch.object(gitx_mod, "subprocess", shim), \
+             mock.patch.object(gitx_mod.os, "killpg",
+                               side_effect=lambda pid, sig: killpg.append((pid, sig))):
+            status, tail = self.gx.push(str(self.repo), "main")
+        self.assertEqual(status, "failed")
+        self.assertIn("超时", tail)
+        argv, kw = popen_kw[0]
+        self.assertEqual(argv[:3], ["git", "push", "origin"])
+        self.assertTrue(kw.get("start_new_session"))  # 整组可杀的前提
+        self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL（非仅直接子进程）
+        self.assertEqual(FakePopen.returncode, -9)  # 收尸已 reap
 
     # ---- LFS 实体物化（ag-c1aa63 同族：指针文件≠内容） ----
 

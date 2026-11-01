@@ -11,11 +11,13 @@ import time
 import unittest
 from pathlib import Path
 
+from agorad.access.pages import write_task_page
 from agorad.access.store import Store
 from agorad.core.auth import Auth
 from agorad.core.gate import Gate, _subprocess_runner
 from agorad.core.msg import Router
 from agorad.core.state import State
+from agorad.core.task import TaskService
 
 SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 OTHER_SHA = "f0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5"
@@ -381,6 +383,27 @@ class TestGateRun(TestCoreGate):
         self.assertIn("y" * 2000, body)  # 输出尾部（截 2000）
         self.assertNotIn("y" * 2001, body)
         self.assertIn("post(done", body)  # 动作指引
+
+    def test_blocked_with_after_cycle_stops_chain_without_fake_reclaim(self):  # Req: F38
+        """W-2 端到端：blocked 触发成环停链（真实 TaskService.stop_after_failed）——
+        visited 兜底后不抛 RecursionError，后继取消落账，无 reclaim_failed 假审计。"""
+        svc = TaskService(self.state, self.auth, self.gx, self.oc, self.store,
+                          self.router, write_task_page)
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate(on_blocked=svc.stop_after_failed)
+        self.in_gate(streak=2)  # t1 进门临界段（本测试的停链起点）
+        self.seed("t2", state="todo")
+        self.state.set_fields("t1", after="t2")  # 环：t1→t2→t1（create 不校验的既有形态）
+        self.state.set_fields("t2", after="t1")
+        self.gate.run("t1")  # verify 败→3 连败 blocked→on_blocked 停链（曾在此递归引爆）
+        self.assertEqual(self.state.get("t1")["state"], "blocked")
+        self.assertEqual(self.state.get("t2")["state"], "cancelled")
+        self.assertEqual(self.state.get("t2")["cancel_reason"],
+                         "dependency_failed:t1")
+        events = self.store.read_events()
+        self.assertEqual([e["task"] for e in events if e["event"] == "dependency_stopped"],
+                         ["t2"])
+        self.assertEqual([e for e in events if e["event"] == "reclaim_failed"], [])
 
     def test_conflict_markers_fail_before_verify_no_merge(self):  # Req: gt-83185d R3
         self.in_gate()

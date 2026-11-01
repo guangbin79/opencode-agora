@@ -5,10 +5,12 @@
 线性历史——merge 只走 --ff-only，绝不产生 merge commit；rebase_onto（F32）
 仅门内 detached 干净同步自愈，不碰 env 分支与目标检出。
 """
+import os
 import secrets
 import re
 import string
 import shutil
+import signal
 import subprocess
 import time
 from datetime import datetime
@@ -262,14 +264,29 @@ class Gitx:
         if self._git(["remote", "get-url", "origin"],
                      cwd=repo_dir, check=False).returncode != 0:
             return "none", ""
+        # F-1（Req: F38）：start_new_session 启动——超时 killpg 全组，ssh/传输孙进程
+        # 不孤儿泄漏（gate runner 同款形态）；分类语义与返回值不变。
+        proc = subprocess.Popen(["git", "push", "origin", f"refs/heads/{branch}"],
+                                cwd=str(repo_dir), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
-            r = self._git(["push", "origin", f"refs/heads/{branch}"],
-                          cwd=repo_dir, check=False, timeout=_PUSH_TIMEOUT)
+            out, err = proc.communicate(timeout=_PUSH_TIMEOUT)
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+            try:  # 有限宽限收尸；逃逸后代持管道时弃读，防线程挂死
+                out, err = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe:
+                        pipe.close()
+                out, err = "", "（push 逃逸进程仍持有输出管道，已弃采）"
             return "failed", f"push 超时（>{_PUSH_TIMEOUT}s）"
-        if r.returncode == 0:
+        if proc.returncode == 0:
             return "ok", ""
-        out = ((r.stderr or "") + (r.stdout or "")).strip()
+        out = ((err or "") + (out or "")).strip()
         status = "non-ff" if ("non-fast-forward" in out
                               or "fetch first" in out) else "failed"
         return status, out

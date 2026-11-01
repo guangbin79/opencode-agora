@@ -269,6 +269,37 @@ class TestNestedDispatch(TestCoreTask):
         stopped = [e for e in self.events() if e["event"] == "dependency_stopped"]
         self.assertEqual([e["task"] for e in stopped], ["next", "last"])
 
+    def test_after_cycle_dispatch_rejected_with_path(self):  # Req: F38
+        """W-2 派发前沿拒环：自引用与两元环均拒，报因含环路径且零副作用。"""
+        a = self.dispatchable("A")
+        b = self.dispatchable("B", after=a)
+        self.state.set_fields(a, after=a)  # 自引用
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(a, self.root)
+        self.assertIn("成环", str(cm.exception))
+        self.state.set_fields(a, after=b)  # 两元环：a→b→a
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(b, self.root)
+        self.assertIn("成环", str(cm.exception))
+        self.assertIn(a, str(cm.exception))  # 报因含环路径
+        self.assertEqual(self.gitx.built, [])  # 拒派零副作用：不建环境不建会话
+        self.assertEqual(self.oc.sessions, [])
+
+    def test_stop_after_failed_cycle_terminates(self):  # Req: F38
+        """W-2 visited 兜底：after 环（failed→mid→failed）停链正常返回不递归引爆，
+        起点自身免取消（失败任务不是后继），后继照常停链。"""
+        self.seed("failed", state="blocked", disp="main")
+        self.seed("mid", state="todo", disp="main")
+        self.state.set_fields("mid", after="failed")
+        self.state.set_fields("failed", after="mid")
+        self.assertEqual(self.svc.stop_after_failed("failed"), ["mid"])
+        self.assertEqual(self.state.get("mid")["state"], "cancelled")
+        self.assertEqual(self.state.get("mid")["cancel_reason"],
+                         "dependency_failed:failed")
+        self.assertEqual(self.state.get("failed")["state"], "blocked")  # 起点未被自链取消
+        stopped = [e for e in self.events() if e["event"] == "dependency_stopped"]
+        self.assertEqual([e["task"] for e in stopped], ["mid"])
+
     def test_dependency_failed_cancel_does_not_unlock_new_after_task(self):
         self.seed("failed", state="blocked", disp="main")
         self.seed("stopped", state="cancelled", disp="main")

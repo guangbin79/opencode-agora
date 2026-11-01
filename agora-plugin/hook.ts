@@ -16,6 +16,8 @@ export const NO_CRED_HINT =
   "被拦：无凭据缓存——可经真实 prompt 通道重注 BOOT+credential 自愈（配方见任务页），或 post(kind=question) 求派发方。";
 export const READ_HINT =
   "被拦：tasks.jsonl 与 messages/ 属账本面，请走工具面（board/check_mail）；events.jsonl 与 wiki 可直接读。主会话不受此限。";
+export const GATE_SCOPE_HINT =
+  "被拦：门记录目录（.omo/.req-gate/.review-loop）写入仅限当前任务 env 或当前仓根——跨 env/跨仓目标不豁免（F38 W-1）。";
 
 const TMP_ROOT = "/tmp/opencode"; // B3 设计定值
 const GATE_RECORD_DIRS = new Set([".omo", ".req-gate", ".review-loop"]); // F33：门记录目录（新旧同收；.review-loop=评审环证据，2026-11-01 issue#222 实测误伤面）
@@ -54,6 +56,25 @@ function under(root: string, p: string): boolean {
 /** F33 豁免面：req-gate 门记录目录（basename 级，路径任一段命中即豁免）。 */
 function inGateRecordDir(p: string): boolean {
   return resolve(p).split(sep).some((seg) => GATE_RECORD_DIRS.has(seg));
+}
+
+/** git 仓根：沿目标向上找 .git（目录或文件——worktree/submodule 形态）；不属任何仓＝null。 */
+function gitRoot(p: string): string | null {
+  let cur = resolve(p);
+  for (;;) {
+    if (existsSync(join(cur, ".git"))) return cur;
+    const parent = dirname(cur);
+    if (parent === cur) return null;
+    cur = parent;
+  }
+}
+
+/** F38 W-1 位置约束：门记录命中仅在写目标 ∈ 当前 env（cred.envDir）或当前仓根
+ * （cwd 所在 git 根）时豁免；跨 env/跨仓命中一律不豁免（防一次 write 投毒他仓治理面）。 */
+function gateDirInScope(target: string, cwd: string, envDir: string | undefined): boolean {
+  if (envDir && under(envDir, target)) return true;
+  const root = gitRoot(cwd);
+  return root !== null && under(root, target);
 }
 
 /** git 仓判定：沿目标向上找 .git（目录或文件——worktree/submodule 形态）。 */
@@ -123,7 +144,13 @@ export function shouldBlock(
     return READ_HINT;
   }
   if (!WRITE_TOOLS.has(tool)) return null;
-  if (under(TMP_ROOT, target) || !inGitRepo(target) || inGateRecordDir(target)) return null; // 豁免面 B3＋F33 门记录
+  if (under(TMP_ROOT, target) || !inGitRepo(target)) return null; // 豁免面 B3
+  if (inGateRecordDir(target)) {
+    // F33 门记录豁免＋F38 W-1 位置约束：作用域内放行（豁免先行，先于 env 归属判定）；
+    // 跨 env/跨仓命中一律拒——先于 cwd∈env 放行，不落穿。
+    if (gateDirInScope(target, cwd, cred?.envDir)) return null;
+    return GATE_SCOPE_HINT;
+  }
   if (cred?.token && cred.envDir && under(cred.envDir, cwd)) return null;
   // 拒因分流：缓存命中 root 牌＝防御位（生产不入缓存）维持 DISPATCH_HINT；无凭据按拉取
   // 判据路由（F27 收殓残留 finding，裁定 A 镜像）——404（not_worker）＝主会话直改→

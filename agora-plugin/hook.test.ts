@@ -7,7 +7,9 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { agoraHome, DISPATCH_HINT, NO_CRED_HINT, READ_HINT, shouldBlock, wrongDoorHint } from "./hook";
+import {
+  agoraHome, DISPATCH_HINT, GATE_SCOPE_HINT, NO_CRED_HINT, READ_HINT, shouldBlock, wrongDoorHint,
+} from "./hook";
 import {
   attachToken, cacheCredential, getCredential, pullCredential,
   readCredential, resetCredPull, type Cred,
@@ -34,7 +36,8 @@ beforeAll(() => {
   plain = join(root, "plain");
   envDir = join(root, "env-wt");
   home = join(root, "plaza");
-  for (const d of [join(repo, ".git"), plain, envDir, join(home, "state", "messages"), join(home, "wiki"), join(home, ".agora")]) {
+  // F38：envDir 带 .git——env 腿（cred.envDir/仓根）判定需 env 具仓形态，非 B3 豁免误绿
+  for (const d of [join(repo, ".git"), plain, join(envDir, ".git"), join(home, "state", "messages"), join(home, "wiki"), join(home, ".agora")]) {
     mkdirSync(d, { recursive: true });
   }
   writeFileSync(join(repo, "a.md"), "x");
@@ -83,14 +86,33 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("edit", join(tmpRepo, "b.md"), tmpRepo, null, true)).toBeNull();
   });
 
-  test("F33 门记录目录豁免：.omo/ 与 .req-gate/ 与 .review-loop/ 写入放行（新旧同收）；控制组非豁免 dotdir 仍拒", () => {
-    // Req: F33
-    expect(shouldBlock("write", join(repo, ".omo", "req-gate", "s1.md"), plain, null, true)).toBeNull();
-    expect(shouldBlock("edit", join(repo, ".req-gate", "s2.md"), plain, null, true)).toBeNull();
-    expect(shouldBlock("write", join(repo, ".review-loop", "r.md"), plain, null, true)).toBeNull(); // F33 名册新成员：评审环证据目录同豁免
-    expect(shouldBlock("write", join(repo, ".not-gate", "x.md"), plain, null, true)).toBe(NO_CRED_HINT);
-    // ocr 评审钉死：嵌套同名目录亦豁免＝刻意广度（basename 级，与 .gitignore 任意深度同形）
-    expect(shouldBlock("write", join(repo, "src", ".omo", "x.md"), plain, null, true)).toBeNull();
+  test("F33 门记录目录豁免（F38 位置约束口径）：当前仓根内 .omo/.req-gate/.review-loop 放行；控制组非豁免 dotdir 仍拒", () => {
+    // Req: F38（F33 基线用例随位置约束修：cwd=repo＝当前仓根腿；null cred 走豁免先行）
+    expect(shouldBlock("write", join(repo, ".omo", "req-gate", "s1.md"), repo, null, true)).toBeNull();
+    expect(shouldBlock("edit", join(repo, ".req-gate", "s2.md"), repo, null, true)).toBeNull();
+    expect(shouldBlock("write", join(repo, ".review-loop", "e1.md"), repo, null, true)).toBeNull(); // F-PROC-1 收编锚（1224fbd 一行收编，本例钉死）
+    expect(shouldBlock("write", join(repo, ".not-gate", "x.md"), repo, null, true)).toBe(NO_CRED_HINT);
+    // ocr 评审钉死：嵌套同名目录亦豁免＝刻意广度（basename 级）——F38 后仅在当前 env/仓根内保留
+    expect(shouldBlock("write", join(repo, "src", ".omo", "x.md"), repo, null, true)).toBeNull();
+  });
+
+  test("F38 W-1 位置约束：worker env 内三门目录放行（env 腿）", () => {
+    // Req: F38
+    expect(shouldBlock("write", join(envDir, ".omo", "x.md"), envDir, worker, true)).toBeNull();
+    expect(shouldBlock("edit", join(envDir, ".req-gate", "x.md"), envDir, worker, true)).toBeNull();
+    expect(shouldBlock("write", join(envDir, ".review-loop", "e.md"), envDir, worker, true)).toBeNull();
+  });
+
+  test("F38 W-1 位置约束：跨 env/跨仓门记录目录命中一律拒（含收编面 .review-loop）", () => {
+    // Req: F38——主会话（无凭据）cwd=repo 写他仓门记录目录（原 basename 豁免逃逸/投毒面）
+    expect(shouldBlock("write", join(envDir, ".req-gate", "x.md"), repo, null, true)).toBe(GATE_SCOPE_HINT);
+    // worker cwd∈env 跨仓写主仓门记录目录——位置判定先于 cwd∈env 放行，不落穿
+    expect(shouldBlock("write", join(repo, ".req-gate", "x.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
+    expect(shouldBlock("write", join(repo, ".review-loop", "e.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
+    expect(shouldBlock("edit", join(repo, ".omo", "x.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
+    // 路径中段命中（src/.omo）跨 env 同拒；非门目录跨仓不归本约束（既有面不动）
+    expect(shouldBlock("write", join(repo, "src", ".omo", "y.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
+    expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toBeNull();
   });
 
   test("git 仓无凭据 edit/write→拒＋无凭据专属文案（write 目标可尚未存在）", () => {

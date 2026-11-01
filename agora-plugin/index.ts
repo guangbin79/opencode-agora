@@ -151,6 +151,11 @@ export default {
       }
       let hint = shouldBlock(event.tool, target, cwd, cred, on, pull?.reason ?? null);
       if (hint) {
+        // F38 W-1 灰度观察：拒绝落 AGORA_HOOK_DEBUG 日志（target＋拒因）——上线初期
+        // 保留相关拒绝日志供跨仓拒/门记录缺失/评审环异常三类信号计数（现无其他日志面）。
+        if (process.env.AGORA_HOOK_DEBUG) {
+          process.stderr.write(`[agora-plugin] deny tool=${event.tool} sid=${event.sessionID} target=${target}\n`);
+        }
         // F27 拒因分诊（信息量增量，语义不变）：write 面 NO_CRED_HINT 剩不可达/节流两态
         // ——404（not_worker）已由裁定 A 镜像路由进 DISPATCH_HINT，真非 worker 附文退役。
         if (hint === NO_CRED_HINT && pull && pull.reason !== "ok") {
