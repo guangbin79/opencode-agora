@@ -6,6 +6,8 @@
 
 - **甲案跨仓**：耦合仓顺序编排（B7 after:），后仓经 ../ 见前仓已合并形态——无复合环境
 - **verify 双路**：预登记（快速路）＋ worker 回填（探索路）并存
+- **verify 双顶**（F36）：软顶=AGORA_VERIFY_TIMEOUT 提醒派发方不杀、硬顶=AGORA_VERIFY_CEILING（缺省 4×软顶）杀全组 rc=124；超顶分类路由派发方（不 transition/不弹 worker/不计连败/任务驻留 done）
+- **驻留 done 的取消结算不变量**（F36 终闸实证）：矩阵 done 无 cancelled 出口，而 verify_overrun/锚缺失驻留后门尾不可达——cancel 必须按 in_gate 分流：门内排队（gate_tail 消费），驻留（in_gate=False）直结（State.settle_parked_cancel）；否则 pending 悬挂至重启重跑整轮 verify。凡新增「任务驻留 done」类出口，取消结算面必须同步核查
 - **三访问层**：agorad 内域核心＋oc（opencode API）＋store（账本）＋gitx（worktree）
 - **12+1 工具面**：12 服务端端点（httpd._TOOLS）＋壳层 wait＝MCP 面 13 工具（agora_mcp._TOOLS）
 - **会话牌认证**：root/dispatcher/worker 角色矩阵＋附牌链
