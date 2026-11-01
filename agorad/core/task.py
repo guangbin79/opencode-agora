@@ -204,10 +204,17 @@ class TaskService:
         t = self._state.get(tid)
         total = 0
         if t["state"] not in _FROZEN:
-            if not self._state.queue_cancel(tid, cancel_reason):  # done 在门内：原子排队，门尾消费
+            settled = False
+            if not self._state.queue_cancel(tid, cancel_reason):  # 非 done：矩阵直迁
                 fields = {"cancel_reason": cancel_reason} if cancel_reason else {}
                 self._state.transition(tid, "cancelled", **fields)
-                if t.get("worker_sid"):  # 快照行先行后消息（§4.8 写序）
+                settled = True
+            elif self._state.settle_parked_cancel(tid, cancel_reason):
+                settled = True  # F36 R2：驻留 done（门已走完）直结，防 pending 悬挂
+            # else：done 在门内——原子排队，门尾消费（F-4 原语义）
+            if settled:
+                t = self._state.get(tid)  # 快照行先行后消息（§4.8 写序）
+                if t.get("worker_sid"):
                     self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                       f"task {tid} cancelled by {sid}")
                     self._revoke_worker(t["worker_sid"])

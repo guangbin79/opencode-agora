@@ -92,7 +92,10 @@ def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
             if not soft_fired and elapsed >= timeout:
                 soft_fired = True  # 软顶拍不杀：提醒恰一次（进程已退则免提醒）
                 if proc.poll() is None and on_soft is not None:
-                    on_soft()
+                    try:
+                        on_soft()
+                    except Exception:  # 提醒链故障不废硬顶杀保证：杀分支必须可达
+                        pass
             if elapsed >= ceiling:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -193,6 +196,8 @@ class Gate:
 
     def run(self, tid):
         t = self._state.get(tid)
+        if t["state"] != "done":
+            return  # F36 R2：驻留取消直结后，重启残留队列里的非 done 任务不跑门
         branch = t.get("target_branch")  # 合入目标支（外部工作流）；缺省＝仓默认支
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         integration = t.get("gate_env") or f"{env}__gate"

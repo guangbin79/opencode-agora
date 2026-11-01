@@ -158,6 +158,21 @@ class TestCoreState(unittest.TestCase):
         self.assertEqual(row["state"], "closed")  # merged 不逆转历史
         self.assertFalse(row.get("pending_cancel"))
 
+    def test_settle_parked_cancel_direct_settles_done(self):  # Req: F36
+        """F36 R2：驻留 done 门已走完——排队取消直结，防 pending 悬挂至重启重跑。"""
+        self.seed({"t9": "done"})
+        self.assertTrue(self.st.settle_parked_cancel("t9", "manual"))
+        row = self.st.get("t9")
+        self.assertEqual(row["state"], "cancelled")
+        self.assertEqual(row["cancel_reason"], "manual")
+        self.assertFalse(row.get("pending_cancel"))  # 排队标记同取走，零悬挂
+
+    def test_settle_parked_cancel_refuses_in_gate_or_non_done(self):  # Req: F36
+        self.seed({"g1": "done", "r1": "running"})
+        self.st.set_fields("g1", in_gate=True)
+        self.assertFalse(self.st.settle_parked_cancel("g1"))  # 在门内：门尾消费语义不变
+        self.assertFalse(self.st.settle_parked_cancel("r1"))  # 非 done 不直结
+
     def test_cancel_and_gate_tail_never_orphan_pending(self):  # Req: F6
         """排队→门尾结算逐轮交错：排队者必被取走、pending 零残留（40 轮）。"""
         for i in range(40):

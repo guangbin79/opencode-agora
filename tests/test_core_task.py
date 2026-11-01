@@ -207,6 +207,28 @@ class TestNestedDispatch(TestCoreTask):
                 operation()
         self.assertEqual(self.state.get(child)["state"], "todo")
 
+    def test_parked_done_cancel_settles_directly(self):  # Req: F36
+        """F36 R2：verify_overrun/锚缺失驻留 done 后门尾不可达——cancel 直结
+        （cancelled=1）＋取消副作用照常（worker 撤凭据＋env 回收＋result 通知）。"""
+        self.seed("parked", state="done", disp="main", worker="w1",
+                  env="/envs/parked")
+        tok = self.auth.issue("w1", "worker")
+        self.assertEqual(self.svc.cancel("parked", self.root), {"cancelled": 1})
+        self.assertEqual(self.state.get("parked")["state"], "cancelled")
+        self.assertEqual(self.gitx.removed, ["/envs/parked"])
+        self.assertIsNone(self.auth.identify(tok))  # 凭据已撤
+        results = [m for m in self.store.read_messages()
+                   if m["to"] == "main" and m["kind"] == "result"]
+        self.assertIn("已取消", results[-1]["body"])
+
+    def test_in_gate_done_cancel_still_queues_for_gate_tail(self):  # Req: F36
+        """门内 done：排队原语义不变（settle 拒绝，门尾消费）。"""
+        self.seed("in-gate", state="done", disp="main")
+        self.state.set_fields("in-gate", in_gate=True)
+        self.assertEqual(self.svc.cancel("in-gate", self.root), {"cancelled": 0})
+        self.assertEqual(self.state.get("in-gate")["state"], "done")
+        self.assertTrue(self.state.get("in-gate")["pending_cancel"])
+
     def test_terminal_failure_stops_entire_after_chain(self):
         self.seed("failed", state="blocked", disp="main")
         self.seed("next", state="todo", disp="main")
@@ -237,7 +259,7 @@ class TestNestedDispatch(TestCoreTask):
     def test_dependency_failure_reason_survives_gate_tail(self):
         self.seed("failed", state="blocked", disp="main")
         self.seed("in-gate", state="done", disp="main")
-        self.state.set_fields("in-gate", after="failed")
+        self.state.set_fields("in-gate", after="failed", in_gate=True)  # 门内：排队语义
         self.assertEqual(self.svc.stop_after_failed("failed"), ["in-gate"])
         self.assertTrue(self.state.get("in-gate")["pending_cancel"])
         self.state.transition("in-gate", "verify_failed")
@@ -249,7 +271,7 @@ class TestNestedDispatch(TestCoreTask):
     def test_explicit_cancel_overrides_pending_dependency_reason(self):
         self.seed("failed", state="blocked", disp="main")
         self.seed("in-gate", state="done", disp="main")
-        self.state.set_fields("in-gate", after="failed")
+        self.state.set_fields("in-gate", after="failed", in_gate=True)  # 门内：排队语义
         self.svc.stop_after_failed("failed")
         self.svc.cancel("in-gate", self.root)
         self.state.transition("in-gate", "verify_failed")
@@ -329,6 +351,7 @@ class TestCancel(TestCoreTask):
 
     def test_done_task_pends_and_children_still_cascade(self):  # Req: F11
         self.seed("t1", state="done", worker="s-w1", env="/envs/t1")
+        self.state.set_fields("t1", in_gate=True)  # 门内 done：只排队（F36 R2 直结仅限驻留）
         self.seed("t2", disp="s-w1", worker="s-w2", env="/envs/t2")
         n = self.svc.cancel("t1", self.root)
         self.assertEqual(n["cancelled"], 1)  # done 只排队，下级照常级联

@@ -128,6 +128,27 @@ class State:
             self._persist()
             return True
 
+    def settle_parked_cancel(self, tid, cancel_reason=None) -> bool:
+        """F36 R2：驻留 done（门已走完，in_gate=False）的排队取消直结 cancelled。
+
+        verify_overrun/锚缺失驻留后门尾不再可达——排队必悬挂至重启重跑整轮
+        verify，取消方直结防悬挂。在门内（in_gate=True）不直结：门尾消费
+        语义（F-4）不变。
+        """
+        with self._lock:
+            t = self._tasks[tid]
+            if t["state"] != EV_DONE or t.get("in_gate"):
+                return False
+            t.pop("pending_cancel", None)
+            t.pop("pending_cancel_reason", None)
+            t["state"] = EV_CANCELLED
+            t["in_gate"] = False
+            t["updated"] = time.time()
+            if cancel_reason:
+                t["cancel_reason"] = cancel_reason
+            self._persist()
+            return True
+
     def clear_gate_latches(self):
         """启动清残留门闩：门线程不跨进程存活，kill -9 残闩是撒谎闩（二批决策）。"""
         with self._lock:
