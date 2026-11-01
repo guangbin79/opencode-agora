@@ -28,8 +28,9 @@ _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
 _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                           "reopened", "blocked"})  # 拉取面＝在飞非冻结（F25 修正；牌活性二道守卫）
 _DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/wiki_write/"
-                        "task_create/task_dispatch/wait；task_update/task_cancel 仅限己建子任务；"
-                        "需登记 verify→post(kind=verify) 提案验收命令"}
+                        "task_create/task_dispatch/wait；task_cancel 仅限己建子任务；"
+                        "task_update/验收命令写面全局 worker 角色永拒"
+                        "（建单缺省继承父任务配置）——需登记 verify→post(kind=verify) 提案"}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -125,7 +126,9 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("verify_cmd 须为字符串")
             if rq is not None and not isinstance(rq, str):  # 同 verify_cmd 口径
                 raise ValueError("req_id 须为字符串")
-            return {"task": app.task.create(body["goal"], body["project_dir"],
+            pd = (body.get("project_dir") if role == "worker"  # F37：worker 缺省继承
+                  else body["project_dir"])  # 受信角色仍必填（缺即 400）
+            return {"task": app.task.create(body["goal"], pd,
                                             body.get("after"), token,
                                             title=body.get("title"),
                                             target_branch=body.get("target_branch"),

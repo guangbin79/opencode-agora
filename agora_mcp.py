@@ -27,26 +27,31 @@ _TID = {"type": "string",
 _TOOLS = [
     {"name": "task_create", "description": "登记任务（todo）（dispatcher/root；worker 创建嵌套子任务）",
      "inputSchema": {"type": "object", "properties": {
-         "goal": _STR, "project_dir": _STR,
+         "goal": _STR,
+         "project_dir": {"type": "string",
+                         "description": "项目仓根（dispatcher/root 必填；worker 缺省"
+                                        "继承父任务仓，指定他径拒）"},
          "after": {"type": "string", "description": "前驱任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，B7 链）"},
          "target_branch": {"type": "string",
-                           "description": "合入目标分支（外部工作流；缺省＝仓默认支）"},
+                           "description": "合入目标分支（外部工作流；缺省＝仓默认支；"
+                                          "worker 不可指定——缺省继承父任务）"},
          "verify_cmd": {"type": "string",
-                        "description": "验收命令：传入即建单时原子登记（推荐，"
-                                       "否则 task_dispatch 硬闸拒派）"},
+                        "description": "验收命令：传入即建单时原子登记（仅 dispatcher/root；"
+                                       "worker 拒——子任务缺省继承父任务验证配置）"},
          "verify_pending": {"type": "boolean",
                             "description": "探索路豁免旗：true＝未登记 verify 也可先派发，"
-                                           "worker 提案后 task_update 登记"},
+                                           "worker 提案后由主会话派发方/root 登记"},
          "req_id": {"type": "string",
                     "description": "req 编号领取（如 F34）：服务端查重发放，重复/在案号拒"
                                    "（报因含已发任务指针）——服务端分配＝权威号源，worker 从"
                                    "任务页取号；不阻止绕过（先例约束）"},
          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
-         "required": ["goal", "project_dir"]}},
+         "required": ["goal"]}},
     {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
      "inputSchema": {"type": "object", "properties": {"task": _TID},
                      "required": ["task"]}},
-    {"name": "task_update", "description": "登记 verify 命令（仅派发方/root；worker 仅限己建子任务）",
+    {"name": "task_update", "description": "登记 verify 命令（仅主会话派发方/root；"
+                                           "全局 worker 角色永拒——验收授权已收回）",
      "inputSchema": {"type": "object", "properties": {
          "task": _TID, "verify_cmd": _STR},
          "required": ["task", "verify_cmd"]}},

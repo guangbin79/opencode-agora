@@ -173,6 +173,11 @@ class HttpdTest(unittest.TestCase):
         self.assertEqual(st, 200)
         return r["task"]
 
+    def test_task_create_missing_project_dir_rejected_for_root(self):  # Req: F37
+        st, r = call(self.port, "POST", "/task_create", {"goal": "g"}, self.root)
+        self.assertEqual(st, 400)
+        self.assertIn("project_dir", r["error"])  # 受信角色仍必填；worker 走继承
+
     def test_target_branch_flows_to_dispatch(self):  # Req: gt-132747
         tid = self.create_task({"goal": "g", "project_dir": "/repo",
                                 "target_branch": "issue/7"})
@@ -409,12 +414,14 @@ class TestNestedDispatchLoop(HttpdTest):
         parent_token = self.dispatch_task(parent)
         parent_sid = self.app.state.get(parent)["worker_sid"]
         st, r = call(self.port, "POST", "/task_create",
-                     {"goal": "child", "project_dir": "/repo",
-                      "verify_cmd": "true"}, parent_token)
+                     {"goal": "child"}, parent_token)  # F37：缺省继承父仓与验证配置
         self.assertEqual(st, 200)
         child = r["task"]
         self.assertEqual(self.app.state.get(child)["dispatcher_sid"], parent_sid)
         self.assertEqual(self.app.state.get(child)["chain_depth"], 2)
+        self.assertEqual(self.app.state.get(child)["project_dir"], "/repo")
+        self.assertEqual(self.app.state.get(child)["verify"],
+                         self.app.state.get(parent)["verify"])
         st, r = call(self.port, "POST", "/task_dispatch",
                      {"task": child}, parent_token)
         self.assertEqual(st, 200)
@@ -453,8 +460,7 @@ class TestNestedDispatchLoop(HttpdTest):
         parent_token = self.dispatch_task(parent)
         old_sid = self.app.state.get(parent)["worker_sid"]
         st, r = call(self.port, "POST", "/task_create",
-                     {"goal": "child", "project_dir": "/repo",
-                      "verify_cmd": "true"}, parent_token)
+                     {"goal": "child"}, parent_token)  # F37：缺省继承
         self.assertEqual(st, 200)
         child = r["task"]
         st, _ = call(self.port, "POST", "/wiki_read",
