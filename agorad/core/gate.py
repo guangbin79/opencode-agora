@@ -271,6 +271,9 @@ class Gate:
                 r = self._gitx.head(integration)
                 self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
                 self._audit(tid, "rebased", **{"from": e, "to": r})
+            seed = self._gitx.seed_submodules(integration, target)  # Req: ag-0d2daa
+            if seed:  # ag-0d2daa：推进后按任务 pin 预置（含 gitlink bump 的任务 pin），留痕
+                self._audit(tid, "submodule_seed", note=seed)
             irc, iout = runner(integration, cmd)
             if irc == 124:  # F36 集成超硬顶：同款分类路由，目标分支未改动
                 self._audit(tid, "verify_overrun")
@@ -334,6 +337,33 @@ class Gate:
         self._audit(tid, "merged", commit=t.get("commit"), **extra)
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
+        self._push_after_merge(tid)
+
+    def _push_after_merge(self, tid):  # Req: ag-0d2daa
+        """ag-0d2daa 服务侧 origin 同步：merged 落账后推目标支（含缺省支）。
+
+        幂等（崩溃重排补终态路径也推，已同步静默）；非 ff 被拒/失败仅告警留痕
+        ——不 force、不回滚本地合并、不影响已落 merged 终态；无 origin 零动作。
+        全兜底：push 链任何异常不掩盖门结果。
+        """
+        try:
+            t = self._state.get(tid)
+            branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
+            r = self._gitx.push(t["project_dir"], branch)
+            if r == "non-ff":
+                self._audit(tid, "push_rejected", branch=branch)
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"origin push 被拒（non-ff）——本地合并保持不动、不 force，"
+                    f"请人工核对远端: refs/heads/{branch}")
+            elif r == "failed":
+                self._audit(tid, "push_failed", branch=branch)
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"origin push 失败（不影响任务终态，本地合并保持不动）: "
+                    f"refs/heads/{branch}")
+        except Exception as e:
+            self._audit(tid, "push_failed", note=str(e)[:200])
 
     def _non_ff(self, tid, branch, before, conflict=False):
         """F32 同步冲突或最终推进窄竞态遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""

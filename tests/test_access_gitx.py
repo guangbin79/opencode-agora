@@ -450,6 +450,144 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(exclude.read_bytes(),
                          b"*.log\n# \xd6\xd0\xce\xc4\n.req-gate/\n")
 
+    # ---- ag-0d2daa gate env 供给：submodule 预置＋服务侧 push（ag-0d2daa） ----
+
+    _SUB_URL = "ssh://git@127.0.0.1:1/t/sub.git"  # 无凭据假源：一旦真拉取即秒拒
+
+    def _init_with_submodule(self):
+        """主仓＋libs/sub（.gitmodules url＝无凭据 ssh 假源，主检出本地填充）——
+        镜像 gate 无凭据视角。返回 (main, sub, pin1, pin2)。"""
+        sub = self.tmp / "subsrc"
+        sub.mkdir()
+        self._git(["init", "-b", "master"], cwd=sub)
+        self._git(["config", "user.email", "t@t"], cwd=sub)
+        self._git(["config", "user.name", "t"], cwd=sub)
+        (sub / "api.h").write_text("v1\n")
+        self._git(["add", "-A"], cwd=sub)
+        self._git(["commit", "-m", "c1"], cwd=sub)
+        pin1 = self._head(sub)
+        (sub / "impl.h").write_text("impl\n")
+        self._git(["add", "-A"], cwd=sub)
+        self._git(["commit", "-m", "c2"], cwd=sub)
+        pin2 = self._head(sub)
+        main = self.tmp / "projm"
+        main.mkdir()
+        self._git(["init", "-b", "master"], cwd=main)
+        self._git(["config", "user.email", "t@t"], cwd=main)
+        self._git(["config", "user.name", "t"], cwd=main)
+        (main / "app.txt").write_text("app\n")
+        self._git(["add", "-A"], cwd=main)
+        self._git(["commit", "-m", "m1"], cwd=main)
+        self._git(["-c", "protocol.file.allow=always", "submodule", "add",
+                   str(sub), "libs/sub"], cwd=main)
+        self._git(["config", "--file", ".gitmodules",
+                   "submodule.libs/sub.url", self._SUB_URL], cwd=main)
+        self._git(["add", ".gitmodules"], cwd=main)
+        self._git(["commit", "-m", "m2"], cwd=main)
+        self._git(["submodule", "init"], cwd=main)  # 主检出本地填充（有凭据常态模拟）
+        self._git(["config", "submodule.libs/sub.url", str(sub)], cwd=main)
+        self._git(["-c", "protocol.file.allow=always", "submodule", "update"], cwd=main)
+        self._git(["config", "submodule.libs/sub.url", self._SUB_URL], cwd=main)
+        return main, sub, pin1, pin2
+
+    def test_seed_submodules_populates_env_at_pin(self):  # Req: ag-0d2daa
+        """检出后 submodule 非空：env 填至 gitlink pin，verify 自带 submodule 句
+        成 no-op（ssh 假 url 下零拉取）；主检出 config 与工作区零被动。"""
+        main, sub, pin1, pin2 = self._init_with_submodule()
+        env = self.gx.build_env(main, "gt-s1")
+        report = self.gx.seed_submodules(env, main)
+        self.assertIn(f"seeded libs/sub@{pin2[:12]}", report)
+        self.assertTrue((Path(env) / "libs" / "sub" / "impl.h").exists())
+        self.assertEqual(self._head(Path(env) / "libs" / "sub"), pin2)
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
+        self._git(["submodule", "update", "--init", "--recursive"], cwd=env)  # no-op 不炸
+        self.assertEqual(self._git(["config", "submodule.libs/sub.url"],
+                                   cwd=main).stdout.strip(), self._SUB_URL)  # url 未被改写
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=main).stdout, "")
+
+    def test_seed_submodules_detached_integration_tree(self):  # Req: ag-0d2daa
+        """gate 集成树（detached worktree）同机制覆盖：pin 落位、树全净。"""
+        main, sub, pin1, pin2 = self._init_with_submodule()
+        integ = self.tmp / "integ"
+        self._git(["worktree", "add", "--detach", str(integ), "HEAD"], cwd=main)
+        report = self.gx.seed_submodules(str(integ), main)
+        self.assertIn("seeded libs/sub", report)
+        self.assertEqual(self._head(integ / "libs" / "sub"), pin2)
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=integ).stdout, "")
+
+    def test_seed_submodules_skips_pin_missing_in_reference(self):  # Req: ag-0d2daa
+        """参考源缺 pin：跳过留报告不阻断、不落残树（后续 verify 如实显症状）。"""
+        main, sub, pin1, pin2 = self._init_with_submodule()
+        (sub / "new.h").write_text("v3\n")
+        self._git(["add", "-A"], cwd=sub)
+        self._git(["commit", "-q", "-m", "c3"], cwd=sub)
+        pin3 = self._head(sub)  # 参考源对象库此后不再更新＝缺失的新 pin
+        self._git(["update-index", "--add", "--cacheinfo",
+                   f"160000,{pin3},libs/sub"], cwd=main)
+        self._git(["commit", "-q", "-m", "bump"], cwd=main)
+        env = self.gx.build_env(main, "gt-s2")
+        report = self.gx.seed_submodules(env, main)
+        self.assertIn(f"skipped libs/sub: pin {pin3[:12]} 不在参考源", report)
+        self.assertFalse((Path(env) / "libs" / "sub" / "api.h").exists())  # 树未被半拉子填充
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
+
+    def test_seed_submodules_reference_covers_unreachable_pin(self):  # Req: ag-0d2daa
+        """pin 仅存参考源对象库（refs 不可达）：--reference alternates 接住。"""
+        main, sub, pin1, pin2 = self._init_with_submodule()
+        mod = main / "libs" / "sub"
+        self._git(["checkout", "--detach", "-q"], cwd=mod)
+        (mod / "extra.h").write_text("x\n")
+        self._git(["add", "-A"], cwd=mod)
+        self._git(["-c", "user.email=t@t", "-c", "user.name=t",
+                   "commit", "-q", "-m", "orphan"], cwd=mod)
+        pin3 = self._head(mod)
+        self._git(["checkout", "-q", pin2], cwd=mod)  # 还原主检出位（对象库留 pin3）
+        self._git(["update-index", "--add", "--cacheinfo",
+                   f"160000,{pin3},libs/sub"], cwd=main)
+        self._git(["commit", "-q", "-m", "bump-orphan"], cwd=main)
+        env = self.gx.build_env(main, "gt-s3")
+        report = self.gx.seed_submodules(env, main)
+        self.assertIn(f"seeded libs/sub@{pin3[:12]}", report)
+        self.assertTrue((Path(env) / "libs" / "sub" / "extra.h").exists())
+        self.assertEqual(self._git(["status", "--porcelain"], cwd=env).stdout, "")
+
+    def test_seed_submodules_no_gitlinks_zero_action(self):  # Req: ag-0d2daa
+        env = self.gx.build_env(self.repo, "gt-s4")
+        self.assertEqual(self.gx.seed_submodules(env, self.repo), "")
+
+    def test_push_ok_advances_origin(self):  # Req: ag-0d2daa
+        origin = self.tmp / "origin.git"
+        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
+        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
+        self._commit(self.repo, {"src.py": "v2"}, "advance")
+        self.assertEqual(self.gx.push(str(self.repo), "main"), "ok")
+        self.assertEqual(self._head(origin), self._head(self.repo))
+        self.assertEqual(self.gx.push(str(self.repo), "main"), "ok")  # 幂等：已同步仍 ok
+
+    def test_push_non_ff_classified_not_forced(self):  # Req: ag-0d2daa
+        origin = self.tmp / "origin.git"
+        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
+        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
+        self._commit(self.repo, {"src.py": "v2"}, "advance")
+        self.assertEqual(self.gx.push(str(self.repo), "main"), "ok")
+        peer = self.tmp / "peer"
+        self._git(["clone", "-q", str(origin), str(peer)], cwd=self.tmp)
+        self._git(["config", "user.email", "t@t"], cwd=peer)
+        self._git(["config", "user.name", "t"], cwd=peer)
+        self._commit(peer, {"src.py": "v3"}, "peer advance")
+        self._git(["push", "-q", "origin", "main"], cwd=peer)  # 远端被第三方推进
+        local = self._commit(self.repo, {"src.py": "v2-local"}, "local advance")
+        self.assertEqual(self.gx.push(str(self.repo), "main"), "non-ff")
+        self.assertEqual(self._head(self.repo), local)  # 本地合并未被 force 回滚
+
+    def test_push_none_without_origin(self):  # Req: ag-0d2daa
+        self.assertEqual(self.gx.push(str(self.repo), "main"), "none")
+
+    def test_push_failure_classified(self):  # Req: ag-0d2daa
+        self._git(["remote", "add", "origin", str(self.tmp / "nope.git")],
+                  cwd=self.repo)
+        self.assertEqual(self.gx.push(str(self.repo), "main"), "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

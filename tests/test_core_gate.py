@@ -51,6 +51,8 @@ class FakeGitx:
         self.rebase_result = "conflict"  # F32 缺省冲突：既有 non-ff 用例保持弹回口径
         self.rebase_calls = []
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
+        self.push_calls, self.push_result = [], "ok"  # Req: ag-0d2daa
+        self.seed_calls, self.seed_result = [], ""  # ag-0d2daa 缺省零 gitlink＝空报告
 
     def rebase_onto(self, env_dir, integration):
         self.rebase_calls.append((env_dir, integration))
@@ -111,6 +113,14 @@ class FakeGitx:
     def head(self, repo_dir, branch=None):
         self.head_calls.append((repo_dir, branch))
         return self.head_shas.get(repo_dir, self.head_sha)
+
+    def push(self, repo_dir, branch):  # Req: ag-0d2daa
+        self.push_calls.append((repo_dir, branch))
+        return self.push_result
+
+    def seed_submodules(self, tree_dir, source_dir):
+        self.seed_calls.append((tree_dir, source_dir))
+        return self.seed_result
 
 
 class FakeHealth:
@@ -743,6 +753,79 @@ class TestGateRun(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")  # merged 二择：closed
         self.assertNotIn("pending_cancel", t)  # 不许悬挂
+
+
+class TestGateSupply(TestCoreGate):
+    """ag-0d2daa gate env 供给：集成树 submodule 预置＋merged 后服务侧 origin push。"""
+
+    def test_gate_seeds_integration_before_verify(self):  # Req: ag-0d2daa
+        self.gx.seed_result = "seeded libs/sub@0123456789ab"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.gx.seed_calls,
+                         [(f"{self.env}__gate", "/repo")])  # 推进后按任务 pin 预置
+        ev = [e for e in self.store.read_events("t1") if e["event"] == "submodule_seed"]
+        self.assertEqual([e["note"] for e in ev], ["seeded libs/sub@0123456789ab"])
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 供给不碍门结果
+
+    def test_gate_seed_silent_when_zero_gitlinks(self):  # Req: ag-0d2daa
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.gx.seed_calls, [(f"{self.env}__gate", "/repo")])
+        self.assertEqual([e for e in self.store.read_events("t1")
+                          if e["event"] == "submodule_seed"], [])  # 零 gitlink 无审计行
+
+    def test_merged_pushes_default_branch(self):  # Req: ag-0d2daa
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.gx.push_calls, [("/repo", "main")])  # 服务侧 push 缺省支
+
+    def test_merged_pushes_named_target_branch(self):  # Req: ag-0d2daa
+        self.seed(tb="issue/7-fix")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.gx.push_calls, [("/repo", "issue/7-fix")])
+
+    def test_push_nonff_warns_dispatcher_keeps_merged(self):  # Req: ag-0d2daa
+        self.gx.push_result = "non-ff"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 终态不受 push 拒影响
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("push_rejected", names)
+        notes = [m["body"] for m in self.store.read_messages()
+                 if m["to"] == "disp1" and "non-ff" in m["body"]]
+        self.assertEqual(len(notes), 1)  # 告警恰一次，不 force 文案在场
+        self.assertIn("不 force", notes[0])
+
+    def test_push_failed_notifies_keeps_merged(self):  # Req: ag-0d2daa
+        self.gx.push_result = "failed"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertIn("push_failed", [e["event"] for e in self.store.read_events("t1")])
+        self.assertEqual(len([m for m in self.store.read_messages()
+                              if m["to"] == "disp1" and "push 失败" in m["body"]]), 1)
+
+    def test_push_none_silent(self):  # Req: ag-0d2daa
+        self.gx.push_result = "none"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual([e for e in self.store.read_events("t1")
+                          if e["event"].startswith("push_")], [])
+        self.assertEqual([m for m in self.store.read_messages()
+                          if m["to"] == "disp1" and "push" in m["body"]], [])
+
+    def test_push_exception_never_breaks_merged(self):  # Req: ag-0d2daa
+        def boom(repo_dir, branch):
+            raise RuntimeError("network unreachable")
+        self.gx.push = boom
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 全兜底：异常不废门结果
+        ev = [e for e in self.store.read_events("t1") if e["event"] == "push_failed"]
+        self.assertEqual([e["note"] for e in ev], ["network unreachable"])
 
 
 class TestGateVerifyOverrun(TestCoreGate):

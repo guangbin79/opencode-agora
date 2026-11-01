@@ -36,6 +36,11 @@ class FakeGitx:
     def remove_env(self, env_dir):
         self.removed.append(env_dir)
 
+    def seed_submodules(self, tree_dir, source_dir):  # Req: ag-0d2daa
+        self.seeds = getattr(self, "seeds", [])
+        self.seeds.append((tree_dir, source_dir))
+        return ""
+
 
 class FakeOc:
     def __init__(self):
@@ -137,6 +142,28 @@ class TestFuses(TestCoreTask):
         self.assertEqual(self.state.get(tid)["state"], "todo")
         self.assertEqual(self.gitx.removed, [f"/envs/{tid}"])  # 半途环境即回收
         self.assertEqual(self.oc.sessions, [])  # 无会话无凭据
+
+    def test_dispatch_seeds_submodules_on_fresh_env(self):  # Req: ag-0d2daa
+        tid = self.dispatchable()
+        self.svc.dispatch(tid, self.root)
+        self.assertEqual(self.gitx.seeds, [(f"/envs/{tid}", "/repo")])  # 检出后即预置
+
+    def test_dispatch_seed_failure_rejects_and_reclaims_env(self):  # Req: ag-0d2daa
+        tid = self.dispatchable()
+        def boom(tree_dir, source_dir):
+            raise RuntimeError("git submodule update: bad object")
+        self.gitx.seed_submodules = boom
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("submodule_seed", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "todo")  # 拒绝零副作用
+        self.assertEqual(self.gitx.removed, [f"/envs/{tid}"])  # 不交残树给 worker
+
+    def test_dispatch_env_reuse_skips_seeding(self):  # Req: ag-0d2daa
+        self.seed("t9", state="blocked", env="/envs/old", disp="main")
+        self.svc.dispatch("t9", self.root)
+        self.assertEqual(getattr(self.gitx, "seeds", []) , [])  # 复用 env 不重置 worker 现场
+        self.assertEqual(self.gitx.built, [])
 
     def test_b7_after_not_terminal_rejected_then_passes(self):  # Req: F3
         a = self.dispatchable("A")

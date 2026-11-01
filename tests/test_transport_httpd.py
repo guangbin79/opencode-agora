@@ -46,6 +46,19 @@ class FakeGitx:
         (env / ".review-loop").mkdir(parents=True)
         return str(env)
 
+    def seed_submodules(self, tree_dir, source_dir):  # Req: ag-0d2daa
+        self.seeds = getattr(self, "seeds", [])
+        self.seeds.append((tree_dir, source_dir))
+        return ""
+
+    def symref(self, repo_dir):
+        return "main"
+
+    def push(self, repo_dir, branch):
+        self.pushes = getattr(self, "pushes", [])
+        self.pushes.append((repo_dir, branch))
+        return "none"
+
     def remove_env(self, env_dir):
         self.removed.append(env_dir)
         shutil.rmtree(env_dir, ignore_errors=True)

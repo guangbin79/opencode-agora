@@ -19,6 +19,8 @@ _RAND = string.ascii_lowercase + string.digits
 # rmtree 撞写重试参数：worker 评审环进程合并后仍可能往 env/.review-loop/ 写文件
 _RMT_TRIES = 4
 _RMT_WAIT = 0.5
+# ag-0d2daa push 网络上界：服务侧同步不得挂死串行门（非 ff 拒/无凭据失败均秒级，300s 已宽）
+_PUSH_TIMEOUT = 300
 
 
 class Gitx:
@@ -30,8 +32,9 @@ class Gitx:
         return re.sub(r"\.{2,}", ".", s).lstrip(".-") or "repo"
 
     @staticmethod
-    def _git(args, cwd, check=True):
-        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    def _git(args, cwd, check=True, timeout=None):
+        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                           text=True, timeout=timeout)
         if check and r.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
         return r
@@ -130,6 +133,59 @@ class Gitx:
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)
 
+    def seed_submodules(self, tree_dir: str, source_dir: str) -> str:  # Req: ag-0d2daa
+        """ag-0d2daa 检出后 submodule 预置：HEAD 树 gitlink pin 级本地填充，零网络零凭据。
+
+        参考源＝source_dir 主检出的同名 submodule 检出（--reference alternates
+        覆盖 pin 不在源 refs 可达面的场景）。url 用一次性 `-c` 覆写——worktree
+        里 `git config` 落共享 config 会改写主检出（实证），禁用；`protocol.file`
+        放开为 submodule 间接 clone 本地路径的必要位。源缺 pin／缺 .gitmodules
+        映射：跳过留报告不阻断其余；git 机械病如实上抛。返回人读报告（空串＝
+        无 gitlink 零动作）；只铺顶层（libs/* 级），嵌套层归 verify 自理。
+        """
+        tree = Path(tree_dir).resolve()
+        src_root = Path(source_dir).resolve()
+        entries = []
+        for line in self._git(["ls-files", "--stage"], cwd=tree).stdout.splitlines():
+            mode, sha, _stage, path = line.split(None, 3)  # <mode> <sha> <stage>\t<path>
+            if mode == "160000":
+                entries.append((path, sha))
+        if not entries:
+            return ""
+        if not (tree / ".gitmodules").is_file():
+            return ("skipped all: gitlink 无 .gitmodules 映射（"
+                    + ", ".join(p for p, _ in entries) + "）")
+        names = {}
+        r = self._git(["config", "--file", ".gitmodules", "--get-regexp",
+                       r"^submodule\..*\.path$"], cwd=tree, check=False)
+        for line in r.stdout.splitlines():
+            key, _, val = line.partition(" ")
+            names[val.strip()] = key[len("submodule."):-len(".path")]
+        report = []
+        for path, sha in entries:
+            name = names.get(path)
+            if not name:
+                report.append(f"skipped {path}: 无 .gitmodules 映射")
+                continue
+            src = src_root / path
+            if not (src / ".git").exists():
+                report.append(f"skipped {path}: 参考源未检出（{src}）")
+                continue
+            if self._git(["cat-file", "-e", f"{sha}^{{commit}}"],
+                         cwd=src, check=False).returncode != 0:
+                report.append(f"skipped {path}: pin {sha[:12]} 不在参考源")
+                continue
+            self._git(["-c", f"submodule.{name}.url={src}",
+                       "-c", "protocol.file.allow=always",
+                       "submodule", "update", "--reference", str(src),
+                       "--", path], cwd=tree)
+            got = self._git(["rev-parse", "HEAD"], cwd=tree / path).stdout.strip()
+            if got != sha:  # 预检已过仍错位＝机械病，宁抛不交残树
+                raise RuntimeError(
+                    f"submodule {path} 预置校验败：HEAD@{got[:12]} ≠ pin {sha[:12]}")
+            report.append(f"seeded {path}@{sha[:12]}")
+        return "; ".join(report)
+
     def merge_ff(self, env_dir: str, target: str, branch: str = None) -> str:
         src = Path(env_dir).resolve().name
         sha = self._git(["rev-parse", src], cwd=target).stdout.strip()
@@ -161,6 +217,26 @@ class Gitx:
             raise RuntimeError(f"git merge --ff-only {src}: rc={r.returncode}, "
                                f"head@{new_head} vs expected@{sha}: {detail}")
         return "ok"  # head==sha（目标支已在提交上）亦达此：幂等推进
+
+    def push(self, repo_dir: str, branch: str) -> str:  # Req: ag-0d2daa
+        """ag-0d2daa 服务侧 origin 同步：推 refs/heads/<branch>（只此一引用，不 force）。
+
+        幂等（已同步＝up-to-date 仍 "ok"）；无 origin remote＝"none"（本地仓
+        静默）；被拒输出含 non-fast-forward/fetch first＝"non-ff"；其余失败
+        （含超时）＝"failed"。只报告不重试，告警与终态语义归调用方。
+        """
+        if self._git(["remote", "get-url", "origin"],
+                     cwd=repo_dir, check=False).returncode != 0:
+            return "none"
+        try:
+            r = self._git(["push", "origin", f"refs/heads/{branch}"],
+                          cwd=repo_dir, check=False, timeout=_PUSH_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return "failed"
+        if r.returncode == 0:
+            return "ok"
+        out = (r.stderr or "") + (r.stdout or "")
+        return "non-ff" if ("non-fast-forward" in out or "fetch first" in out) else "failed"
 
     def rebase_onto(self, env_dir: str, integration: str) -> str:
         """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交
