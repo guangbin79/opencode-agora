@@ -40,7 +40,8 @@ _TOOLS = [
                                        "worker 拒——子任务缺省继承父任务验证配置）"},
          "verify_pending": {"type": "boolean",
                             "description": "探索路豁免旗：true＝未登记 verify 也可先派发，"
-                                           "worker 提案后由主会话派发方/root 登记"},
+                                           "worker 提案后由主会话派发方/root 登记"
+                                           "（worker 建单不可自旗——缺省继承父任务配置）"},
          "req_id": {"type": "string",
                     "description": "req 编号领取（如 F34）：服务端查重发放，重复/在案号拒"
                                    "（报因含已发任务指针）——服务端分配＝权威号源，worker 从"

@@ -568,12 +568,14 @@ class TestVerifyGate(TestCoreTask):
         self.assertEqual(t["goal"], "my goal")
         self.assertEqual(t["chain_depth"], 1)
 
-    def test_boot_carries_opening_and_shell_contract(self):  # Req: F13
+    def test_boot_carries_opening_and_shell_contract(self):  # Req: F13/F37
         self.dispatched_pair()
         boot = self.oc.sessions[-1][2]
         self.assertIn("开工: 进 env 后首个动作 post(kind=note", boot)
         self.assertIn("shell: mcp_shell（shell_execute）按 argv 数组执行", boot)
         self.assertIn("ALLOW_COMMANDS", boot)
+        self.assertIn("全局 worker 角色永拒", boot)  # F37 验收录回文案
+        self.assertIn("缺省继承父任务", boot)  # F37 继承语义文案
 
     def test_redispatch_revokes_old_token(self):  # Req: F3
         tid, disp, old = self.dispatched_pair()
@@ -651,6 +653,27 @@ class TestWorkerScope(TestCoreTask):
         with self.assertRaises(Rejected) as cm:
             self.svc.create("child", None, None, token, target_branch="issue/7")
         self.assertIn("target_branch", str(cm.exception))
+
+    def test_worker_child_target_branch_inherits_parent(self):  # Req: F37
+        parent, token = self.parent_with_worker()  # 父带 pin 合并策略才算继承
+        self.state.set_fields(parent, target_branch="issue/7")
+        child = self.svc.create("child", None, None, token)
+        self.assertEqual(self.state.get(child)["target_branch"], "issue/7")
+        self.svc.dispatch(child, token)  # 合并/push 落点随父，非默认支漂移
+        self.assertEqual(self.state.get(child)["state"], "dispatched")
+
+    def test_worker_create_verify_pending_rejected(self):  # Req: F37
+        _, token = self.parent_with_worker()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", None, None, token, verify_pending=True)
+        self.assertIn("verify_pending", str(cm.exception))
+
+    def test_worker_create_with_closed_parent_rejected(self):  # Req: F37
+        self.seed("closed", state="closed", disp="main", worker="w1")
+        token = self.auth.issue("w1", "worker")  # merged/closed 残牌不吊销（既有语义）
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", None, None, token)
+        self.assertIn("现役", str(cm.exception))  # 终态父不构成继承上下文
 
     def test_worker_create_without_parent_context_rejected(self):  # Req: F37
         outsider = self.auth.issue("outsider", "worker")

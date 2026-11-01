@@ -51,10 +51,13 @@ class TaskService:
         sid, role = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
-        if role == "worker":  # F37 作用域：验收写面拒＋仓/合并策略强制继承
+        if role == "worker":  # F37 作用域：验收写面/豁免旗拒＋仓/合并策略强制继承
             if verify_cmd is not None:
                 self._reject(tid, sid, "worker 不得登记验收命令——主会话派发方或 root "
                                        "task_create/task_update 登记", ev=EV_DENIED)
+            if verify_pending:
+                self._reject(tid, sid, "verify_pending 豁免旗由派发方持有——worker 建单"
+                                       "缺省继承父任务配置", ev=EV_DENIED)
             if target_branch is not None:
                 self._reject(tid, sid, "worker 不得改变后代合并/push 策略"
                                        "（target_branch）——缺省继承父任务", ev=EV_DENIED)
@@ -63,6 +66,7 @@ class TaskService:
                                        f"（{parent['project_dir']}），指定他径拒",
                              ev=EV_DENIED)
             project_dir = parent["project_dir"]
+            target_branch = parent["target_branch"]
         if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
             self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
         if verify_cmd is not None and not verify_cmd.strip():
@@ -174,14 +178,14 @@ class TaskService:
     def _worker_parent(self, tid, sid, role):
         """F37 worker 建单作用域（全局角色判定）：验收录回＋仓与合并策略强制继承。
 
-        父任务＝该 worker 现役任务（worker_sid==sid 取最近创建）；verify_cmd 写面
-        一律拒（局部 dispatcher 归属不构成授权）；project_dir 显式他径拒、target_branch
-        显式传入拒。返回父任务行（非 worker 角色原样放行，路径不变）。
+        父任务＝该 worker 现役任务（worker_sid==sid、非冻结——merged/closed 残牌
+        不算上下文，防终态父永续继承式建单管线），取最近创建；verify_cmd 写面一律拒
+        （局部 dispatcher 归属不构成授权）。返回父任务行（非 worker 角色原样放行）。
         """
         if role != "worker":
             return None
         parent = max((t for t in self._state.snapshot()["tasks"].values()
-                      if t.get("worker_sid") == sid),
+                      if t.get("worker_sid") == sid and t["state"] not in _FROZEN),
                      key=lambda t: t["created"], default=None)
         if parent is None:
             self._reject(tid, sid, "worker 建单须有现役任务上下文（继承父仓与验证配置）",

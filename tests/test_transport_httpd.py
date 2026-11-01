@@ -25,7 +25,11 @@ from tests.stub_opencode import VERSION, StubOpencode
 SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 
 
+RUNNER_CALLS = []  # (cwd, cmd) 门体验证实调记录（验收④取证用）
+
+
 def ok_runner(cwd, cmd):
+    RUNNER_CALLS.append((cwd, cmd))
     return 0, "pass"
 
 
@@ -410,6 +414,7 @@ class TestHttpSmoke(HttpdTest):
 
 class TestNestedDispatchLoop(HttpdTest):
     def test_worker_nested_child_result_unblocks_parent_done(self):
+        RUNNER_CALLS.clear()
         parent = self.create_task({"goal": "parent", "project_dir": "/repo"})
         parent_token = self.dispatch_task(parent)
         parent_sid = self.app.state.get(parent)["worker_sid"]
@@ -441,6 +446,8 @@ class TestNestedDispatchLoop(HttpdTest):
         self.assertEqual(r, {"result": "accepted"})
         self.assertTrue(wait_until(
             lambda: self.app.state.get(child)["state"] == "closed"))
+        self.assertTrue(any(cwd.endswith(f"/envs/{child}") and cmd == "true"
+                            for cwd, cmd in RUNNER_CALLS))  # 门跑继承的 verify_cmd
         st, r = call(self.port, "POST", "/check_mail", {}, parent_token)
         self.assertEqual(st, 200)
         results = [m for m in r["messages"] if m["kind"] == "result"]
@@ -648,10 +655,11 @@ class TestParamContract(HttpdTest):
         self.assertEqual(st, 403)
         self.assertIn("check_mail", r["error"])  # 可用面指引
 
-    def test_worker_403_hint_points_to_verify_proposal_channel(self):  # Req: F13
+    def test_worker_403_hint_points_to_verify_proposal_channel(self):  # Req: F13/F37
         wtok = self.app.auth.issue("w9", "worker")
         st, r = call(self.port, "POST", "/board", {}, wtok)
         self.assertIn("post(kind=verify)", r["error"])  # verify 提案专用通道
+        self.assertIn("全局 worker 角色永拒", r["error"])  # F37 验收录回文案
         self.assertNotIn("question", r["error"])  # 不再指问询通道
 
     def test_unauthenticated_bad_body_400_without_audit(self):  # Req: F13
