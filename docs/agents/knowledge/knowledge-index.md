@@ -6,13 +6,13 @@
 
 - **甲案跨仓**：耦合仓顺序编排（B7 after:），后仓经 ../ 见前仓已合并形态——无复合环境
 - **verify 双路**：预登记（快速路）＋ worker 回填（探索路）并存
-- **verify 双顶**（F36）：软顶=AGORA_VERIFY_TIMEOUT 提醒派发方不杀、硬顶=AGORA_VERIFY_CEILING（缺省 4×软顶）杀全组 rc=124；超顶分类路由派发方（不 transition/不弹 worker/不计连败/任务驻留 done）
-- **驻留 done 的取消结算不变量**（F36 终闸实证）：矩阵 done 无 cancelled 出口，而 verify_overrun/锚缺失驻留后门尾不可达——cancel 必须按 in_gate 分流：门内排队（gate_tail 消费），驻留（in_gate=False）直结（State.settle_parked_cancel）；否则 pending 悬挂至重启重跑整轮 verify。凡新增「任务驻留 done」类出口，取消结算面必须同步核查
+- **verify 双顶**（F36）：软顶=AGORA_VERIFY_TIMEOUT 提醒不杀；硬顶=AGORA_VERIFY_CEILING（缺省 4×软顶）杀全组 rc=124；超顶路由派发方（不 transition/不弹 worker/不计连败，任务驻留 done）
+- **驻留 done 取消结算不变量**（F36）：cancel 按 in_gate 分流——门内排队（gate_tail 消费）、驻留（in_gate=False）直结（State.settle_parked_cancel）；否则 pending 悬挂至重启；新增「驻留 done」类出口须同步核查取消结算面
 - **三访问层**：agorad 内域核心＋oc（opencode API）＋store（账本）＋gitx（worktree）
 - **12+1 工具面**：12 服务端端点（httpd._TOOLS）＋壳层 wait＝MCP 面 13 工具（agora_mcp._TOOLS）
 - **会话牌认证**：root/dispatcher/worker 角色矩阵＋附牌链
-- **验收授权全局角色判定**（F37，2026-11-01）：worker 牌保留嵌套建单/派发，但对 verify_cmd 写面（task_create 携带＋task_update 登记）一律按 token 全局 role 拒——子任务局部 dispatcher 归属不构成授权（否则自开单自审批仅差一次调用）；worker 建单 project_dir/target_branch 强制继承现役父任务（非冻结行，终态父残牌不算上下文），verify_pending 自旗拒且豁免旗不随父，子任务验证配置（verify 字典）缺省随父——未获配置 dispatch 照旧硬闸拒
-- **门记录豁免面位置约束**（F38，2026-11-01）：basename 级豁免（.omo/.req-gate/.review-loop）必须配作用域腿——写目标 ∈ 当前 env（cred.envDir）或当前仓根（cwd 所在 git 根）才豁免，跨 env/跨仓命中一律拒（GATE_SCOPE_HINT，先于 cwd∈env 放行不落穿）；「路径含字样即放行」类豁免是投毒面，放宽只认工作区＋具体路径精确授权
+- **验收授权全局角色判定**（F37，2026-11-01）：worker 保留嵌套建单/派发，但 verify_cmd 写面（task_create 携带＋task_update 登记）一律按 token 全局 role 拒——子任务局部 dispatcher 归属不构成授权；建单 project_dir/target_branch 强制继承现役父任务，verify_pending 自旗拒且豁免旗不随父，verify 字典缺省随父——未获配置 dispatch 硬闸拒
+- **门记录豁免作用域约束**（F38，2026-11-01）：basename 级豁免（.omo/.req-gate/.review-loop）须配作用域腿——写目标 ∈ 当前 env（cred.envDir）或当前仓根才豁免，跨 env/跨仓一律拒；「路径含字样即放行」类豁免是投毒面，放宽只认工作区＋精确路径授权
 
 ## 关键模式
 
@@ -20,27 +20,25 @@
 - **enforce 部署缝隙**：源码改动须重跑 install.sh（拷贝非引用）——改 BOOT/代码后忘重跑是最常见部署坑
 - **评审环锚绑定**：done 前提＝.review-loop/.last-reviewed == HEAD（代码被审过且绿）
 - **摩擦驱动迭代**：狗粮两口实证——第一口 2 次被拒 9 事件；第二口零被拒 7 事件
-- **AGORA_HOME 指针**：MCP 壳/install 写 ~/.agora-home 单行指针；组件 env>指针>缺省 发现；插件判定链不跟随（被辖方可写文件不作信任锚，gt-32c051 裁定 A）
-- **TUI 行号与深树三坑**（gt-c3c74f/gt-8d5761 评审实证）：curses 行切片/行号算术须防 h 过小出负值（如 `max(0, ·)`，draw_board 实例）；树深由远端 JSON 决定的遍历禁递归，用显式栈（build_rows DFS）；键位处理器先改 sel 再调滑动辅助时，空滑回退必须用按键前行 origin——回退到进辅助时的桶行＝光标隐身（_skip_bucket 实例）
-- **状态桶行固顶**（gt-cb1075）：sel 最小＝首任务行索引，clamp 追 sel 会把桶行（行流前缀）永久滚出——固顶＝桶行画在滚动窗外（draw_board 固定画 y=1..nb），clamp_view 加 nb 参把 top 钳在 [nb, len-visible]；矮屏任务区允许 0（`max(0, ·)` 又一实例：硬挤 1 行 h≤6 越界 curses.error 退出、更高则挤入提示行不可见）
-- **install 生命周期与 setsid 观察法**（gt-71b6af）：install 只停自拉实例（第 8 步），装后服务不在场（由插件 lift 拉起，MCP 壳仅消费）；setsid 在脚本上下文原位 exec 不 fork（`$!` 即 daemon pid，kill/wait 仍达）；验脱会话须装后以同启动行自拉安装位载荷——装中观察有 ready→smoke→kill 竞态窗不可靠
-- **指针读守卫对齐下游 raise 面**（gt-54f874 评审实证）：指针文件半写形状里，非对象 JSON 在下标处抛 TypeError、非数端口经 f-string 进 urlopen 抛 http.client.InvalidURL（HTTPException 族，非 OSError）——`except (OSError,ValueError,KeyError)` 元组兜不住，穿透轮询循环经 main 兜底 exit 2 杀活等待。收口单点＝discover 出口形状校验（`int(port)`＋拒含 `\r`/`\n` 的牌），守卫元组补 TypeError；合法 header 值规则（`\n(?![ \t])|\r(?![ \t\n])`）比直觉宽（obs-fold 折行合法）——控制符牌须一律拒读而非只拒 `\n`
-- **内存态心跳禁走落盘字段路径**（gt-a18ef6 写放大事故实证）：httpd 每工具调用经 health.touch→set_fields(last_seen) 触发全量快照追加——O(调用数) 行×全任务快照把 tasks.jsonl 撑到 4.4GB/48791 行（相邻快照 293 对中 updated 变 291、last_seen 变 238，样本每秒 3 次），load_state 逐行解析挂死。定式：模块头声明「崩溃回退接受」的内存态字段（last_seen/mail_read）一律走专用内存方法（touch_seen/touch_mail 口径），set_fields 只收实质变更；心跳内存化的重启回退由 F15 env 活性＋busy 免判兜底，僵态只提醒不处置
-- **账本尾读＋有界瘦身**（gt-a02ab1 事故善后）：load_state 只 seek 末 1MB 解析完整行（尾窗无完整行回退全扫，末行胜出不变）——启动耗时与账本大小解耦；追加路径行数超 500（计数器内存懒播种＋自增，flock 单写者安全，禁每次追加全文件重扫——ocr 实证 O(size)/append 复耦）即原子重写仅留末完整行——「只追加」的有界例外，重写时机避开启动路径
-- **运行时管道显式解码**（ag-fa17e4→ag-e96140 八轮门崩实证）：subprocess 管道/文件读面向 git 输出、邮件外呼、页面读，一律显式 `encoding="utf-8", errors="replace"`——`text=True` 无 encoding 按严格 UTF-8 解码，子进程输出含非 UTF-8 字节（GBK 资源混入实证 0xc8）确定性崩在 communicate()。git 面细化：`git log` 对非 UTF-8 提交信息自行重编码（latin-1 释义出合法 UTF-8，2.55 实证）坏字节到不了本侧解码器；`git diff` 内容行是原样字节流——U+FFFD 断言只能落在 diff 路径。有 try 捕获（OSError/UnicodeDecodeError）的静态配置读保持严格不动
-- **任务 id 前缀契约词散布面**（gt-99ae7b）：前缀变更漏面两处实证——①交替正则写 `(?:gt|task)-` 丢字面 `task-` 子串，registered verify 的 grep -qE 直接失配（写成 `(gt-\S+|task-\S+)` 保两字面）；②e2e 断言 startswith("gt-") 硬编码在 t3_chain.sh（ocr 捕获，单测覆盖不到）。改前缀先 grep 全仓字面前缀含测试/文档断言面
-- **worker 会话原生写被自家闸拦的写通道**（gt-99ae7b）：harness 会话插件凭据缓存空（inject 未达）时 edit/write 全拦、req-gate 拦首写——mcp_shell 白名单（git/cat/ls）成唯一写通道：原生 write 落 /tmp/opencode 补丁文件＋`git apply --unidiff-zero -` stdin 打零上下文补丁；铁律：hunk 行数计数必须准确，计数少一行时 git 静默截尾行（EOF 语法错才暴露）
-- **合成消息不触发 prompt hook——F25 静默通道失效根因**（task-fb8b01）：v2.2.0 官方契约明示 synthetic/shell/compaction/move 控制均不走 prompt admission hook——inject_silent 静默重注入对插件 onInject 永不可达（牌不入缓存→worker 恒拒；彼时四病一文案无法自诊）；自愈＝对 opencode `/api/session/{sid}/prompt` 以真实 prompt 依次重注 BOOT 形＋credential 形两消息（onInject 入缓存，下轮 edit 过闸；配方随 F26 落任务页与 NO_CRED_HINT 指路）；诊断教训：黑盒排障逐项核前提（location 经 /api 实证、安装副本 git hash-object 比对、serve 启动时 vs 插件 mtime），且勿信「凭据清零」惯性叙事——拒因不可辨正是 F26 前的系统病
-- **mcp_shell 白名单封死一切执行向量**（task-fb8b01）：ALLOW_COMMANDS（ls/cat/head/tail/grep/find/wc/sort/uniq/cut/awk/git/du/df/ps/rg/agentctl/semantic-memory）外 bun/python/bash/sh/env 全拒，策略还深防执行旁路——`git -c`（command-scoped config）、`git config` 子命令、`find -exec`（`;` 报 shell operator、`+` 显式拒）、`awk` external access（system()）逐一封死；worker 跑 verify 的合法通道＝一次性 opencode API 会话（POST /session→move→prompt「跑 X 原样贴输出」→GET message 读转录→DELETE session），或交服务侧 merge 门自跑（gate.py subprocess shell=True cwd=env_dir）
-- **计数声明须分面**（推广重写 ocr 实证）：同一"工具数"三面异值——MCP tools/list=13（含 wait）、HTTP 端点=12（wait 壳层本地拦截 `_tools_call` 不转发）、旧注释 12——blanket 全局替换把 httpd 事实改错（13≠端点数）；改计数类声明先 grep 各消费面逐面改，注释随面定值
-- **Python 地板=3.10**（PEP 604 实证）：`str | None` 运行时注解且无 `from __future__ import annotations`（access/oc.py、access/store.py）——3.8/3.9 导入即 TypeError；README/CI matrix 以 3.10/3.12 为地板，勿回写 ≥3.8
-- **Bun.spawn detached 等价 setsid**（F27 实证）：`detached: true` 子进程 sess≠父进程（probe 实证），POSIX 新会话/Windows 新进程组——插件拉起不再依赖 setsid 包装；install.sh 侧 macOS 缺 setsid 走 nohup 兜底（$! 两形态同为 python pid，击杀语义不变）
-- **维护者自编辑通道**（F27 过程判例）：enforce ON 下 root 亦被拦（hook.ts 写入分支 root→DISPATCH_HINT，零信任设计；task-305aff 后该缓存命中分支纯防御位——root 牌生产不入缓存，主会话写面拦截实际经 pull 404 not_worker 路由送达 DISPATCH_HINT，镜像 readish 裁定 A）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离，MCP 拉牌救不了 hook 拦截）
-- **wheel 数据面两坑＋argv 假象**（F31 实证，53fb8ec）：①importlib.metadata 的 RECORD 是安装态（pip 重写带 `../../../` 前缀），`locate_file` 以 site-packages 为基——传 `find_share_dir` 尾段（`share/...`）必落 site-packages/share 幽灵路径，兜底 `Path(sys.prefix)/rel` 双态通吃；②data-files 目的地键即安装后目录名（`share/opencode-agora/plugin` 装成 `plugin/`），与 install.sh 源布局 `agora-plugin/` 名实冲突致 pkg 分支 cp 落空——目的地键须保源目录名；③`python3 -c '...sys.argv[0]...'` 里 argv[0] 是字面 `-c`，首参自 argv[1] 起（dash/bash 同），拿 argv 拼命令行须从 1 数
-- **O_CREAT mode 仅建时生效**（ag-20898a 三评审合证）：`os.open(..., 0o600)` 对已存在件不收紧权限、O_TRUNC 只清内容——旧版 `open("w")` 崩溃残留 0644 `.tmp` 被复用时，tokens 落盘再 0644 且此后每次写持续复现，「重写自愈」静默失效；定式：权限敏感中转件建后必补 `os.fchmod(fd, 目标 mode)`，测试须预置遗留终件＋遗留中转件两路各断言
-- **rebase 冲突态检测须双 backend 目录**（F32/ag-4b300d 终闸 B 册 git 2.43/2.55 实证）：`git rebase` 停冲突的 per-worktree sequencer 目录随 backend 分叉——merge backend（2.26+ 缺省）停 `rebase-merge`、apply backend（`rebase.backend=apply`，integration worktree 共享主仓 config）停 `rebase-apply`，单查其一即把真冲突误分类环境病（rc=1＋所查目录缺席）；定式：判据＝`rev-parse --git-path` 两目录逐一探测、任一在位→abort→冲突，皆缺才按环境病如实上抛（分类先于动作）
-- **递归引用图遍历必带 visited＋显式栈**（F38 W-2）：create 面不校验 after 环→stop_after_failed 无条件下钻即 RecursionError（经门体 except 落假 reclaim_failed 审计）；定式：遍历起点自身入 seen（免被自链取消）、已访问不再下钻、入口面（dispatch）沿 after 链查自引用/重复成环拒派报因含路径；visited 只消环不消链深——遍历本体用显式栈，递归版无环长链 >1000 节点仍引爆（终闸 C 册实证）
-- **网络子进程超时杀按进程组**（F-1）：git push 类会派生 ssh/传输孙进程——start_new_session 启动＋TimeoutExpired 时 os.killpg(SIGKILL)＋有限宽限收尸（逃逸后代持管道弃读防挂死）；只杀直接子进程＝孤儿逐次累积（gate runner 同款形态对齐）
+- **AGORA_HOME 指针与读守卫**（gt-32c051/gt-54f874）：MCP 壳/install 写 ~/.agora-home 单行指针，组件 env>指针>缺省 发现；插件判定链不跟随（被辖方可写文件不作信任锚）；指针读在 discover 出口形状校验收口——半写件抛 TypeError/InvalidURL 不在 (OSError,ValueError,KeyError) 元组内，守卫补 TypeError；控制符牌一律拒读（obs-fold 折行合法，只拒换行不够）
+- **TUI 行号与桶行固顶**（gt-c3c74f/gt-8d5761/gt-cb1075）：curses 行算术防 h 过小出负（max(0,·)）；远端 JSON 定深的遍历禁递归用显式栈；键位辅助空滑回退须用按键前行 origin（回退到进辅助时桶行＝光标隐身）；桶行固顶画滚动窗外，clamp_view 加 nb 参钳 [nb, len-visible]，矮屏任务区允许 0
+- **install 生命周期与 setsid**（gt-71b6af）：install 只停自拉实例，装后服务由插件 lift 拉起（MCP 壳仅消费）；setsid 脚本上下文原位 exec 不 fork（$! 即 daemon pid）；验脱会话须装后以同启动行自拉安装位载荷——装中观察有竞态窗不可靠
+- **内存态心跳禁走落盘字段路径**（gt-a18ef6 事故实证）：health.touch→set_fields(last_seen) 每调用触发全量快照追加，O(调用数) 撑爆 tasks.jsonl（4.4GB 实证）；「崩溃回退接受」的内存态字段（last_seen/mail_read）一律走专用内存方法，set_fields 只收实质变更；重启回退由 F15 env 活性＋busy 免判兜底
+- **账本尾读＋有界瘦身**（gt-a02ab1）：load_state 只 seek 末 1MB 解析完整行——启动耗时与账本大小解耦；追加超 500 行即原子重写仅留末完整行（flock 单写者安全，禁每次追加全文件重扫），重写时机避开启动路径
+- **运行时管道显式解码**（ag-fa17e4→ag-e96140 实证）：subprocess 管道/文件读一律显式 encoding="utf-8", errors="replace"——text=True 严格解码遇非 UTF-8 崩在 communicate()；git log 坏字节自重编码到不了本侧，git diff 内容行是原样字节流（U+FFFD 断言只落 diff 路径）；有 try 的静态配置读保持严格
+- **任务 id 前缀契约词散布面**（gt-99ae7b）：交替正则写 (?:gt|task)- 丢字面 task- 使 verify grep 失配（须 (gt-\S+|task-\S+)）；e2e 有 startswith("gt-") 硬编码单测盖不到——改前缀先 grep 全仓含测试/文档断言面
+- **worker 原生写被自家闸拦的通道**（gt-99ae7b）：凭据缓存空时 edit/write 全拦、req-gate 拦首写——原生 write 落 /tmp/opencode 补丁文件＋git apply --unidiff-zero stdin 打零上下文补丁；hunk 行数计数必须准确，少一行 git 静默截尾（EOF 语法错才暴露）
+- **合成消息不触发 prompt hook**（task-fb8b01，F25 根因）：v2.2.0 契约明示 synthetic 控制不走 prompt admission hook——inject_silent 对插件 onInject 永不可达；自愈＝对 /api/session/{sid}/prompt 以真实 prompt 重注 BOOT+credential 两消息（配方随 F26 落任务页）；诊断教训：黑盒排障逐项核前提，勿信「凭据清零」惯性叙事
+- **mcp_shell 白名单封死执行向量**（task-fb8b01）：ALLOW_COMMANDS 外全拒，并封 git -c、git config、find -exec、awk system() 旁路；worker 跑 verify 合法通道＝一次性 opencode API 会话（POST→move→prompt→GET→DELETE）或交服务侧 merge 门自跑
+- **计数声明须分面**（ocr 实证）：同一「工具数」三面异值——MCP tools/list=13（含 wait）、HTTP 端点=12（wait 壳层拦截不转发）、旧注释 12——blanket 替换改错事实；改计数先 grep 各消费面逐面改
+- **Python 地板=3.10**（PEP 604 实证）：str | None 运行时注解且无 __future__ import（access/oc.py、access/store.py）——3.8/3.9 导入即 TypeError；README/CI 以 3.10/3.12 为地板，勿回写 ≥3.8
+- **Bun.spawn detached 等价 setsid**（F27 实证）：detached:true 子进程 sess≠父（POSIX 新会话/Windows 新进程组），插件拉起不依赖 setsid 包装；install.sh macOS 缺 setsid 走 nohup 兜底（击杀语义不变）
+- **维护者自编辑通道**（F27/task-305aff）：enforce ON 下 root 亦被拦（零信任）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离）
+- **wheel 数据面两坑＋argv 假象**（F31，53fb8ec）：importlib RECORD 是安装态，locate_file 以 site-packages 为基——兜底 Path(sys.prefix)/rel 双态通吃；data-files 目的地键须保源目录名（与 install.sh 布局名实冲突即 cp 落空）；python3 -c 的 argv[0] 是字面 -c，首参自 argv[1] 起
+- **O_CREAT mode 仅建时生效**（ag-20898a）：os.open(0o600) 对已存在件不收紧、O_TRUNC 只清内容——崩溃残留 0644 中转件被复用即「重写自愈」静默失效；权限敏感中转件建后必补 os.fchmod(fd, mode)，测试预置遗留终件＋遗留中转件两路断言
+- **rebase 冲突态检测须双 backend 目录**（F32/ag-4b300d）：sequencer 目录随 backend 分叉——merge 停 rebase-merge、apply 停 rebase-apply，单查其一即把真冲突误判环境病；定式＝rev-parse --git-path 两目录逐一探测，任一在位→abort→冲突，皆缺才按环境病上抛（分类先于动作）
+- **递归引用图遍历必带 visited＋显式栈**（F38 W-2）：after 环无校验→stop_after_failed 下钻 RecursionError（落假 reclaim_failed 审计）；定式＝起点自身入 seen、已访问不下钻、dispatch 沿 after 链查自引用/成环拒派报因含路径；visited 只消环不消链深，递归版长链仍引爆
+- **网络子进程超时杀按进程组**（F-1）：git push 类派生 ssh 孙进程——start_new_session＋TimeoutExpired 时 os.killpg(SIGKILL)＋宽限收尸（逃逸后代持管道弃读防挂死）；只杀直接子＝孤儿累积（gate runner 同款对齐）
 
 ## 已知接受面
 
