@@ -73,6 +73,7 @@ AGORA_VERIFY_TIMEOUT=3600
 # AGORA_VERIFY_CEILING=14400
 EOF
 )
+chmod 600 "$AGORA_HOME/.agora/agorad.env"  # 存量收权：只动权限不动内容（前版 0644/手创升级路径，评审环 R2）
 
 # ---- 3) MCP 注册（mcp 段合并不覆盖；注册形状 T5 对账）----
 # F31：pkg 模式命令走 PATH 入口 agora-mcp；repo 模式仍指本仓壳（命令 JSON bash 侧构造作 heredoc 第 4 参）
