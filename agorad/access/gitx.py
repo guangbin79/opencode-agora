@@ -35,8 +35,10 @@ class Gitx:
 
     @staticmethod
     def _git(args, cwd, check=True, timeout=None):
+        # 分支历史/diff 文本可含非 UTF-8 字节（GBK 资源混入）：降级 U+FFFD 禁崩（ag-830b1b 同族）
         r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
         if check and r.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
         return r
@@ -268,7 +270,9 @@ class Gitx:
         # 不孤儿泄漏（gate runner 同款形态）；分类语义与返回值不变。
         proc = subprocess.Popen(["git", "push", "origin", f"refs/heads/{branch}"],
                                 cwd=str(repo_dir), stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+                                stderr=subprocess.PIPE, text=True,
+                                encoding="utf-8", errors="replace",
+                                start_new_session=True)
         try:
             out, err = proc.communicate(timeout=_PUSH_TIMEOUT)
         except subprocess.TimeoutExpired:

@@ -390,6 +390,27 @@ class TestAccessGitx(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gx.diff_check(env)
 
+    def test_branch_history_gbk_bytes_degraded_not_fatal(self):  # Req: ag-e96140
+        """分支历史含 GBK 字节（css 资源混入类）：gitx 分支处理不抛、文本降级
+        U+FFFD、闸体判定照常真实（ag-fa17e4 第 8 轮门崩同型复现）。"""
+        env = self.gx.build_env(self.repo, "gt-enc1")
+        css = Path(env) / "data" / "appstyle" / "style_a" / "darkBlue.css"
+        css.parent.mkdir(parents=True)
+        # GBK 内容＋尾随空格：--check 告警携带的内容行即含非法 UTF-8 字节
+        css.write_bytes("body { font-family: 微软雅黑; }   \n".encode("gbk"))
+        msg = self.tmp / "gbk-msg.txt"
+        msg.write_bytes("引入GBK样式数据".encode("gbk"))  # 提交信息带 GBK：历史读取路径
+        self._git(["add", "-A"], cwd=env)
+        self._git(["commit", "-q", "-F", str(msg)], cwd=env)
+        self.assertTrue(self.gx.touches_gate(env, ["data/appstyle/*"]))  # diff 提取不抛、判定真实
+        warn = self.gx.diff_check(env)  # 告警内容行含原始 GBK：不抛且降级 U+FFFD
+        self.assertIn("darkBlue.css", warn)
+        self.assertIn("\ufffd", warn)
+        # 历史读取不抛即达标：git log 对非 UTF-8 提交信息自行重编码（latin-1 释义
+        # 出合法 UTF-8，实证 2.55），坏字节到不了本侧解码器——U+FFFD 断言归 diff 路径
+        hist = self.gx._git(["log", "--oneline", "-1"], cwd=env).stdout
+        self.assertTrue(hist.strip())
+
     def test_check_branch_symref_checkout(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/8"], cwd=self.repo)
         self.assertEqual(self.gx.symref(str(self.repo)), "issue/8")

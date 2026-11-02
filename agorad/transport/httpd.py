@@ -168,7 +168,7 @@ class _Handler(BaseHTTPRequestHandler):
             return app.peer.board(snap, repo)
         if name == "wiki_read":
             return {"text": self._wiki(body["path"]).read_text(
-                encoding="utf-8")}
+                encoding="utf-8", errors="replace")}  # 页面可含坏字节：降级 U+FFFD 不 500
         if name == "wiki_write":
             rel = Path(body["path"])
             if rel.parts and rel.parts[0] == "tasks":  # 任务页服务独占刷新

@@ -45,7 +45,7 @@ _KIND_NOTE = {
 def _subprocess_runner(cmd, input_text):
     """默认邮件外呼：正文走 stdin，30s 超时；非零退出/超时抛异常由调用方吞。"""
     r = subprocess.run(cmd, input=input_text, text=True, timeout=30,
-                       capture_output=True)
+                       capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode:
         raise subprocess.CalledProcessError(r.returncode, cmd)
     return r

@@ -15,7 +15,8 @@ def read_anchor(env_dir):
     if not marker.is_file():
         return None
     r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(env_dir),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     sha = r.stdout.strip() if r.returncode == 0 else ""
     if not sha or marker.read_text(encoding="utf-8").strip() != sha:
         return None
