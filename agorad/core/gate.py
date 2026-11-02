@@ -71,13 +71,16 @@ def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
     软顶＝timeout：到点不杀，on_soft() 恰一次（None 跳过），继续等；硬顶＝ceiling
     （缺省 4×软顶）：到点 SIGKILL 全组 rc=124。循环 communicate（CPython 契约：
     TimeoutExpired 后重试不丢已读输出）。F32 门环境消毒：剥除 _GATE_ENV_STRIP
-    三枚服务自身态变量后以显式副本传子进程（不改 os.environ 本体）。
+    三枚服务自身态变量后以显式副本传子进程（不改 os.environ 本体）。输出管道显式
+    UTF-8＋errors=replace 解码（ag-830b1b：子进程非 UTF-8 字节输出曾于 communicate
+    内 UnicodeDecodeError 门崩——非法字节降级 U+FFFD，rc 与输出尾照常捕获）。
     """
     ceiling = 4 * timeout if ceiling is None else ceiling
     child_env = {k: v for k, v in os.environ.items() if k not in _GATE_ENV_STRIP}
     proc = subprocess.Popen(cmd, shell=True, cwd=env_dir, env=child_env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, start_new_session=True)
+                            text=True, encoding="utf-8", errors="replace",
+                            start_new_session=True)
     soft_fired, start = False, time.monotonic()
     while True:
         now = time.monotonic()

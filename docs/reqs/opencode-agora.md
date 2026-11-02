@@ -263,3 +263,7 @@ W-1（hook.ts）：F33 门记录目录豁免按路径任一段 basename 命中�
 ### F40 backlog triage 系列（收编，2026-11-01，R1 评审 S2）
 2026-10-29 评审积压清扫（报告 docs/review-backlog-20261029.md，评审 4 轮）已随 3f0a413 落地，台账原缺条目，本条收编：①install.sh 残牌清扫——token 泄漏面收口（stderr dump/归档/argv 三处）；②bind_* TOCTOU 复检——改绑竞态窗口二次校验；③board_tui err 语义修正＋死代码清理；附带 gitx worktree prune、CLI tid 归因、doctor 键守卫。均为评审修复级行为，无独立需求号。
 **验收**：既有全量套件绿（行为锚随 3f0a413 入库）；`python3 -m unittest discover -s tests -t .` 绿。
+
+### ag-830b1b gate verify 输出管道解码加固——errors=replace（2026-11-02，ag-fa17e4 三轮门崩根因收编）
+北京部署 app verify 输出含非 UTF-8 字节（GBK 0xc8，确定性复现、分支无关、locale 无关）：gate `_subprocess_runner` Popen `text=True` 按严格 UTF-8 文本管道解码，`communicate()` 内 UnicodeDecodeError 门崩——verify 结果与输出尾双失。修法：Popen 增显式 `encoding="utf-8", errors="replace"`——非法字节降级 U+FFFD（替换符自带定位线索），verify 判定回归真实退出码。边界：只动解码健壮性，不动软硬顶/环境消毒/其他 runner 语义；同文件其余解码点仅 `_roster_from_file`（静态配置，既有 (OSError, UnicodeDecodeError) 捕获）不动；gitx/health 的 `text=True` 属 git plumbing/通知管道，不在本条。
+**验收**：test_core_gate.py——子进程输出含 GBK 字节（`printf '\310\316'`）：runner 不抛、rc 真实（用例 exit 7）、输出含 U+FFFD；既有 gate 测试全数保持；`python3 -m pytest tests/ -q` 全绿（Req: ag-830b1b 锚）。

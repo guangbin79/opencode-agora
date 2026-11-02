@@ -195,6 +195,14 @@ class TestSubprocessRunner(unittest.TestCase):
         # 三枚服务自身态被剥（空）；AGORA_HOME 明示不剥——夹具自设值照常继承
         self.assertEqual(out, "[PORT=][URL=][PW=][HOME=/fixture-home]")
 
+    def test_runner_replaces_non_utf8_output(self):  # Req: ag-830b1b
+        """非 UTF-8 输出（ag-fa17e4 实证 GBK 0xc8）：errors=replace 降级 U+FFFD
+        不抛门——rc 真实、输出尾照常捕获（原 text=True 严格解码即门崩）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = _subprocess_runner(tmp, "printf '\\310\\316\\n'; exit 7")
+        self.assertEqual(rc, 7)  # verify 判定回归真实退出码
+        self.assertIn("\ufffd", out)  # 非法字节降级替换符（自带定位线索）
+
 
 class TestCoreGate(unittest.TestCase):
     def setUp(self):
