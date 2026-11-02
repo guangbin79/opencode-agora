@@ -110,6 +110,8 @@ for s in agora-dispatch agora-ops; do
 done' _ "$REPO" "$H1/.config/opencode"
 chk "inactive-repos 骨架在位且空 (Req: F12)" bash -c '
 f="$1/.agora/inactive-repos"; [ -f "$f" ] && [ ! -s "$f" ]' _ "$A1"
+chk "agorad.env 旋钮模板在位含软顶缺省 (ag-fc67bc)" grep -qxF "AGORA_VERIFY_TIMEOUT=3600" "$A1/.agora/agorad.env"
+chk "agorad.env 模板携注释示例行 (ag-fc67bc)" grep -q "^# AGORA_VERIFY_CEILING=" "$A1/.agora/agorad.env"
 chk "inactive-repos owner 可写 (Req: F12)" [ -w "$A1/.agora/inactive-repos" ]
 chk "inactive-repos 0644 (Req: F12)" [ "$(stat -c %a "$A1/.agora/inactive-repos")" = 644 ]
 chk "收尾输出携名册提示（路径 env 展开非字面量，Req: F12）" bash -c '
@@ -155,6 +157,7 @@ run_install "$H2" "$A2" >/dev/null 2>&1 || bad "二装场景首跑退出 0 (Req:
 cp "$OCJ2" "$FIX/oc-run1.json"
 cp "$A2/.agora/root.token" "$FIX/token-run1"
 echo "$FIX/some/repo" >> "$A2/.agora/inactive-repos"   # 模拟用户自录名册（二装不可覆盖）
+printf 'AGORA_VERIFY_TIMEOUT=9999\n' > "$A2/.agora/agorad.env"  # 模拟用户旋钮（二装不可覆盖）
 cp -r "$H2/.config/opencode/skills" "$FIX/skills-run1"
 printf 'AGORA_ROOT_TOKEN: seeded-stale\n' >> "$A2/.agora/install-agorad.log"  # 模拟前轮中断残牌（.1 留档实路径，task-bb4ad2）
 printf 'AGORA_ROOT_TOKEN: seeded-bak\n' > "$A2/.agora/install-agorad.log.bak"  # 模拟前轮 cleanup 被杀 mid-sed（.bak 扫尾实路径）
@@ -184,6 +187,7 @@ assert len(names) == 1, names' "$OCJ2"
 chk "二装 root.token 不变（牌持久复用）(Req: F1)" cmp -s "$FIX/token-run1" "$A2/.agora/root.token"
 chk "二装 skills 逐字节不变 (Req: F12)" diff -r "$FIX/skills-run1" "$H2/.config/opencode/skills" >/dev/null
 chk "二装名册用户自录行不被覆盖 (Req: F12)" grep -qxF "$FIX/some/repo" "$A2/.agora/inactive-repos"
+chk "二装 agorad.env 用户旋钮不被覆盖 (ag-fc67bc)" grep -qxF "AGORA_VERIFY_TIMEOUT=9999" "$A2/.agora/agorad.env"
 
 # ---------- 场景 3：缺依赖退出码＋提示＋早退 ----------
 newfix

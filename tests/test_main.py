@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agorad.main import assemble, env_config, main, verify_ceiling_from_env, \
-    verify_timeout_from_env
+from agorad.main import assemble, env_config, load_env_file, main, \
+    verify_ceiling_from_env, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -84,6 +84,42 @@ class TestVerifyCeilingConfig(unittest.TestCase):
                 with self.assertRaises(ValueError) as cm:
                     verify_ceiling_from_env()
                 self.assertIn("AGORA_VERIFY_CEILING", str(cm.exception))
+
+
+class TestEnvFileDefaults(unittest.TestCase):
+    """agorad.env 旋钮缺省层（ag-fc67bc）：加载/优先级/缺文件/坏行容错。"""
+
+    def test_load_priority_and_read_points(self):  # Req: ag-fc67bc
+        tmp = tempfile.mkdtemp()
+        try:
+            d = Path(tmp) / ".agora"
+            d.mkdir(parents=True)
+            (d / "agorad.env").write_text(
+                "# 注释\nAGORA_VERIFY_TIMEOUT=3600\n"
+                "AGORA_VERIFY_CEILING=\"14400\"\n"
+                "\n坏行无等号\n=空键\nAGORA_HEALTH_INTERVAL=60\n",
+                encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGORA_HOME": tmp}, clear=True):
+                self.assertEqual(load_env_file(), {
+                    "AGORA_VERIFY_TIMEOUT": "3600",
+                    "AGORA_VERIFY_CEILING": "14400",
+                    "AGORA_HEALTH_INTERVAL": "60"})
+                # 读取点自动受益（原纯读 os.environ 的事故面）
+                self.assertEqual(verify_timeout_from_env(), 3600.0)
+                self.assertEqual(verify_ceiling_from_env(), 14400.0)
+            with mock.patch.dict(os.environ,
+                                 {"AGORA_HOME": tmp, "AGORA_VERIFY_TIMEOUT": "600"},
+                                 clear=True):
+                load_env_file()
+                self.assertEqual(verify_timeout_from_env(), 600.0)  # 显式 env 优先
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_missing_file_silent(self):  # Req: ag-fc67bc
+        with mock.patch.dict(os.environ, {"AGORA_HOME": "/nonexistent-agora-fx"},
+                             clear=True):
+            self.assertEqual(load_env_file(), {})
+            self.assertNotIn("AGORA_VERIFY_TIMEOUT", os.environ)
 
 
 class TestAssembleWiring(unittest.TestCase):

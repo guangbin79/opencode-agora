@@ -46,11 +46,44 @@ def pointer_home():
         return None
 
 
+def resolve_home():
+    """AGORA_HOME 优先级 env > ~/.agora-home 指针 > 缺省 ~/plaza（设计 §3）。"""
+    return os.environ.get("AGORA_HOME") or pointer_home() or str(Path.home() / "plaza")
+
+
+def load_env_file(home=None):
+    """$AGORA_HOME/.agora/agorad.env 旋钮缺省层：KEY=VALUE 逐行、# 注释、缺文件静默；
+    已有 os.environ 值优先（env > env 文件 > 代码默认）。事故根因（ag-fc67bc）：
+    daemon 由 supervisor 代管重生，环境干净，手工 export 随重启丢失——此层让旋钮
+    （AGORA_VERIFY_TIMEOUT/AGORA_VERIFY_CEILING 等读取点）免疫任意重启。"""
+    if home is None:
+        home = resolve_home()
+    try:
+        lines = (Path(home) / ".agora" / "agorad.env").read_text(
+            encoding="utf-8").splitlines()
+    except (OSError, ValueError):  # 缺文件静默；ValueError＝坏字节（非 OSError 族）
+        return {}
+    loaded = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue  # 空行/注释/坏行容错跳过
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]  # 一对成对引号脱壳（手写防呆：值不需引号）
+        if key:
+            os.environ.setdefault(key, value)
+            loaded[key] = value
+    return loaded
+
+
 def env_config():
-    """env 解析：AGORA_HOME 优先级 env > ~/.agora-home 指针 > 缺省 ~/plaza（设计 §3）；
+    """env 解析：home 经 resolve_home（env > 指针 > 缺省）；
     OC 服务＝AGORA_OC_URL 显式优先，
     缺省读 $XDG_STATE_HOME/opencode/service.json（T5 实证发现源，password 随取）。"""
-    home = os.environ.get("AGORA_HOME") or pointer_home() or str(Path.home() / "plaza")
+    home = resolve_home()
     url = os.environ.get("AGORA_OC_URL")
     password = os.environ.get("AGORA_OC_PASSWORD")
     if not url:
@@ -158,6 +191,7 @@ def _log_signal_exit(signum, _frame):
 def main():
     for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(_sig, _log_signal_exit)
+    load_env_file()  # agorad.env 旋钮缺省层先行（env > 文件 > 代码默认，ag-fc67bc）
     home, oc_url, oc_password = env_config()
     if not oc_url:
         print("需要 AGORA_OC_URL（或 $XDG_STATE_HOME/opencode/service.json 服务发现）",

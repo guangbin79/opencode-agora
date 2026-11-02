@@ -143,6 +143,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 | `AGORA_HEALTH_INTERVAL` | `300` | dispatcher 健康巡检（秒） |
 | `AGORA_VERIFY_TIMEOUT` | `300` | 单次任务／集成 verify 软顶（秒）：到点提醒派发方、不杀 |
 | `AGORA_VERIFY_CEILING` | `4× 软顶` | 硬顶（秒）：到点终止验证进程组；超顶路由派发方（不弹 worker、任务驻留 done） |
+| `$AGORA_HOME/.agora/agorad.env` | — | 旋钮缺省文件（`KEY=VALUE` 逐行、`#` 注释）；显式 env 优先，daemon 重启不丢 |
 | `enforce` | on | 强制闸总开关（仅 root，开关留审计） |
 | `$AGORA_HOME/.agora/email.json` | 关 | 僵态任务邮件提醒（`{"to","command"}`） |
 

@@ -64,6 +64,14 @@ done
 mkdir -p "$AGORA_HOME/state/messages" "$AGORA_HOME/wiki" "$AGORA_HOME/.agora"
 # F12 名册空骨架：已有不覆盖（用户自录条目不可破坏）；0644 owner 可追加
 [ -e "$AGORA_HOME/.agora/inactive-repos" ] || (umask 022; : > "$AGORA_HOME/.agora/inactive-repos")
+# agorad.env 旋钮缺省模板：已有不覆盖（用户旋钮不可破坏）——daemon 由 supervisor 代管
+# 重生环境干净，旋钮写此文件免疫任意重启（main.py load_env_file：显式 env 优先，ag-fc67bc）
+[ -e "$AGORA_HOME/.agora/agorad.env" ] || (umask 022; cat > "$AGORA_HOME/.agora/agorad.env" <<'EOF'
+# agorad 运行时旋钮（KEY=VALUE 一行一个，# 注释；shell 显式 export 优先于此文件）
+AGORA_VERIFY_TIMEOUT=3600
+# AGORA_VERIFY_CEILING=14400
+EOF
+)
 
 # ---- 3) MCP 注册（mcp 段合并不覆盖；注册形状 T5 对账）----
 # F31：pkg 模式命令走 PATH 入口 agora-mcp；repo 模式仍指本仓壳（命令 JSON bash 侧构造作 heredoc 第 4 参）

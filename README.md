@@ -144,6 +144,7 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 | `AGORA_HEALTH_INTERVAL` | `300` | Dispatcher health patrol (seconds) |
 | `AGORA_VERIFY_TIMEOUT` | `300` | Soft top per task/integration verify run (seconds): notify the dispatcher on expiry, no kill |
 | `AGORA_VERIFY_CEILING` | `4× soft top` | Hard top (seconds): expiry kills the verify process group; overrun routes to the dispatcher (no worker retry, task stays done) |
+| `$AGORA_HOME/.agora/agorad.env` | — | Knob defaults file (`KEY=VALUE`, `#` comments); explicit process env takes precedence, survives daemon restarts |
 | `enforce` | on | Global gate switch (root only, audited) |
 | `$AGORA_HOME/.agora/email.json` | off | Stuck-task email alerts (`{"to","command"}`) |
 
