@@ -123,13 +123,13 @@ class TestFuses(TestCoreTask):
         self.assertIn("chain_depth", str(cm.exception))
         self.assertEqual(self.state.get("t5")["state"], "todo")  # 拒绝零副作用
 
-    def test_quota_rejected_then_cancel_releases(self):  # Req: F3；F41 配额 6
+    def test_quota_rejected_then_cancel_releases(self):  # Req: F3；F41 配额 6；F45 按 pool
         for i in range(6):
-            self.seed(f"b{i}", worker=f"s-w{i}", env=f"/envs/b{i}")
-        tid = self.dispatchable()
+            self.seed(f"b{i}", worker=f"s-w{i}", env=f"/envs/b{i}", disp="main")
+        tid = self.dispatchable()  # root 建：root_sid＝main，与播种行同池
         with self.assertRaises(Rejected) as cm:
             self.svc.dispatch(tid, self.root)
-        self.assertIn("quota", str(cm.exception))
+        self.assertIn("quota[main]", str(cm.exception))
         self.svc.cancel("b0", self.root)  # 配额按活动任务计数：cancelled 即释放
         self.svc.dispatch(tid, self.root)
         self.assertEqual(self.state.get(tid)["state"], "dispatched")
@@ -200,6 +200,63 @@ class TestFuses(TestCoreTask):
         child = self.dispatchable(after="gt-abc123")  # 旧 id 作 after：存在性校验双形态同收
         self.svc.dispatch(child, self.root)
         self.assertEqual(self.state.get(child)["state"], "dispatched")
+
+
+class TestQuotaPools(TestCoreTask):
+    """F45 广度按主会话分池：配额口径全局单池→按 root_sid 血统分池，每池上限不变。"""
+
+    def test_create_root_sid_caller_and_worker_inherits(self):  # Req: F45
+        disp = self.auth.issue("dispA", "dispatcher")
+        t = self.svc.create("g", "/repo", None, disp, verify_cmd="true")
+        self.assertEqual(self.state.get(t)["root_sid"], "dispA")  # dispatcher 建单＝caller
+        w = self.svc.dispatch(t, disp)
+        child = self.svc.create("child", None, None, w)  # F37 全继承
+        self.assertEqual(self.state.get(child)["root_sid"], "dispA")  # worker 建单归父池
+        # （F41 叶子闸：depth-2 worker 不可再嵌套，第三极建单即拒，无更深验证面）
+
+    def test_pool_quota_a_rejected_b_fresh_ok(self):  # Req: F45 核心判据
+        disp_a = self.auth.issue("A", "dispatcher")
+        for i in range(6):
+            self.svc.dispatch(
+                self.svc.create(f"a{i}", "/repo", None, disp_a, verify_cmd="true"),
+                disp_a)
+        a7 = self.svc.create("a7", "/repo", None, disp_a, verify_cmd="true")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(a7, disp_a)
+        self.assertIn("quota[A]", str(cm.exception))  # 报因含池标识
+        disp_b = self.auth.issue("B", "dispatcher")
+        b1 = self.svc.create("b1", "/repo", None, disp_b, verify_cmd="true")
+        self.svc.dispatch(b1, disp_b)  # 同刻 B 池首单成功——旧全局口径必拒
+        self.assertEqual(self.state.get(b1)["state"], "dispatched")
+        self.assertEqual(self.state.get(a7)["state"], "todo")  # 拒绝零副作用
+
+    def test_nested_child_counts_into_root_pool(self):  # Req: F45 嵌套归池
+        disp_a = self.auth.issue("A", "dispatcher")
+        for i in range(4):
+            self.svc.dispatch(
+                self.svc.create(f"a{i}", "/repo", None, disp_a, verify_cmd="true"),
+                disp_a)
+        root_t = self.svc.create("aroot", "/repo", None, disp_a, verify_cmd="true")
+        w = self.svc.dispatch(root_t, disp_a)  # A 池第 5 个活动任务
+        child = self.svc.create("child", None, None, w)
+        self.svc.dispatch(child, w)  # 嵌套单计入 A 池（第 6 个）
+        a6 = self.svc.create("a6", "/repo", None, disp_a, verify_cmd="true")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(a6, disp_a)  # A 池满：子单占位即归池证据
+        self.assertIn("quota[A]", str(cm.exception))
+        disp_b = self.auth.issue("B", "dispatcher")
+        b1 = self.svc.create("b1", "/repo", None, disp_b, verify_cmd="true")
+        self.svc.dispatch(b1, disp_b)  # B 池不受影响
+        self.assertEqual(self.state.get(b1)["state"], "dispatched")
+
+    def test_legacy_row_pools_by_dispatcher_sid(self):  # Req: F45 兼容 fallback
+        for i in range(6):
+            self.seed(f"old{i}", disp="disp9")  # 存量播种：无 root_sid
+        disp = self.auth.issue("disp9", "dispatcher")
+        tid = self.svc.create("g", "/repo", None, disp, verify_cmd="true")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, disp)
+        self.assertIn("quota[disp9]", str(cm.exception))  # 按 dispatcher_sid 归池不炸
 
 
 class TestNestedDispatch(TestCoreTask):

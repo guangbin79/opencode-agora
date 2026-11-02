@@ -1,7 +1,7 @@
 """任务生命周期（F2/F3/F11）：建/派/中止/verify 登记。
 
 鉴权两段（R18）：auth.may 角色级粗判＋dispatcher_sid==caller 归属细判归本服务。
-保险丝（F3，F41 校准）：链深<3、并发配额（活动任务计数）、叶子层无嵌套派发、
+保险丝（F3，F41 校准）：链深<3、并发配额（F45 按 root_sid 血统分池计数）、叶子层无嵌套派发、
 can_spawn（oc 名册——会话创建不可达即拒）、B7 after 前驱终态。中止级联下级（平表：子任务
 dispatcher_sid==上级 worker_sid）、终止通知走 router.post、凭据作废、环境即回收、
 merged 不动、空链幂等。cancel 忙碌闸防误杀（F28）：worker 回合进行中拒取消
@@ -94,6 +94,8 @@ class TaskService:
                       "registered_by": sid, "registered_at": now}
         elif role == "worker":  # F37 缺省继承：验证配置随父任务（registered 才过闸）
             verify = dict(parent["verify"])
+        root_sid = sid if role != "worker" else (
+            parent.get("root_sid") or parent["dispatcher_sid"])  # F45 一次性定死：worker 继承父池
         self._state.add(tid, {
             "title": (title or goal.splitlines()[0][:40]) if (title or goal) else tid, "goal": goal,
             "project_dir": project_dir, "target_branch": target_branch,
@@ -101,6 +103,7 @@ class TaskService:
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
+            "root_sid": root_sid,
             "chain_depth": depth, "fail_streak": 0, "last_seen": None,
             "created": now, "updated": now})
         self._store.append_event({"ts": now, "actor": sid,
@@ -126,10 +129,12 @@ class TaskService:
                                    "或建单 verify_pending=true 走探索路", ev=EV_REJECTED_VERIFY)
         if t["chain_depth"] >= _MAX_DEPTH:  # （F41 兜底）
             self._reject(tid, sid, f"chain_depth>={_MAX_DEPTH}")
+        pool = t.get("root_sid") or t["dispatcher_sid"]  # F45 池标识：存量行 fallback 归 dispatcher
         active = sum(1 for x in self._state.snapshot()["tasks"].values()
-                     if x["state"] in _ACTIVE)
+                     if x["state"] in _ACTIVE
+                     and (x.get("root_sid") or x["dispatcher_sid"]) == pool)
         if active >= _QUOTA:
-            self._reject(tid, sid, f"quota: 活动任务 {active}>={_QUOTA}")
+            self._reject(tid, sid, f"quota[{pool}]: 活动任务 {active}>={_QUOTA}")
         after = t.get("after")
         if after is not None:
             # W-2：create 不校验 after 环——派发前沿沿 after 链查自引用/重复，

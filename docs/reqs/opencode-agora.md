@@ -52,7 +52,7 @@ git 仓的代码写入只发生在委托的专属隔离环境（**git worktree�
 每个委托有身份（id）、状态、归属链记录。任务为**平表**（无 deps/parent——编排顺序由 dispatcher 的派发与消息节奏表达）。verify（真实可执行的验收判据）由 **worker 进环境勘察后回填**，经派发方校验（可执行性＋需求覆盖）确认后登记；登记即锁定——**worker 不得修改自己任务的 verify**，修改权属派发方，修改写审计。登记字段（语义清单，schema 归设计）：id · 目标 · 仓 · 环境 · verify（含登记状态）· 状态 · 归属（dispatcher/worker 会话）· 链深 · 连败 · 当前凭据 · 时间戳；**交互原文进消息库、历史事件进审计，任务页只存当前态＋锚**。
 **验收**：任务创建后 id/状态/归属可查；状态迁移由服务权威记录；worker 回填→派发方确认登记、驳回起重各一例；登记后 worker 改 verify 必拒且审计留行。
 
-### F3 派发与链（缺省链深 5 与嵌套边界被 F41 替代）
+### F3 派发与链（缺省链深 5 与嵌套边界被 F41 替代；并发配额全局口径被 F45 替代）
 dispatcher 经服务派发 worker（opencode API create+inject）；支持嵌套派发，**链深上限**（默认 5）与并发配额（默认值 builder 定）硬约束。会话不复用——一任务一会话一环境一凭据（生死绑定）；跨仓任务按依赖顺序编排：前仓 merged 后 dispatcher 才派后仓（甲案；平表无 deps，顺序由派发节奏表达）。
 **验收**：正常派发链建立并登记；超深度/超配额派发必拒且报因；跨仓两任务经同一 dispatcher 派发后，board 按该 dispatcher 一次查出两任务及各自状态（S2 链上可见）；跨仓顺序派发 e2e：前仓 merged 后后仓才 dispatched，后仓经相对路径见到前仓主检出新形态。
 
@@ -275,3 +275,7 @@ ag-830b1b 只修了 verify 输出管道，第 8 轮门崩终因在 verify 之前
 ### F41 派发保险丝校准——链深 3、配额 6、叶子层收回嵌套派发权（2026-11-02，用户裁定）
 复合损耗（s^d 乘性）与管理跨度（Graicunas 超线性、ICS 最优 5）锚定：链深上限 5→3（深度 1/2 可派发），并发配额 8→6；**叶子层**＝现役父任务 chain_depth+1 ≥ 上限的 worker，其嵌套建单在 create 即拒（EV_DENIED，报因含「叶子」）——建了也派不出去的死单从源头消失；派发闸 chain_depth≥上限 保留作兜底。替代 F3 的「默认 5」缺省；F30 嵌套闭环机制不变。
 **验收**：test_core_task.py——depth=3 派发拒报因 chain_depth（零副作用）、恰好 6 个活动任务即 quota 拒、叶子 worker 建单拒（报因含「叶子」＋auth_denied 审计行）、depth=1→2 嵌套全链（建/派/收）保持绿；`python3 -m pytest tests/ -q` 全绿。
+
+### F45 广度按主会话分池——配额池从全局改按血统（2026-11-02，用户裁定）
+并发配额统计口径改按主会话血统：任务行新增 root_sid（create 一次性定死：dispatcher/root 建单＝caller，worker 建单＝继承父任务），dispatch 配额按同 root_sid 活动任务数计（>=_QUOTA=6 拒，报因含池标识）；全局合计口径退役。存量行 fallback root_sid||dispatcher_sid。深度不动（F41/F3：chain_depth 按链记录）。替代 F3「并发配额」的全局口径；F41 的每池缺省 6 不变。
+**验收**：test_core_task.py——分池判据（A 池满 6 拒、B 首单同刻成功）、嵌套归池、兼容 fallback、create 字段继承；`python3 -m pytest tests/ -q` 全绿。
