@@ -116,15 +116,15 @@ def cancel_msgs(store, sid):
 
 
 class TestFuses(TestCoreTask):
-    def test_chain_depth_at_limit_rejected(self):  # Req: F3
-        self.seed("t5", state="todo", depth=5, disp="main")
+    def test_chain_depth_at_limit_rejected(self):  # Req: F3；F41 校准上限 3
+        self.seed("t5", state="todo", depth=3, disp="main")
         with self.assertRaises(Rejected) as cm:
             self.svc.dispatch("t5", self.root)
         self.assertIn("chain_depth", str(cm.exception))
         self.assertEqual(self.state.get("t5")["state"], "todo")  # 拒绝零副作用
 
-    def test_quota_rejected_then_cancel_releases(self):  # Req: F3
-        for i in range(8):
+    def test_quota_rejected_then_cancel_releases(self):  # Req: F3；F41 配额 6
+        for i in range(6):
             self.seed(f"b{i}", worker=f"s-w{i}", env=f"/envs/b{i}")
         tid = self.dispatchable()
         with self.assertRaises(Rejected) as cm:
@@ -221,6 +221,18 @@ class TestNestedDispatch(TestCoreTask):
                    if m["to"] == parent_sid and m["kind"] == "result"]
         self.assertEqual(len(results), 1)
         self.assertIn("已取消", results[0]["body"])
+
+    def test_leaf_worker_nested_create_denied(self):  # Req: F41 叶子层无派发权
+        parent = self.dispatchable("parent")
+        w1 = self.svc.dispatch(parent, self.root)
+        child = self.svc.create("child", None, None, w1)
+        w2 = self.svc.dispatch(child, w1)  # 链到叶子：w2 现役父任务 chain_depth=2
+        n = len(self.state.snapshot()["tasks"])
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("grandchild", None, None, w2)
+        self.assertIn("叶子", str(cm.exception))
+        self.assertTrue(any(e["event"] == "auth_denied" for e in self.events()))
+        self.assertEqual(len(self.state.snapshot()["tasks"]), n)  # 拒绝零副作用
 
     def test_worker_cannot_manage_another_dispatchers_task(self):
         parent = self.dispatchable("parent")

@@ -1,8 +1,8 @@
 """任务生命周期（F2/F3/F11）：建/派/中止/verify 登记。
 
 鉴权两段（R18）：auth.may 角色级粗判＋dispatcher_sid==caller 归属细判归本服务。
-保险丝四件（F3）：链深<5、并发配额（活动任务计数）、can_spawn（oc 名册——会话
-创建不可达即拒）、B7 after 前驱终态。中止级联下级（平表：子任务
+保险丝（F3，F41 校准）：链深<3、并发配额（活动任务计数）、叶子层无嵌套派发、
+can_spawn（oc 名册——会话创建不可达即拒）、B7 after 前驱终态。中止级联下级（平表：子任务
 dispatcher_sid==上级 worker_sid）、终止通知走 router.post、凭据作废、环境即回收、
 merged 不动、空链幂等。cancel 忙碌闸防误杀（F28）：worker 回合进行中拒取消
 （health 僵态豁免同款 busy 信号），force:true 强杀，oc 探测失败 fail-open。
@@ -13,8 +13,8 @@ import re
 import secrets
 import time
 
-_MAX_DEPTH = 5
-_QUOTA = 8  # 并发配额默认（护栏默认值，②期核定）
+_MAX_DEPTH = 3
+_QUOTA = 6  # F41：Graicunas/ICS 跨度锚定
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _AFTER_OK = {"merged", "closed", "cancelled"}  # cancelled 还须非 dependency_failed；派发处终审
 _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged 不逆转历史）
@@ -124,7 +124,7 @@ class TaskService:
             # 唯一豁免＝建单显式 verify_pending（探索路：worker 提案→task_update 登记）
             self._reject(tid, sid, "verify 未登记——create 传 verify_cmd 原子登记，"
                                    "或建单 verify_pending=true 走探索路", ev=EV_REJECTED_VERIFY)
-        if t["chain_depth"] >= _MAX_DEPTH:
+        if t["chain_depth"] >= _MAX_DEPTH:  # （F41 兜底）
             self._reject(tid, sid, f"chain_depth>={_MAX_DEPTH}")
         active = sum(1 for x in self._state.snapshot()["tasks"].values()
                      if x["state"] in _ACTIVE)
@@ -200,6 +200,11 @@ class TaskService:
                      key=lambda t: t["created"], default=None)
         if parent is None:
             self._reject(tid, sid, "worker 建单须有现役任务上下文（继承父仓与验证配置）",
+                         ev=EV_DENIED)
+        if parent["chain_depth"] + 1 >= _MAX_DEPTH:  # F41 叶子层：子任务不可派发，建单即死单
+            self._reject(tid, sid,
+                         f"叶子层无嵌套派发权——父任务链深 {parent['chain_depth']}，"
+                         f"子任务 chain_depth 将达 {_MAX_DEPTH} 无派发面；拆解需求回报上级建兄弟任务",
                          ev=EV_DENIED)
         return parent
 

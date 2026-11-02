@@ -52,7 +52,7 @@ git 仓的代码写入只发生在委托的专属隔离环境（**git worktree�
 每个委托有身份（id）、状态、归属链记录。任务为**平表**（无 deps/parent——编排顺序由 dispatcher 的派发与消息节奏表达）。verify（真实可执行的验收判据）由 **worker 进环境勘察后回填**，经派发方校验（可执行性＋需求覆盖）确认后登记；登记即锁定——**worker 不得修改自己任务的 verify**，修改权属派发方，修改写审计。登记字段（语义清单，schema 归设计）：id · 目标 · 仓 · 环境 · verify（含登记状态）· 状态 · 归属（dispatcher/worker 会话）· 链深 · 连败 · 当前凭据 · 时间戳；**交互原文进消息库、历史事件进审计，任务页只存当前态＋锚**。
 **验收**：任务创建后 id/状态/归属可查；状态迁移由服务权威记录；worker 回填→派发方确认登记、驳回起重各一例；登记后 worker 改 verify 必拒且审计留行。
 
-### F3 派发与链
+### F3 派发与链（缺省链深 5 与嵌套边界被 F41 替代）
 dispatcher 经服务派发 worker（opencode API create+inject）；支持嵌套派发，**链深上限**（默认 5）与并发配额（默认值 builder 定）硬约束。会话不复用——一任务一会话一环境一凭据（生死绑定）；跨仓任务按依赖顺序编排：前仓 merged 后 dispatcher 才派后仓（甲案；平表无 deps，顺序由派发节奏表达）。
 **验收**：正常派发链建立并登记；超深度/超配额派发必拒且报因；跨仓两任务经同一 dispatcher 派发后，board 按该 dispatcher 一次查出两任务及各自状态（S2 链上可见）；跨仓顺序派发 e2e：前仓 merged 后后仓才 dispatched，后仓经相对路径见到前仓主检出新形态。
 
@@ -271,3 +271,7 @@ W-1（hook.ts）：F33 门记录目录豁免按路径任一段 basename 命中�
 ### ag-e96140 gate 分支处理路径解码加固——gitx plumbing/外呼/页面读全量 errors=replace（2026-11-02，ag-fa17e4 第 8 轮门崩续修）
 ag-830b1b 只修了 verify 输出管道，第 8 轮门崩终因在 verify 之前的「处理目标分支」阶段：gitx plumbing 读分支历史/diff 文本遇 GBK 字节（f5a988d9 历史重放段引入 data/appstyle/style_*/darkBlue.css 微软雅黑 GBK 序列），`_git` 的 `text=True` 严格 UTF-8 解码确定性崩。修＝全量清点运行时解码面：gitx `_git`/push Popen、health 邮件外呼、anchors rev-parse 管道加显式 `encoding="utf-8", errors="replace"`（非法字节降级 U+FFFD）；anchors 锚文件读同款（终闸 B 册实证：坏锚原样抛 UDE → done 恒 500，降级后失配回 None fail-closed）；httpd wiki_read 页面读补 errors=replace（坏字节降级不 500）。静态配置读（有 try 捕获 OSError/UnicodeDecodeError：oc service.json、gate 名册、task req 台账、store 自写状态）保持严格。git 面细化（实证 2.55）：`git log` 对非 UTF-8 提交信息自行重编码（latin-1 释义出合法 UTF-8）坏字节到不了本侧解码器；`git diff` 内容行是原样字节流——U+FFFD 断言只能落在 diff 路径。边界：只动解码健壮性，不动 gitx 语义与其他模块。
 **验收**：test_access_gitx.py——构造含 GBK 字节的提交历史（css 内容＋GBK 提交信息）：touches_gate/diff_check/log 读取不抛、diff 路径文本含 U+FFFD、闸体判定真实（HEAD 过、父提交反事实复现 UnicodeDecodeError 0xc8）；test_access_anchors.py——坏字节锚降级回 None 不抛；`python3 -m pytest tests/ -q` 全绿（Req: ag-e96140 锚）。
+
+### F41 派发保险丝校准——链深 3、配额 6、叶子层收回嵌套派发权（2026-11-02，用户裁定）
+复合损耗（s^d 乘性）与管理跨度（Graicunas 超线性、ICS 最优 5）锚定：链深上限 5→3（深度 1/2 可派发），并发配额 8→6；**叶子层**＝现役父任务 chain_depth+1 ≥ 上限的 worker，其嵌套建单在 create 即拒（EV_DENIED，报因含「叶子」）——建了也派不出去的死单从源头消失；派发闸 chain_depth≥上限 保留作兜底。替代 F3 的「默认 5」缺省；F30 嵌套闭环机制不变。
+**验收**：test_core_task.py——depth=3 派发拒报因 chain_depth（零副作用）、恰好 6 个活动任务即 quota 拒、叶子 worker 建单拒（报因含「叶子」＋auth_denied 审计行）、depth=1→2 嵌套全链（建/派/收）保持绿；`python3 -m pytest tests/ -q` 全绿。

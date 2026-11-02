@@ -25,7 +25,7 @@ _STR = {"type": "string"}
 _TID = {"type": "string",
         "description": "任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，task_create/task_dispatch 返回）"}
 _TOOLS = [
-    {"name": "task_create", "description": "登记任务（todo）（dispatcher/root；worker 创建嵌套子任务）",
+    {"name": "task_create", "description": "登记任务（todo）（dispatcher/root；worker 建嵌套子任务（叶子层拒））",
      "inputSchema": {"type": "object", "properties": {
          "goal": _STR,
          "project_dir": {"type": "string",
