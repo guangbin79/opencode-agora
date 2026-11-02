@@ -14,9 +14,15 @@ class FakeOc:
     def __init__(self, online=True):
         self.online = online
         self.calls = []
+        self.events = []  # F42：silent/inject 按发生序，断言投递顺序
 
     def inject(self, sid, text):
         self.calls.append((sid, text))
+        self.events.append(("inject", sid, text))
+        return self.online
+
+    def inject_silent(self, sid, text):
+        self.events.append(("silent", sid, text))
         return self.online
 
 
@@ -181,6 +187,81 @@ class TestCoreMsg(unittest.TestCase):
                          [("silent", "d1", "[agora] task t1 escalate from w1\nhush")])
         self.assertEqual(self.r.check_mail("d1"), [])  # 静默已达，补拉不重交
         self.assertTrue(self.r.dedup_key(mid))
+
+
+class TestF42NoteDigest(unittest.TestCase):
+    """F42 消息分级批量注入：worker→dispatcher 的 note 进缓冲聚合 digest 经
+    inject_silent 免通知投递（落转录不调度回合）；关键消息保持实时且先冲后发。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(self.tmp)
+        self.store.append_state({
+            "version": 1,
+            "tasks": {
+                "t1": {"state": "running", "fail_streak": 0, "title": "x",
+                       "created": 0.0, "updated": 0.0,
+                       "dispatcher_sid": "d1", "worker_sid": "w1"},
+            },
+            "mail_read": {},
+        })
+        self.state = State(self.store)
+        self.oc = FakeOc()
+        self.now = [1000.0]
+        self.r = Router(self.store, self.state, self.oc,
+                        clock=lambda: self.now[0])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _note(self, body):
+        return self.r.post("w1", ("up", "t1"), "note", body)
+
+    def test_five_notes_one_silent_digest_with_all(self):  # Req: F42
+        mids = [self._note(f"n{i}") for i in range(5)]
+        self.assertEqual(self.oc.events,
+                         [("silent", "d1",
+                           "[agora] 5 条过程消息（t1）\nn0\nn1\nn2\nn3\nn4")])
+        self.assertEqual(self.oc.calls, [])  # 常规通道零触碰
+        self.assertEqual(len(self.store.read_messages()), 5)  # 本体先行落库
+        self.assertTrue(all(self.r.dedup_key(m) for m in mids))  # digest 达＝已投
+        self.assertEqual(self.r.check_mail("d1"), [])  # 补拉不重交
+
+    def test_critical_after_notes_digest_first(self):  # Req: F42
+        self._note("a")
+        self._note("b")
+        self.r.post("w1", ("up", "t1"), "result", "final")
+        self.assertEqual(self.oc.events,
+                         [("silent", "d1", "[agora] 2 条过程消息（t1）\na\nb"),
+                          ("inject", "d1",
+                           "[agora] task t1 result from w1\nfinal")])
+
+    def test_age_over_120_flushes_single_note(self):  # Req: F42
+        self._note("early")
+        self.now[0] += 121  # 假时钟：过龄待发在下次任一投递时惰性冲刷
+        self._note("late")
+        self.assertEqual(self.oc.events,
+                         [("silent", "d1", "[agora] 1 条过程消息（t1）\nearly")])
+
+    def test_below_thresholds_zero_inject(self):  # Req: F42
+        for i in range(4):
+            self._note(f"n{i}")
+        self.assertEqual(self.oc.events, [])
+        self.assertEqual(self.oc.calls, [])
+        self.assertEqual([m["body"] for m in self.r.check_mail("d1")],
+                         ["n0", "n1", "n2", "n3"])  # 本体已落库：补拉兜底不改动
+
+    def test_digest_offline_bodies_stay_for_pull(self):  # Req: F42
+        self.oc.online = False  # inject_silent 回 False：离线口径
+        mids = [self._note(f"n{i}") for i in range(5)]
+        self.assertEqual([k for k, _, _ in self.oc.events], ["silent"])
+        self.assertEqual([m["id"] for m in self.r.check_mail("d1")], mids)
+        self.assertEqual(self.r.check_mail("d1"), [])
+
+    def test_down_note_stays_realtime(self):  # Req: F42
+        self.r.post("d1", ("down", "t1"), "note", "hi")  # 下行 note 不分级
+        self.assertEqual(self.oc.events,
+                         [("inject", "w1", "[agora] task t1 note from d1\nhi")])
 
 
 class TestPeerBoard(unittest.TestCase):
