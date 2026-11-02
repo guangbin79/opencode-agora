@@ -206,9 +206,10 @@ class TestHttpSmoke(HttpdTest):
         tid = self.create_task()
         wtok = self.dispatch_task(tid)
         wsid = self.app.state.get(tid)["worker_sid"]
-        # T5 真形状：boot 随 create 走 prompt 通道，先于 dispatch 的 credential 注入
+        # T5 真形状：boot 随 create 走 prompt 通道，先于 dispatch 的 credential 注入（F43 指针形态）
         self.assertEqual(self.stub.sessions[wsid]["injects"][-1],
-                         f"[agora] credential {tid}\ntoken: {wtok}")
+                         f"[agora] credential {tid}"
+                         f"\nfile: {self.app.store.home}/credentials/{tid}.token")
         boot_text = self.stub.sessions[wsid]["injects"][0]
         self.assertTrue(boot_text.startswith("[agora] ") and tid in boot_text)
         st, r = call(self.port, "POST", "/post",
@@ -819,7 +820,9 @@ class TestCredentialFallback(unittest.TestCase):
                 if m["kind"] == "credential"]
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0]["to"], "sw1")
-        self.assertIn(f"token: {tok}", msgs[0]["body"])
+        self.assertNotIn(tok, msgs[0]["body"])  # F43：落库消息也不携 token 本体
+        self.assertIn(f"file: {self.app.store.home}/credentials/{tid}.token",
+                      msgs[0]["body"])  # 指针形态落库，check_mail 补拉可取回
         got = self.app.router.check_mail("sw1")  # worker 补拉可取回
         self.assertEqual([m["body"] for m in got], [msgs[0]["body"]])
 

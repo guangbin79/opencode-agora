@@ -102,8 +102,11 @@ class TestCoreRecover(unittest.TestCase):
                                "worker": sid}])
         self.assertEqual(self.auth.identify(tok), (sid, "worker"))  # 牌重绑新 sid
         cred = [i for i in self.oc.injected if "credential" in i[1]]
-        self.assertEqual(cred,  # 凭据随 dispatch 同形送达新会话
-                         [(sid, f"[agora] credential t1\ntoken: {tok}")])
+        cred_file = self.tmp / "credentials" / "t1.token"
+        self.assertEqual(cred,  # 凭据随 dispatch 同形送达新会话（F43 指针形态）
+                         [(sid, f"[agora] credential t1\nfile: {cred_file}")])
+        self.assertNotIn(tok, cred[0][1])  # token 本体不进注入文本
+        self.assertIn(tok, cred_file.read_text())  # 牌覆写落盘 0600
 
     def test_startup_spares_dead_worker_of_non_inflight(self):  # Req: F6
         for i, st in enumerate(("cancelled", "blocked", "verify_failed",
@@ -169,6 +172,35 @@ class TestCoreRecover(unittest.TestCase):
         msgs = [m for m in self.store.read_messages() if m["to"] == "main"]
         self.assertEqual([m["id"] for m in msgs], [mid])
         self.assertIn("续跑中", msgs[0]["body"])
+
+    def test_reinject_credential_write_failure_still_reinjects(self):  # Req: F43
+        (self.tmp / "credentials").write_text("junk")  # 杂散同名文件：落盘必炸
+        self.seed("t1")
+        tok = self.auth.issue("w1", "worker")
+        self.assertTrue(self.rec.reinject("t1"))  # 不抛不假败：指针缺文件→插件读败→pull 自愈
+        cred = [i for i in self.oc.injected if "credential" in i[1]]
+        self.assertEqual(cred,
+                         [(self.oc.sessions[0][0],
+                           f"[agora] credential t1\nfile: {self.tmp}/credentials/t1.token")])
+        self.assertEqual(self.auth.identify(tok), (self.oc.sessions[0][0], "worker"))  # 牌仍重绑新会话
+
+    def test_startup_sweeps_terminal_credential_files(self):  # Req: F43
+        self.seed("t-done", state="closed")
+        self.seed("t-live")
+        for tid in ("t-done", "t-live"):
+            p = self.tmp / "credentials" / f"{tid}.token"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('{"token": "x"}')
+        self.oc.liveness["w1"] = True  # t-live 活：不触发 reinject
+        self.rec.startup()
+        self.assertFalse((self.tmp / "credentials" / "t-done.token").exists())  # 崩窗孤儿清扫
+        self.assertTrue((self.tmp / "credentials" / "t-live.token").exists())  # 在飞牌不动
+
+    def test_startup_sweep_tolerates_stray_credentials_file(self):  # Req: F43
+        # credentials 为杂散同名文件：unlink 抛 NotADirectoryError——清扫尽力而为不崩启动
+        self.seed("t-done", state="closed")
+        (self.tmp / "credentials").write_text("junk")
+        self.rec.startup()  # 不抛
 
     def test_reinject_rebinds_nested_dispatcher_ownership(self):
         self.seed("parent", worker="w-parent")

@@ -338,6 +338,7 @@ class Gate:
         # F32：rebased_from 从 state 读（裁定②）——崩溃补终态路径才有值可取
         extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
         self._audit(tid, "merged", commit=t.get("commit"), **extra)
+        self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
         self._push_after_merge(tid)
@@ -426,6 +427,7 @@ class Gate:
                     self._gitx.remove_env(t["env_dir"])
                 except Exception as e:  # 回收败留痕后继续：终止通知＋凭据作废不得被拦断
                     self._audit(tid, "reclaim_failed", note=str(e)[:200])
+            self._store.remove_credential(tid)  # F43：门尾取消同删牌文件
             if t.get("worker_sid"):  # 同 T7 直路径：终止通知＋凭据作废
                 self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                   f"task {tid} cancelled at gate tail")

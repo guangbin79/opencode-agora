@@ -161,6 +161,20 @@ class Store:
         except ValueError:
             return None  # 断尾/损坏件视为缺席，同 load_state 容错口径
 
+    # ---- F43 worker 牌落盘（$AGORA_HOME/credentials/<tid>.token，0600） ----
+
+    def write_credential(self, tid: str, token: str) -> str:
+        """worker 牌经 write_ephemeral 口径落盘（0600）；返回绝对路径供指针文本。"""
+        name = f"credentials/{tid}.token"
+        self.write_ephemeral(name, {"token": token})
+        return str(self.home / name)
+
+    def remove_credential(self, tid: str) -> None:
+        try:
+            (self.home / f"credentials/{tid}.token").unlink(missing_ok=True)
+        except OSError:
+            pass  # 尽力而为 hygiene：credentials 杂散文件/权限坏等环境成因不拦断调用方（牌作废归 auth.revoke）
+
     def flock_singleton(self) -> bool:
         if self._lock_fd is not None:
             return True

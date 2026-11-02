@@ -432,6 +432,25 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 干净零影响照常合并
         self.assertEqual(self.gx.check_calls, [(str(self.env), None)])  # env＋branch 口径
 
+    def test_merge_recycle_removes_credential_file(self):  # Req: F43
+        self.in_gate()
+        cred = self.tmp / "credentials" / "t1.token"
+        cred.parent.mkdir(parents=True)
+        cred.write_text('{"token": "tok"}')
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertFalse(cred.exists())  # closed 环境回收处删牌文件
+
+    def test_reclaim_failure_still_removes_credential_file(self):  # Req: F43
+        self.in_gate()
+        cred = self.tmp / "credentials" / "t1.token"
+        cred.parent.mkdir(parents=True)
+        cred.write_text('{"token": "tok"}')
+        self.mk_gate(fail_remove=True)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # merged 不逆转
+        self.assertFalse(cred.exists())  # env 回收败不得拦断删牌（merged 路径牌无其他作废点）
+
     def test_verify_green_merges_and_closes(self):  # Req: F7
         self.in_gate(streak=2)
         self.gate.run("t1")

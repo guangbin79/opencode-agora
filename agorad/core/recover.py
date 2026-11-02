@@ -13,6 +13,7 @@ import time
 _REINJECTABLE = {"dispatched", "running"}
 # 未结案嵌套子任务均随父 worker 改绑；todo 虽尚未派发，也不能在恢复后丢失所有权。
 _NESTED_OPEN = {"todo", "dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
+_TERMINAL = {"merged", "closed", "cancelled"}  # F43：终态牌文件启动即清扫（回收前 kill -9 崩窗孤儿）
 
 EV_REINJECTED = "reinjected"
 
@@ -28,6 +29,9 @@ class Recover:
         """启动复查重注入；先清残留门闩——门线程不跨进程存活，kill -9 残闩必清。"""
         self._state.clear_gate_latches()
         for tid, t in self._state.snapshot()["tasks"].items():
+            if t["state"] in _TERMINAL:  # F43 崩窗孤儿：终态任务牌文件启动即清扫
+                self._store.remove_credential(tid)
+                continue
             if t["state"] not in _REINJECTABLE or not t.get("worker_sid"):
                 continue
             try:
@@ -64,8 +68,12 @@ class Recover:
         self._store.append_event({"ts": time.time(), "actor": "agorad",
                                   "event": EV_REINJECTED, "task": tid,
                                   "worker": wsid})
-        if tok:  # 凭据随 dispatch 同形送达（签牌文本 inject 进新会话）
-            text = f"[agora] credential {tid}\ntoken: {tok}"
+        if tok:  # 凭据随 dispatch 同形送达（F43：牌覆写落盘，注入携指针）
+            try:
+                cred_file = self._store.write_credential(tid, tok)
+            except Exception:  # 落盘败不废重注入：指针缺文件→插件读败→pull 自愈兜底
+                cred_file = str(self._store.home / "credentials" / f"{tid}.token")
+            text = f"[agora] credential {tid}\nfile: {cred_file}"
             try:
                 ok = self._oc.inject(wsid, text)
             except Exception:  # oc 抖动同死会话口径：走落库兜底

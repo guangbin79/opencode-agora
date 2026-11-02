@@ -177,12 +177,19 @@ class TaskService:
             self._reject(tid, sid, f"can_spawn: {e}")
         self._revoke_worker(t.get("worker_sid"))  # 重派先废旧牌再签新牌
         token = self._auth.issue(wsid, "worker")
+        try:
+            cred_file = self._store.write_credential(tid, token)  # F43：牌落盘 0600（迁移前：败则零账面残局）
+        except Exception as e:  # 落盘败＝派发零副作用回滚（新牌即废、新建 env 回收），不交无凭据残局
+            self._revoke_worker(wsid)
+            if not t.get("env_dir"):
+                self._gitx.remove_env(env)
+            self._reject(tid, sid, f"credential_write: {e}")
         self._state.transition(tid, "dispatched", worker_sid=wsid, env_dir=env,
                                dispatcher_sid=sid)
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": EV_DISPATCHED, "task": tid, "worker": wsid})
         self._pages(self._store.home, tid, self._state.get(tid))  # F44：事件先落再渲染
-        text = f"[agora] credential {tid}\ntoken: {token}"
+        text = f"[agora] credential {tid}\nfile: {cred_file}"
         try:
             ok = self._oc.inject(wsid, text)
         except Exception:  # oc 抖动同死会话口径：走落库兜底
@@ -286,8 +293,14 @@ class TaskService:
                     self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                       f"task {tid} cancelled by {sid}")
                     self._revoke_worker(t["worker_sid"])
+                self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断凭据作废
                 if t.get("env_dir"):
-                    self._gitx.remove_env(t["env_dir"])
+                    try:
+                        self._gitx.remove_env(t["env_dir"])
+                    except Exception as e:  # 回收败留痕后继续：级联与通知不被拦断（同 gate._tail 口径）
+                        self._store.append_event({"ts": time.time(), "actor": sid,
+                                                  "event": "reclaim_failed", "task": tid,
+                                                  "note": str(e)[:200]})
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"任务 {tid} 已取消（actor={sid}）"

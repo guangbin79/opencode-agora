@@ -35,6 +35,8 @@ class FakeGitx:
         return env
 
     def remove_env(self, env_dir):
+        if getattr(self, "remove_raises", False):  # F43 回收失败注入：删牌/级联/通知不得被拦断
+            raise RuntimeError("rmtree: Directory not empty")
         self.removed.append(env_dir)
 
     def materialize_checkout(self, tree_dir, source_dir):  # Req: ag-0d2daa
@@ -847,6 +849,65 @@ class TestReqId(TestCoreTask):
         for bad in ("F34\n", "F034", "F٣٤"):
             with self.assertRaises(Rejected):
                 self.svc.create("g", repo, None, self.root, req_id=bad)
+
+
+class TestCredentialPointer(TestCoreTask):
+    """F43 凭据不进上下文：牌落盘 0600，注入文本/落库消息只携指针。
+
+    牌经 write_ephemeral 口径落 $AGORA_HOME/credentials/<tid>.token；
+    注入文本改指针形态；生命周期＝重派覆写、cancel（含级联）删除。
+    """
+
+    def cred_path(self, tid):
+        return self.tmp / "credentials" / f"{tid}.token"
+
+    def test_dispatch_injects_pointer_not_token(self):  # Req: F43
+        tid, disp, tok = self.dispatched_pair()
+        cred = [i for i in self.oc.injected if "credential" in i[1]]
+        self.assertEqual(len(cred), 1)
+        sid, text = cred[0]
+        self.assertNotIn(tok, text)  # token 本体不进模型上下文
+        self.assertIn(f"[agora] credential {tid}\nfile: {self.cred_path(tid)}",
+                      text)  # 指针形态
+        p = self.cred_path(tid)
+        self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600")  # 牌文件 0600
+        self.assertIn(tok, p.read_text())  # 牌本体只在盘上（指针所指）
+
+    def test_redispatch_overwrites_credential_file(self):  # Req: F43
+        tid, disp, old = self.dispatched_pair()
+        for _ in range(3):
+            self.state.fail_streak_bump(tid)  # blocked＝重派唯一合法来态
+        new = self.svc.dispatch(tid, disp)
+        self.assertNotEqual(old, new)
+        self.assertEqual(json.loads(self.cred_path(tid).read_text())["token"],
+                         new)  # 同路径覆写换牌
+
+    def test_cancel_removes_credential_file(self):  # Req: F43
+        tid, disp, _ = self.dispatched_pair()
+        self.assertTrue(self.cred_path(tid).exists())
+        self.svc.cancel(tid, disp)
+        self.assertFalse(self.cred_path(tid).exists())  # 牌随任务生死
+
+    def test_cancel_credential_removed_despite_env_reclaim_failure(self):  # Req: F43
+        tid, disp, _ = self.dispatched_pair()
+        self.gitx.remove_raises = True
+        r = self.svc.cancel(tid, disp)
+        self.assertEqual(r["cancelled"], 1)
+        self.assertFalse(self.cred_path(tid).exists())  # 回收败不得拦断删牌
+        self.assertEqual([e["task"] for e in self.events()
+                          if e["event"] == "reclaim_failed"], [tid])  # 回收败留痕
+        self.assertTrue(cancel_msgs(self.store, "s1"))  # 终止通知不被拦断（down 边直达 worker）
+
+    def test_dispatch_credential_write_failure_rejects_clean(self):  # Req: F43
+        (self.tmp / "credentials").write_text("not a dir")  # 杂散同名文件：落盘必炸
+        tid = self.dispatchable()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("credential_write", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "todo")  # 派发零副作用可重试
+        self.assertEqual(self.gitx.removed, [f"/envs/{tid}"])  # 新建 env 回收
+        self.assertIsNone(self.auth.token_for("s1"))  # 签出的新牌即废
+        self.assertEqual(self.oc.injected, [])  # 零凭据文本注入
 
 
 if __name__ == "__main__":
