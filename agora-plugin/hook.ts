@@ -20,7 +20,7 @@ export const GATE_SCOPE_HINT =
   "被拦：门记录目录（.omo/.req-gate/.review-loop）写入仅限当前任务 env 或当前仓根——跨 env/跨仓目标不豁免（F38 W-1）。";
 
 const TMP_ROOT = "/tmp/opencode"; // B3 设计定值
-const GATE_RECORD_DIRS = new Set([".omo", ".req-gate", ".review-loop"]); // F33：门记录目录（新旧同收；.review-loop=评审环证据，2026-11-01 issue#222 实测误伤面）
+const GATE_RECORD_DIRS = new Set([".omo", ".req-gate", ".review-loop", ".superpowers"]); // F33：门记录目录（新旧同收；.review-loop=评审环证据 1224fbd；.superpowers=SDD 账本/workspace 面，2026-11-02 实测误伤面）
 const WRITE_TOOLS = new Set(["edit", "write"]);
 const READISH_TOOLS = new Set(["read", "bash"]);
 

@@ -91,6 +91,7 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("write", join(repo, ".omo", "req-gate", "s1.md"), repo, null, true)).toBeNull();
     expect(shouldBlock("edit", join(repo, ".req-gate", "s2.md"), repo, null, true)).toBeNull();
     expect(shouldBlock("write", join(repo, ".review-loop", "e1.md"), repo, null, true)).toBeNull(); // F-PROC-1 收编锚（1224fbd 一行收编，本例钉死）
+    expect(shouldBlock("write", join(repo, ".superpowers", "sdd", "progress.md"), repo, null, true)).toBeNull(); // SDD 账本/workspace 面（2026-11-02 实测误伤面）
     expect(shouldBlock("write", join(repo, ".not-gate", "x.md"), repo, null, true)).toBe(NO_CRED_HINT);
     // ocr 评审钉死：嵌套同名目录亦豁免＝刻意广度（basename 级）——F38 后仅在当前 env/仓根内保留
     expect(shouldBlock("write", join(repo, "src", ".omo", "x.md"), repo, null, true)).toBeNull();
@@ -101,6 +102,7 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("write", join(envDir, ".omo", "x.md"), envDir, worker, true)).toBeNull();
     expect(shouldBlock("edit", join(envDir, ".req-gate", "x.md"), envDir, worker, true)).toBeNull();
     expect(shouldBlock("write", join(envDir, ".review-loop", "e.md"), envDir, worker, true)).toBeNull();
+    expect(shouldBlock("write", join(envDir, ".superpowers", "progress.md"), envDir, worker, true)).toBeNull();
   });
 
   test("F38 W-1 位置约束：跨 env/跨仓门记录目录命中一律拒（含收编面 .review-loop）", () => {
