@@ -70,12 +70,17 @@ def load_env_file(home=None):
             continue  # 空行/注释/坏行容错跳过
         key, _, value = line.partition("=")
         key = key.strip()
+        if not (key.isidentifier() and key.isascii()) or key == "AGORA_HOME":
+            # 坏键容错跳过（含 export KEY=… 前缀误写：键含空格不成名）；AGORA_HOME
+            # 保留键：env 文件不可重定向自身所在 home（防指针被经其发现的值反超）
+            continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]  # 一对成对引号脱壳（手写防呆：值不需引号）
-        if key:
-            os.environ.setdefault(key, value)
-            loaded[key] = value
+        if key in loaded:
+            continue  # 重复键：首见生效，与 os.environ.setdefault 口径一致
+        os.environ.setdefault(key, value)
+        loaded[key] = value
     return loaded
 
 

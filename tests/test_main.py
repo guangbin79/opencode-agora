@@ -97,13 +97,17 @@ class TestEnvFileDefaults(unittest.TestCase):
             (d / "agorad.env").write_text(
                 "# 注释\nAGORA_VERIFY_TIMEOUT=3600\n"
                 "AGORA_VERIFY_CEILING=\"14400\"\n"
-                "\n坏行无等号\n=空键\nAGORA_HEALTH_INTERVAL=60\n",
+                "\n坏行无等号\n=空键\nexport AGORA_VERIFY_TIMEOUT=1\n"
+                "AGORA_HOME=/elsewhere\nAGORA_HEALTH_INTERVAL=60\n"
+                "AGORA_HEALTH_INTERVAL=99\n",
                 encoding="utf-8")
             with mock.patch.dict(os.environ, {"AGORA_HOME": tmp}, clear=True):
                 self.assertEqual(load_env_file(), {
                     "AGORA_VERIFY_TIMEOUT": "3600",
                     "AGORA_VERIFY_CEILING": "14400",
                     "AGORA_HEALTH_INTERVAL": "60"})
+                self.assertNotIn("export AGORA_VERIFY_TIMEOUT", os.environ)
+                self.assertEqual(os.environ["AGORA_HOME"], tmp)  # 保留键不被重定向
                 # 读取点自动受益（原纯读 os.environ 的事故面）
                 self.assertEqual(verify_timeout_from_env(), 3600.0)
                 self.assertEqual(verify_ceiling_from_env(), 14400.0)

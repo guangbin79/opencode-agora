@@ -112,6 +112,7 @@ chk "inactive-repos 骨架在位且空 (Req: F12)" bash -c '
 f="$1/.agora/inactive-repos"; [ -f "$f" ] && [ ! -s "$f" ]' _ "$A1"
 chk "agorad.env 旋钮模板在位含软顶缺省 (ag-fc67bc)" grep -qxF "AGORA_VERIFY_TIMEOUT=3600" "$A1/.agora/agorad.env"
 chk "agorad.env 模板携注释示例行 (ag-fc67bc)" grep -q "^# AGORA_VERIFY_CEILING=" "$A1/.agora/agorad.env"
+chk "agorad.env 0600（通用 env 层防凭据泄漏，评审环 R1）" [ "$(stat -c %a "$A1/.agora/agorad.env")" = 600 ]
 chk "inactive-repos owner 可写 (Req: F12)" [ -w "$A1/.agora/inactive-repos" ]
 chk "inactive-repos 0644 (Req: F12)" [ "$(stat -c %a "$A1/.agora/inactive-repos")" = 644 ]
 chk "收尾输出携名册提示（路径 env 展开非字面量，Req: F12）" bash -c '
