@@ -103,12 +103,12 @@ class TaskService:
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
             "chain_depth": depth, "fail_streak": 0, "last_seen": None,
             "created": now, "updated": now})
-        self._pages(self._store.home, tid, self._state.get(tid))
         self._store.append_event({"ts": now, "actor": sid,
                                   "event": EV_CREATED, "task": tid})
         if verify_cmd is not None:  # 登记事件照落（与 update 路同款审计）
             self._store.append_event({"ts": now, "actor": sid,
                                       "event": EV_VERIFY, "task": tid})
+        self._pages(self._store.home, tid, self._state.get(tid))  # F44：事件先落再渲染
         return tid
 
     # ---- F3 派发 ----
@@ -174,9 +174,9 @@ class TaskService:
         token = self._auth.issue(wsid, "worker")
         self._state.transition(tid, "dispatched", worker_sid=wsid, env_dir=env,
                                dispatcher_sid=sid)
-        self._pages(self._store.home, tid, self._state.get(tid))
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": EV_DISPATCHED, "task": tid, "worker": wsid})
+        self._pages(self._store.home, tid, self._state.get(tid))  # F44：事件先落再渲染
         text = f"[agora] credential {tid}\ntoken: {token}"
         try:
             ok = self._oc.inject(wsid, text)

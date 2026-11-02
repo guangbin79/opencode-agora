@@ -39,6 +39,37 @@ class TestAccessPages(unittest.TestCase):
         p = write_task_page(self.tmp, "ag-x1", dict(ROW, req_id="F34"))
         self.assertIn("req_id: F34", p.read_text(encoding="utf-8"))  # worker 从任务页取号
 
+    def test_f44_relations_section_on_nested_page(self):  # Req: F44
+        row = dict(ROW, dispatcher_sid="ses-par", worker_sid="ses-w",
+                   after="ag-a", created=1000.0)
+        tasks = {
+            "ag-m": row,
+            "ag-p": {"worker_sid": "ses-par", "state": "dispatched",
+                     "title": "父任务标题"},  # 父：worker_sid==本任务 dispatcher_sid
+            "ag-c": {"dispatcher_sid": "ses-w", "state": "running"},  # 子
+            "ag-a": {"state": "merged"},  # after 前驱
+            "ag-s": {"after": "ag-m", "state": "todo"},  # 后继
+        }
+        events = [{"ts": 1000.0 + i, "task": "ag-m",
+                   "event": "task_created" if i == 0 else "dispatched"}
+                  for i in range(9)]
+        events[1]["note"] = "x" * 80
+        p = write_task_page(self.tmp, "ag-m", row, tasks=tasks, events=events)
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("## 关联", text)
+        for rid in ("ag-p", "ag-a", "ag-c", "ag-s"):
+            self.assertIn(rid, text)  # 全部关联 id 内联
+        self.assertIn("running", text)  # 子任务 state
+        ev = [ln for ln in text.splitlines() if ln.startswith("- 事件:")]
+        self.assertEqual(len(ev), 8)  # 最近 8 条
+        self.assertTrue(any("dispatched" in ln for ln in ev))
+        self.assertFalse(any("x" * 61 in ln for ln in ev))  # note 截 ≤60 字符
+
+    def test_f44_orphan_flat_page_has_no_relations_section(self):  # Req: F44
+        p = write_task_page(self.tmp, "ag-o", dict(ROW, id="ag-o"),
+                            tasks={"ag-o": dict(ROW)}, events=[])
+        self.assertNotIn("关联", p.read_text(encoding="utf-8"))  # 无关联不输出空标题
+
 
 if __name__ == "__main__":
     unittest.main()
