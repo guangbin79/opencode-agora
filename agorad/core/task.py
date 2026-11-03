@@ -58,6 +58,11 @@ class TaskService:
             if verify_pending:
                 self._reject(tid, sid, "verify_pending 豁免旗由派发方持有——worker 建单"
                                        "缺省继承父任务配置", ev=EV_DENIED)
+            if parent["verify"]["state"] == "pending":  # F46 H-1 fail-fast：探索父登记前
+                # 建子单必继承 pending 配置→dispatch 恒拒死单；登记后旗残留但配置已
+                # registered——判配置不判旗，引导待登记后再建
+                self._reject(tid, sid, "父任务验收未登记（探索中）——子任务待父 verify 登记后"
+                                       "建单", ev=EV_DENIED)
             if target_branch is not None:
                 self._reject(tid, sid, "worker 不得改变后代合并/push 策略"
                                        "（target_branch）——缺省继承父任务", ev=EV_DENIED)
@@ -96,9 +101,10 @@ class TaskService:
             verify = dict(parent["verify"])
         root_sid = sid if role != "worker" else (
             parent.get("root_sid") or parent["dispatcher_sid"])  # F45 一次性定死：worker 继承父池
+        head = (title or goal.splitlines()[0][:40]) if (title or goal) else tid
         self._state.add(tid, {
-            "title": (title or goal.splitlines()[0][:40]) if (title or goal) else tid, "goal": goal,
-            "project_dir": project_dir, "target_branch": target_branch,
+            "title": " ".join(str(head).split()),  # F46 B-1：压平 title（boot 开场按行解析；goal 合法多行不动）
+            "goal": goal, "project_dir": project_dir, "target_branch": target_branch,
             "req_id": req_id,
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
@@ -414,6 +420,8 @@ class TaskService:
         return tid
 
     def _boot(self, tid, env, title=None):
+        if title:  # F46 B-1 纵深防御：存量脏 title 同款压平，断多行穿透开场解析面
+            title = " ".join(str(title).split())
         page = pathlib.Path(self._store.home) / "wiki" / "tasks" / f"{tid}.md"
         return (f"[agora] {tid}: {title or tid}\npage: {page}\nenv: {env}\n"
                 "contract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note\n"

@@ -42,6 +42,19 @@ function readTokenFile(path: string): string {
   }
 }
 
+/** F46 H-8 收口：token 解析具名化——指针形态独占且 tid/token 同标记：指针 tid 与
+ * boot tid 并存不一致→视同非法（""，抑制 prev 回落走拉取自愈）；legit→trim 后读牌
+ * （尾空格/CRLF 残留不静默降级）；无指针回落旧文本形态（无 credential 时 undefined
+ * →调用点 prev 回落继承既有，BOOT-only 注入不 wipe 缓存）。 */
+function credToken(m: RegExpExecArray | null, p: RegExpExecArray | null,
+                   bootTid: string | undefined): string | undefined {
+  if (p) {
+    if (bootTid !== undefined && bootTid !== p[1]) return "";
+    return legitPointer(p[2], p[1]) ? readTokenFile(p[2].trim()) : "";
+  }
+  return m?.[2];
+}
+
 export function onInject(msg: OcInject): void {
   // 信封门：全部标记（BOOT/env/credential）只在裸注入（无信封，dispatch/reinject 直投＋
   // 会话创建 boot）或 credential 信封（直投失败落库兜底的 inject 送达）内可信——其余信封
@@ -58,7 +71,7 @@ export function onInject(msg: OcInject): void {
   const env = credText ? BOOT_ENV.exec(credText) : null;
   const prev = getCredential(msg.sessionID);
   const cred: Cred = {
-    token: (p ? (legitPointer(p[2], p[1]) ? readTokenFile(p[2]) : "") : m?.[2]) ?? prev?.token ?? "",
+    token: credToken(m, p, boot?.[1]) ?? prev?.token ?? "",
     sid: msg.sessionID,
     role: "worker",
     tid: boot?.[1] ?? m?.[1] ?? p?.[1] ?? prev?.tid,

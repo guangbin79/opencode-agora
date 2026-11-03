@@ -88,7 +88,8 @@ class Router:
     def _flush(self, to_sid, tid):
         """F42 b/c：同目标待发聚 digest 经 inject_silent 免通知投递；失败则
         本体留库待补拉，成功即标记已投（check_mail 不重交）。"""
-        buf = self._pending.pop((to_sid, tid), ())
+        buf = [(m, ts, b) for m, ts, b in self._pending.pop((to_sid, tid), ())
+               if m not in self._delivered]  # F46 H-2：缓冲窗口内补拉已交的 mid 对账剔除
         if not buf:
             return
         lines = [f"[agora] {len(buf)} 条过程消息（{tid}）"]

@@ -195,4 +195,41 @@ describe("onInject 单消息双标记自举", () => {
       expect(getCredential("s-inj-fb")?.token).toBe("tok-fb");
     });
   });
+
+  test("⑬指针 tid 与 boot tid 不一致→token 置空（跨标记解耦拒，prev 不回落）", () => {
+    // Req: F46 H-8：tid 与 token 须同标记同源——混载视同非法指针，"" 走拉取自愈
+    withHome((home) => {
+      const file = makeCred(home, "ag-b", JSON.stringify({ token: "tok-b" }));
+      cacheCredential({ token: "tok-prev", sid: "s-inj-cross", role: "worker", tid: "t-prev", envDir: "/env-prev" });
+      onInject({
+        sessionID: "s-inj-cross",
+        text: `[agora] ag-a: 标题\nenv: /env-a\n[agora] credential ag-b\nfile: ${file}`,
+      });
+      expect(getCredential("s-inj-cross")).toEqual({
+        token: "", sid: "s-inj-cross", role: "worker", tid: "ag-a", envDir: "/env-a",
+      });
+    });
+  });
+
+  test("⑭指针行尾空格/CRLF 残留→trim 后照读成功", () => {
+    // Req: F46 H-8：readTokenFile 收 trim 路径——投递面换行规整残留不静默降级
+    withHome((home) => {
+      const file = makeCred(home, "ag-trim", JSON.stringify({ token: "tok-trim" }));
+      onInject({
+        sessionID: "s-inj-trim",
+        text: `[agora] ag-trim: 标题\nenv: /env-trim\n[agora] credential ag-trim\nfile: ${file}   \r`,
+      });
+      expect(getCredential("s-inj-trim")?.token).toBe("tok-trim");
+    });
+  });
+
+  test("⑮BOOT-only 注入不 wipe 既有缓存 token（无 credential→prev 回落）", () => {
+    // Req: F46 H-8 评审环：legacy 无 credential 路 undefined→prev 回落语义保持
+    // （BOOT 先行 credential 后至/重注入 boot 不得清掉已在手 token）
+    cacheCredential({ token: "tok-hold", sid: "s-inj-bootonly", role: "worker", tid: "t-hold", envDir: "/env-hold" });
+    onInject({ sessionID: "s-inj-bootonly", text: "[agora] gt-t9: boot 先行\npage: p.md\nenv: /env-nine" });
+    expect(getCredential("s-inj-bootonly")).toEqual({
+      token: "tok-hold", sid: "s-inj-bootonly", role: "worker", tid: "gt-t9", envDir: "/env-nine",
+    });
+  });
 });

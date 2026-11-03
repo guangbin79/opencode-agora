@@ -258,6 +258,16 @@ class TestF42NoteDigest(unittest.TestCase):
         self.assertEqual([m["id"] for m in self.r.check_mail("d1")], mids)
         self.assertEqual(self.r.check_mail("d1"), [])
 
+    def test_check_mail_pulled_notes_not_redelivered_in_digest(self):  # Req: F46 H-2
+        self._note("early0")  # 缓冲窗口内 2 条
+        self._note("early1")
+        self.assertEqual(self.oc.events, [])
+        self.r.check_mail("d1")  # 补拉即送达：mid 入 _delivered，缓冲未清
+        for i in range(3):
+            self._note(f"n{i}")  # 凑满阈值触发 flush
+        self.assertEqual(self.oc.events,  # digest 只含后 3 条（已补拉 mid 对账剔除）
+                         [("silent", "d1", "[agora] 3 条过程消息（t1）\nn0\nn1\nn2")])
+
     def test_down_note_stays_realtime(self):  # Req: F42
         self.r.post("d1", ("down", "t1"), "note", "hi")  # 下行 note 不分级
         self.assertEqual(self.oc.events,
