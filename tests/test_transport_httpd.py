@@ -471,9 +471,10 @@ class TestNestedDispatchLoop(HttpdTest):
         st, r = call(self.port, "POST", "/check_mail", {}, parent_token)
         self.assertEqual(st, 200)
         results = [m for m in r["messages"] if m["kind"] == "result"]
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["task"], child)
-        self.assertIn("已 closed", results[0]["body"])
+        self.assertEqual(len(results), 2)  # ag-acae3b：merged＋closed 两拍均实时
+        self.assertEqual([m["task"] for m in results], [child, child])
+        self.assertIn("merged @", results[0]["body"])
+        self.assertIn("已 closed", results[1]["body"])
 
         st, r = call(self.port, "POST", "/post",
                      {"task": parent, "kind": "done", "body": SHA}, parent_token)

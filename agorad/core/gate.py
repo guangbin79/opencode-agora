@@ -289,7 +289,8 @@ class Gate:
                 where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
                 self._quality_fail(tid, "reopened",
                                    f"{where}，目标分支未改动——修复后重新"
-                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}")
+                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
+                                   reason=where)
                 return
             # 集成验证可能耗时较长，最终推进前复查，关闭“开始干净、结束时变脏”窗口。
             self._gitx.ensure_clean(target)
@@ -312,6 +313,8 @@ class Gate:
                 self._state.transition(tid, "reopened")
                 self._audit(tid, "reopened")
                 self._post(tid, f"门内异常：{e}——处理目标分支后重新 post(done, commit)")
+                self._router.notify_transition(  # ag-acae3b 摘要直投（异常长文归 worker）
+                    tid, "reopened", "门内异常")
             else:  # 终态后异常（如环境回收败）：不逆转门结果，但留痕＋实时提示派发方
                 self._audit(tid, "reclaim_failed", note=str(e)[:200])
                 t = self._state.get(tid)
@@ -338,6 +341,8 @@ class Gate:
         # F32：rebased_from 从 state 读（裁定②）——崩溃补终态路径才有值可取
         extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
         self._audit(tid, "merged", commit=t.get("commit"), **extra)
+        self._router.notify_transition(  # ag-acae3b：merged 实时直达 dispatcher
+            tid, "merged", f"@{(t.get('commit') or '')[:7]}")
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
@@ -384,6 +389,7 @@ class Gate:
         self._state.transition(tid, "reopened")
         self._audit(tid, "reopened")
         why, act = (("同步冲突", "解冲突后") if conflict else ("non-ff 拒并", "同步后"))
+        self._router.notify_transition(tid, "reopened", why)  # ag-acae3b 摘要直投
         self._post(tid, f"{why}："
                         f"{branch or self._gitx.symref(t['project_dir'])}@{before}"
                         f" vs branch@{self._gitx.head(t['env_dir'])}——{act}"
@@ -406,11 +412,14 @@ class Gate:
             f"任务 {tid} verify 超软顶（>{self._verify_timeout:g}s）——仍在跑、"
             "无需操作、确认挂死才 cancel")
 
-    def _quality_fail(self, tid, to, body):
-        """质量败（verify 败/集成败）：迁移＋审计＋实时回 worker＋计连败（3 连败拍人）。"""
+    def _quality_fail(self, tid, to, body, reason=""):
+        """质量败（verify 败/集成败）：迁移＋审计＋实时回 worker＋计连败（3 连败拍人）。
+        reopened 时向 dispatcher 推拒因摘要单行（ag-acae3b：原文归 worker）。"""
         self._state.transition(tid, to)
         self._audit(tid, to)
         self._post(tid, body)
+        if to == "reopened":
+            self._router.notify_transition(tid, "reopened", reason)
         self._state.fail_streak_bump(tid)
         if self._state.get(tid)["state"] == "blocked":
             self._audit(tid, "blocked")

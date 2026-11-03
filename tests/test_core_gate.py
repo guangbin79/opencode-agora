@@ -1022,17 +1022,30 @@ class TestDispatcherResults(TestCoreGate):
     def test_closed_result_returns_to_dispatcher(self):
         self.in_gate()
         self.gate.run("t1")
-        (m,) = self.results()
-        self.assertEqual(m["from"], "agorad")
-        self.assertIn("已 closed", m["body"])
-        self.assertIn(SHA, m["body"])
+        closed = self.results()[-1]  # merged＋closed 两拍，closed 收官
+        self.assertEqual(closed["from"], "agorad")
+        self.assertIn("已 closed", closed["body"])
+        self.assertIn(SHA, closed["body"])
+
+    def test_merged_result_returns_to_dispatcher(self):  # Req: ag-acae3b
+        """merged 迁移实时直达 dispatcher：单行紧凑（id＋终态＋短 sha），
+        先于 closed 收官拍；worker milestone 通道不变。"""
+        self.in_gate()
+        self.gate.run("t1")
+        merged, closed = self.results()
+        self.assertEqual(merged["from"], "agorad")
+        self.assertEqual(merged["kind"], "result")
+        self.assertEqual(merged["body"], f"任务 t1 merged @{SHA[:7]}")
+        self.assertLess(merged["id"], closed["id"])
 
     def test_closed_splits_milestone_to_worker_and_result_to_dispatcher(self):
-        """双通道契约（F30 跟进）：关单 milestone（人读）归 worker，result（机器读）归 dispatcher，各恰一条。"""
+        """双通道契约（F30 跟进＋ag-acae3b）：关单 milestone（人读）归 worker，
+        result（机器读）归 dispatcher（merged＋closed 两拍），各就各位。"""
         self.in_gate()
         self.gate.run("t1")
         routed = sorted((m["to"], m["kind"]) for m in self.store.read_messages())
-        self.assertEqual(routed, [("disp1", "result"), ("s-w1", "milestone")])
+        self.assertEqual(routed, [("disp1", "result"), ("disp1", "result"),
+                                  ("s-w1", "milestone")])
         milestone, = [m["body"] for m in self.store.read_messages()
                       if m["kind"] == "milestone"]
         self.assertIn("merged @", milestone)
@@ -1055,6 +1068,58 @@ class TestDispatcherResults(TestCoreGate):
         self.gate.run("t1")
         (m,) = self.results()
         self.assertIn("已取消", m["body"])
+
+
+class TestReopenDispatcherNotice(TestCoreGate):
+    """ag-acae3b：reopened 迁移向 dispatcher 推拒因摘要单行（kind=result，
+    from=agorad）；拒因原文与输出尾仍只归 worker，摘要不外带长文。"""
+
+    def notices(self):
+        return [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"
+                and "reopened" in m["body"]]
+
+    def test_rebase_conflict_notice_summary(self):  # Req: ag-acae3b
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(merge="non-ff")  # 缺省 rebase_result=conflict：同步冲突弹回
+        self.in_gate()
+        self.gate.run("t1")
+        (m,) = self.notices()
+        self.assertEqual(m["from"], "agorad")
+        self.assertIn("任务 t1 reopened 同步冲突", m["body"])
+        self.assertNotIn("main@aaa111", m["body"])  # 分支位长文只给 worker
+        self.assertEqual(len(m["body"].splitlines()), 1)  # 单行紧凑
+
+    def test_non_ff_reject_notice_summary(self):  # Req: ag-acae3b
+        self.runner = FakeRunner((0, "pass"), (0, "pass"))
+        self.mk_gate(merge="non-ff")
+        self.gx.rebase_result = "ok"
+        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.gx.ff_sha_result = "non-ff"
+        self.gx.contains_results = [False, False]  # 门首探针与守卫均未含
+        self.in_gate()
+        self.gate.run("t1")
+        (m,) = self.notices()
+        self.assertIn("任务 t1 reopened non-ff 拒并", m["body"])
+
+    def test_integration_fail_notice_summary(self):  # Req: ag-acae3b
+        self.runner = FakeRunner((0, "env pass"), (1, "R broke"))
+        self.mk_gate(merge="non-ff")
+        self.gx.rebase_result = "ok"
+        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.in_gate()
+        self.gate.run("t1")
+        (m,) = self.notices()
+        self.assertIn("任务 t1 reopened rebase 后集成 verify 失败", m["body"])
+        self.assertNotIn("R broke", m["body"])  # 输出尾只给 worker
+
+    def test_gate_crash_notice_summary(self):  # Req: ag-acae3b
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(crash=True)
+        self.in_gate()
+        self.gate.run("t1")
+        (m,) = self.notices()
+        self.assertIn("任务 t1 reopened 门内异常", m["body"])
 
 
 class TestGateAudit(TestCoreGate):

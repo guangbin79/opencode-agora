@@ -13,6 +13,10 @@ inject_silent 免通知投递（落转录不调度回合），其余 kind 保持
 经 check_mail 可拉。冲刷触发：满 _DIGEST_N 条／最旧存龄 ≥_DIGEST_T 秒（无后台
 线程，任一投递时惰性扫）／同目标关键消息先冲后发。digest 送达即视本体已投
 （补拉不重交），失败则本体留库待补拉（离线口径不变）。
+
+生命周期通知（ag-acae3b）：终态迁移（merged/closed/blocked/cancelled）与
+reopened 拒因摘要经 notify_transition 以 kind=result 实时直投 dispatcher——
+缓冲只收 note，天然旁路（终态优先级最高）；(tid,to,detail) 去重防重试窗口重推。
 """
 import time
 
@@ -34,6 +38,7 @@ class Router:
         self._same_lineage = same_lineage  # F16 血统判定（core 禁兄弟 import，装配注入）
         self._delivered = set()
         self._pending = {}  # F42：(to_sid, tid) -> [(mid, ts, body)]，内存态可丢
+        self._notified = set()  # ag-acae3b 生命周期通知去重：(tid, to, detail)
         self._clock = clock or time.time  # 假时钟注入口（测试）
 
     def is_dispatcher(self, sid, t):
@@ -55,6 +60,22 @@ class Router:
         if to_sid is None:
             raise NotChainEdge(f"{tid}: dispatcher 未登记")
         return self._deliver("agorad", to_sid, tid, kind, body)
+
+    def notify_transition(self, tid, to, detail=""):
+        """生命周期迁移→dispatcher 实时单行（ag-acae3b）：终态（merged/closed/
+        blocked/cancelled）与 reopened 拒因摘要。kind=result 走弹通道直投——
+        F42 缓冲只收 note，天然旁路（分级）；同迁移 (tid,to,detail) 去重，
+        gate 重试/崩溃重排窗口重放不重推。dispatcher 未登记＝静默跳过：
+        通知面异常不得断裂门链（同 _deliver 失败口径）。"""
+        key = (tid, to, detail)
+        if key in self._notified:
+            return None
+        self._notified.add(key)
+        try:
+            return self.notify_dispatcher(
+                tid, "result", f"任务 {tid} {to} {detail}".rstrip())
+        except NotChainEdge:
+            return None
 
     def _deliver(self, from_sid, to_sid, tid, kind, body, silent=False):
         self._sweep()  # F42：过龄待发先冲，保投递时序

@@ -274,6 +274,77 @@ class TestF42NoteDigest(unittest.TestCase):
                          [("inject", "w1", "[agora] task t1 note from d1\nhi")])
 
 
+class TestLifecycleNotify(unittest.TestCase):
+    """任务生命周期迁移→dispatcher 实时单行通知（ag-acae3b）：终态直投不经
+    F42 digest 缓冲（kind=result 天然旁路）；同迁移重放不重推；dispatcher
+    未登记静默跳过——通知面异常不得断裂门链。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(self.tmp)
+        self.store.append_state({
+            "version": 1,
+            "tasks": {
+                "t1": {"state": "running", "fail_streak": 0, "title": "x",
+                       "created": 0.0, "updated": 0.0,
+                       "dispatcher_sid": "d1", "worker_sid": "w1"},
+            },
+            "mail_read": {},
+        })
+        self.state = State(self.store)
+        self.oc = FakeOc()
+        self.r = Router(self.store, self.state, self.oc)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_terminal_direct_inject_not_buffered(self):  # Req: ag-acae3b
+        """分级：终态迁移实时直投（inject 弹通道），不进 F42 note 缓冲。"""
+        mid = self.r.notify_transition("t1", "merged", "@abc1234")
+        self.assertEqual(self.oc.events,
+                         [("inject", "d1",
+                           "[agora] task t1 result from agorad\n任务 t1 merged @abc1234")])
+        self.assertEqual(self.r._pending, {})  # digest 缓冲零残留
+        (m,) = [x for x in self.store.read_messages() if x["id"] == mid]
+        self.assertEqual((m["kind"], m["from"], m["to"], m["body"]),
+                         ("result", "agorad", "d1", "任务 t1 merged @abc1234"))
+
+    def test_detail_optional_single_line(self):  # Req: ag-acae3b
+        self.r.notify_transition("t1", "blocked", "")
+        self.assertEqual(self.oc.events,
+                         [("inject", "d1",
+                           "[agora] task t1 result from agorad\n任务 t1 blocked")])
+
+    def test_replay_same_transition_not_repushed(self):  # Req: ag-acae3b
+        """幂等：同迁移（tid,to,detail）重放（gate 重试/崩溃重排窗口）只推一次。"""
+        self.r.notify_transition("t1", "merged", "@abc1234")
+        self.r.notify_transition("t1", "merged", "@abc1234")
+        self.assertEqual(len(self.oc.events), 1)
+        self.assertEqual(len(self.store.read_messages()), 1)  # 重放零落库
+
+    def test_distinct_migration_pushes_again(self):  # Req: ag-acae3b
+        self.r.notify_transition("t1", "reopened", "同步冲突")
+        self.r.notify_transition("t1", "merged", "@abc1234")  # 另一迁移照推
+        self.assertEqual([e[2].splitlines()[1] for e in self.oc.events],
+                         ["任务 t1 reopened 同步冲突", "任务 t1 merged @abc1234"])
+
+    def test_offline_replay_stays_single_message(self):  # Req: ag-acae3b
+        """离线：首推落库兜底，重放不再追加——补拉恰一条。"""
+        self.oc.online = False
+        self.r.notify_transition("t1", "closed", "@abc1234")
+        self.r.notify_transition("t1", "closed", "@abc1234")
+        (m,) = self.store.read_messages()
+        self.assertEqual([x["id"] for x in self.r.check_mail("d1")], [m["id"]])
+
+    def test_unregistered_dispatcher_swallowed(self):  # Req: ag-acae3b
+        """dispatcher 未登记＝非链边：静默跳过不抛（通知面不得断裂门链）。"""
+        self.state.add("t9", {"state": "done", "fail_streak": 0, "title": "x",
+                              "created": 0.0, "updated": 0.0,
+                              "dispatcher_sid": None, "worker_sid": "w9"})
+        self.assertEqual(self.r.notify_transition("t9", "merged", "@abc1234"), None)
+        self.assertEqual(self.store.read_messages(), [])
+
+
 class TestPeerBoard(unittest.TestCase):
     """F22 同仓协作面：peer 写读回路/分区/上限/is_stale/权限/审计（真 Store tmp 夹具）。"""
 
