@@ -16,7 +16,7 @@ import {
   AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
 } from "./lift";
 import { isDormant } from "./scope";
-import { agoraHome, enforceRelevant, isWriteTool, NO_CRED_HINT, readishGated, shouldBlock } from "./hook";
+import { agoraHome, enforceRelevant, fold, isWriteTool, NO_CRED_HINT, readishGated, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -154,7 +154,13 @@ export default {
         // F38 W-1 灰度观察：拒绝落 AGORA_HOOK_DEBUG 日志（target＋拒因）——上线初期
         // 保留相关拒绝日志供跨仓拒/门记录缺失/评审环异常三类信号计数（现无其他日志面）。
         if (process.env.AGORA_HOOK_DEBUG) {
-          process.stderr.write(`[agora-plugin] deny tool=${event.tool} sid=${event.sessionID} target=${target} hint=${hint}\n`);
+          // F49 S-2：target 模型可控——记 fold() 后路径＋控制字符压平，恰一行不可伪造。
+          // 类含 DEL/C1/Unicode 行分隔符（Python splitlines 行界），显式 \uXXXX 转义保证可见。
+          const logged = (target ? fold(target) : "").replace(
+            /[\x00-\x1f\x7f-\x9f\u2028\u2029]/g,
+            (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+          );
+          process.stderr.write(`[agora-plugin] deny tool=${event.tool} sid=${event.sessionID} target=${logged} hint=${hint}\n`);
         }
         // F27 拒因分诊（信息量增量，语义不变）：write 面 NO_CRED_HINT 剩不可达/节流两态
         // ——404（not_worker）已由裁定 A 镜像路由进 DISPATCH_HINT，真非 worker 附文退役。

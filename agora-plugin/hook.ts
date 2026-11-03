@@ -33,7 +33,7 @@ export function agoraHome(homeDir = homedir()): string {
 }
 
 /** realpath 折叠：末端不存在时折叠到最深存在祖先再拼回（write 目标常尚未创建）。 */
-function fold(p: string): string {
+export function fold(p: string): string {
   let cur = resolve(p);
   const tail: string[] = [];
   for (;;) {

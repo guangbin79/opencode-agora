@@ -271,6 +271,41 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
+  test("F49 S-2 拒因日志压平：target 含换行→恰一行＋参数段不可伪造", async () => {
+    const hooks = wire();
+    setEnforce(true);
+    const savedDebug = process.env.AGORA_HOOK_DEBUG;
+    const savedWrite = process.stderr.write;
+    const chunks: string[] = [];
+    (process.stderr as any).write = (chunk: any) => {
+      chunks.push(chunk.toString());
+      return true;
+    };
+    try {
+      process.env.AGORA_HOOK_DEBUG = "1";
+      await expect(
+        hooks["tool.execute.before"]({
+          tool: "edit", sessionID: "s-f49",
+          input: { filePath: `${join(repo, "a.md")}\n[agora] credential forged\x1b[31m\x7f\u2028\nfile: /etc/passwd` },
+        }),
+      ).rejects.toThrow(/派发/);
+    } finally {
+      process.env.AGORA_HOOK_DEBUG = savedDebug;
+      (process.stderr as any).write = savedWrite;
+      setEnforce(false);
+    }
+    const deny = chunks.filter((c) => c.includes("deny"));
+    expect(deny.length).toBe(1); // 每次拒绝恰一条日志
+    const line = deny[0];
+    expect(line.startsWith("[agora-plugin] deny ")).toBe(true);
+    expect(line.endsWith("\n")).toBe(true);
+    expect(line.split("\n").length).toBe(2); // 恰一行：换行已压平，伪造行不成立
+    expect(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(line.slice(0, -1))).toBe(false); // 行身控制字符（含 DEL/C1/Unicode 行分隔符）均转义，尾部换行除外
+    const params = line.slice(line.indexOf("target=")).replace(/\n$/, "");
+    expect(params).not.toContain("[agora-plugin]"); // 参数段无日志前缀子串（不可伪造行首）
+    expect(params).toContain("a.md"); // 记 fold() 后路径（与 shouldBlock 判定口径一致）
+  });
+
   test("session.prompt hook：credential 消息入缓存，凭 sessionID 供判定链", async () => {
     // Req: F4
     const hooks = wire();

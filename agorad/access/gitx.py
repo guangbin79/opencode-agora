@@ -282,12 +282,11 @@ class Gitx:
             except ProcessLookupError:
                 pass  # 超时与正常退出竞速：进程组已消失即无需补杀
             try:  # 有限宽限收尸；逃逸后代持管道时弃读，防线程挂死
-                out, err = proc.communicate(timeout=2)
+                proc.communicate(timeout=2)  # F49 S-1：输出不消费，仅收尸＋排空管道
             except subprocess.TimeoutExpired:
                 for pipe in (proc.stdout, proc.stderr):
                     if pipe:
                         pipe.close()
-                out, err = "", "（push 逃逸进程仍持有输出管道，已弃采）"
             return "failed", f"push 超时（>{_PUSH_TIMEOUT}s）"
         if proc.returncode == 0:
             return "ok", ""
