@@ -64,17 +64,18 @@ class Router:
     def notify_transition(self, tid, to, detail=""):
         """生命周期迁移→dispatcher 实时单行（ag-acae3b）：终态（merged/closed/
         blocked/cancelled）与 reopened 拒因摘要。kind=result 走弹通道直投——
-        F42 缓冲只收 note，天然旁路（分级）；同迁移 (tid,to,detail) 去重，
-        gate 重试/崩溃重排窗口重放不重推。dispatcher 未登记＝静默跳过：
-        通知面异常不得断裂门链（同 _deliver 失败口径）。"""
-        key = (tid, to, detail)
-        if key in self._notified:
-            return None
-        self._notified.add(key)
+        F42 缓冲只收 note，天然旁路（分级）；去重键含迁移时点（state.updated）：
+        同迁移重放（状态未再动，gate 重试/崩溃重排窗口）不重推，跨迁移照推——
+        裸 (tid,to,detail) 键会吞 worker 修复后再败的合法重复（评审环 B 册）。
+        通知面任何异常（未登记/落库 I/O）静默尽力而为：不得断裂门链。"""
         try:
+            key = (tid, to, self._state.get(tid).get("updated"))
+            if key in self._notified:
+                return None
+            self._notified.add(key)
             return self.notify_dispatcher(
                 tid, "result", f"任务 {tid} {to} {detail}".rstrip())
-        except NotChainEdge:
+        except Exception:  # 同 _deliver 注入口径：投递面异常不抛、不断链
             return None
 
     def _deliver(self, from_sid, to_sid, tid, kind, body, silent=False):

@@ -316,11 +316,20 @@ class TestLifecycleNotify(unittest.TestCase):
                            "[agora] task t1 result from agorad\n任务 t1 blocked")])
 
     def test_replay_same_transition_not_repushed(self):  # Req: ag-acae3b
-        """幂等：同迁移（tid,to,detail）重放（gate 重试/崩溃重排窗口）只推一次。"""
+        """幂等：同迁移（键含 state.updated）重放（gate 重试/崩溃重排窗口）只推一次。"""
         self.r.notify_transition("t1", "merged", "@abc1234")
         self.r.notify_transition("t1", "merged", "@abc1234")
         self.assertEqual(len(self.oc.events), 1)
         self.assertEqual(len(self.store.read_messages()), 1)  # 重放零落库
+
+    def test_repeat_migration_after_state_change_pushes_again(self):  # Req: ag-acae3b
+        """同因重复迁移不吞（评审环 B 册）：worker 修复→再 done→门再败＝新迁移。"""
+        self.r.notify_transition("t1", "reopened", "同步冲突")
+        self.state.transition("t1", "done")  # worker 修复重新 done（updated 必变）
+        self.state.transition("t1", "reopened")  # 门内再次同因弹回
+        self.r.notify_transition("t1", "reopened", "同步冲突")
+        self.assertEqual([e[2].splitlines()[1] for e in self.oc.events],
+                         ["任务 t1 reopened 同步冲突", "任务 t1 reopened 同步冲突"])
 
     def test_distinct_migration_pushes_again(self):  # Req: ag-acae3b
         self.r.notify_transition("t1", "reopened", "同步冲突")

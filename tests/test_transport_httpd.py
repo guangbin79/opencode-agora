@@ -464,14 +464,22 @@ class TestNestedDispatchLoop(HttpdTest):
                      {"task": child, "kind": "done", "body": SHA}, child_token)
         self.assertEqual(st, 200)
         self.assertEqual(r, {"result": "accepted"})
-        self.assertTrue(wait_until(
-            lambda: self.app.state.get(child)["state"] == "closed"))
+        # 等 result 消息而非状态（评审环 A 册：gate_tail 态翻先于 closed 落库，
+        # 负载下有窗）；check_mail 带游标副作用——跨轮聚合断言。两拍齐＝门毕，
+        # 其后 runner/终态断言才有时序保证。
+        seen = []
+
+        def pull_results():
+            st, r = call(self.port, "POST", "/check_mail", {}, parent_token)
+            self.assertEqual(st, 200)
+            seen.extend(m for m in r["messages"] if m["kind"] == "result")
+            return len(seen)
+
+        self.assertTrue(wait_until(lambda: pull_results() >= 2))
         self.assertTrue(any(cwd.endswith(f"/envs/{child}") and cmd == "true"
                             for cwd, cmd in RUNNER_CALLS))  # 门跑继承的 verify_cmd
-        st, r = call(self.port, "POST", "/check_mail", {}, parent_token)
-        self.assertEqual(st, 200)
-        results = [m for m in r["messages"] if m["kind"] == "result"]
-        self.assertEqual(len(results), 2)  # ag-acae3b：merged＋closed 两拍均实时
+        self.assertEqual(self.app.state.get(child)["state"], "closed")
+        results = seen  # ag-acae3b：merged＋closed 两拍均实时
         self.assertEqual([m["task"] for m in results], [child, child])
         self.assertIn("merged @", results[0]["body"])
         self.assertIn("已 closed", results[1]["body"])
