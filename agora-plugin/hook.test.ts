@@ -117,6 +117,13 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toBeNull();
   });
 
+  test("F47 GATE_SCOPE_HINT 文案列全四目录（含 .superpowers）", () => {
+    // Req: F47
+    for (const d of [".omo", ".req-gate", ".review-loop", ".superpowers"]) {
+      expect(GATE_SCOPE_HINT).toContain(d);
+    }
+  });
+
   test("git 仓无凭据 edit/write→拒＋无凭据专属文案（write 目标可尚未存在）", () => {
     // Req: F26
     expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true)).toBe(NO_CRED_HINT);

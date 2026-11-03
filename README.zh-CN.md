@@ -147,6 +147,8 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 | `enforce` | on | 强制闸总开关（仅 root，开关留审计） |
 | `$AGORA_HOME/.agora/email.json` | 关 | 僵态任务邮件提醒（`{"to","command"}`） |
 
+注：install.sh 在 `$AGORA_HOME/.agora/agorad.env` 种 `AGORA_VERIFY_TIMEOUT=3600`——代码/README 缺省 300（软顶仅提醒不杀）；安装面放宽，长构建仓实测 300s 不够。
+
 ## 安全模型
 
 如实披露——哪些是机器检查，哪些是信任：

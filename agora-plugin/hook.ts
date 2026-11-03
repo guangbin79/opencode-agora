@@ -17,7 +17,7 @@ export const NO_CRED_HINT =
 export const READ_HINT =
   "被拦：tasks.jsonl 与 messages/ 属账本面，请走工具面（board/check_mail）；events.jsonl 与 wiki 可直接读。主会话不受此限。";
 export const GATE_SCOPE_HINT =
-  "被拦：门记录目录（.omo/.req-gate/.review-loop）写入仅限当前任务 env 或当前仓根——跨 env/跨仓目标不豁免（F38 W-1）。";
+  "被拦：门记录目录（.omo/.req-gate/.review-loop/.superpowers）写入仅限当前任务 env 或当前仓根——跨 env/跨仓目标不豁免（F38 W-1）。";
 
 const TMP_ROOT = "/tmp/opencode"; // B3 设计定值
 const GATE_RECORD_DIRS = new Set([".omo", ".req-gate", ".review-loop", ".superpowers"]); // F33：门记录目录（新旧同收；.review-loop=评审环证据 1224fbd；.superpowers=SDD 账本/workspace 面，2026-11-02 实测误伤面）

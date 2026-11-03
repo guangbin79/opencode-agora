@@ -69,6 +69,7 @@ mkdir -p "$AGORA_HOME/state/messages" "$AGORA_HOME/wiki" "$AGORA_HOME/.agora"
 # umask 077＝0600：通用 env 层用户可能持久化凭据（AGORA_OC_PASSWORD），与 .agora 凭据件同口径
 [ -e "$AGORA_HOME/.agora/agorad.env" ] || (umask 077; cat > "$AGORA_HOME/.agora/agorad.env" <<'EOF'
 # agorad 运行时旋钮（KEY=VALUE 一行一个，# 注释；shell 显式 export 优先于此文件）
+# 安装面缺省 3600（代码/README 缺省 300：软顶仅提醒不杀，安装面放宽——差异见 README 配置表脚注）
 AGORA_VERIFY_TIMEOUT=3600
 # AGORA_VERIFY_CEILING=14400
 EOF

@@ -148,6 +148,8 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 | `enforce` | on | Global gate switch (root only, audited) |
 | `$AGORA_HOME/.agora/email.json` | off | Stuck-task email alerts (`{"to","command"}`) |
 
+Note: `install.sh` seeds `AGORA_VERIFY_TIMEOUT=3600` into `$AGORA_HOME/.agora/agorad.env` — the code/README default is 300 (soft top notifies, never kills); the installer widens it because long-build repos measurably outgrow 300s.
+
 ## Safety Model
 
 Honest by design — what's machine-checked vs what's trusted:
