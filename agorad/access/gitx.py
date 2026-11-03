@@ -63,8 +63,9 @@ class Gitx:
         target = Path(target_dir).resolve()
         integration = Path(integration_dir).resolve()
         self.remove_integration(str(integration), str(target))
-        start = f"refs/heads/{branch}" if branch else "HEAD"
-        self._git(["worktree", "add", "--detach", str(integration), start], cwd=target)
+        # 起基经 baseline()（ag-49312d）：本地支陈旧时落在真实远端头上，F32 自愈后 push 恒 ff
+        self._git(["worktree", "add", "--detach", str(integration),
+                   self.baseline(target, branch)], cwd=target)
         return str(integration)
 
     def remove_integration(self, integration_dir: str, target_dir: str) -> None:
@@ -321,9 +322,66 @@ class Gitx:
                                f"rc={r.returncode}: {r.stderr.strip()}")
         return self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()
 
+    def baseline(self, repo_dir: str, branch: str = None) -> str:
+        """门基线 ref（ag-49312d）：best-effort fetch 后，仅本地严格落后时以 origin 作基。
+
+        外部工作流（PR 网页合并）令主检出本地分支落后 origin：基线取远端——
+        contains 认得出已落库提交、_merge_base 不把他人改动扫进任务 diff、
+        build_integration 落在真实远端头上使 push 恒 ff。领先/分叉/无 origin 一律
+        原样返回本地 ref：禁吞未推送的本地提交，行为退回 fetch 前现状；
+        branch=None 先 symref 解析默认支（detached 主检出无从谈远端基线，原样 HEAD）。
+        """
+        b = branch or self.symref(repo_dir)
+        if b == "HEAD":
+            return b
+        local = f"refs/heads/{b}"
+        cache = getattr(self, "_fetch_at", None)
+        if cache is None:  # 门跑三处共用本基线：60s 内只 fetch 一次（门入口一次语义）
+            cache = self._fetch_at = {}
+        key = f"{repo_dir}:{b}"
+        if time.time() - cache.get(key, 0) > 60:
+            cache[key] = time.time()  # 先记账：超时后同门跑不再重复等待
+            # "--" 防 symref 路径分支名 - 开头选项注入（显式 branch 已有 check_branch 前置）；
+            # F-1（Req: F38）同款：start_new_session——超时 killpg 全组，传输孙进程不孤儿泄漏。
+            # 直连 subprocess 不走 _git：网络面带超时且弃输出，不扩子类覆写的 _git 签名
+            proc = subprocess.Popen(["git", "fetch", "origin", "--", b],
+                                    cwd=str(repo_dir), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                proc.wait(timeout=_PUSH_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+                try:  # 有界收尸防僵尸（push 同款惯例；DEVNULL 无管道可闭）
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                cache[key] = time.time()  # 超时也记账：同门跑不重复等待（300s 最坏只吃一次）
+                return local  # 网络病静默跳过，行为退回 fetch 前现状
+        if self.strictly_behind(repo_dir, b):
+            return f"refs/remotes/origin/{b}"  # 严格落后：基线取远端，他人已落库提交认得出
+        return local  # 领先/分叉：保持现行为
+
+    def strictly_behind(self, repo_dir: str, branch: str) -> bool:
+        """本地支是否严格落后 origin/<branch>（无远端/领先/分叉均 False）。
+        不 fetch，只比对既有 refs——push 前守卫（ag-49312d：推陈旧支必 non-ff 假警报）。"""
+        remote = f"refs/remotes/origin/{branch}"
+        r = self._git(["rev-parse", "--verify", "--quiet", remote],
+                      cwd=repo_dir, check=False)
+        if r.returncode != 0:
+            return False  # 无该远端分支
+        if self._git(["merge-base", "--is-ancestor", f"refs/heads/{branch}", remote],
+                     cwd=repo_dir, check=False).returncode != 0:
+            return False  # 领先/分叉
+        return r.stdout.strip() != self._git(
+            ["rev-parse", f"refs/heads/{branch}"], cwd=repo_dir).stdout.strip()
+
     def contains(self, repo_dir: str, commit: str, branch: str = None) -> bool:
-        """目标分支是否已含任务提交：崩溃重排时识别合并已落，禁止重复验收后假重开。"""
-        target = f"refs/heads/{branch}" if branch else "HEAD"
+        """目标基线是否已含任务提交：崩溃重排时识别合并已落，禁止重复验收后假重开。
+        基线经 baseline()（ag-49312d）：本地支陈旧时认得 origin 上已落库提交。"""
+        target = self.baseline(repo_dir, branch)
         r = self._git(["merge-base", "--is-ancestor", commit, target],
                       cwd=repo_dir, check=False)
         if r.returncode == 0:
@@ -382,12 +440,12 @@ class Gitx:
 
     def _merge_base(self, env: Path, branch: str = None,
                     main: Path = None) -> str:  # main 可注入：调用方已定位免重复子进程
+        # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff；
+        # 目标支 ref 经 baseline()（ag-49312d）——本地陈旧时以 origin 作基，
+        # 他人 PR 改动不扫进任务 diff；branch=None 先 symref 解析默认支再套用
         main = main or self._main(env)
-        src = env.name
-        if branch:  # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff
-            return self._git(["merge-base", f"refs/heads/{branch}", src],
-                             cwd=main).stdout.strip()
-        return self._git(["merge-base", src, "HEAD"], cwd=main).stdout.strip()
+        return self._git(["merge-base", self.baseline(main, branch), env.name],
+                         cwd=main).stdout.strip()
 
     @staticmethod
     def _main(env: Path) -> Path:

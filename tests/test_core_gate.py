@@ -6,11 +6,13 @@
 import os
 import shlex
 import shutil
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
+from agorad.access.gitx import Gitx
 from agorad.access.pages import write_task_page
 from agorad.access.store import Store
 from agorad.core.auth import Auth
@@ -55,6 +57,7 @@ class FakeGitx:
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
         self.push_calls, self.push_result = [], "ok"  # Req: ag-0d2daa
         self.push_tail = ""  # push 失败输出尾（审计/告警外带）
+        self.behind_result = False  # ag-49312d strictly_behind 注入（push 前守卫）
         self.materialize_calls = []  # F: 检出后物化调用记录
         self.materialize_result = ""  # 缺省零依赖物＝空报告
 
@@ -121,6 +124,9 @@ class FakeGitx:
     def push(self, repo_dir, branch):  # Req: ag-0d2daa
         self.push_calls.append((repo_dir, branch))
         return self.push_result, self.push_tail
+
+    def strictly_behind(self, repo_dir, branch):  # Req: ag-49312d
+        return self.behind_result
 
     def materialize_checkout(self, tree_dir, source_dir):
         self.materialize_calls.append((tree_dir, source_dir))
@@ -889,6 +895,18 @@ class TestGateSupply(TestCoreGate):
         ev = [e for e in self.store.read_events("t1") if e["event"] == "push_failed"]
         self.assertEqual([e["note"] for e in ev], ["network unreachable"])
 
+    def test_push_skipped_when_local_strictly_behind_origin(self):  # Req: ag-49312d
+        """基线直通场景：本地支严格落后 origin（已含任务提交）→ 零 push 零假警报。"""
+        self.gx.behind_result = True
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.push_calls, [])  # 推陈旧支必 non-ff：不推
+        self.assertEqual([e for e in self.store.read_events("t1")
+                          if e["event"].startswith("push_")], [])  # 零审计噪音
+        self.assertEqual([m for m in self.store.read_messages()
+                          if m["to"] == "disp1" and "push" in m["body"]], [])
+
 
 class TestGateVerifyOverrun(TestCoreGate):
     """F36 rc=124 分类路由：不 transition、不弹 worker、不计连败，驻留 done 到派发方。"""
@@ -1132,6 +1150,51 @@ class TestGateAudit(TestCoreGate):
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("verify_failed", names)
         self.assertIn("cancelled", names)
+
+
+class TestGateStaleBaseline(TestCoreGate):
+    """门级端到端（真 Gitx，ag-49312d）：主检出本地支陈旧而任务提交已落 origin——
+    contains 认出已落库提交直通终态，零 verify 零合并；旧全链本地基线会重验＋rebase。"""
+
+    def _git(self, args, cwd=None, check=True):
+        r = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None,
+                           capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def test_stale_local_shortcut_merges_without_rerun(self):  # Req: ag-49312d
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        self._git(["init", "-b", "master"], cwd=proj)
+        self._git(["config", "user.email", "t@t"], cwd=proj)
+        self._git(["config", "user.name", "t"], cwd=proj)
+        self._git(["commit", "--allow-empty", "-m", "init"], cwd=proj)
+        origin = self.tmp / "origin.git"
+        self._git(["init", "--bare", "-b", "master", str(origin)])
+        self._git(["remote", "add", "origin", str(origin)], cwd=proj)
+        self._git(["push", "-q", "origin", "master"], cwd=proj)
+        gx = Gitx()
+        env = gx.build_env(str(proj), "t1")
+        self._git(["commit", "--allow-empty", "-m", "task"], cwd=env)
+        task = self._git(["rev-parse", "HEAD"], cwd=env).stdout.strip()
+        stale = self._git(["rev-parse", "master"], cwd=proj).stdout.strip()
+        self._git(["push", "-q", "origin", f"{Path(env).name}:master"],
+                  cwd=proj)  # 模拟网页合并落库：origin=init→task，本地 master 仍停在 init
+        self.seed(tb="master")
+        self.state.set_fields("t1", project_dir=str(proj), env_dir=env)
+        self.anchor = {"head": task, "clean": True}
+        self.gate = Gate(self.state, gx, self.router, self.oc,
+                         lambda e: self.anchor, self.health, self.auth,
+                         self.store, runner=self.runner)
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", task), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.runner.calls, [])  # 已落库提交零重验（contains 直通）
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("push_rejected", names)  # 直通不推陈旧支：零假 non-ff 警报
+        self.assertEqual(
+            self._git(["rev-parse", "master"], cwd=proj).stdout.strip(), stale)  # 主检出未动
 
 
 if __name__ == "__main__":

@@ -348,11 +348,14 @@ class Gate:
 
         幂等（崩溃重排补终态路径也推，已同步静默）；非 ff 被拒/失败仅告警留痕
         ——不 force、不回滚本地合并、不影响已落 merged 终态；无 origin 零动作。
+        本地支严格落后 origin 时零动作（ag-49312d：推之必 non-ff 假警报）。
         全兜底：push 链任何异常不掩盖门结果。
         """
         try:
             t = self._state.get(tid)
             branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
+            if self._gitx.strictly_behind(t["project_dir"], branch):
+                return  # 本地支已全含于 origin（ag-49312d 直通场景）：推陈旧支必 non-ff 假警报
             r, tail = self._gitx.push(t["project_dir"], branch)
             if r == "non-ff":
                 self._audit(tid, "push_rejected", branch=branch, note=tail[:200])
