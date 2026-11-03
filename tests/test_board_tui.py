@@ -19,8 +19,8 @@ from pathlib import Path
 
 import board_tui
 from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
-                       detail_page, doctor_page, handle_key, rel_time, run,
-                       try_cancel)
+                       detail_page, doctor_page, handle_key, load_board,
+                       rel_time, run, try_cancel)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -570,7 +570,11 @@ class _StubBoard(http.server.BaseHTTPRequestHandler):
                                                "kind": "quality"}],
                    "done_body": None}
         else:
-            out = {"buckets": {}, "chain": ["t1"]}
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow()},
+                   "events": [{"ts": NOW, "actor": "health",
+                               "event": "escalate", "task": "t1",
+                               "kind": "quality"}]}
         data = json.dumps(out).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(data)))
@@ -633,8 +637,54 @@ class _FlakyBoard(http.server.BaseHTTPRequestHandler):
         if "task" in body:
             out = {"task": trow(), "events": [], "done_body": None}
         else:
-            out = {"buckets": {}, "chain": ["t1"]}
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow()}, "events": []}
         data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class _CountingBoard(http.server.BaseHTTPRequestHandler):
+    """full view＋明细计数桩：调用形态与次数取证（F48 N+1 根治）。"""
+    calls = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        _CountingBoard.calls.append(body)
+        if "task" in body:
+            out = {"task": trow(), "events": [], "done_body": None}
+        else:
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow()},
+                   "events": [{"ts": NOW, "event": "escalate",
+                               "task": "t1", "kind": "quality"}]}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class _DetailFailBoard(_CountingBoard):
+    """full view 可用、明细恒 500：懒取降级形态取证。"""
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        _DetailFailBoard.calls.append(body)
+        if "task" in body:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        data = json.dumps({"buckets": {}, "forest": ["t1"],
+                           "tasks": {"t1": trow()}, "events": []}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -713,6 +763,49 @@ class TestRunErrSemantics(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestFullViewLazyDetail(unittest.TestCase):
+    """F48 N+1 根治：load_board 单调用，明细懒取＋缓存（stub 计数取证）。"""
+
+    def setUp(self):
+        # 无头环境跑 run()：桩掉 curses 面（同 TestRunErrSemantics）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def _serve(self, handler):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.server_close)
+        return f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def test_load_board_one_call_no_per_task(self):  # Req: F48
+        _CountingBoard.calls = []
+        snap, events = load_board(self._serve(_CountingBoard), "tok")
+        self.assertEqual(_CountingBoard.calls, [{"view": "full"}])  # 恰 1 次，零逐任务
+        self.assertEqual(snap["chain"], ["t1"])
+        self.assertEqual(snap["tasks"]["t1"]["state"], "running")
+        self.assertEqual([e["kind"] for e in events], ["quality"])
+
+    def test_detail_lazy_fetched_once_then_cached(self):  # Req: F48
+        _CountingBoard.calls = []
+        keys = [ord("\r"), ord("h"), ord("\r"), ord("q")]  # 进明细→回→再进同任务→退
+        run(_FakeStdscr(keys), self._serve(_CountingBoard), "tok")
+        self.assertEqual(_CountingBoard.calls,
+                         [{"view": "full"}, {"task": "t1"}])  # 明细恰 1 次，二次命中缓存
+
+    def test_detail_failure_degrades_to_hint(self):  # Req: F48
+        _DetailFailBoard.calls = []
+        scr = _FakeStdscr([ord("\r"), ord("q")])
+        run(scr, self._serve(_DetailFailBoard), "tok")
+        self.assertTrue(any("detail unavailable" in s for _, s in scr.lines))
 
 
 class TestSmoke(unittest.TestCase):

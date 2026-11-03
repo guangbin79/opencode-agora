@@ -8,8 +8,8 @@ from pathlib import Path
 
 from agorad.access.store import Store
 from agorad.core.report import (_env_activity, buckets, chain_view, detail,
-                                doctor_view, forest_view, stale_candidates,
-                                view_html)
+                                doctor_view, forest_view, full_view,
+                                stale_candidates, view_html)
 
 
 def row(state="running", disp="d1", worker="w1", created=0.0, last_seen=None,
@@ -74,6 +74,33 @@ class TestReport(unittest.TestCase):
     def test_forest_view_self_parent_bounded(self):  # Req: gt-6def73
         s = snap(t1=row(disp="d1", worker="d1"))  # 自环：dispatcher=worker
         self.assertEqual(forest_view(s), ["t1"])
+
+    def test_full_view_projection_and_events(self):  # Req: F48
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            st.append_event({"ts": 1.0, "actor": "h", "event": "escalate",
+                             "task": "t1", "kind": "quality"})
+            st.append_event({"ts": 2.0, "actor": "d", "event": "dispatched",
+                             "task": "t1"})
+            t = row(disp="d1", worker="w1", last_seen=900.0)
+            t["project_dir"] = "/repo"        # 白名单内
+            t["env_dir"] = "/repo/envs/t1"    # 白名单外：不得入投影
+            t["fail_streak"] = 2
+            t["commit"] = "abc"
+            v = full_view(snap(t1=t, t2=row(state="todo")), st)
+            self.assertEqual(sorted(v), ["buckets", "events", "forest", "tasks"])
+            self.assertEqual(sorted(v["tasks"]["t1"]),
+                             ["created", "dispatcher_sid", "last_seen",
+                              "project_dir", "state", "title", "worker_sid"])
+            self.assertEqual(v["forest"], ["t1", "t2"])
+            self.assertEqual(v["buckets"]["在飞"], ["t1", "t2"])
+            self.assertEqual([e["event"] for e in v["events"]],
+                             ["escalate"])    # 只含 escalate 事件
+            sparse = full_view(snap(tx={"state": "todo"}), st)  # 缺字段行容错
+            self.assertEqual(sparse["tasks"]["tx"], {"state": "todo"})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_detail_row_events_done_body(self):  # Req: F10
         tmp = Path(tempfile.mkdtemp())

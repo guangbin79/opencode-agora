@@ -109,6 +109,22 @@ def forest_view(snap):
     return out + [tid for tid in sorted(tasks, key=rank) if tid not in seen]
 
 
+def full_view(snap, store):
+    """board full 视图（F48）：单调用取齐渲染面，根治逐任务明细 N+1 全库扫。
+
+    四键＝buckets＋forest＋tasks＋events；tasks＝白名单投影（build_rows 渲染
+    所需全集，其余字段不带防上下文膨胀）；events 只含 escalate（五类 kind
+    过滤仍归客户端 _KINDS——board_tui 不 import agorad 的既有边界不破）。
+    """
+    fields = ("state", "title", "worker_sid", "dispatcher_sid", "last_seen",
+              "created", "project_dir")
+    return {"buckets": buckets(snap), "forest": forest_view(snap),
+            "tasks": {tid: {k: t[k] for k in fields if k in t}
+                      for tid, t in snap["tasks"].items()},
+            "events": [e for e in store.read_events()
+                       if e.get("event") == "escalate"]}
+
+
 def detail(snap, store, tid):
     """单任务明细三件套：全字段行＋事件链＋done 正文（最新一条＝当前结论）。
 

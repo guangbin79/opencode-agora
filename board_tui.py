@@ -368,21 +368,15 @@ def _call(base, token, path, body, timeout=5):
 
 
 def load_board(base, token):
-    """board 全量：全局五桶＋森林序（旧 agorad 无 forest 回退 chain）＋逐任务明细。
+    """board 全量（F48）：单次 {"view":"full"} 取齐五桶＋森林序＋投影任务＋事件。
 
-    snap["chain"] 实为渲染序（forest 优先）；snap["buckets"]＝服务端全局五桶
-    （旧响应缺失时 build_rows 本地计数兜底）。离线由壳兜住。
+    旧形态逐任务明细 N+1 全库扫退役；明细页改 detail action 懒取单次
+    {"task": tid}。离线由壳兜住。
     """
-    top = _call(base, token, "/board", {})
+    top = _call(base, token, "/board", {"view": "full"})
     order = top.get("forest", top.get("chain", []))
-    tasks, events, details = {}, [], {}
-    for tid in order:
-        d = _call(base, token, "/board", {"task": tid})
-        tasks[tid] = d["task"]
-        events.extend(d.get("events", []))
-        details[tid] = d
-    return {"tasks": tasks, "chain": order,
-            "buckets": top.get("buckets")}, events, details
+    return {"tasks": top.get("tasks", {}), "chain": order,
+            "buckets": top.get("buckets")}, top.get("events", [])
 
 
 def try_cancel(base, token, task):
@@ -539,9 +533,9 @@ def run(stdscr, base, token):
 
     def poll():
         """拉一帧刷新内存模型；失败保旧行置 err（err 语义＝轮询离线）。"""
-        nonlocal details, status, err, snap, events
+        nonlocal status, err, snap, events
         try:
-            snap, events, details = load_board(base, token)
+            snap, events = load_board(base, token)
             _rebuild()
             err = None                     # 仅新帧成功才清离线横幅；缓存重建不洗掉 err
         except Exception as e:                     # 离线/坏帧：保旧行＋报因
@@ -586,7 +580,14 @@ def run(stdscr, base, token):
                 except Exception as e:             # 与 poll 同口径：坏帧保旧行＋报因
                     err = str(e)
         elif a.op == "detail":
-            page = detail_page(details.get(a.task, {"task": {}, "events": []}))
+            if a.task not in details:          # F48 懒取：进页才单次取数＋缓存
+                try:
+                    details[a.task] = _call(base, token, "/board",
+                                            {"task": a.task})
+                except Exception as e:         # doctor/tail 同款降级提示行
+                    page = [f"detail unavailable: {e}"]
+            if a.task in details:
+                page = detail_page(details[a.task])
         elif a.op == "doctor":
             try:
                 page = doctor_page(_call(base, token, "/doctor", {}))
@@ -606,7 +607,7 @@ def selftest():
     base, token = discover()
     err = None
     try:
-        snap, events, _ = load_board(base, token)
+        snap, events = load_board(base, token)
         rows = build_rows(snap, events)
     except Exception as e:
         rows, err = [], str(e)

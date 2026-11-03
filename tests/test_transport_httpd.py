@@ -248,6 +248,25 @@ class TestHttpSmoke(HttpdTest):
         self.assertIn("forest", r)  # 顶层新字段（chain/buckets 语义不动）
         self.assertEqual(r["forest"], [tid])  # 全任务集口径：根＝无父
 
+    def test_board_full_view_projection_single_payload(self):  # Req: F48
+        tid = self.create_task()
+        st, r = call(self.port, "POST", "/board", {"view": "full"}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(sorted(r), ["buckets", "events", "forest", "tasks"])
+        self.assertEqual(r["forest"], [tid])
+        self.assertEqual(sorted(r["tasks"][tid]),
+                         ["created", "dispatcher_sid", "last_seen",
+                          "project_dir", "state", "title", "worker_sid"])
+        self.assertTrue(all(e.get("event") == "escalate" for e in r["events"]))
+        st, top = call(self.port, "POST", "/board", {}, self.root)
+        self.assertEqual(st, 200)
+        self.assertNotIn("tasks", top)         # 紧凑 {} 响应形状不变
+        self.assertNotIn("events", top)
+        st, d = call(self.port, "POST", "/board", {"task": tid}, self.root)
+        self.assertEqual(st, 200)              # {"task":…} 既有语义回归
+        self.assertEqual(d["task"]["state"], "todo")
+        self.assertIsNone(d["done_body"])
+
     def test_worker_enforce_denied_403_and_audited(self):  # Req: F1
         wtok = self.app.auth.issue("w9", "worker")
         st, r = call(self.port, "POST", "/enforce", {"on": False}, wtok)

@@ -156,6 +156,8 @@ class _Handler(BaseHTTPRequestHandler):
             snap = app.state.snapshot()
             if "task" in body:
                 return report.detail(snap, app.store, body["task"])
+            if body.get("view") == "full":  # F48 单调用全量（紧凑 {} 形态一字不动）
+                return report.full_view(snap, app.store)
             return {"buckets": report.buckets(snap),
                     "chain": report.chain_view(snap, sid),
                     "forest": report.forest_view(snap)}
