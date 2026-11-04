@@ -863,7 +863,7 @@ class TestTaskVerifyTimeout(TestCoreTask):
         self.assertEqual(self.state.get(child)["verify"]["timeout"], 900)  # 随字典下发
 
     def test_bad_timeout_fail_fast_rejected(self):  # Req: F51
-        for bad in (0, -1, 1.5, "600", True, 10 ** 400):  # 超界值同拒（终闸 B 册）
+        for bad in (0, -1, 1.5, "600", True, 10 ** 308, 10 ** 400):  # 超界值同拒（终闸 B 册×2：硬顶 4×预算须同在 float 域）
             with self.assertRaises(Rejected) as cm:
                 self.svc.create("g", "/repo", None, self.root,
                                 verify_cmd="true", timeout=bad)

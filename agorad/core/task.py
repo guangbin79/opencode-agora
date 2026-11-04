@@ -35,9 +35,10 @@ EV_REJECTED_VERIFY = "dispatch_rejected_verify_missing"
 
 def _bad_timeout(v):
     """F51 任务级 verify 预算：正整数秒（bool 是 int 子类，显式排除）；
-    超 float 上限拒——同 F36 服务级非有限值口径，护住 gate 侧 float 算术与 :g 格式化。"""
+    界按硬顶系数收（float_max//4）——gate 侧 4×预算进 float 算术（ceiling-elapsed）
+    与 :g 格式化须同在 float 域（终闸 B 册两轮实证：(max/4,max] 窗口 4*v 溢出）。"""
     return (not isinstance(v, int) or isinstance(v, bool) or v <= 0
-            or v > sys.float_info.max)
+            or v > sys.float_info.max // 4)
 
 
 class Rejected(Exception):
