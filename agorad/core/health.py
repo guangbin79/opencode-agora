@@ -156,11 +156,13 @@ class Health:
             for p in m.get("content") or []:
                 if isinstance(p, dict) and p.get("type") == "tool" and p.get("name"):
                     title = (p.get("state") or {}).get("title")
-                    tool = p["name"] + (f"/{title}" if title else "")
+                    tool = f"{p['name']}/{title}" if title else p["name"]
                     break
             created = (m.get("time") or {}).get("created") or 0
-            age = max(0, int(time.time() * 1000 - created) // 1000)
-            return f"末次活动 {role}" + (f" tool={tool}" if tool else "") + f" 距今{age}s"
+            age = max(0, int(time.time() * 1000 - created) // 1000) if created else None
+            note = f"末次活动 {role}" + (f" tool={tool}" if tool else "") \
+                + (f" 距今{age}s" if age is not None else "")
+            return " ".join(note.split())  # 摘要含供给文本（tool 名/标题）：同 raw 口径拍平防伪造服务行
         except Exception:
             return None
 
