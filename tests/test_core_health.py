@@ -4,6 +4,7 @@
 主会话 sid＝App 活绑定（R25-A：默认占位 "main"，bind_main 换绑真会话）；
 僵态口径经 report.stale_candidates 构造注入（F5 决策记录 2026-10-28）。
 """
+import re
 import shutil
 import tempfile
 import time
@@ -303,7 +304,7 @@ class TestCoreHealth(unittest.TestCase):
         self.assertIn("assistant", body)  # role 要素
         self.assertIn("shell", body)  # 工具名要素
         self.assertIn("pytest -q", body)  # 工具标题要素
-        self.assertIn("65s", body)  # 距今秒要素
+        self.assertTrue(re.search(r"距今6[5-9]s", body))  # 距今秒要素（//1000 取整留容差窗）
         self.assertEqual(self.oc.msg_calls, 1)  # 边沿一次＝恰一次取末条
 
     def test_stalled_summary_missing_or_down_degrades_quietly(self):  # Req: F52
@@ -336,7 +337,7 @@ class TestCoreHealth(unittest.TestCase):
         self.health.escalate(KIND_STALLED, "t1")
         body = self.main_msgs()[0]["body"]
         self.assertIn("user", body)
-        self.assertIn("10s", body)
+        self.assertTrue(re.search(r"距今1[0-2]s", body))  # 取整容差窗（同上）
 
     def test_stalled_summary_flattens_worker_controlled_title(self):  # Req: F52（评审环 R1）
         """tool 名/标题系 worker 侧供给文本（如 shell 命令可多行）：拍平换行，
