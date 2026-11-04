@@ -5,7 +5,8 @@
 - prompt {text}→{data:{delivery:"steer"}}，busy 排队按序（stub 恒收）；未知/已删 sid→404
   SessionNotFoundError；GET /session/{sid}→{data:{id,location,time:{created,updated,idle}}}
   （F28：sessions[sid]["busy"]=True ⇒ updated>idle＝回合进行中）；GET /session/active→{data:{}}
-  （idle 不在 map）；GET /info→{version,...}（真服务无 /health）。
+  （idle 不在 map）；GET /info→{version,...}（真服务无 /health）；
+  GET /session/{sid}/message→{data:[...]}（F52 消息面：sessions[sid]["messages"] 脚本化，空缺省 []）。
 脚本化接口＝StubOpencode 实例：create 注册会话、kill() 即删（死＝GET/prompt 404）、
 sessions[sid]["injects"] 记录注入序、sessions[sid]["busy"] 拨 busy 探测面、stop() 停机。
 作进程跑：`python3 tests/stub_opencode.py`（stdout 打印监听端口，kill 进程即停）。
@@ -108,6 +109,13 @@ class StubOpencode:
                                                   "time": {"created": 0,
                                                            "updated": 1 if s.get("busy") else 0,
                                                            "idle": 0}}})
+                    elif len(parts) == 3 and parts[0] == "session" and parts[2] == "message":
+                        s = stub.sessions.get(parts[1])
+                        if not s:
+                            self._json(404, self._not_found(parts[1]))
+                            return
+                        # F52 消息面：记录脚本化（sessions[sid]["messages"]），服务原样回 {data:[...]}
+                        self._json(200, {"data": s.get("messages", [])})
                     else:
                         self._json(404, {"error": "not found"})
 

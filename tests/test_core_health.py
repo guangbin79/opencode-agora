@@ -32,6 +32,8 @@ class FakeOc:
         self.silent_injected = []  # 免通知通道（stalled 降噪）
         self.silent_down = False  # True＝免通知通道不可达（契约 False）
         self.down = False
+        self.msg_of = {}  # F52：sid->末条消息记录；None＝空会话；"raise"＝服务不可达
+        self.msg_calls = 0
 
     def session(self, sid):
         if self.down:
@@ -39,6 +41,13 @@ class FakeOc:
         if not self.liveness.get(sid):
             return None
         return {"time": self.time_of[sid]} if sid in self.time_of else {}
+
+    def last_message(self, sid):  # F52 摘要缝（真 Oc 同契约：404/空→None，其余照抛）
+        self.msg_calls += 1
+        m = self.msg_of.get(sid)
+        if m == "raise":
+            raise OcUnavailable("stub msg down")
+        return m
 
     def alive(self, sid):  # 与真 Oc.alive 同形：session 非 None 即活
         return self.session(sid) is not None
@@ -276,6 +285,58 @@ class TestCoreHealth(unittest.TestCase):
         pulled = self.router.check_mail("main")
         self.assertEqual(len(pulled), 1)  # 留库补拉兜底（F4 离线语义）
         self.assertIn("失控[stalled]", pulled[0]["body"])
+
+    # ---- F52 stalled 拍人附末次活动摘要 ----
+
+    def test_stalled_body_carries_last_activity_summary(self):  # Req: F52
+        """拍人文案并入末条消息摘要：role/type＋tool 名/标题＋距今秒，恰一次取末条。"""
+        self.seed("t1")
+        self.oc.msg_of["s-w1"] = {
+            "type": "assistant",  # 2.2.2 实测形状：role 落 type 字段
+            "time": {"created": (time.time() - 65) * 1000},
+            "content": [{"type": "tool", "name": "shell",
+                         "state": {"title": "pytest -q"}}],
+        }
+        self.health.escalate(KIND_STALLED, "t1")
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("末次活动", body)
+        self.assertIn("assistant", body)  # role 要素
+        self.assertIn("shell", body)  # 工具名要素
+        self.assertIn("pytest -q", body)  # 工具标题要素
+        self.assertIn("65s", body)  # 距今秒要素
+        self.assertEqual(self.oc.msg_calls, 1)  # 边沿一次＝恰一次取末条
+
+    def test_stalled_summary_missing_or_down_degrades_quietly(self):  # Req: F52
+        """消息缺失与会话不可达：拍人照常、文案降级（无摘要段）、不抛异常。"""
+        self.seed("t1")
+        self.oc.msg_of["s-w1"] = None  # 空会话/消息缺失
+        self.health.escalate(KIND_STALLED, "t1")
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("失控[stalled]", body)
+        self.assertNotIn("末次活动", body)
+        self.seed("t2", worker="s-w2")
+        self.oc.msg_of["s-w2"] = "raise"  # oc 不可达
+        self.health.escalate(KIND_STALLED, "t2")  # 不抛
+        bodies = [m["body"] for m in self.main_msgs()]
+        self.assertEqual(sum("失控[stalled]" in b for b in bodies), 2)  # 拍人照常
+        self.assertTrue(all("末次活动" not in b for b in bodies))  # 全降级
+
+    def test_non_stalled_kinds_fetch_no_messages(self):  # Req: F52
+        """摘要只挂 stalled 边沿：其余 kind 零取消息（对照锚）。"""
+        self.seed("t1")
+        self.oc.msg_of["s-w1"] = {"type": "user", "time": {"created": 1}}
+        self.health.escalate(KIND_QUALITY, "t1")
+        self.assertEqual(self.oc.msg_calls, 0)
+
+    def test_stalled_user_shape_summary_without_tool(self):  # Req: F52
+        """末条为 user 形（无 content/tool 面）：role＋年龄照出，工具面自然缺席。"""
+        self.seed("t1")
+        self.oc.msg_of["s-w1"] = {"role": "user",
+                                  "time": {"created": (time.time() - 10) * 1000}}
+        self.health.escalate(KIND_STALLED, "t1")
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("user", body)
+        self.assertIn("10s", body)
 
     # ---- escalate：正文合成＋不可信段＋四类达主会话 ----
 

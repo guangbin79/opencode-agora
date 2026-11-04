@@ -64,6 +64,27 @@ class TestAccessOc(unittest.TestCase):
         sid = self.oc.create("/tmp/env-x", "BOOT")
         self.assertEqual(self.stub.sessions[sid]["directory"], "/tmp/env-x")
 
+    def test_last_message_tail_empty_and_dead(self):  # Req: F52
+        sid = self.oc.create("/e", "B")
+        self.assertIsNone(self.oc.last_message(sid))  # 空会话→None
+        self.stub.sessions[sid]["messages"] = [
+            {"type": "user", "time": {"created": 1000}},
+            {"type": "assistant", "time": {"created": 2000},
+             "content": [{"type": "tool", "name": "shell",
+                          "state": {"title": "pytest"}}]},
+        ]
+        m = self.oc.last_message(sid)  # 尾条原样（2.2.2 shape：type/time.created/assistant.content）
+        self.assertEqual(m["type"], "assistant")
+        self.assertEqual(m["time"]["created"], 2000)
+        self.assertEqual(m["content"][0]["name"], "shell")
+        self.stub.kill(sid)
+        self.assertIsNone(self.oc.last_message(sid))  # 死会话 404→None（同 session 契约）
+
+    def test_last_message_down_raises_unavailable(self):  # Req: F52
+        self.stub.stop()
+        with self.assertRaises(OcUnavailable):
+            self.oc.last_message("ses_x")  # 服务不可达照抛（吞的决心归 health）
+
 
 if __name__ == "__main__":
     unittest.main()

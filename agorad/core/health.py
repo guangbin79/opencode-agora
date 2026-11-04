@@ -144,16 +144,40 @@ class Health:
             if sid == t.get("worker_sid"):
                 self._state.touch_seen(tid)  # 心跳只进内存：快照仅随真实迁移追加
 
+    def _last_activity(self, sid):
+        """末次活动摘要（F52）：role＋tool 名/标题＋距今秒；失败/缺失→None
+        （尽力而为，同 email 口径：获取吞掉照常拍人）。"""
+        try:
+            m = self._oc.last_message(sid)
+            if not m:
+                return None
+            role = m.get("role") or m.get("type") or "?"  # 2.2.2 落 type，旧版 role 兼容
+            tool = ""
+            for p in m.get("content") or []:
+                if isinstance(p, dict) and p.get("type") == "tool" and p.get("name"):
+                    title = (p.get("state") or {}).get("title")
+                    tool = p["name"] + (f"/{title}" if title else "")
+                    break
+            created = (m.get("time") or {}).get("created") or 0
+            age = max(0, int(time.time() * 1000 - created) // 1000)
+            return f"末次活动 {role}" + (f" tool={tool}" if tool else "") + f" 距今{age}s"
+        except Exception:
+            return None
+
     def escalate(self, kind, tid, raw=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
         stalled 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户裁定），
-        其余 kind 照常会话注入。"""
+        其余 kind 照常会话注入；stalled 边沿附末次活动摘要（F52，失败降级）。"""
         t = self._state.get(tid)
         body = (f"失控[{kind}] 任务{tid}：{_KIND_NOTE[kind]}；"
                 f"状态 {t['state']}，worker={t.get('worker_sid') or '-'}，"
                 f"dispatcher={t.get('dispatcher_sid') or '-'}，"
                 f"连败 {t.get('fail_streak', 0)}")
+        if kind == KIND_STALLED and t.get("worker_sid"):
+            note = self._last_activity(t["worker_sid"])  # 加一次取末条（F52 裁定）
+            if note:
+                body += f"；{note}"
         if raw:
             flat = " ".join(str(raw).split())  # 拍平换行：供给文本不得伪造服务合成行
             body += f"\n{_UNTRUSTED}\n{flat[:_RAW_MAX]}"
