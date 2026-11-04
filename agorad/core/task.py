@@ -11,6 +11,7 @@ core 只 import stdlib；依赖全构造注入。
 import pathlib
 import re
 import secrets
+import sys
 import time
 
 _MAX_DEPTH = 3
@@ -33,8 +34,10 @@ EV_REJECTED_VERIFY = "dispatch_rejected_verify_missing"
 
 
 def _bad_timeout(v):
-    """F51 任务级 verify 预算：正整数秒（bool 是 int 子类，显式排除）。"""
-    return not isinstance(v, int) or isinstance(v, bool) or v <= 0
+    """F51 任务级 verify 预算：正整数秒（bool 是 int 子类，显式排除）；
+    超 float 上限拒——同 F36 服务级非有限值口径，护住 gate 侧 float 算术与 :g 格式化。"""
+    return (not isinstance(v, int) or isinstance(v, bool) or v <= 0
+            or v > sys.float_info.max)
 
 
 class Rejected(Exception):
