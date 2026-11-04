@@ -16,12 +16,13 @@ description: 主会话委托编排剧本。用户说"派发/委托/让 agent 修
 - 无关仓各自建任务并行派发；耦合仓用甲案顺序编排：`task_create(..., after: 前任务id)`，前驱未终态 dispatch 会被硬拒（403 报因）——等前仓 merged／closed 再派后仓，后仓 worker 经 `../前仓` 相对路径见已合并形态。dispatcher **主动取消**前驱表示有意跳过，后继可继续；前驱三连败进入 `blocked` 则服务自动取消整条 after 后继链（`cancel_reason=dependency_failed:*`）。
 - **跨仓交付编排（F50）**：交付 commit 属他仓＝gate 账本检查结构性恒败（任务仓内 `merge-base` 报 `Not a valid commit name`，ag-f9137c 三连 reopen 实证）——维持「一任务＝一仓交付」，跨仓交付由你编排**两个顶层任务＋`after` 串依赖**（先产仓后收仓），禁止把两仓交付折进单任务；done 改报任务仓 tip 属绕行（账本与真实交付弱关联），勿用。worker 建子任务不得指定他仓 project_dir（F37 ③维持）。gate 零改动，`deliver_repo` 字段提案已放弃。
 - **产物交接约定（F50）**：前任务 merged 即 env 回收——后任务禁止依赖前任务 env 存续；交付产物须落仓内 commit（缺省形态，后任务经 `../前仓` 相对路径见已合并形态取用）或持久路径（仅限 wiki 页 `wiki_write`，或派发方 goal 显式指定的落点——worker 不得自选 env 外路径）。
+- **派发上下文留痕（F53，按需非强制）**：值得记的派发（有风险、方案新颖、大概率被追问或复用）→ 你 `wiki_write` 到 `wiki/why/<tid>.md`：首行锚 `created: <YYYY-MM-DD> tid: <任务id> dispatcher: <你的会话id>`，正文三段——**背景**（为什么派）／**备选与裁决**（考虑过什么、为什么选这条）／**复用点**（下次同类问题从哪入手）。默认不写；追溯已有三通道（tid→任务页／`state/messages/` grep `task: <tid>`／`events.jsonl`），勿重复抄录。
 - **嵌套派发闭环（F37 验收录回）**：worker 也是其子任务的 dispatcher，可 `task_create→task_dispatch`；但验收授权在主会话——worker 建单**缺省继承父任务 `project_dir` 与验证配置**，`project_dir／verify_cmd／target_branch` 显式传入即拒，`task_update` 登记 verify 对全局 worker 角色永拒（子任务验收只能来自继承，或由主会话派发方/root 登记父任务配置后继承）。子任务 `closed／blocked／cancelled` 由服务以 `result` 回传父 worker（离线留库，恢复后 `check_mail` 补拉）。父 worker 必须等全部子任务 `merged／closed` 或有意取消后才能 `post(done)`；`blocked` 子任务须重派或取消，依赖失败造成的自动取消须由 dispatcher 再 `task_cancel` 一次显式确认跳过。父 worker 恢复／换号会保留未结案子任务所有权。
 - 同仓并行任务后合并者遇 non-ff：干净同步门内 rebase 自愈；同步冲突才 reopened 弹回 worker 解冲突重报 done——这是门的自愈，勿人工介入。
 - **多任务或含 after: 的编排：先写编排单再执行**——`wiki_write` 到 `wiki/orch/<主题>-<日期>.md`，内容＝任务清单（每条 goal 草案＋目标仓）＋after 边＋并行分组；写完后照单逐条 task_create/task_dispatch。执行中偏离（增删任务、改 goal）在编排单**追加一行记因**，不回改原文。单任务直接派发免单。
 - 无 task 时"进展如何"走第 4 节 board，"取消任务"走第 5/6 节。
 
-> 来源：§2 自主姿态／F9 决策记录／F3；e2e S2（B7 拒＋相对路径见前仓新主）；T6 拒因文案（hook.ts 派发引导）；编排单＝2026-10-27 用户裁定增补（审计前置，零服务改动，复用 wiki_write）；F50 跨仓交付两纪律＝2026-11-04 用户裁定（纯文档不改 gate，ag-f9137c 实证）
+> 来源：§2 自主姿态／F9 决策记录／F3；e2e S2（B7 拒＋相对路径见前仓新主）；T6 拒因文案（hook.ts 派发引导）；编排单＝2026-10-27 用户裁定增补（审计前置，零服务改动，复用 wiki_write）；F50 跨仓交付两纪律＝2026-11-04 用户裁定（纯文档不改 gate，ag-f9137c 实证）；F53 why 页留痕＝2026-11-04 用户裁定（按需不强制，服务端零改动）
 
 ## 2. goal 写作纪律——目标即指令
 

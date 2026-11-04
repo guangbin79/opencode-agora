@@ -313,3 +313,8 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **现状**：预算仅服务级 AGORA_VERIFY_TIMEOUT（缺省 300s，install.sh 种 3600），dispatcher/worker 双不可达，唯一出口 root 改配置＋重启；冷构建类验收被迫窄化为 grep 断言（ag-aa9a74/ag-87b6a4）。
 **裁定**：verify 字典加 timeout 字段（正整数秒，可缺省）；写权限与 verify_cmd 完全同权（task_create 携带/task_update 同角色可改；worker 一律拒——F37 零改动）；子任务随 verify 字典继承下发。gate 取值两级：任务 timeout → 服务缺省；硬顶固定 4× 生效值；软顶提醒与超顶路由文案附生效预算值。放弃 root 配置面板与 gate 树构建缓存。
 **验收**：F51 用例（Req: F51 锚，先红后绿）——①task_create 带 timeout 登记：dispatcher 绿、worker 拒＋auth_denied 审计；②任务未带 timeout 回落服务 AGORA_VERIFY_TIMEOUT；③子任务随字典继承 timeout；④坏值（非正整数）fail-fast 拒（与服务级同款文案风格）；⑤gate 硬顶＝4× 生效值（经注入 runner 单测断言）；⑥软顶提醒与超顶通知文案含生效预算数值；⑦MCP schema task_create/task_update 描述同步 timeout 参数；⑧`python3 -m pytest tests/ -q` 全绿。
+### F53 派发上下文留痕——wiki/why/<tid>.md 按需锚定（2026-11-04，用户裁定；主会话追溯/复用两场景讨论）
+**现状**：追溯已有 tid→任务页（goal/verify）＋`state/messages/*.md`（`task: <tid>` 头可 grep）＋`events.jsonl` 三通道；缺派发方“为什么”——对话背景/备选/裁决只存主会话，跨会话还原与方案复用无锚。
+**裁定**：tid 即唯一锚——单 plaza 池内终身唯一有机制保证（`_new_tid()` 查全量任务池、任务行不 GC）；已知边界＝跨 plaza 撞号与 state 清空重发旧号，why 页首行日期＋dispatcher sid 锚封死，服务端零改动。B 路线：按需留痕，不强制、不进闸。
+**落点**：skills/agora-dispatch/SKILL.md §1 新增一条纪律（内容即 F53 why 页约定）；模板即该条纪律本身，不另立模板文件。
+**验收**：`grep -q '### F53 ' docs/reqs/opencode-agora.md && grep -q 'wiki/why/<tid>.md' skills/agora-dispatch/SKILL.md` 机械锚＋`python3 -m pytest tests/ -q` 全绿（Req: F53）。
