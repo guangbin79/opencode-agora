@@ -28,12 +28,12 @@ SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 RUNNER_CALLS = []  # (cwd, cmd) 门体验证实调记录（验收④取证用）
 
 
-def ok_runner(cwd, cmd):
+def ok_runner(cwd, cmd, timeout=None, ceiling=None):
     RUNNER_CALLS.append((cwd, cmd))
     return 0, "pass"
 
 
-def fail_runner(cwd, cmd):
+def fail_runner(cwd, cmd, timeout=None, ceiling=None):
     return 1, "boom"
 
 
@@ -583,7 +583,7 @@ class SwitchRunner:
     def __init__(self):
         self.n = 0
 
-    def __call__(self, cwd, cmd):
+    def __call__(self, cwd, cmd, timeout=None, ceiling=None):
         self.n += 1
         return (1, "boom") if self.n == 1 else (0, "pass")
 
@@ -713,6 +713,39 @@ class TestParamContract(HttpdTest):
         finally:
             self.app.store.append_event = orig
         self.assertEqual(st, 400)  # 审计写失败不影响应答（best-effort）
+
+    def test_task_timeout_flows_and_bad_values_rejected(self):  # Req: F51
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo",
+                      "verify_cmd": "true", "timeout": 600}, self.root)
+        self.assertEqual(st, 200)
+        tid = r["task"]
+        self.assertEqual(self.app.state.get(tid)["verify"]["timeout"], 600)
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g2", "project_dir": "/repo",
+                      "verify_cmd": "true", "timeout": "600"}, self.root)
+        self.assertEqual(st, 400)  # 非整数 400 报因（同 verify_cmd 口径）
+        st, r = call(self.port, "POST", "/task_update",
+                     {"task": tid, "verify_cmd": "true", "timeout": 0}, self.root)
+        self.assertEqual(st, 403)  # 坏值 core 层 fail-fast（正整数秒文案）
+        self.assertEqual(self.app.state.get(tid)["verify"]["timeout"], 600)  # 未被污染
+        st, r = call(self.port, "POST", "/task_update",
+                     {"task": tid, "verify_cmd": "pytest -q", "timeout": 1200},
+                     self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(tid)["verify"]["timeout"], 1200)
+
+    def test_worker_task_create_with_timeout_403(self):  # Req: F51
+        tid = self.create_task({"goal": "g", "project_dir": "/repo",
+                                "verify_cmd": "true", "timeout": 600})
+        wtok = self.dispatch_task(tid)
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "child", "timeout": 300}, wtok)
+        self.assertEqual(st, 403)
+        self.assertIn("timeout", r["error"])
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "auth_denied" and "timeout" in str(e.get("note"))]
+        self.assertTrue(ev)  # F37 同款 auth_denied 审计
 
 
 class TestStartupRequeue(unittest.TestCase):

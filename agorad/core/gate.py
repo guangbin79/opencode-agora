@@ -205,12 +205,18 @@ class Gate:
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         integration = t.get("gate_env") or f"{env}__gate"
         origin = t.get("gate_origin_branch")  # 崩溃重排沿用首轮分支位，不采信漂移后的现场
+        budget = t["verify"].get("timeout") or self._verify_timeout  # F51 两级取值
+        ceiling = (4 * budget if t["verify"].get("timeout")
+                   or self._verify_ceiling is None
+                   else self._verify_ceiling)  # 任务级硬顶固定 4×；服务级 F36 旋钮缺省 4×
         runner = self._runner
-        if runner is None:  # F36 默认 runner：软顶提醒闭包绑本任务
+        if runner is None:  # F36 默认 runner：软顶提醒闭包绑本任务＋生效预算
             runner = lambda env, cmd: _subprocess_runner(  # noqa: E731
-                env, cmd, timeout=self._verify_timeout,
-                ceiling=self._verify_ceiling,
-                on_soft=lambda: self._notify_verify_soft(tid))
+                env, cmd, timeout=budget, ceiling=ceiling,
+                on_soft=lambda: self._notify_verify_soft(tid, budget))
+        else:  # F51：注入 runner 经 kwargs 观察生效预算（硬顶＝4×生效值单测缝）
+            runner = lambda env, cmd: self._runner(env, cmd, timeout=budget,
+                                                   ceiling=ceiling)
         self._state.set_fields(tid, in_gate=True, gate_env=integration)
         try:
             # kill 落在“目标已推进、merged 未落库”窗口：任务提交已在目标支即只补终态，
@@ -242,6 +248,7 @@ class Gate:
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"verify 超硬顶——进程组已终止（非质量败，无需 worker 重试）；"
+                    f"生效预算 {budget:g}s（硬顶 {ceiling:g}s）；"
                     f"输出尾部:\n{out[-_TAIL:]}")
                 return
             if rc != 0:
@@ -283,7 +290,8 @@ class Gate:
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"集成 verify 超硬顶，目标分支未改动——进程组已终止"
-                    f"（非质量败，无需 worker 重试）；输出尾部:\n{iout[-_TAIL:]}")
+                    f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
+                    f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
                 return
             if irc != 0:
                 where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
@@ -403,13 +411,13 @@ class Gate:
 
     # ---- 内部 ----
 
-    def _notify_verify_soft(self, tid):
+    def _notify_verify_soft(self, tid, timeout):
         """F36 软顶提醒线：不杀只提醒恰一次（gt-961483/gt-018676 误报诱导 cancel
-        前科→文案显式仍在跑、无需操作）。"""
+        前科→文案显式仍在跑、无需操作）；F51 文案报任务级生效预算。"""
         self._audit(tid, "verify_soft_timeout")
         self._router.notify_dispatcher(
             tid, "milestone",
-            f"任务 {tid} verify 超软顶（>{self._verify_timeout:g}s）——仍在跑、"
+            f"任务 {tid} verify 超软顶（>{timeout:g}s）——仍在跑、"
             "无需操作、确认挂死才 cancel")
 
     def _quality_fail(self, tid, to, body, reason=""):

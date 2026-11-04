@@ -831,6 +831,68 @@ class TestWorkerScope(TestCoreTask):
             self.svc.create("child", None, None, outsider)
 
 
+class TestTaskVerifyTimeout(TestCoreTask):
+    """F51 任务级 verify 预算：timeout 随 verify 字典，写权限与 verify_cmd 同权。"""
+
+    def parent_with_worker(self, timeout=None):
+        """建＋派父任务，回 (tid, worker_token)——镜像 TestWorkerScope 夹具。"""
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true", timeout=timeout)
+        return parent, self.svc.dispatch(parent, self.root)
+
+    def test_dispatcher_create_registers_timeout(self):  # Req: F51
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", timeout=600)
+        self.assertEqual(self.state.get(tid)["verify"]["timeout"], 600)
+
+    def test_create_without_timeout_none(self):  # Req: F51
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertIsNone(self.state.get(tid)["verify"].get("timeout"))
+
+    def test_worker_create_with_timeout_rejected(self):  # Req: F51
+        _, token = self.parent_with_worker()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", None, None, token, timeout=600)
+        self.assertIn("timeout", str(cm.exception))
+        self.assertTrue(any(e["event"] == "auth_denied" for e in self.events()))
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 1)  # 拒绝零副作用
+
+    def test_child_inherits_timeout_via_verify_dict(self):  # Req: F51
+        parent, token = self.parent_with_worker(timeout=900)
+        child = self.svc.create("child", None, None, token)
+        self.assertEqual(self.state.get(child)["verify"]["timeout"], 900)  # 随字典下发
+
+    def test_bad_timeout_fail_fast_rejected(self):  # Req: F51
+        for bad in (0, -1, 1.5, "600", True):
+            with self.assertRaises(Rejected) as cm:
+                self.svc.create("g", "/repo", None, self.root,
+                                verify_cmd="true", timeout=bad)
+            self.assertIn("正整数秒", str(cm.exception))  # 与服务级同款文案风格
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", timeout=1)  # 正例放行
+        self.assertEqual(self.state.get(tid)["verify"]["timeout"], 1)
+
+    def test_update_verify_sets_timeout(self):  # Req: F51
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.svc.update_verify(tid, self.root, "pytest -q", timeout=1200)
+        self.assertEqual(self.state.get(tid)["verify"]["timeout"], 1200)
+
+    def test_update_verify_preserves_existing_timeout(self):  # Req: F51
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", timeout=600)
+        self.svc.update_verify(tid, self.root, "pytest -q")  # 未携 timeout 不清账
+        self.assertEqual(self.state.get(tid)["verify"]["timeout"], 600)
+
+    def test_update_verify_bad_timeout_rejected(self):  # Req: F51
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.update_verify(tid, self.root, "pytest -q", timeout=0)
+        self.assertIn("正整数秒", str(cm.exception))
+        v = self.state.get(tid)["verify"]  # 拒绝零副作用：既有登记不被污染
+        self.assertEqual(v["state"], "registered")
+        self.assertIsNone(v["timeout"])
+
+
 class TestReqId(TestCoreTask):
     """F34 req 编号服务端发放：发放登记＋查重拒绝（含已发指针）＋种子扫描。"""
 

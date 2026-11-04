@@ -32,6 +32,11 @@ EV_REJECTED = "dispatch_rejected"
 EV_REJECTED_VERIFY = "dispatch_rejected_verify_missing"
 
 
+def _bad_timeout(v):
+    """F51 任务级 verify 预算：正整数秒（bool 是 int 子类，显式排除）。"""
+    return not isinstance(v, int) or isinstance(v, bool) or v <= 0
+
+
 class Rejected(Exception):
     """task 域拒绝（鉴权/保险丝/前置校验）——报因在消息。"""
 
@@ -47,7 +52,7 @@ class TaskService:
 
     def create(self, goal, project_dir, after, actor_token, title=None,
                target_branch=None, verify_cmd=None, verify_pending=False,
-               req_id=None):
+               req_id=None, timeout=None):
         sid, role = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
@@ -55,6 +60,10 @@ class TaskService:
             if verify_cmd is not None:
                 self._reject(tid, sid, "worker 不得登记验收命令——主会话派发方或 root "
                                        "task_create/task_update 登记", ev=EV_DENIED)
+            if timeout is not None:  # F51：预算写面与 verify_cmd 同权
+                self._reject(tid, sid, "worker 不得设置任务级 verify 预算（timeout）"
+                                       "——主会话派发方或 root task_create/"
+                                       "task_update 登记", ev=EV_DENIED)
             if verify_pending:
                 self._reject(tid, sid, "verify_pending 豁免旗由派发方持有——worker 建单"
                                        "缺省继承父任务配置", ev=EV_DENIED)
@@ -76,6 +85,8 @@ class TaskService:
             self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
         if verify_cmd is not None and not verify_cmd.strip():
             self._reject(tid, sid, "verify 命令为空——task_create 登记非空命令")
+        if timeout is not None and _bad_timeout(timeout):  # F51：坏值 fail-fast，文案与服务级同款风格
+            self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
         if after is not None:
             try:
                 self._state.get(after)
@@ -93,10 +104,11 @@ class TaskService:
         tid = self._new_tid()
         now = time.time()
         verify = {"cmd": "", "state": "pending", "registered_by": None,
-                  "registered_at": None}
+                  "registered_at": None, "timeout": timeout}
         if verify_cmd is not None:  # 建单原子登记：一步到位，两步舞消失
             verify = {"cmd": verify_cmd, "state": "registered",
-                      "registered_by": sid, "registered_at": now}
+                      "registered_by": sid, "registered_at": now,
+                      "timeout": timeout}
         elif role == "worker":  # F37 缺省继承：验证配置随父任务（registered 才过闸）
             verify = dict(parent["verify"])
         root_sid = sid if role != "worker" else (
@@ -340,7 +352,7 @@ class TaskService:
 
     # ---- F2 verify 登记（登记即锁定，worker 必拒） ----
 
-    def update_verify(self, tid, actor_token, cmd):
+    def update_verify(self, tid, actor_token, cmd, timeout=None):
         t = self._state.get(tid)
         sid, role = self._gate(actor_token, "task_update", tid, t,
                                owner=t.get("dispatcher_sid"))
@@ -349,9 +361,13 @@ class TaskService:
                                    "或 root 登记", ev=EV_DENIED)  # dispatcher 归属非授权
         if not cmd.strip():  # 空命令＝无质量闸：登记即拒（merge 仅经 verify 绿）
             self._reject(tid, sid, "verify 命令为空——task_update 登记非空命令")
-        self._state.set_fields(tid, verify={"cmd": cmd, "state": "registered",
-                                            "registered_by": sid,
-                                            "registered_at": time.time()})
+        if timeout is not None and _bad_timeout(timeout):  # F51：坏值 fail-fast，同款文案
+            self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
+        self._state.set_fields(tid, verify={
+            "cmd": cmd, "state": "registered", "registered_by": sid,
+            "registered_at": time.time(),
+            "timeout": timeout if timeout is not None
+            else t["verify"].get("timeout")})  # 未携 timeout 不清既有预算
         self._store.append_event({"ts": time.time(), "actor": sid, "event": EV_VERIFY,
                                   "task": tid})
         # 推送通知 worker：verify 已登记，消除轮询等待（狗粮摩擦 #1）

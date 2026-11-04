@@ -144,9 +144,11 @@ class FakeHealth:
 class FakeRunner:
     def __init__(self, *results):
         self.results, self.calls = list(results), []
+        self.budgets = []  # F51 生效预算观察：(timeout, ceiling) 逐调用
 
-    def __call__(self, cwd, cmd):
+    def __call__(self, cwd, cmd, timeout=None, ceiling=None):
         self.calls.append((cwd, cmd))
+        self.budgets.append((timeout, ceiling))
         return self.results.pop(0)
 
 
@@ -243,20 +245,21 @@ class TestCoreGate(unittest.TestCase):
                          roster_path=roster_path)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None,
-             cmd="pytest -q"):
+             cmd="pytest -q", timeout=None):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
                              "env_dir": str(self.env), "after": None,
                              "target_branch": tb,
                              "verify": {"cmd": cmd, "state": "registered",
-                                        "registered_by": "disp1", "registered_at": 1.0},
+                                        "registered_by": "disp1", "registered_at": 1.0,
+                                        "timeout": timeout},
                              "state": state, "dispatcher_sid": "disp1",
                              "worker_sid": "s-w1", "chain_depth": 1,
                              "fail_streak": streak, "created": 0.0, "updated": 0.0})
         return tid
 
-    def in_gate(self, streak=0):
+    def in_gate(self, streak=0, timeout=None):
         """播种 running→受理 done（进入门临界段）。"""
-        self.seed(streak=streak)
+        self.seed(streak=streak, timeout=timeout)
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
 
     def worker_msgs(self):
@@ -970,6 +973,68 @@ class TestGateVerifyOverrun(TestCoreGate):
         self.assertEqual(len(soft), 1)
         self.assertIn("t1", soft[0]["body"])
         self.assertIn("无需操作", soft[0]["body"])
+
+
+class TestGateTaskBudget(TestCoreGate):
+    """F51 任务级 verify 预算：gate 取值两级（任务 timeout→服务缺省），硬顶固定 4×生效值。"""
+
+    def test_task_timeout_resolved_with_fixed_4x_ceiling(self):  # Req: F51
+        self.mk_gate()
+        self.in_gate(timeout=100)  # 服务缺省 300：任务预算优先
+        self.gate.run("t1")
+        self.assertEqual(self.runner.budgets, [(100, 400), (100, 400)])  # env＋集成同预算
+
+    def test_no_task_timeout_falls_back_to_service_default(self):  # Req: F51
+        self.seed()
+        self.mk_gate()  # Gate 缺省 verify_timeout=300、ceiling=None→4×软顶
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.runner.budgets, [(300, 1200), (300, 1200)])
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 行为不变
+
+    def test_service_ceiling_kept_without_task_timeout(self):  # Req: F36/F51
+        """无任务预算：服务 AGORA_VERIFY_CEILING 旋钮语义原样（F36 不动）。"""
+        self.seed()
+        self.gate = Gate(self.state, self.gx, self.router, self.oc,
+                         lambda env: self.anchor, self.health, self.auth,
+                         self.store, runner=self.runner,
+                         verify_timeout=300, verify_ceiling=999)
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.runner.budgets[0], (300, 999))
+
+    def test_overrun_message_contains_effective_budget(self):  # Req: F51
+        self.runner = FakeRunner((124, "x" * 3000))
+        self.mk_gate()
+        self.in_gate(timeout=100)
+        self.gate.run("t1")
+        (m,) = [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+        self.assertIn("生效预算 100s", m["body"])
+        self.assertIn("硬顶 400s", m["body"])
+
+    def test_integration_overrun_message_contains_effective_budget(self):  # Req: F51
+        self.runner = FakeRunner((0, "pass"), (124, "itail"))
+        self.mk_gate()
+        self.in_gate(timeout=100)
+        self.gate.run("t1")
+        (m,) = [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+        self.assertIn("生效预算 100s", m["body"])
+
+    def test_soft_reminder_contains_effective_budget(self):  # Req: F51
+        """默认 runner：软顶文案报任务级生效预算（非服务缺省）。"""
+        self.seed(cmd="sleep 0.3; echo ok", timeout=0.1)
+        shutil.rmtree(self.env / ".review-loop")  # 锚缺失驻留：仅 env verify 一跑
+        gate = Gate(self.state, self.gx, self.router, self.oc,
+                    lambda env: None, self.health, self.auth, self.store,
+                    runner=None, verify_timeout=0.05, verify_ceiling=5)
+        self.assertEqual(gate.accept_done("t1", "s-w1", SHA), "accepted")
+        gate.run("t1")
+        soft = [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and "仍在跑" in m["body"]]
+        self.assertEqual(len(soft), 1)
+        self.assertIn("0.1s", soft[0]["body"])  # 任务级生效预算数值在案
 
 
 class TestGateIgnoreRoster(TestCoreGate):

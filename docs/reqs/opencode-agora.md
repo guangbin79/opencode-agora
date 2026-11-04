@@ -308,3 +308,8 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **现状**：gate 全管线绑定任务仓（contains/锚/merge/push），交付 commit 属他仓时账本检查 merge-base fatal（`Not a valid commit name`）→ 结构性 reopen；绕行＝done 改报任务仓 master tip，账本与真实交付弱关联。
 **裁定**：维持「一任务＝一仓交付」。跨仓交付由主会话编排两个顶层任务＋after 依赖（甲案）；worker 建子任务不得指定他仓 project_dir（F37 ③维持）。gate 零改动；deliver_repo 字段提案放弃。
 **落点**：skills/agora-dispatch/SKILL.md §1 新增两条纪律：①跨仓交付编排——两仓两任务＋after 串依赖，禁止折进单任务；②产物交接约定——前任务 merged 即 env 回收，交付产物须落仓内 commit（缺省，后任务经 ../前仓 相对路径取用）或持久路径（仅限 wiki 页或派发方 goal 显式指定落点，worker 不得自选 env 外路径），禁止依赖前任务 env 存续。
+
+### F51 verify 任务级预算——timeout 随 verify 字典（2026-11-04，用户裁定；来源 wiki/orch/agorad-improvement-20261104.md 改进 2；超时双顶语义沿用 F36）
+**现状**：预算仅服务级 AGORA_VERIFY_TIMEOUT（缺省 300s，install.sh 种 3600），dispatcher/worker 双不可达，唯一出口 root 改配置＋重启；冷构建类验收被迫窄化为 grep 断言（ag-aa9a74/ag-87b6a4）。
+**裁定**：verify 字典加 timeout 字段（正整数秒，可缺省）；写权限与 verify_cmd 完全同权（task_create 携带/task_update 同角色可改；worker 一律拒——F37 零改动）；子任务随 verify 字典继承下发。gate 取值两级：任务 timeout → 服务缺省；硬顶固定 4× 生效值；软顶提醒与超顶路由文案附生效预算值。放弃 root 配置面板与 gate 树构建缓存。
+**验收**：F51 用例（Req: F51 锚，先红后绿）——①task_create 带 timeout 登记：dispatcher 绿、worker 拒＋auth_denied 审计；②任务未带 timeout 回落服务 AGORA_VERIFY_TIMEOUT；③子任务随字典继承 timeout；④坏值（非正整数）fail-fast 拒（与服务级同款文案风格）；⑤gate 硬顶＝4× 生效值（经注入 runner 单测断言）；⑥软顶提醒与超顶通知文案含生效预算数值；⑦MCP schema task_create/task_update 描述同步 timeout 参数；⑧`python3 -m pytest tests/ -q` 全绿。

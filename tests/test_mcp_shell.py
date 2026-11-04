@@ -20,7 +20,7 @@ from agorad.transport.httpd import _TOOLS, make_server
 from tests.stub_opencode import StubOpencode
 
 
-def ok_runner(cwd, cmd):
+def ok_runner(cwd, cmd, timeout=None, ceiling=None):
     return 0, "pass"
 
 
@@ -161,6 +161,18 @@ class TestSchemaContract(McpShellTest):
         desc = schema["task_create"]["inputSchema"]["properties"]["after"]["description"]
         self.assertIn("前驱任务 id", desc)
         self.assertIn("B7", desc)
+
+    def test_task_timeout_schema_described(self):  # Req: F51
+        schema = {t["name"]: t for t in
+                  self.rpc("tools/list")["result"]["tools"]}
+        tc = schema["task_create"]["inputSchema"]["properties"]["timeout"]
+        self.assertEqual(tc["type"], "integer")
+        self.assertIn("正整数秒", tc["description"])
+        self.assertIn("AGORA_VERIFY_TIMEOUT", tc["description"])
+        self.assertIn("worker", tc["description"])  # 写权限与 verify_cmd 同权标注
+        tu = schema["task_update"]["inputSchema"]["properties"]["timeout"]
+        self.assertEqual(tu["type"], "integer")
+        self.assertIn("正整数秒", tu["description"])
 
     def test_worker_availability_marked_in_descriptions(self):  # Req: F13/F30/F37
         descs = {t["name"]: t["description"] for t in
