@@ -305,6 +305,6 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **验收**：test_core_report.py——full view 投影键集＝白名单精确相等（含缺字段容错）、events 只含 escalate；test_transport_httpd.py——{"view":"full"} 四键含投影任务行与 escalate 事件、紧凑 {} 响应形状不变（无 tasks/events 键）、{"task":…} 既有语义回归；test_board_tui.py——stub 计数断言 load_board 恰 1 次 /board 调用（零逐任务）、detail 恰 1 次 {"task": tid} 二次进缓存零新增、取败降级提示行；`python3 -m pytest tests/ -q` 全绿（Req: F48）。
 
 ### F50 跨仓交付编排纪律——不改 gate，纯文档（2026-11-04，用户裁定；来源 wiki/orch/agorad-improvement-20261104.md 改进 1；实证 ag-f9137c 三连 reopen）
-**现状**：gate 全管线绑定任务仓（contains/锚/merge/push），交付 commit 属他仓时 cat-file fatal → 结构性 reopen；绕行＝done 改报任务仓 master tip，账本与真实交付弱关联。
+**现状**：gate 全管线绑定任务仓（contains/锚/merge/push），交付 commit 属他仓时账本检查 merge-base fatal（`Not a valid commit name`）→ 结构性 reopen；绕行＝done 改报任务仓 master tip，账本与真实交付弱关联。
 **裁定**：维持「一任务＝一仓交付」。跨仓交付由主会话编排两个顶层任务＋after 依赖（甲案）；worker 建子任务不得指定他仓 project_dir（F37 ③维持）。gate 零改动；deliver_repo 字段提案放弃。
-**落点**：skills/agora-dispatch/SKILL.md §1 新增两条纪律：①跨仓交付编排——两仓两任务＋after 串依赖，禁止折进单任务；②产物交接约定——前任务 merged 即 env 回收，交付产物须落仓内 commit 或持久路径供后任务经仓内形态取用，禁止依赖前任务 env 存续。
+**落点**：skills/agora-dispatch/SKILL.md §1 新增两条纪律：①跨仓交付编排——两仓两任务＋after 串依赖，禁止折进单任务；②产物交接约定——前任务 merged 即 env 回收，交付产物须落仓内 commit（缺省，后任务经 ../前仓 相对路径取用）或持久路径（仅限 wiki 页或派发方 goal 显式指定落点，worker 不得自选 env 外路径），禁止依赖前任务 env 存续。
