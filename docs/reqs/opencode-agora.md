@@ -324,3 +324,8 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **实证**（2026-11-04 busy 探针，scratch 会话 sleep 240 全程采样）：长静默工具调用期间 busy 判据（updated>idle）恒真——判据与部署均无恙，ag-f9137c 假阳性属「工作在会话回合外」（后台进程），会话级信号原理不可见，判据零改动。
 **裁定**：stalled 边沿 escalate 时加一次取末条消息摘要（GET /session/{sid}/message 末条 role＋tool 名/标题＋距今秒）并入拍人文案；获取失败（异常/空）吞掉照常拍人（同 email 尽力而为口径）；oc.py 新增取末条消息方法，health 沿既有 oc 注入缝调用。
 **验收**：F52 用例（Req: F52 锚，先红后绿）——①stalled 拍人文案含末次活动摘要要素（role/工具名/年龄，stub_opencode 扩消息面）；②会话不可达或消息缺失时拍人照常、文案降级、不抛异常；③`python3 -m pytest tests/ -q` 全绿。
+
+### ag-6099ba 并发附牌单飞——cred 拉取在途共享，灭空窗无牌拒（2026-11-05，ag-fc5db0 丢投实证根修）
+**事故链**（plaza 账本＋opencode DB 取证）：派发方 `Promise.all([tools.agora.post(kind=answer), tools.agora.wiki_write(...)])`——首调撞首拉（cred_pull 404 在途，audit 1793838608.092），次调落 30s 节流空窗且 lastVerdict 尚空→回放 throttled→零牌即时拒「缺 _token」（serve WARN :08.090）；Promise.all 首拒取消在途首拉兄弟调用→post 从未发出（零账本行零审计行），模型却据单一 wiki 错误文案误读「answer 已发成功」→worker 空等 50min。**投递层证伪**：answer 2239/2245 注入 parked worker 均秒级唤醒（转录 user 消息＋新回合）、隔离 v2.2.2 实例探针同证——「parked 会话不唤醒」前提不成立，丢投全在发送侧附牌路径。
+**修法**：cred.ts pullCredential 加 per-sid 单飞 Map（在途拉取并发共享，先于节流窗判）；顺序窗内回放判据语义不动；resetCredPull 清单飞。agora_mcp.py 拒因文案改「本次调用未送达 agorad（非服务拒）」——灭「已发成功」误读面。Promise.all 兄弟取消属 opencode 运行时行为，不在本仓修（单飞灭其触发源）。
+**验收**：hook.test.ts ag-6099ba 用例（Req: ag-6099ba 锚，先红后绿）——并发两调（30ms 在途窗桩）双双附 tok-root＋恰一次 cred_pull；既有节流窗断言不回归；`bun test agora-plugin/`＋`python3 -m pytest tests/ -q` 全绿。

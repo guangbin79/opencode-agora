@@ -198,7 +198,7 @@ def _tools_call(rid, params):
         return _err(rid, -32602, f"未知工具: {name}")
     args = params.get("arguments")
     if not isinstance(args, dict) or not args.get("_token"):
-        return _err(rid, -32001, "缺 _token（未附牌）——服务不可达默认拒同方向")
+        return _err(rid, -32001, "缺 _token（插件未附牌）——本次调用未送达 agorad（非服务拒），稍候重试即自愈")
     try:
         status, body = http_call(name, args)
     except OSError as e:  # 连接拒/发现失败：lift 线索报因

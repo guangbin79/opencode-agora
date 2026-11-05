@@ -26,11 +26,13 @@ export function getCredential(sid: string): Cred | undefined {
 const PULL_INTERVAL_MS = 30_000;
 const pullSeen = new Map<string, number>(); // sid->上次拉取时刻
 const lastVerdict = new Map<string, PullReason>(); // sid->窗内回放判据（评审 high 修复）
+const inFlight = new Map<string, Promise<PullResult>>(); // sid->在途拉取（ag-6099ba 单飞）
 
 /** 测试注入口：清节流窗。 */
 export function resetCredPull(): void {
   pullSeen.clear();
   lastVerdict.clear();
+  inFlight.clear();
 }
 
 /** 拉取拒因四分支（F27）：ok＝命中；not_worker＝404 服务侧无在飞任务绑本会话（主会话常态）；
@@ -41,6 +43,11 @@ export type PullResult = { reason: PullReason; cred: Cred | null };
 /** 缓存未命中拉取自愈（F25 修正推改拉）：命中即填缓存并返回；其余按拒因枚举返回
  * cred=null＝走现有默认拒文案。短超时 2s：不拖垮工具调用判定链。 */
 export async function pullCredential(sid: string, port: number): Promise<PullResult> {
+  // 单飞（ag-6099ba 根修，先于节流窗判）：并发同 sid 调用共享在途拉取——
+  // 否则第二调落节流空窗（lastVerdict 尚空）回放 throttled→零牌即时拒，
+  // Promise.all 首拒还会取消在途首拉的兄弟调用（2026-11-05 派发方 answer 丢投实证）
+  const flight = inFlight.get(sid);
+  if (flight) return flight;
   const now = Date.now();
   if (now - (pullSeen.get(sid) ?? 0) < PULL_INTERVAL_MS) {
     // 窗内零网络但回放上次判据——裸 throttled 会把已知 not_worker 降级：root 牌永不入
@@ -54,34 +61,42 @@ export async function pullCredential(sid: string, port: number): Promise<PullRes
     }
   }
   pullSeen.set(sid, now);
+  const p = (async (): Promise<PullResult> => {
+    try {
+      const r = await fetch(agoradUrl(port, "/cred_for_sid"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sid }),
+        signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
+      });
+      if (r.status === 404) {
+        lastVerdict.set(sid, "not_worker"); // 非在飞 worker：常态未命中（窗内回放防降级）
+        return { reason: "not_worker", cred: null };
+      }
+      if (!r.ok) {
+        lastVerdict.set(sid, "unreachable");
+        return { reason: "unreachable", cred: null };
+      }
+      const d = (await r.json()) as { tid?: string; env_dir?: string; token?: string };
+      // 形状缺＝异常安全向（归 unreachable：调用方不得回落 root 附牌）
+      if (!d.token || !d.env_dir) {
+        lastVerdict.set(sid, "unreachable");
+        return { reason: "unreachable", cred: null };
+      }
+      const cred: Cred = { token: d.token, sid, role: "worker", tid: d.tid, envDir: d.env_dir };
+      cacheCredential(cred);
+      lastVerdict.delete(sid); // ok 判据随缓存生效（后续走缓存命中，不再进本函数）
+      return { reason: "ok", cred };
+    } catch {
+      lastVerdict.set(sid, "unreachable"); // 服务不可达/超时：默认拒（与判定链服务不可达同口径）
+      return { reason: "unreachable", cred: null };
+    }
+  })();
+  inFlight.set(sid, p);
   try {
-    const r = await fetch(agoradUrl(port, "/cred_for_sid"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sid }),
-      signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
-    });
-    if (r.status === 404) {
-      lastVerdict.set(sid, "not_worker"); // 非在飞 worker：常态未命中（窗内回放防降级）
-      return { reason: "not_worker", cred: null };
-    }
-    if (!r.ok) {
-      lastVerdict.set(sid, "unreachable");
-      return { reason: "unreachable", cred: null };
-    }
-    const d = (await r.json()) as { tid?: string; env_dir?: string; token?: string };
-    // 形状缺＝异常安全向（归 unreachable：调用方不得回落 root 附牌）
-    if (!d.token || !d.env_dir) {
-      lastVerdict.set(sid, "unreachable");
-      return { reason: "unreachable", cred: null };
-    }
-    const cred: Cred = { token: d.token, sid, role: "worker", tid: d.tid, envDir: d.env_dir };
-    cacheCredential(cred);
-    lastVerdict.delete(sid); // ok 判据随缓存生效（后续走缓存命中，不再进本函数）
-    return { reason: "ok", cred };
-  } catch {
-    lastVerdict.set(sid, "unreachable"); // 服务不可达/超时：默认拒（与判定链服务不可达同口径）
-    return { reason: "unreachable", cred: null };
+    return await p;
+  } finally {
+    inFlight.delete(sid);
   }
 }
 

@@ -34,6 +34,7 @@
 - **mcp_shell 白名单封死执行向量**（task-fb8b01）：ALLOW_COMMANDS 外全拒，并封 git -c、git config、find -exec、awk system() 旁路；worker 跑 verify 合法通道＝一次性 opencode API 会话（POST→move→prompt→GET→DELETE）或交服务侧 merge 门自跑
 - **计数声明须分面**（ocr 实证）：同一「工具数」三面异值——MCP tools/list=13（含 wait）、HTTP 端点=12（wait 壳层拦截不转发）、旧注释 12——blanket 替换改错事实；改计数先 grep 各消费面逐面改
 - **Python 地板=3.10**（PEP 604 实证）：str | None 运行时注解且无 __future__ import（access/oc.py、access/store.py）——3.8/3.9 导入即 TypeError；README/CI 以 3.10/3.12 为地板，勿回写 ≥3.8
+- **并发附牌单飞**（ag-6099ba）：Promise.all 并发 agora MCP 调用须共享 per-sid 在途 cred 拉取——否则次调落 30s 节流空窗（lastVerdict 尚空）回放 throttled→零牌即时拒，Promise.all 首拒取消在途首拉兄弟调用＝静默丢投（模型据单一 wiki 错误误读「已发成功」）；cred_pull 审计行有无＝拉取分支判决性探针；拒因文案须写明「未送达（非服务拒）」防误读
 - **Bun.spawn detached 等价 setsid**（F27 实证）：detached:true 子进程 sess≠父（POSIX 新会话/Windows 新进程组），插件拉起不依赖 setsid 包装；install.sh macOS 缺 setsid 走 nohup 兜底（击杀语义不变）
 - **维护者自编辑通道**（F27/task-305aff）：enforce ON 下 root 亦被拦（零信任）——维护者直改主检出＝root 拨 enforce off→编辑→on（MCP enforce 工具，审计留痕）；check_mail 附牌回落只回填 MCP 面、不回填 hook 面缓存（两缓存分离）
 - **wheel 数据面两坑＋argv 假象**（F31，53fb8ec）：importlib RECORD 是安装态，locate_file 以 site-packages 为基——兜底 Path(sys.prefix)/rel 双态通吃；data-files 目的地键须保源目录名（与 install.sh 布局名实冲突即 cp 落空）；python3 -c 的 argv[0] 是字面 -c，首参自 argv[1] 起

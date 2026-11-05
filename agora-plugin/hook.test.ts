@@ -627,6 +627,56 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
+  test("ag-6099ba 根修：并发 agora_* 附牌单飞——首拉在途时并发第二调共享同一拉取，不落空窗 throttled 拒附牌", async () => {
+    // Req: ag-6099ba（事故 2026-11-05 08:30 派发方 answer 丢投实证：Promise.all 并发
+    // agora_post＋agora_wiki_write，第二调撞 30s 节流空窗（lastVerdict 尚空）→ 无牌
+    // 即时拒「缺 _token」→ Promise.all 首拒取消在途首拉的兄弟调用 → post 从未发出）
+    const hooks = wire();
+    setEnforce(false);
+    const pulls: string[] = [];
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            pulls.push(sid);
+            // 30ms 在途窗：放大竞态面，让并发第二调落在首拉未归期
+            return new Promise<Response>((res) =>
+              setTimeout(() => res(new Response("{}", { status: 404 })), 30));
+          });
+        }
+        return Response.json({ ok: true });
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-root\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`; // lift 直达探活
+    resetLift();
+    resetCredPull();
+    try {
+      const sid = "s-race-main"; // 主会话形态：404→root 牌接管回退（worker 牌永不入缓存）
+      const postIn: Record<string, unknown> = { task: "t-race", kind: "answer", body: "x" };
+      const wikiIn: Record<string, unknown> = { path: "wiki/race.md", text: "x" };
+      await Promise.all([
+        hooks["tool.execute.before"]({ tool: "agora_post", sessionID: sid, input: postIn }),
+        hooks["tool.execute.before"]({ tool: "agora_wiki_write", sessionID: sid, input: wikiIn }),
+      ]);
+      // 两调都必须附上牌（事故形态＝并发第二调零牌即时拒，兄弟调用被取消致 post 丢投）
+      expect(postIn._token).toBe("tok-root");
+      expect(wikiIn._token).toBe("tok-root");
+      expect(pulls).toEqual([sid]); // 单飞：并发两调共享一次在途拉取（非两次、非零次）
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      setEnforce(false);
+      srv.stop(true);
+    }
+  });
+
   test("F27 readish 拉取接线三态：404 放行 state 读；worker 拉取后仍 READ_HINT；不可达仍 READ_HINT", async () => {
     // Req: F27
     const hooks = wire();
