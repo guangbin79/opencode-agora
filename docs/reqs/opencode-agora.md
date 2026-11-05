@@ -329,3 +329,8 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **事故链**（plaza 账本＋opencode DB 取证）：派发方 `Promise.all([tools.agora.post(kind=answer), tools.agora.wiki_write(...)])`——首调撞首拉（cred_pull 404 在途，audit 1793838608.092），次调落 30s 节流空窗且 lastVerdict 尚空→回放 throttled→零牌即时拒「缺 _token」（serve WARN :08.090）；Promise.all 首拒取消在途首拉兄弟调用→post 从未发出（零账本行零审计行），模型却据单一 wiki 错误文案误读「answer 已发成功」→worker 空等 50min。**投递层证伪**：answer 2239/2245 注入 parked worker 均秒级唤醒（转录 user 消息＋新回合）、隔离 v2.2.2 实例探针同证——「parked 会话不唤醒」前提不成立，丢投全在发送侧附牌路径。
 **修法**：cred.ts pullCredential 加 per-sid 单飞 Map（在途拉取并发共享，先于节流窗判）；顺序窗内回放判据语义不动；resetCredPull 清单飞。agora_mcp.py 拒因文案改「本次调用未送达 agorad（非服务拒）」——灭「已发成功」误读面。Promise.all 兄弟取消属 opencode 运行时行为，不在本仓修（单飞灭其触发源）。
 **验收**：hook.test.ts ag-6099ba 用例（Req: ag-6099ba 锚，先红后绿）——并发两调（30ms 在途窗桩）双双附 tok-root＋恰一次 cred_pull；既有节流窗断言不回归；`bun test agora-plugin/`＋`python3 -m pytest tests/ -q` 全绿。
+
+### F54 验证中间态两边会话可见——门启动拍＋board 投影（2026-11-05，用户裁定「验证中间态两边会话可见」）
+**现状**：worker post(done) 后门静默跑 verify，worker 与 dispatcher 两侧都无「验证中」信号——长 verify（冷构建分钟级）只能干等，board 上 done 任务也无门内标识。
+**裁定**：两档改动（2026-10-28「门内静默免判」裁定不推翻——本改动是边沿消息非定时判读）：①门启动拍双边——gate run() set_fields(in_gate=True) 后紧接两行：worker 里程碑「已入验证门：verify 运行中——绿/败另有消息」＋dispatcher result 直投「任务 <tid> 已入验证门（verify 运行中）」（F-4 崩溃重排会重发一次，罕见窗口可接受）；②board 投影带 in_gate——report.full_view 白名单追加该字段，board_tui._emit 在 state=="done" 且 in_gate 时 state 列显示 "done·验证中"（过滤/桶/着色仍用原始 state，口径不动）。
+**验收**：三测试（Req: F54 锚，先红后绿）——test_core_gate.py test_gate_entry_milestone_both_sides（worker milestone＋dispatcher result 双边断言）；test_core_report.py test_full_view_projection_and_events（白名单键集含 in_gate）；test_board_tui.py test_in_gate_done_shows_verifying（state 列 done·验证中）；`python3 -m pytest tests/ -q` 全绿。

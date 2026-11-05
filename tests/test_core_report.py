@@ -88,10 +88,11 @@ class TestReport(unittest.TestCase):
             t["env_dir"] = "/repo/envs/t1"    # 白名单外：不得入投影
             t["fail_streak"] = 2
             t["commit"] = "abc"
+            t["in_gate"] = True              # F54: 门内字段入投影
             v = full_view(snap(t1=t, t2=row(state="todo")), st)
             self.assertEqual(sorted(v), ["buckets", "events", "forest", "tasks"])
             self.assertEqual(sorted(v["tasks"]["t1"]),
-                             ["created", "dispatcher_sid", "last_seen",
+                             ["created", "dispatcher_sid", "in_gate", "last_seen",
                               "project_dir", "state", "title", "worker_sid"])
             self.assertEqual(v["forest"], ["t1", "t2"])
             self.assertEqual(v["buckets"]["在飞"], ["t1", "t2"])

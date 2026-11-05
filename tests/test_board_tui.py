@@ -57,6 +57,11 @@ class TestBuildRows(unittest.TestCase):
         self.assertEqual([(r.tid, r.depth) for r in task_rows(rows)],
                          [("t1", 0), ("t2", 1), ("t3", 2)])
 
+    def test_in_gate_done_shows_verifying(self):  # Req: F54
+        s = snap(t1=trow("done"), t2=dict(trow("done"), in_gate=True))
+        st = {r.tid: r.state for r in task_rows(build_rows(s, [], now=NOW))}
+        self.assertEqual(st, {"t1": "done", "t2": "done·验证中"})
+
     def test_five_bucket_rows(self):  # Req: F10
         s = snap(t1=trow("merged"), t2=trow("closed"), t3=trow("verify_failed"),
                  t4=trow("reopened"), t5=trow("dispatched"), t6=trow("done"),

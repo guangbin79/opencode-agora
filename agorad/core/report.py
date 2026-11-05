@@ -117,7 +117,7 @@ def full_view(snap, store):
     过滤仍归客户端 _KINDS——board_tui 不 import agorad 的既有边界不破）。
     """
     fields = ("state", "title", "worker_sid", "dispatcher_sid", "last_seen",
-              "created", "project_dir")
+              "created", "project_dir", "in_gate")  # in_gate＝F54 验证中间态投影
     return {"buckets": buckets(snap), "forest": forest_view(snap),
             "tasks": {tid: {k: t[k] for k in fields if k in t}
                       for tid, t in snap["tasks"].items()},

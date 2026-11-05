@@ -475,14 +475,15 @@ class TestNestedDispatchLoop(HttpdTest):
             seen.extend(m for m in r["messages"] if m["kind"] == "result")
             return len(seen)
 
-        self.assertTrue(wait_until(lambda: pull_results() >= 2))
+        self.assertTrue(wait_until(lambda: pull_results() >= 3))  # F54 启动＋merged＋closed
         self.assertTrue(any(cwd.endswith(f"/envs/{child}") and cmd == "true"
                             for cwd, cmd in RUNNER_CALLS))  # 门跑继承的 verify_cmd
         self.assertEqual(self.app.state.get(child)["state"], "closed")
-        results = seen  # ag-acae3b：merged＋closed 两拍均实时
-        self.assertEqual([m["task"] for m in results], [child, child])
-        self.assertIn("merged @", results[0]["body"])
-        self.assertIn("已 closed", results[1]["body"])
+        results = seen  # ag-acae3b：merged＋closed 两拍均实时（F54 起前置门启动拍）
+        self.assertEqual([m["task"] for m in results], [child, child, child])
+        self.assertIn("已入验证门", results[0]["body"])
+        self.assertIn("merged @", results[1]["body"])
+        self.assertIn("已 closed", results[2]["body"])
 
         st, r = call(self.port, "POST", "/post",
                      {"task": parent, "kind": "done", "body": SHA}, parent_token)

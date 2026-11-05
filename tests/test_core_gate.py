@@ -387,6 +387,16 @@ class TestNestedDoneGate(TestCoreGate):
 
 
 class TestGateRun(TestCoreGate):
+    def test_gate_entry_milestone_both_sides(self):  # Req: F54
+        self.in_gate()
+        self.gate.run("t1")
+        first = self.worker_msgs()[0]  # worker 侧启动拍
+        self.assertIn("已入验证门", first["body"])
+        disp = [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+        self.assertTrue(disp)
+        self.assertIn("已入验证门", disp[0]["body"])  # dispatcher 侧 result 直投
+
     def test_verify_fail_posts_tail_bumps_no_merge(self):  # Req: F7
         self.runner = FakeRunner((1, "y" * 2500))
         self.mk_gate()
@@ -396,7 +406,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "verify_failed")
         self.assertEqual(t["fail_streak"], 1)
         self.assertEqual(self.gx.merge_calls, [])  # 败不合并
-        body = self.worker_msgs()[0]["body"]
+        body = self.worker_msgs()[-1]["body"]
         self.assertIn("y" * 2000, body)  # 输出尾部（截 2000）
         self.assertNotIn("y" * 2001, body)
         self.assertIn("post(done", body)  # 动作指引
@@ -431,7 +441,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["fail_streak"], 1)  # verify_failed 口径计连败
         self.assertEqual(self.runner.calls, [])  # 先于用户 verify（verify 未跑）
         self.assertEqual(self.gx.merge_calls, [])  # 不合并
-        body = self.worker_msgs()[0]["body"]
+        body = self.worker_msgs()[-1]["body"]
         self.assertIn("<<<<<<< HEAD", body)  # 标记证据随告警尾部回 worker
         self.assertIn("post(done", body)
 
@@ -506,7 +516,7 @@ class TestGateRun(TestCoreGate):
         self.assertFalse(t.get("in_gate"))  # 门闩照常落
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("review_absent_no_merge", names)
-        self.assertIn("review-loop", self.worker_msgs()[0]["body"])
+        self.assertIn("review-loop", self.worker_msgs()[-1]["body"])
 
     def test_review_loop_absent_accepts_done_then_stays_done(self):  # Req: gt-8c8fe8
         """评审环缺失降级：受理不再锚拒，done 放行；门体绿亦驻留 done 不合并。"""
@@ -521,7 +531,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.gx.merge_calls, [])  # 无自动合并
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("review_absent_no_merge", names)
-        self.assertIn("review-loop", self.worker_msgs()[0]["body"])  # 补设施指引
+        self.assertIn("review-loop", self.worker_msgs()[-1]["body"])  # 补设施指引
 
     def test_merge_time_anchor_missing_degrades(self):  # Req: gt-3e7301
         """合并前锚重验：受理后锚不在/未绿（accept→run 窗口 TOCTOU）→驻留 done。"""
@@ -572,7 +582,7 @@ class TestGateRun(TestCoreGate):
         self.gx.head_shas[str(self.env)] = "bbb222"  # 任务支头≠主干头：实值可区分
         self.in_gate()
         self.gate.run("t1")
-        body = self.worker_msgs()[0]["body"]
+        body = self.worker_msgs()[-1]["body"]
         self.assertIn("同步冲突", body)  # 冲突路径文案（干净同步已门内自愈）
         self.assertIn("main@aaa111", body)  # 拒因内嵌实际比较值（双端各验）
         self.assertIn("branch@bbb222", body)
@@ -634,7 +644,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["rebased_from"], SHA)
         self.assertEqual(self.gx.ff_sha_calls, [])  # 目标分支未动
         self.assertFalse(self.gx.merged)
-        body = self.worker_msgs()[0]["body"]
+        body = self.worker_msgs()[-1]["body"]
         self.assertIn("R broke", body)
         self.assertIn("rebase 后集成 verify 失败", body)
         self.assertIn("post(done", body)
@@ -739,7 +749,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None)])
         self.assertEqual(self.gx.removed, [])
         self.assertEqual(self.gx.integration_removed, [(integration, "/repo")])
-        body = self.worker_msgs()[0]["body"]
+        body = self.worker_msgs()[-1]["body"]
         self.assertIn("I: broke", body)
         self.assertIn("目标分支未改动", body)
         self.assertIn("post(done", body)
@@ -769,7 +779,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.integration_builds, [])
-        self.assertIn("工作区不干净", self.worker_msgs()[0]["body"])
+        self.assertIn("工作区不干净", self.worker_msgs()[-1]["body"])
 
     def test_three_failures_block_and_escalate_quality(self):  # Req: F7
         self.runner = FakeRunner((1, "boom"))
@@ -926,10 +936,11 @@ class TestGateVerifyOverrun(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "done")  # 驻留：不 transition
         self.assertEqual(t["fail_streak"], 1)  # 不 bump
-        (m,) = self.results()
+        m = self.results()[-1]  # F54 启动拍在前，取本路径末拍
         self.assertIn("超硬顶", m["body"])
         self.assertIn("x" * 100, m["body"])  # 输出尾在手（截断内）
-        self.assertEqual(self.worker_msgs(), [])  # worker 无「重新 post(done, commit)」
+        (wm,) = self.worker_msgs()  # 仅 F54 门启动拍；无「重新 post(done, commit)」
+        self.assertIn("已入验证门", wm["body"])
         events = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("verify_overrun", events)
 
@@ -940,11 +951,12 @@ class TestGateVerifyOverrun(TestCoreGate):
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "done")
         self.assertEqual(self.state.get("t1")["fail_streak"], 0)
-        (m,) = self.results()
+        m = self.results()[-1]  # F54 启动拍在前，取本路径末拍
         self.assertIn("超硬顶", m["body"])
         self.assertIn("目标分支未改动", m["body"])
         self.assertIn("itail", m["body"])
-        self.assertEqual(self.worker_msgs(), [])
+        (wm,) = self.worker_msgs()  # 仅 F54 门启动拍；无「重新 post(done, commit)」
+        self.assertIn("已入验证门", wm["body"])
 
     def test_overrun_parked_done_settles_queued_cancel(self):  # Req: F36
         """评审环 R1：驻留 done＋排队取消（软顶文案邀请的挂死 cancel）门尾合法结算——
@@ -1008,8 +1020,8 @@ class TestGateTaskBudget(TestCoreGate):
         self.mk_gate()
         self.in_gate(timeout=100)
         self.gate.run("t1")
-        (m,) = [m for m in self.store.read_messages()
-                if m["to"] == "disp1" and m["kind"] == "result"]
+        m = [m for m in self.store.read_messages()
+             if m["to"] == "disp1" and m["kind"] == "result"][-1]  # F54 启动拍在前
         self.assertIn("生效预算 100s", m["body"])
         self.assertIn("硬顶 400s", m["body"])
 
@@ -1018,8 +1030,8 @@ class TestGateTaskBudget(TestCoreGate):
         self.mk_gate()
         self.in_gate(timeout=100)
         self.gate.run("t1")
-        (m,) = [m for m in self.store.read_messages()
-                if m["to"] == "disp1" and m["kind"] == "result"]
+        m = [m for m in self.store.read_messages()
+             if m["to"] == "disp1" and m["kind"] == "result"][-1]  # F54 启动拍在前
         self.assertIn("生效预算 100s", m["body"])
 
     def test_soft_reminder_contains_effective_budget(self):  # Req: F51
@@ -1097,7 +1109,7 @@ class TestDispatcherResults(TestCoreGate):
         先于 closed 收官拍；worker milestone 通道不变。"""
         self.in_gate()
         self.gate.run("t1")
-        merged, closed = self.results()
+        merged, closed = self.results()[-2:]  # F54 启动拍在前，merged/closed 收官
         self.assertEqual(merged["from"], "agorad")
         self.assertEqual(merged["kind"], "result")
         self.assertEqual(merged["body"], f"任务 t1 merged @{SHA[:7]}")
@@ -1110,9 +1122,10 @@ class TestDispatcherResults(TestCoreGate):
         self.gate.run("t1")
         routed = sorted((m["to"], m["kind"]) for m in self.store.read_messages())
         self.assertEqual(routed, [("disp1", "result"), ("disp1", "result"),
-                                  ("s-w1", "milestone")])
-        milestone, = [m["body"] for m in self.store.read_messages()
-                      if m["kind"] == "milestone"]
+                                  ("disp1", "result"),  # 首拍＝F54 门启动
+                                  ("s-w1", "milestone"), ("s-w1", "milestone")])
+        milestone = [m["body"] for m in self.store.read_messages()
+                     if m["kind"] == "milestone"][-1]
         self.assertIn("merged @", milestone)
 
     def test_blocked_result_returns_and_triggers_failure_callback(self):
@@ -1122,7 +1135,7 @@ class TestDispatcherResults(TestCoreGate):
         self.in_gate(streak=2)
         self.gate.run("t1")
         self.assertEqual(blocked, ["t1"])
-        (m,) = self.results()
+        m = self.results()[-1]  # F54 启动拍在前，取本路径末拍
         self.assertIn("已 blocked", m["body"])
 
     def test_gate_tail_cancel_result_returns_to_dispatcher(self):
@@ -1131,7 +1144,7 @@ class TestDispatcherResults(TestCoreGate):
         self.in_gate()
         self.state.set_fields("t1", pending_cancel=True)
         self.gate.run("t1")
-        (m,) = self.results()
+        m = self.results()[-1]  # F54 启动拍在前，取本路径末拍
         self.assertIn("已取消", m["body"])
 
 

@@ -161,7 +161,10 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
 
     def _emit(out, tid):
         t = tasks[tid]
-        out.append(Row("task", tid, depth[tid], t["state"], t.get("title", ""),
+        # F54 验证中间态列上可见；过滤/桶/着色仍用原始 state，口径不动
+        state = ("done·验证中" if t["state"] == "done" and t.get("in_gate")
+                 else t["state"])
+        out.append(Row("task", tid, depth[tid], state, t.get("title", ""),
                        t.get("worker_sid"), rel_time(t.get("last_seen"), now),
                        " ".join(esc.get(tid, [])), _domain(t["state"]),
                        Path(t["project_dir"]).name if t.get("project_dir")

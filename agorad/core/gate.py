@@ -218,6 +218,9 @@ class Gate:
             runner = lambda env, cmd: self._runner(env, cmd, timeout=budget,
                                                    ceiling=ceiling)
         self._state.set_fields(tid, in_gate=True, gate_env=integration)
+        self._post(tid, "已入验证门：verify 运行中——绿/败另有消息")  # F54 门启动拍
+        self._router.notify_dispatcher(  # F-4 崩溃重排会重发一次，罕见窗口可接受
+            tid, "result", f"任务 {tid} 已入验证门（verify 运行中）")
         try:
             # kill 落在“目标已推进、merged 未落库”窗口：任务提交已在目标支即只补终态，
             # 绝不重跑集成 verify 后把已合法合并的任务假 reopened，更不需要 reset --hard。
