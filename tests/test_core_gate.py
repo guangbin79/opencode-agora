@@ -397,6 +397,18 @@ class TestGateRun(TestCoreGate):
         self.assertTrue(disp)
         self.assertIn("已入验证门", disp[0]["body"])  # dispatcher 侧 result 直投
 
+    def test_gate_entry_beat_best_effort_no_chain_break(self):  # Req: F54
+        """启动拍通知面异常不断裂门链（评审环 R0：残闩卡死面）——门照常走完。"""
+        self.in_gate()
+
+        def boom(tid, body):
+            raise OSError("disk full")
+
+        self.gate._post = boom
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertTrue(self.runner.calls)  # verify 未被启动拍跳过
+
     def test_verify_fail_posts_tail_bumps_no_merge(self):  # Req: F7
         self.runner = FakeRunner((1, "y" * 2500))
         self.mk_gate()
