@@ -408,6 +408,8 @@ class TestGateRun(TestCoreGate):
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
         self.assertTrue(self.runner.calls)  # verify 未被启动拍跳过
+        self.assertTrue([m for m in self.store.read_messages()  # R1：另一侧不受牵连
+                         if m["to"] == "disp1" and m["kind"] == "result"])
 
     def test_verify_fail_posts_tail_bumps_no_merge(self):  # Req: F7
         self.runner = FakeRunner((1, "y" * 2500))

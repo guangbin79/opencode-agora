@@ -218,8 +218,11 @@ class Gate:
             runner = lambda env, cmd: self._runner(env, cmd, timeout=budget,
                                                    ceiling=ceiling)
         self._state.set_fields(tid, in_gate=True, gate_env=integration)
-        try:  # F54 门启动拍：通知面尽力而为（同 notify_transition 口径），不得断裂门链
+        try:  # F54 门启动拍：两通道各自尽力而为（同 notify_transition 口径），一侧败不压另一侧
             self._post(tid, "已入验证门：verify 运行中——绿/败另有消息")
+        except Exception:
+            pass
+        try:
             self._router.notify_dispatcher(  # F-4 崩溃重排会重发一次，罕见窗口可接受
                 tid, "result", f"任务 {tid} 已入验证门（verify 运行中）")
         except Exception:
