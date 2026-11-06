@@ -49,19 +49,22 @@ class FakeGitx:
 class FakeOc:
     def __init__(self):
         self.sessions, self.injected = [], []
+        self.models, self.inject_models = [], []  # F55：逐回合 model 记录（与 sessions/injected 平行）
         self.fail_create = False
         self.detail = {}  # sid -> session 详情 dict（F28 busy 探测面）；缺 sid＝死会话
         self.down = False  # True＝oc 不可达（session 抛 OcUnavailable）
 
-    def create(self, cwd, boot, title=None):
+    def create(self, cwd, boot, title=None, model=None):
         if self.fail_create:
             raise OcUnavailable("stub down")
         sid = f"s{len(self.sessions) + 1}"
         self.sessions.append((sid, cwd, boot))
+        self.models.append(model)
         return sid
 
-    def inject(self, sid, text):
+    def inject(self, sid, text, model=None):
         self.injected.append((sid, text))
+        self.inject_models.append(model)
         return True
 
     def session(self, sid):
@@ -891,6 +894,38 @@ class TestTaskVerifyTimeout(TestCoreTask):
         v = self.state.get(tid)["verify"]  # 拒绝零副作用：既有登记不被污染
         self.assertEqual(v["state"], "registered")
         self.assertIsNone(v["timeout"])
+
+
+class TestModelRouting(TestCoreTask):
+    """F55 任务级 worker 模型字段：model 逐回合随 prompt 携带（opencode /session 不收 model）。"""
+
+    def test_create_bad_model_format_rejected(self):  # Req: F55
+        for bad in ("noslash", "a b/c", "/x", "x/"):
+            with self.assertRaises(Rejected) as cm:
+                self.svc.create("g", "/repo", None, self.root,
+                                verify_cmd="true", model=bad)
+            self.assertIn("providerID/modelID", str(cm.exception))  # fail-fast 报因含收到值
+
+    def test_dispatch_plumbs_model_to_boot_and_credential(self):  # Req: F55
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                              model="zai-coding-plan/glm-5.3")
+        self.assertEqual(self.state.get(tid)["model"], "zai-coding-plan/glm-5.3")
+        self.svc.dispatch(tid, self.root)
+        self.assertEqual(self.oc.models, ["zai-coding-plan/glm-5.3"])  # boot prompt 携
+        self.assertEqual(self.oc.inject_models,
+                         ["zai-coding-plan/glm-5.3"])  # 凭据注入同携（漏带静默回落默认）
+
+    def test_worker_create_model_rejected_and_inherits_parent(self):  # Req: F55
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true", model="zai-coding-plan/glm-5.3")
+        token = self.svc.dispatch(parent, self.root)
+        with self.assertRaises(Rejected) as cm:  # 模型面派发方持有：worker 显式拒
+            self.svc.create("child", None, None, token, model="other/model")
+        self.assertIn("model", str(cm.exception))
+        self.assertTrue(any(e["event"] == "auth_denied" for e in self.events()))
+        child = self.svc.create("child", None, None, token)
+        self.assertEqual(self.state.get(child)["model"],
+                         self.state.get(parent)["model"])  # 缺省继承父任务
 
 
 class TestReqId(TestCoreTask):

@@ -99,10 +99,10 @@ class FakeGitx:
 class DeadInjectOc:
     """create 成功但 inject 一律拒——凭据直投失败路径。"""
 
-    def create(self, cwd, boot, title=None):
+    def create(self, cwd, boot, title=None, model=None):  # F55：签名随 Oc 加性扩展
         return "sw1"
 
-    def inject(self, sid, text):
+    def inject(self, sid, text, model=None):
         return False
 
     def alive(self, sid):
@@ -256,7 +256,8 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(r["forest"], [tid])
         self.assertEqual(sorted(r["tasks"][tid]),
                          ["created", "dispatcher_sid", "last_seen",
-                          "project_dir", "state", "title", "worker_sid"])
+                          "model", "project_dir", "state", "title",
+                          "worker_sid"])  # F55：model 恒在键，随白名单投影
         self.assertTrue(all(e.get("event") == "escalate" for e in r["events"]))
         st, top = call(self.port, "POST", "/board", {}, self.root)
         self.assertEqual(st, 200)
@@ -747,6 +748,19 @@ class TestParamContract(HttpdTest):
         ev = [e for e in self.app.store.read_events()
               if e["event"] == "auth_denied" and "timeout" in str(e.get("note"))]
         self.assertTrue(ev)  # F37 同款 auth_denied 审计
+
+    def test_task_create_model_type_checked_and_projected(self):  # Req: F55
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "model": 123}, self.root)
+        self.assertEqual(st, 400)  # 非串 400 报因（同 verify_cmd 口径）
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "verify_cmd": "true",
+                      "model": "zai-coding-plan/glm-5.3"}, self.root)
+        self.assertEqual(st, 200)
+        tid = r["task"]
+        st, r = call(self.port, "POST", "/board", {"view": "full"}, self.root)
+        self.assertEqual(r["tasks"][tid]["model"],
+                         "zai-coding-plan/glm-5.3")  # 派发决策投影可审计
 
 
 class TestStartupRequeue(unittest.TestCase):

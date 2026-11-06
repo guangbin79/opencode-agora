@@ -51,7 +51,8 @@ class Recover:
             return False  # 复查：终态/blocked/verify_failed(等续修) 不重注入
         try:
             self._gitx.head(t["env_dir"])  # 环境在册探针：worktree 已失不盲注
-            wsid = self._oc.create(t["env_dir"], self._boot(tid, t))
+            wsid = self._oc.create(t["env_dir"], self._boot(tid, t),
+                                   model=t.get("model"))  # F55：重建 boot 逐回合携
         except Exception:
             return False
         old_wsid = t.get("worker_sid")
@@ -75,7 +76,7 @@ class Recover:
                 cred_file = str(self._store.home / "credentials" / f"{tid}.token")
             text = f"[agora] credential {tid}\nfile: {cred_file}"
             try:
-                ok = self._oc.inject(wsid, text)
+                ok = self._oc.inject(wsid, text, model=t.get("model"))  # F55：凭据注入同携
             except Exception:  # oc 抖动同死会话口径：走落库兜底
                 ok = False
             if not ok and self._router is not None:  # 直投失败落库：补拉可取回

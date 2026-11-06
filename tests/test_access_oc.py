@@ -89,6 +89,25 @@ class TestAccessOc(unittest.TestCase):
         with self.assertRaises(OcUnavailable):
             self.oc.last_message("ses_x")  # 服务不可达照抛（吞的决心归 health）
 
+    def test_prompt_carries_model_when_set(self):  # Req: F55
+        frag = {"providerID": "zai-coding-plan", "modelID": "glm-5.3"}
+        sid = self.oc.create("/e", "BOOT", model="zai-coding-plan/glm-5.3")
+        self.assertTrue(self.oc.inject(sid, "m", model="zai-coding-plan/glm-5.3"))
+        # model 是 prompt 逐回合参数：boot 与 inject 各携一次
+        self.assertEqual(self.stub.sessions[sid]["prompt_models"], [frag, frag])
+
+    def test_omitted_model_keeps_body_free_of_model(self):  # Req: F55
+        sid = self.oc.create("/e", "BOOT")
+        self.assertTrue(self.oc.inject(sid, "m"))
+        self.assertEqual(self.stub.sessions[sid]["prompt_models"],
+                         [None, None])  # 防「恒带键」回归：缺省 body 不得带 model 键
+
+    def test_boot_failure_deletes_created_session(self):  # Req: F55
+        self.stub.fail_prompt = True  # 坏 model 串→prompt 400：半建会话须清理不残留
+        with self.assertRaises(OcUnavailable):
+            self.oc.create("/e", "BOOT", model="bad/model")
+        self.assertEqual(self.stub.sessions, {})
+
 
 class TestAccessOc401Heal(unittest.TestCase):
     """401 凭据自愈（ag-dfc5f6）：opencode serve 重启轮换密码后，同一 Oc 实例

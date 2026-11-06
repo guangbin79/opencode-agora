@@ -5,6 +5,10 @@
   API＝<url>/api/*，Basic auth `opencode:<password>`；discover() 回 (url, password)。
 - create：POST /session {}→{data:{id}}；POST /session/{sid}/move {directory}→204（绑任务 env）；
   boot 文本＝POST /session/{sid}/prompt {text}。
+- model（F55）是 prompt 逐回合参数非会话属性：create/inject 携 model 时 prompt body 附
+  {"model":{providerID,modelID}}，None＝不带键（漏带即静默回落服务默认）；create 的
+  move/prompt 任一抛异常→best-effort DELETE /session/{sid}（吞清理异常）后重抛——
+  坏 model 串（prompt 400）不清理即漏僵尸会话。
 - inject：POST /session/{sid}/prompt {text}→200 {data:{delivery:"steer"}}；busy 会话排队按序；
   未知/已删 sid→404 SessionNotFoundError→False；非 ses_ 形 sid→400→False（T6 实测补）。
 - inject_silent：POST /session/{sid}/synthetic {text,resume:false}→204 无体（免通知通道：
@@ -76,21 +80,31 @@ class Oc:
             self._swap(url, password)
             return True
 
-    def create(self, cwd: str, boot: str, title: str = None) -> str:
-        """建 worker 会话并绑任务 env 目录，boot 文本作首条注入；回 sid。title 传给 opencode 供会话命名。"""
+    def create(self, cwd: str, boot: str, title: str = None, model: str = None) -> str:
+        """建 worker 会话并绑任务 env 目录，boot 文本作首条注入；回 sid。title 传给 opencode 供会话命名。
+
+        model（F55）随 boot prompt 逐回合携带；坏 model 串（prompt 400）是新失败面——
+        会话已建后 move/prompt 任一抛异常→best-effort DELETE 半建会话再重抛。"""
         body = {"title": title} if title else {}
         data = self._post("/session", body)
         try:
             sid = data["data"]["id"]
         except (KeyError, TypeError) as e:  # 应答形状错（含 200 非 JSON 信封）＝契约 OcUnavailable
             raise OcUnavailable(f"/session 应答形状错: {data!r}") from e
-        self._post(f"/session/{sid}/move", {"directory": cwd})  # 204；location 即任务 env
-        self._post(f"/session/{sid}/prompt", {"text": boot})
+        try:
+            self._post(f"/session/{sid}/move", {"directory": cwd})  # 204；location 即任务 env
+            self._post(f"/session/{sid}/prompt", self._prompt_body(boot, model))
+        except Exception:
+            try:
+                self._delete(f"/session/{sid}")  # 吞清理异常：原失败面上抛为准
+            except Exception:
+                pass
+            raise
         return sid
 
-    def inject(self, sid: str, text: str) -> bool:
+    def inject(self, sid: str, text: str, model: str = None) -> bool:
         try:
-            self._post(f"/session/{sid}/prompt", {"text": text})
+            self._post(f"/session/{sid}/prompt", self._prompt_body(text, model))
             return True
         except OcUnavailable as e:
             if e.status in (400, 404):  # 死/未知会话：契约 False 不抛（T6 实测：非 ses_ 形 sid→400、未知 ses_→404）
@@ -142,11 +156,23 @@ class Oc:
             return urllib.request.Request(self.base + path, data=data,
                                           headers=self._headers, method=method), face
 
+    @staticmethod
+    def _prompt_body(text: str, model: str | None) -> dict:
+        """prompt body：model None＝不带键（服务默认兜底），否则拆 providerID/modelID。"""
+        body = {"text": text}
+        if model is not None:
+            p, m = model.split("/", 1)
+            body["model"] = {"providerID": p, "modelID": m}
+        return body
+
     def _post(self, path: str, obj: dict) -> dict:
         return self._call(lambda: self._req(path, json.dumps(obj).encode(), "POST"))
 
     def _get(self, path: str) -> dict:
         return self._call(lambda: self._req(path))
+
+    def _delete(self, path: str) -> dict:
+        return self._call(lambda: self._req(path, method="DELETE"))
 
     def _call(self, mk) -> dict:
         """发请求；401→凭据自愈（重发现有变才重试）恰一次，二次 401 照抛。"""

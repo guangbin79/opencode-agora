@@ -22,6 +22,7 @@ _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged �
 _REQ_DOC = pathlib.Path("docs") / "reqs" / "opencode-agora.md"
 _REQ_ID_RE = re.compile(r"F[0-9]+")  # fullmatch；\d 放 Unicode 数字、$ 放尾换行（round-1）
 _REQ_NUM_RE = re.compile(r"F(\d+)")
+_MODEL_RE = re.compile(r"[\w.-]+/[\w.-]+")  # F55：providerID/modelID（fullmatch）
 
 EV_CREATED = "task_created"
 EV_DISPATCHED = "dispatched"
@@ -56,7 +57,7 @@ class TaskService:
 
     def create(self, goal, project_dir, after, actor_token, title=None,
                target_branch=None, verify_cmd=None, verify_pending=False,
-               req_id=None, timeout=None):
+               req_id=None, timeout=None, model=None):
         sid, role = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
@@ -79,18 +80,24 @@ class TaskService:
             if target_branch is not None:
                 self._reject(tid, sid, "worker 不得改变后代合并/push 策略"
                                        "（target_branch）——缺省继承父任务", ev=EV_DENIED)
+            if model is not None:  # F55：模型面派发方持有，与 target_branch 同口径
+                self._reject(tid, sid, "worker 不得改变 worker 模型面（model）"
+                                       "——缺省继承父任务", ev=EV_DENIED)
             if project_dir is not None and project_dir != parent["project_dir"]:
                 self._reject(tid, sid, f"worker 建单 project_dir 强制继承父任务仓"
                                        f"（{parent['project_dir']}），指定他径拒",
                              ev=EV_DENIED)
             project_dir = parent["project_dir"]
             target_branch = parent["target_branch"]
+            model = parent.get("model")  # F55：缺省继承父任务
         if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
             self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
         if verify_cmd is not None and not verify_cmd.strip():
             self._reject(tid, sid, "verify 命令为空——task_create 登记非空命令")
         if timeout is not None and _bad_timeout(timeout):  # F51：坏值 fail-fast，文案与服务级同款风格
             self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
+        if model is not None and not _MODEL_RE.fullmatch(model):  # F55：坏格式 fail-fast（错名由 can_spawn 熔断暴露）
+            self._reject(tid, sid, f"model 须为 providerID/modelID 形（收到 {model!r}）")
         if after is not None:
             try:
                 self._state.get(after)
@@ -121,7 +128,7 @@ class TaskService:
         self._state.add(tid, {
             "title": " ".join(str(head).split()),  # F46 B-1：压平 title（boot 开场按行解析；goal 合法多行不动）
             "goal": goal, "project_dir": project_dir, "target_branch": target_branch,
-            "req_id": req_id,
+            "req_id": req_id, "model": model,  # model 恒在键，None 缺省（F55）
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
@@ -192,7 +199,8 @@ class TaskService:
                                           "task": tid, "note": report})
         try:
             wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
-                                    title=f"{tid}: {t.get('title', tid)}")
+                                    title=f"{tid}: {t.get('title', tid)}",
+                                    model=t.get("model"))  # F55：boot prompt 逐回合携
         except Exception as e:  # can_spawn 名册：会话创建失败即熔断（不 import access 异常）
             if not t.get("env_dir"):
                 self._gitx.remove_env(env)
@@ -213,7 +221,7 @@ class TaskService:
         self._pages(self._store.home, tid, self._state.get(tid))  # F44：事件先落再渲染
         text = f"[agora] credential {tid}\nfile: {cred_file}"
         try:
-            ok = self._oc.inject(wsid, text)
+            ok = self._oc.inject(wsid, text, model=t.get("model"))  # F55：凭据注入同携
         except Exception:  # oc 抖动同死会话口径：走落库兜底
             ok = False
         if not ok:  # 直投失败落库兜底：worker check_mail 补拉（§4.8 行先行后消息）

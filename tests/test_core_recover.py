@@ -22,6 +22,7 @@ class FakeOc:
     def __init__(self):
         self.liveness = {}  # sid->bool；缺席＝死
         self.sessions, self.injected = [], []
+        self.models, self.inject_models = [], []  # F55：逐回合 model 记录（同 task 层改法）
         self.down, self.fail_create = False, False
 
     def alive(self, sid):
@@ -29,15 +30,17 @@ class FakeOc:
             raise OcUnavailable("stub down")
         return bool(self.liveness.get(sid))
 
-    def create(self, cwd, boot, title=None):
+    def create(self, cwd, boot, title=None, model=None):
         if self.fail_create:
             raise OcUnavailable("stub down")
         sid = f"r{len(self.sessions) + 1}"
         self.sessions.append((sid, cwd, boot))
+        self.models.append(model)
         return sid
 
-    def inject(self, sid, text):
+    def inject(self, sid, text, model=None):
         self.injected.append((sid, text))
+        self.inject_models.append(model)
         return True
 
 
@@ -67,11 +70,12 @@ class TestCoreRecover(unittest.TestCase):
 
     # ---- 夹具 ----
 
-    def seed(self, tid, state="running", worker="w1"):
+    def seed(self, tid, state="running", worker="w1", model=None):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
                              "env_dir": f"/envs/{tid}",
                              "verify": {"cmd": "pytest -q", "state": "registered",
                                         "registered_by": "main", "registered_at": 1.0},
+                             "model": model,  # F55：行字典恒带键（None 缺省）
                              "state": state, "dispatcher_sid": "main",
                              "worker_sid": worker, "chain_depth": 1,
                              "fail_streak": 0, "created": 0.0, "updated": 0.0})
@@ -108,6 +112,15 @@ class TestCoreRecover(unittest.TestCase):
                          [(sid, f"[agora] credential t1\nfile: {cred_file}")])
         self.assertNotIn(tok, cred[0][1])  # token 本体不进注入文本
         self.assertIn(tok, cred_file.read_text())  # 牌覆写落盘 0600
+
+    def test_reinject_carries_model_to_boot_and_credential(self):  # Req: F55
+        self.seed("t1", model="zai-coding-plan/glm-5.3")
+        tok = self.auth.issue("w1", "worker")
+        self.rec.startup()  # 死 worker 重建：boot 与凭据注入逐回合携 model
+        self.assertEqual(self.oc.models, ["zai-coding-plan/glm-5.3"])
+        cred = [i for i in self.oc.injected if "credential" in i[1]]
+        self.assertEqual(len(cred), 1)
+        self.assertEqual(self.oc.inject_models, ["zai-coding-plan/glm-5.3"])
 
     def test_reinject_boot_flattens_legacy_multiline_title(self):  # Req: F49
         """B-1 同型残留：F46 前存量行多行 title（State.add 直种不消毒）——重注入

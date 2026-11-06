@@ -27,6 +27,7 @@ class StubOpencode:
         self.sessions = {}  # sid -> {"injects": [text, ...], "directory": str,
     #                     "req": dict, "busy": bool（F28 探测面拨杆）}
         self.poison_html = False  # T5 修正：置 True 时 GET /api/info 回 200 text/html（SPA 兜底同族面）
+        self.fail_prompt = False  # F55：置 True 时 prompt 一律 400（坏 model 串失败面），不记录
         self.password = None  # 凭据面：None＝不校验；拨定后 Basic 错凭据一律 401（轮换自愈拨杆）
         self.httpd = None
         self.thread = None
@@ -96,7 +97,10 @@ class StubOpencode:
                         self.end_headers()
                     elif len(parts) == 3 and parts[0] == "session" and parts[2] == "prompt":
                         s = stub.sessions.get(parts[1])
-                        if s:  # busy 排队按序＝stub 恒收（delivery:steer）
+                        if s and stub.fail_prompt:  # F55：prompt 400 拨杆（坏 model 串面），不记录
+                            self._json(400, {"error": "Bad Request"})
+                        elif s:  # busy 排队按序＝stub 恒收（delivery:steer）
+                            s.setdefault("prompt_models", []).append(req.get("model"))
                             s["injects"].append(req.get("text", ""))
                             self._json(200, {"data": {"id": "msg_" + uuid.uuid4().hex[:8],
                                                       "delivery": "steer"}})
