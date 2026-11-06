@@ -120,6 +120,14 @@ class TestAccessOc(unittest.TestCase):
         self.assertEqual(self.oc.models(),
                          ["zai-coding-plan/glm-5.3", "zai-coding-plan/glm-5.3-flash"])
 
+    def test_models_skips_non_dict_agent_model(self):  # Req: F56（R1 评审补：model 字段漂移守卫）
+        # /agent 元素 model 漂移成非 dict（本热修所防形状族）：跳过不炸，其余绑定照常收录
+        self.stub.agents = [{"id": "build", "model": "zai-coding-plan/glm-5.3-flash"},
+                            {"id": "plan", "model": {"providerID": "zai-coding-plan",
+                                                     "id": "glm-5.3"}}]
+        self.assertEqual(self.oc.models(), ["zai-coding-plan/glm-5.3",
+                                            "zai-coding-plan/glm-5.3-flash"])
+
     def test_models_policy_filters_providers(self):  # Req: F56
         self.stub.config_docs = [{
             "type": "document", "path": "opencode.json",

@@ -20,10 +20,10 @@
   assistant/idle…、time.created 毫秒、assistant.content 内 tool part 带 name＋state，title 可缺；
   旧版 role 字段兼容读）；取尾条，空会话/404→None，OcUnavailable 照抛（吞的决心归调用方）。
 - probe：GET /info→{version,...}（无 /health 端点）。
-- models（F56）：GET /agent 顶层裸数组（模型键 id）∪ GET /config 顶层裸数组
-  （config 文档列表，真机无信封——v2.2.5 热修实证；解析对 dict 信封宽容取 data、
-  list 直用，防端点版本漂移；info.model/info.agents.*.model 模型键 model，
-  多文档按序合并后覆盖前），按
+- models（F56）：GET /agent {location, data:[<agent>...]} 信封（模型键 id，v2.2.5 热修二
+  实证）∪ GET /config 顶层裸数组（config 文档列表，真机无信封——热修实证；两端点解析对
+  dict 信封宽容取 data、list 直用，防端点版本漂移；info.model/info.agents.*.model 模型键
+  model，多文档按序合并后覆盖前），按
   provider.use policies 过滤（deny 剔除、allow 白名单、同 provider deny 优先），
   去重排序 "providerID/modelID"；任一端点不可达照抛（吞的决心归 doctor 调用方）。
 401（凭据失效：opencode serve 重启轮换密码）＝凭据自愈触发面（ag-dfc5f6）：重读 service.json，
@@ -164,8 +164,8 @@ class Oc:
         """
         models_map, policies = {}, []  # None＝缺省 model 位，agent id＝绑定位（后文档覆盖前）
         cfg = self._get("/config")
-        # F56 热修：真机 /config 回顶层裸数组（config 文档列表）无信封——dict 信封取 data、
-        # list 直用，双形状都吃（对 /agent 裸数组同款宽容，防御端点版本漂移）。
+        # F56 热修：真机 /config 回顶层裸数组（config 文档列表）——dict 信封取 data、
+        # list 直用，双形状都吃（防端点版本漂移，/agent 同款）。
         docs = cfg.get("data") if isinstance(cfg, dict) else cfg
         for doc in docs or []:
             info = doc.get("info") or {}
@@ -177,9 +177,14 @@ class Oc:
             policies.extend(info.get("policies") or [])
         pairs = {(m["providerID"], m["model"]) for m in models_map.values()
                  if m.get("providerID") and m.get("model")}
-        for a in self._get("/agent") or []:  # 顶层裸数组无信封，模型键 id
-            m = a.get("model") or {}
-            if m.get("providerID") and m.get("id"):
+        ag = self._get("/agent")
+        # F56 热修二：真机 /agent 回 {location, data:[...]} 信封——dict 信封取 data、list 直用，
+        # 与 /config 同款双形状宽容；非 dict 元素／model 字段跳过（防御漂移）。
+        for a in (ag.get("data") if isinstance(ag, dict) else ag) or []:
+            if not isinstance(a, dict):
+                continue
+            m = a.get("model")
+            if isinstance(m, dict) and m.get("providerID") and m.get("id"):
                 pairs.add((m["providerID"], m["id"]))
         use = [p for p in policies if p.get("action") == "provider.use"]
         deny = {p.get("resource") for p in use if p.get("effect") == "deny"}
