@@ -2,7 +2,7 @@
  * hook/cred/index 判定链红测——F1 强制隔离执行（插件面）。
  * 判定语义须与 agorad 服务侧一致：非 git 豁免、临时目录豁免、主会话同拦、读引导。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import {
   readCredential, resetCredPull, type Cred,
 } from "./cred";
 import { resetLift } from "./lift";
-import { default as entry, setEnforce } from "./index";
+import { default as entry, setEnforce, setWatchdog } from "./index";
 
 let root: string; // 非豁免夹具根（/tmp 下但不在 /tmp/opencode 内）
 let repo: string; // git 仓夹具（.git 目录桩）
@@ -256,6 +256,21 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     } as any);
     return hooks;
   }
+
+  // 测试卫生：看门狗一律走桩（禁真实 detached bash／沙箱外写盘）
+  const wdCalls: string[] = [];
+  beforeEach(() => {
+    wdCalls.length = 0;
+    setWatchdog((tid) => { wdCalls.push(tid); });
+  });
+  afterEach(() => setWatchdog(null));
+
+  test("派发即挂看门狗：tid 白名单过→spawn(tid)；非法 tid→不 spawn", async () => {
+    const hooks = wire();
+    await hooks["tool.execute.before"]({ tool: "agora_task_dispatch", sessionID: "s-wd", input: { task: "ag-1_x-" } });
+    await hooks["tool.execute.before"]({ tool: "agora_task_dispatch", sessionID: "s-wd", input: { task: "x;rm" } });
+    expect(wdCalls).toEqual(["ag-1_x-"]);
+  });
 
   test("tool hook execute.before：拦 edit 无凭据抛引导；豁免面静默", async () => {
     // Req: F1
