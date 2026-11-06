@@ -7,8 +7,8 @@
   （F28：sessions[sid]["busy"]=True ⇒ updated>idle＝回合进行中）；GET /session/active→{data:{}}
   （idle 不在 map）；GET /info→{version,...}（真服务无 /health）；
   GET /session/{sid}/message→{data:[...]}（F52 消息面：sessions[sid]["messages"] 脚本化，空缺省 []）；
-  GET /agent→顶层裸数组（F56：agents 拨杆，缺省＝实测本机形状）、GET /config→信封文档列表
-  （F56：config_docs 拨杆，缺省＝缺省 model＋policies 白名单）。
+  GET /agent→顶层裸数组（F56：agents 拨杆，缺省＝实测本机形状）、GET /config→顶层裸数组
+  （F56 热修真机形状：config_docs 拨杆＝config 文档列表，缺省 model＋policies 白名单）。
 脚本化接口＝StubOpencode 实例：create 注册会话、kill() 即删（死＝GET/prompt 404）、
 sessions[sid]["injects"] 记录注入序、sessions[sid]["busy"] 拨 busy 探测面、stop() 停机；
 password 拨密码面（None＝不校验；拨定后 Basic 错凭据一律 401——凭据轮换自愈测试面）。
@@ -38,7 +38,7 @@ class StubOpencode:
             {"id": "plan", "name": "Plan", "mode": "primary",
              "model": {"providerID": "zai-coding-plan", "id": "glm-5.3"}},
         ]
-        self.config_docs = [  # GET /config→信封文档列表：缺省 model＋provider.use 白名单
+        self.config_docs = [  # GET /config→顶层裸数组（config 文档列表）：缺省 model＋provider.use 白名单
             {"type": "document", "path": "opencode.json",
              "info": {"model": {"providerID": "zai-coding-plan", "model": "glm-5.3-flash"},
                       "agents": {},
@@ -139,8 +139,8 @@ class StubOpencode:
                         self._json(200, {"data": {}})  # idle 会话不在 active map
                     elif parts == ["agent"]:  # F56：顶层裸数组无信封（实测形状，模型键 id）
                         self._json(200, stub.agents)
-                    elif parts == ["config"]:  # F56：信封文档列表（实测形状 {location, data:[...]})
-                        self._json(200, {"location": "stub", "data": stub.config_docs})
+                    elif parts == ["config"]:  # F56 热修：真机回顶层裸数组（config 文档列表），无信封
+                        self._json(200, stub.config_docs)
                     elif len(parts) == 2 and parts[0] == "session":
                         s = stub.sessions.get(parts[1])
                         if not s:

@@ -114,6 +114,12 @@ class TestAccessOc(unittest.TestCase):
         self.assertEqual(self.oc.models(),
                          ["zai-coding-plan/glm-5.3", "zai-coding-plan/glm-5.3-flash"])
 
+    def test_models_tolerates_config_envelope_shape(self):  # Req: F56（热修信封宽容分支）
+        # 双形状宽容回归钉：信封 {location, data:[...]} 也吃（stub 缺省回裸数组后此分支无既有覆盖）
+        self.stub.config_docs = {"location": "stub", "data": self.stub.config_docs}
+        self.assertEqual(self.oc.models(),
+                         ["zai-coding-plan/glm-5.3", "zai-coding-plan/glm-5.3-flash"])
+
     def test_models_policy_filters_providers(self):  # Req: F56
         self.stub.config_docs = [{
             "type": "document", "path": "opencode.json",

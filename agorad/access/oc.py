@@ -20,8 +20,10 @@
   assistant/idle…、time.created 毫秒、assistant.content 内 tool part 带 name＋state，title 可缺；
   旧版 role 字段兼容读）；取尾条，空会话/404→None，OcUnavailable 照抛（吞的决心归调用方）。
 - probe：GET /info→{version,...}（无 /health 端点）。
-- models（F56）：GET /agent 顶层裸数组（模型键 id）∪ GET /config 信封文档列表
-  （info.model/info.agents.*.model 模型键 model，多文档按序合并后覆盖前），按
+- models（F56）：GET /agent 顶层裸数组（模型键 id）∪ GET /config 顶层裸数组
+  （config 文档列表，真机无信封——v2.2.5 热修实证；解析对 dict 信封宽容取 data、
+  list 直用，防端点版本漂移；info.model/info.agents.*.model 模型键 model，
+  多文档按序合并后覆盖前），按
   provider.use policies 过滤（deny 剔除、allow 白名单、同 provider deny 优先），
   去重排序 "providerID/modelID"；任一端点不可达照抛（吞的决心归 doctor 调用方）。
 401（凭据失效：opencode serve 重启轮换密码）＝凭据自愈触发面（ag-dfc5f6）：重读 service.json，
@@ -161,7 +163,11 @@ class Oc:
         形状与过滤算法见模块 docstring；任一端点不可达照抛 OcUnavailable。
         """
         models_map, policies = {}, []  # None＝缺省 model 位，agent id＝绑定位（后文档覆盖前）
-        for doc in self._get("/config").get("data") or []:
+        cfg = self._get("/config")
+        # F56 热修：真机 /config 回顶层裸数组（config 文档列表）无信封——dict 信封取 data、
+        # list 直用，双形状都吃（对 /agent 裸数组同款宽容，防御端点版本漂移）。
+        docs = cfg.get("data") if isinstance(cfg, dict) else cfg
+        for doc in docs or []:
             info = doc.get("info") or {}
             if isinstance(info.get("model"), dict):
                 models_map[None] = info["model"]
