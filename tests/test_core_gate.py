@@ -588,6 +588,23 @@ class TestGateRun(TestCoreGate):
         self.assertIn("未绿", body)  # 原因
         self.assertIn("人工审阅合并", body)  # 建议动作备选
 
+    def test_park_survives_notify_failure(self):  # Req: ag-8f41ff
+        """通知面尽力而为（F54 同口径）：驻留通知败不得把驻留 done 翻成误导 reopened。"""
+        class BoomRouter:
+            def notify_dispatcher(self, tid, kind, body):
+                raise OSError("disk full")
+
+            def post(self, *a, **k):  # _post 面照常（启动拍/驻留文案归 worker）
+                return 1
+
+        self.gate._router = BoomRouter()
+        self.in_gate()
+        self.anchor = None
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "done")  # 驻留语义不破
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("reopened", names)
+
     def test_review_green_during_verify_merges(self):  # Req: gt-3e7301
         """降级受理后 verify 期间评审环跑绿：锚绿于 commit 即照常合并（正路径）。"""
         shutil.rmtree(self.env / ".review-loop")
