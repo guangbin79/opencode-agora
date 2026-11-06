@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from agorad.access.gitx import Gitx
+from agorad.access.oc import OcUnavailable
 from agorad.access.pages import write_task_page
 from agorad.access.store import Store
 from agorad.core.auth import Auth
@@ -30,10 +31,14 @@ R2_SHA = "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1b2"  # 崩溃重排再 rebase �
 class FakeOc:
     def __init__(self):
         self.injected = []
+        self.msgs = []  # F57 用量采集脚本面（缺省空＝降级缺席不设 usage）
 
     def inject(self, sid, text):
         self.injected.append((sid, text))
         return True
+
+    def messages(self, sid):
+        return self.msgs
 
 
 class FakeGitx:
@@ -298,6 +303,42 @@ class TestAcceptDone(TestCoreGate):
         evs = [e for e in self.store.read_events("t1")
                if e["event"] == "done_rejected"]
         self.assertEqual([e["note"] for e in evs], ["body-format"])
+
+    def test_done_acceptance_records_usage_sum(self):  # Req: F57
+        self.oc.msgs = [
+            {"type": "user"},
+            {"type": "assistant", "tokens": {"input": 10, "output": 5, "reasoning": 2,
+                                             "cache": {"read": 7, "write": 3}},
+             "cost": 0.5},
+            {"type": "assistant", "tokens": {"input": 1, "output": 2, "reasoning": 0,
+                                             "cache": {"read": 1, "write": 0}},
+             "cost": 0.25},
+        ]
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertEqual(self.state.get("t1")["usage"],
+                         {"input": 11, "output": 7, "reasoning": 2,
+                          "cache_read": 8, "cache_write": 3,
+                          "cost": 0.75, "msgs": 3})  # assistant 求和＋全消息计数
+
+    def test_done_acceptance_survives_oc_down(self):  # Req: F57
+        class DownOc(FakeOc):
+            def messages(self, sid):
+                raise OcUnavailable("down")
+        self.oc = DownOc()
+        self.mk_gate()
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertNotIn("usage", self.state.get("t1"))  # 经济性数据不阻塞验收门
+
+    def test_done_usage_scalar_drift_degrades_to_zero(self):  # Req: F57
+        self.oc.msgs = [{"type": "assistant", "tokens": {"input": "123", "output": 5},
+                         "cost": "0.5"}]  # 值类型漂移（F56 同族形状漂移）
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertEqual(self.state.get("t1")["usage"],
+                         {"input": 0, "output": 5, "reasoning": 0, "cache_read": 0,
+                          "cache_write": 0, "cost": 0.0, "msgs": 1})  # 漂移字段按 0 计不炸
 
     def test_reject_anchor_missing_guides_review_loop(self):  # Req: F13
         self.seed()

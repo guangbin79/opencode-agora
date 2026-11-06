@@ -112,21 +112,51 @@ def forest_view(snap):
     return out + [tid for tid in sorted(tasks, key=rank) if tid not in seen]
 
 
+# F57 rework 计数事件（board stats 分桶口径，事件名同 state 迁移面）
+_REWORK_EVENTS = ("verify_failed", "reopened")
+
+
+def _model_stats(tasks, events):
+    """board 按 model 分桶（F57）：{model|"default": {tasks, merged, rework}}。
+
+    桶键＝行 model 字段、无 model 归 "default"（服务默认档）；tasks＝桶内行数
+    （任意状态）；merged＝终态（merged/closed）且本任务 rework==0 的一次过口径；
+    rework＝该桶任务 verify_failed＋reopened 事件计数（事件按 tid 归桶）。
+    """
+    rework = {tid: 0 for tid in tasks}
+    for e in events:
+        if e.get("event") in _REWORK_EVENTS and e.get("task") in rework:
+            rework[e["task"]] += 1
+    out = {}
+    for tid, t in tasks.items():
+        b = out.setdefault(t.get("model") or "default",
+                           {"tasks": 0, "merged": 0, "rework": 0})
+        b["tasks"] += 1
+        b["rework"] += rework[tid]
+        if t["state"] in _MERGED and rework[tid] == 0:
+            b["merged"] += 1
+    return out
+
+
 def full_view(snap, store):
     """board full 视图（F48）：单调用取齐渲染面，根治逐任务明细 N+1 全库扫。
 
     四键＝buckets＋forest＋tasks＋events；tasks＝白名单投影（build_rows 渲染
     所需全集，其余字段不带防上下文膨胀）；events 只含 escalate（五类 kind
-    过滤仍归客户端 _KINDS——board_tui 不 import agorad 的既有边界不破）。
+    过滤仍归客户端 _KINDS——board_tui 不 import agorad 的既有边界不破）；
+    stats＝F57 按 model 分桶（events 同源 read_events 读一次计数）。
     """
     fields = ("state", "title", "worker_sid", "dispatcher_sid", "last_seen",
               "created", "project_dir", "in_gate",
-              "model")  # in_gate＝F54 验证中间态投影；model＝F55 派发决策投影
+              "model", "usage")  # in_gate＝F54 验证中间态投影；model＝F55 派发决策投影；
+    # usage＝F57 经济性投影（行内 dict 原样带，缺席行不投影）
+    raw_events = store.read_events()
     return {"buckets": buckets(snap), "forest": forest_view(snap),
             "tasks": {tid: {k: t[k] for k in fields if k in t}
                       for tid, t in snap["tasks"].items()},
-            "events": [e for e in store.read_events()
-                       if e.get("event") == "escalate"]}
+            "events": [e for e in raw_events
+                       if e.get("event") == "escalate"],
+            "stats": _model_stats(snap["tasks"], raw_events)}
 
 
 def detail(snap, store, tid):

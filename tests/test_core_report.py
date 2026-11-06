@@ -89,17 +89,30 @@ class TestReport(unittest.TestCase):
             t["fail_streak"] = 2
             t["commit"] = "abc"
             t["in_gate"] = True              # F54: 门内字段入投影
-            v = full_view(snap(t1=t, t2=row(state="todo")), st)
-            self.assertEqual(sorted(v), ["buckets", "events", "forest", "tasks"])
+            t["usage"] = {"input": 5}        # F57: usage 经济性投影（dict 原样带）
+            t3 = row(state="closed", disp="d2", worker="w3")
+            t3["model"] = "glm-5.3"          # F57: closed 无失败事件 → merged
+            t4 = row(state="closed", disp="d2", worker="w4")
+            t4["model"] = "flash"
+            st.append_event({"ts": 3.0, "actor": "d", "event": "reopened",
+                             "task": "t4"})  # F57: rework 事件按 tid 归桶
+            v = full_view(snap(t1=t, t2=row(state="todo"), t3=t3, t4=t4), st)
+            self.assertEqual(sorted(v), ["buckets", "events", "forest", "stats",
+                                         "tasks"])
             self.assertEqual(sorted(v["tasks"]["t1"]),
                              ["created", "dispatcher_sid", "in_gate", "last_seen",
-                              "project_dir", "state", "title", "worker_sid"])
-            self.assertEqual(v["forest"], ["t1", "t2"])
+                              "project_dir", "state", "title", "usage",
+                              "worker_sid"])
+            self.assertEqual(v["forest"], ["t1", "t2", "t3", "t4"])
             self.assertEqual(v["buckets"]["在飞"], ["t1", "t2"])
             self.assertEqual([e["event"] for e in v["events"]],
                              ["escalate"])    # 只含 escalate 事件
+            self.assertEqual(v["stats"], {   # F57 分桶：merged＝终态且 rework==0 一次过
+                "glm-5.3": {"tasks": 1, "merged": 1, "rework": 0},
+                "flash": {"tasks": 1, "merged": 0, "rework": 1},
+                "default": {"tasks": 2, "merged": 0, "rework": 0}})
             sparse = full_view(snap(tx={"state": "todo"}), st)  # 缺字段行容错
-            self.assertEqual(sparse["tasks"]["tx"], {"state": "todo"})
+            self.assertEqual(sparse["tasks"]["tx"], {"state": "todo"})  # 无 usage 不投影
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

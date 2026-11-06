@@ -31,6 +31,7 @@ class StubOpencode:
     #                     "req": dict, "busy": bool（F28 探测面拨杆）}
         self.poison_html = False  # T5 修正：置 True 时 GET /api/info 回 200 text/html（SPA 兜底同族面）
         self.fail_prompt = False  # F55：置 True 时 prompt 一律 400（坏 model 串失败面），不记录
+        self.msg_raw = False  # F57：置 True 时 /message 回顶层裸数组（信封宽容分支拨杆）
         self.password = None  # 凭据面：None＝不校验；拨定后 Basic 错凭据一律 401（轮换自愈拨杆）
         # F56 模型面拨杆（缺省＝2026-11-06 真机 v2.2.5 实测本机形状）：
         self.agents = [  # GET /agent→信封 data 列表（拨杆）：build/general 绑 flash、plan 绑 glm-5.3
@@ -159,7 +160,9 @@ class StubOpencode:
                             self._json(404, self._not_found(parts[1]))
                             return
                         # F52 消息面：记录脚本化（sessions[sid]["messages"]），服务原样回 {data:[...]}
-                        self._json(200, {"data": s.get("messages", [])})
+                        # F57 拨杆：msg_raw=True 回顶层裸数组（真机漂移形状族，信封宽容分支覆盖）
+                        body = s.get("messages", [])
+                        self._json(200, body if stub.msg_raw else {"data": body})
                     else:
                         self._json(404, {"error": "not found"})
 

@@ -252,7 +252,8 @@ class TestHttpSmoke(HttpdTest):
         tid = self.create_task()
         st, r = call(self.port, "POST", "/board", {"view": "full"}, self.root)
         self.assertEqual(st, 200)
-        self.assertEqual(sorted(r), ["buckets", "events", "forest", "tasks"])
+        self.assertEqual(sorted(r), ["buckets", "events", "forest", "stats",
+                                     "tasks"])  # F57：stats 分桶随返回体
         self.assertEqual(r["forest"], [tid])
         self.assertEqual(sorted(r["tasks"][tid]),
                          ["created", "dispatcher_sid", "last_seen",

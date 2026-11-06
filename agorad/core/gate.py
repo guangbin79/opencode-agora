@@ -185,10 +185,48 @@ class Gate:
                     tid, "anchor",
                     f"任务 {tid} 评审环未绿——修复 blocker/high 后"
                     "重新 post(done, commit)")
+        usage = self._collect_usage(worker_sid)  # oc 可失败原语先于 transition：败则零账面
         self._state.transition(tid, "done", commit=commit,
                                rebased_from=None)  # F32：受理即清陈旧留痕（门内直通对齐处亦清）
+        if usage is not None:
+            self._state.set_fields(tid, usage=usage)
         self._audit(tid, "done", commit=commit)
         return "accepted"
+
+    def _collect_usage(self, worker_sid):
+        """done 受理点 token 用量采集（F57）：assistant 消息 tokens/cost 求和落行。
+
+        usage={input,output,reasoning,cache_read,cache_write,cost:float,msgs}
+        （msgs＝全消息数）；oc 异常/空会话/无 assistant→None＝usage 缺席——
+        经济性数据永不阻塞验收门；/message 单页缺省 50 条＝长会话用量已知低估。"""
+        try:
+            msgs = self._oc.messages(worker_sid)
+        except Exception:  # 降级缺席照受理（含旧注入面无 messages 的 AttributeError）
+            return None
+        if not msgs:
+            return None
+        usage = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0,
+                 "cache_write": 0, "cost": 0.0, "msgs": len(msgs)}
+
+        def _num(v, zero):
+            return v if isinstance(v, (int, float)) else zero  # 值漂移该字段按 0 计，采集不炸
+
+        seen = False
+        for m in msgs:
+            if not isinstance(m, dict) or m.get("type") != "assistant":
+                continue
+            tk = m.get("tokens")
+            if not isinstance(tk, dict):  # 形状漂移守卫：该条不计，采集不炸
+                continue
+            seen = True
+            for k in ("input", "output", "reasoning"):
+                usage[k] += _num(tk.get(k), 0)
+            cache = tk.get("cache")
+            if isinstance(cache, dict):
+                usage["cache_read"] += _num(cache.get("read"), 0)
+                usage["cache_write"] += _num(cache.get("write"), 0)
+            usage["cost"] += _num(m.get("cost"), 0.0)
+        return usage if seen else None  # 无 assistant＝无计量，不设键
 
     def _deny_done(self, tid, tag, msg):
         """F13：done 拒收统一出口——先审计 done_rejected（note=tag）再带因拒回。"""

@@ -19,6 +19,9 @@
 - last_message：GET /session/{sid}/message→{data:[...]}（2.2.2 实测：记录带 type=user/
   assistant/idle…、time.created 毫秒、assistant.content 内 tool part 带 name＋state，title 可缺；
   旧版 role 字段兼容读）；取尾条，空会话/404→None，OcUnavailable 照抛（吞的决心归调用方）。
+- messages（F57）：同端点取全量消息（用量采集原料）；信封双形状宽容（dict 取 data、list
+  直用，F56 两热修同款）＋非 dict 元素 isinstance 守卫跳过；404 死会话→[]；已知低估＝
+  端点单页缺省 50 条，长会话用量低估——分页另立需求。
 - probe：GET /info→{version,...}（无 /health 端点）。
 - models（F56）：GET /agent {location, data:[<agent>...]} 信封（模型键 id，v2.2.5 热修二
   实证）∪ GET /config 顶层裸数组（config 文档列表，真机无信封——热修实证；两端点解析对
@@ -148,6 +151,21 @@ class Oc:
                 return None
             raise
         return msgs[-1] if isinstance(msgs, list) and msgs else None
+
+    def messages(self, sid: str) -> list:
+        """会话全量消息记录（F57 用量采集原料）：GET /session/{sid}/message。
+
+        信封双形状宽容（dict 取 data、list 直用，F56 热修同款）＋非 dict 元素
+        isinstance 守卫跳过；404 死会话→[]（同 last_message 契约），OcUnavailable 照抛。
+        已知低估：端点单页缺省 50 条，长会话用量低估——分页另立需求。"""
+        try:
+            raw = self._get(f"/session/{sid}/message")
+        except OcUnavailable as e:
+            if e.status == 404:
+                return []
+            raise
+        msgs = raw.get("data") if isinstance(raw, dict) else raw
+        return [m for m in (msgs or []) if isinstance(m, dict)]
 
     def alive(self, sid: str) -> bool:
         return self.session(sid) is not None

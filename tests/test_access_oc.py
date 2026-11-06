@@ -89,6 +89,20 @@ class TestAccessOc(unittest.TestCase):
         with self.assertRaises(OcUnavailable):
             self.oc.last_message("ses_x")  # 服务不可达照抛（吞的决心归 health）
 
+    def test_messages_envelope_tolerant_and_skips_non_dict(self):  # Req: F57
+        sid = self.oc.create("/e", "B")
+        self.stub.sessions[sid]["messages"] = [
+            {"type": "user"},
+            {"type": "assistant", "tokens": {"input": 1}},
+        ]
+        self.assertEqual([m["type"] for m in self.oc.messages(sid)],
+                         ["user", "assistant"])  # 信封 {data:[...]}：dict 取 data
+        self.stub.msg_raw = True  # 真机裸数组形状拨杆（F56 /config 热修同族）
+        self.stub.sessions[sid]["messages"] = ["junk", {"type": "user"}]
+        self.assertEqual(self.oc.messages(sid), [{"type": "user"}])  # 非 dict 元素守卫跳过
+        self.stub.kill(sid)
+        self.assertEqual(self.oc.messages(sid), [])  # 死会话 404→[]（同 last_message 契约）
+
     def test_prompt_carries_model_when_set(self):  # Req: F55
         frag = {"providerID": "zai-coding-plan", "modelID": "glm-5.3"}
         sid = self.oc.create("/e", "BOOT", model="zai-coding-plan/glm-5.3")

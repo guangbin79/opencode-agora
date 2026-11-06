@@ -93,8 +93,12 @@ _TOOLS = [
          "required": ["kind", "body"]}},
     {"name": "check_mail", "description": "拉取本会话收件",
      "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "board", "description": "看板快照（给 task 返回单任务详情）（dispatcher/root；worker 不可用）",
-     "inputSchema": {"type": "object", "properties": {"task": _TID}}},
+    {"name": "board", "description": "看板快照（给 task 返回单任务详情；full 视图含 usage"
+                                     " 与按 model 分桶 stats）（dispatcher/root；worker 不可用）",
+     "inputSchema": {"type": "object", "properties": {
+          "task": _TID,
+          "view": {"type": "string", "enum": ["full"],
+                   "description": "full＝单调用全量视图（tasks 含 usage 投影＋按 model 分桶 stats）"}}}},
     {"name": "doctor", "description": "诊断视图（年龄排名＋环境残留＋候选模型清单 models）（dispatcher/root；worker 不可用）",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "repo_board", "description": "同仓协作面：在飞任务摘要＋最近 20 条 peer 留言"
