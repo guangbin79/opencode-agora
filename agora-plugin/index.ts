@@ -49,9 +49,10 @@ export function setEnforce(on: boolean | null): void {
 
 /** 看门狗实装：后台 spawn `agora wait <tid>`——终态退出落 /tmp 日志＝终态状态记录取证（非唤醒器）。 */
 function spawnWatchdog(tid: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(tid)) return; // 注入白名单随命令构造同点收口：缝恢复/新调用面漏校验也不致注入
   const env: Record<string, string | undefined> = { ...process.env };
-  augmentPath(env); // F18 剥皮 PATH 补 ~/.local/bin（agora CLI 安装位），缺补＝看门狗静默失效
   try {
+    augmentPath(env); // F18 剥皮 PATH 补 ~/.local/bin（agora CLI 安装位），缺补＝看门狗静默失效；入 try——抛错也不得外逸拦派发
     const child = spawn(
       "bash",
       ["-c", `{ agora wait ${tid}; echo "watchdog-exit ${tid} $(agora status ${tid})"; } >> /tmp/agora-watchdog-${tid}.log 2>&1`],
@@ -60,7 +61,7 @@ function spawnWatchdog(tid: string): void {
     child.on("error", () => {}); // 异步拉起失败（ENOENT 等）走 'error' 事件不被 try/catch 接住——吞掉，不拦派发不炸宿主
     child.unref();
   } catch {
-    // 同步抛错同理吞掉——看门狗失败不拦派发
+    // 拉起路径任何抛错（含 augmentPath）同理吞掉——看门狗失败不拦派发
   }
 }
 
