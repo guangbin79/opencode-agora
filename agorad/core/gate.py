@@ -274,6 +274,11 @@ class Gate:
                 self._post(tid, "verify 绿但合并时 .review-loop 锚缺失/落后/未绿——"
                                 "任务驻留 done 待人工审阅合并（dispatcher 可 "
                                 "cancel 或人工 git 合并）")
+                self._router.notify_dispatcher(  # ag-8f41ff：驻留实时直投派发方（ag-d987b9 事故面）
+                    tid, "result",
+                    f"任务 {tid} 驻留 done——verify 绿但合并时 .review-loop 锚"
+                    f"缺失/落后/未绿（commit={t.get('commit')}）；建议：重派复位"
+                    "（worker 在 env 重建锚后 re-done）或人工审阅合并")
                 return
             # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
             self._gitx.build_integration(target, integration, branch)

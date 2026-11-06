@@ -559,6 +559,35 @@ class TestGateRun(TestCoreGate):
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("review_absent_no_merge", names)
 
+    def disp_results(self):
+        return [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+
+    def test_anchor_missing_park_notifies_dispatcher_realtime(self):  # Req: ag-8f41ff
+        """驻留 done 同拍 dispatcher 收 result 实时通知（ag-d987b9 事故面：
+        只靠任务页文案考古数小时）；驻留语义与 worker 侧 _post 文案不变（纯增量）。"""
+        self.in_gate()
+        self.anchor = None  # 合并时锚缺失（accept→run 窗口 TOCTOU 同款注入）
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "done")  # 驻留不变
+        self.assertEqual(self.state.get("t1")["fail_streak"], 0)
+        self.assertIn("review-loop", self.worker_msgs()[-1]["body"])  # 既有 _post 文案仍在
+        body = self.disp_results()[-1]["body"]  # F54 启动拍在前，取本路径末拍
+        self.assertIn("t1", body)  # 任务 id
+        self.assertIn(SHA, body)  # commit
+        self.assertIn("锚缺失", body)  # 原因
+        self.assertIn("re-done", body)  # 建议动作：重建锚后 re-done
+
+    def test_anchor_unclean_park_notifies_dispatcher_realtime(self):  # Req: ag-8f41ff
+        self.in_gate()
+        self.anchor = {"head": SHA, "clean": False}  # 合并时评审环未绿
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "done")  # 驻留不变
+        body = self.disp_results()[-1]["body"]
+        self.assertIn(SHA, body)  # commit
+        self.assertIn("未绿", body)  # 原因
+        self.assertIn("人工审阅合并", body)  # 建议动作备选
+
     def test_review_green_during_verify_merges(self):  # Req: gt-3e7301
         """降级受理后 verify 期间评审环跑绿：锚绿于 commit 即照常合并（正路径）。"""
         shutil.rmtree(self.env / ".review-loop")
