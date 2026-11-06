@@ -8,6 +8,7 @@
  * 语义与 agorad 服务侧一致：豁免面 B3、读引导、主会话例外、服务不可达默认拒。
  */
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { getCredential, pullCredential, type PullResult } from "./cred";
 import { onShellCreate, type ShellCreatePayload } from "./envPath";
@@ -171,6 +172,23 @@ export default {
           hint = `${hint}（${why}）`;
         }
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
+      }
+      // 派发即挂看门狗（2026-11-05 事故溯源：dispatch 与看门狗分属两动作、被回合边界隔开
+      // → ag-b594a6 派发滞留 6h+，merged/closed 通知排队至次晨用户消息才涌入并触发派发）。
+      // 机制：task_dispatch 放行即后台 spawn `agora wait <tid>`——终态进程退出＝完成通知，
+      // 唤醒派发会话（唯一跨回合可靠唤醒通道）。tid 白名单防注入；spawn 失败不拦派发
+      // （兜底退化为现状＝用户消息唤醒）。
+      if (event.tool === "agora_task_dispatch" && /^[A-Za-z0-9_-]+$/.test(String(input.task ?? ""))) {
+        const tid = String(input.task);
+        try {
+          spawn(
+            "bash",
+            ["-c", `{ agora wait ${tid}; echo "watchdog-exit ${tid} $(agora status ${tid})"; } >> /tmp/agora-watchdog-${tid}.log 2>&1`],
+            { detached: true, stdio: "ignore" },
+          ).unref();
+        } catch {
+          // 看门狗失败不拦派发：退化为用户消息唤醒现状
+        }
       }
     });
   },
