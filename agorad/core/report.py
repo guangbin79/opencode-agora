@@ -16,6 +16,9 @@ _STALE_AFTER = 1200
 # 僵态候选口径（F5 决策记录 2026-10-28）：blocked 已属失控拍过人、终态与 todo
 # 无 worker 活动面——均排除。
 _STALE_STATES = {"dispatched", "running", "done", "verify_failed", "reopened"}
+# F56 语义注记：doctor models 键随行说明（清单＝绑定面非供应商目录全集）
+_MODELS_NOTE = ("清单＝配置绑定面（服务实际可路由），非供应商目录全集——"
+                "plan 代理类 provider 模型名不可枚举，以运维配置为准")
 
 
 def _env_activity(env_dir):
@@ -163,12 +166,14 @@ def stale_candidates(snap, now, base=None):
     return cand
 
 
-def doctor_view(snap, store_home, now=None):
+def doctor_view(snap, store_home, now=None, models=None):
     """账本侧事实：任务年龄/最后活动排行＋僵态候选＋env_dir 在盘性（盘上孤儿扫描属②期）。
 
     排行活性基线（F15）：age_rank/last_seen_rank 同取 _stale_baseline（与
     stale_candidates 同口径），字段名不变、值改为融合基线的 now- 差与原值。
     僵态候选（F5）：同 stale_candidates 口径，纯显示，处置归上级判断。
+    候选模型清单（F56）：models 非 None 时回体加 models＋models_note；
+    oc 不可达由调用方降级传 None＝键缺席（core 勿 import access，oc 调用归 transport）。
     """
     now = time.time() if now is None else now
     home, tasks = Path(store_home), snap["tasks"]
@@ -183,10 +188,14 @@ def doctor_view(snap, store_home, now=None):
         p = Path(e)
         env.append({"tid": tid, "env_dir": e,
                     "on_disk": (p if p.is_absolute() else home / p).exists()})
-    return {"age_rank": [[tid, now - base[tid]] for tid in ranked],
+    out = {"age_rank": [[tid, now - base[tid]] for tid in ranked],
             "last_seen_rank": [[tid, base[tid]] for tid in ranked],
             "stale_candidates": cand,
             "env": env}
+    if models is not None:
+        out["models"] = models
+        out["models_note"] = _MODELS_NOTE
+    return out
 
 
 def view_html(snap):

@@ -432,6 +432,18 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(len(r["age_rank"]), 1)
         self.assertEqual(r["env"], [])
 
+    def test_doctor_carries_models_and_degrades(self):  # Req: F56
+        st, r = call(self.port, "POST", "/doctor", {}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["models"],
+                         ["zai-coding-plan/glm-5.3", "zai-coding-plan/glm-5.3-flash"])
+        self.assertIn("绑定面", r["models_note"])
+        self.stub.stop()
+        st, r = call(self.port, "POST", "/doctor", {}, self.root)
+        self.assertEqual(st, 200)
+        self.assertNotIn("models", r)  # oc 不可达降级：键缺席不 500（F10 doctor 面照旧）
+        self.stub.start()  # 复原监听面：tearDown.stop() 需活 httpd（oc 已换面失效不受影响）
+
 
 class TestNestedDispatchLoop(HttpdTest):
     def test_worker_nested_child_result_unblocks_parent_done(self):

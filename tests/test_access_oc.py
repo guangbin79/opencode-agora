@@ -108,6 +108,29 @@ class TestAccessOc(unittest.TestCase):
             self.oc.create("/e", "BOOT", model="bad/model")
         self.assertEqual(self.stub.sessions, {})
 
+    def test_models_merges_agent_and_config_bindings(self):  # Req: F56
+        # 键名归一两侧照实测：/config 侧读 info.model/info.agents.*.model 的 "model" 键，
+        # /agent 侧读 model 的 "id" 键；合并去重排序＝缺省 model＋agents 绑定投影
+        self.assertEqual(self.oc.models(),
+                         ["zai-coding-plan/glm-5.3", "zai-coding-plan/glm-5.3-flash"])
+
+    def test_models_policy_filters_providers(self):  # Req: F56
+        self.stub.config_docs = [{
+            "type": "document", "path": "opencode.json",
+            "info": {"policies": [{"action": "provider.use",
+                                   "resource": "zai-coding-plan", "effect": "deny"},
+                                  {"action": "provider.use",
+                                   "resource": "kimi-code-plan-cn", "effect": "allow"}]}}]
+        self.stub.agents = [{"id": "build", "model": {"providerID": "zai-coding-plan",
+                                                      "id": "glm-5.3-flash"}}]
+        # deny 剔除优先于 allow 白名单：绑了 zai 也被剔
+        self.assertNotIn("zai-coding-plan/glm-5.3-flash", self.oc.models())
+
+    def test_models_unavailable_raises(self):  # Req: F56
+        self.stub.stop()
+        with self.assertRaises(OcUnavailable):
+            self.oc.models()  # 任一端点不可达照抛（吞的决心归 doctor 调用方）
+
 
 class TestAccessOc401Heal(unittest.TestCase):
     """401 凭据自愈（ag-dfc5f6）：opencode serve 重启轮换密码后，同一 Oc 实例

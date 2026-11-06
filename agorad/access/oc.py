@@ -20,6 +20,10 @@
   assistant/idle…、time.created 毫秒、assistant.content 内 tool part 带 name＋state，title 可缺；
   旧版 role 字段兼容读）；取尾条，空会话/404→None，OcUnavailable 照抛（吞的决心归调用方）。
 - probe：GET /info→{version,...}（无 /health 端点）。
+- models（F56）：GET /agent 顶层裸数组（模型键 id）∪ GET /config 信封文档列表
+  （info.model/info.agents.*.model 模型键 model，多文档按序合并后覆盖前），按
+  provider.use policies 过滤（deny 剔除、allow 白名单、同 provider deny 优先），
+  去重排序 "providerID/modelID"；任一端点不可达照抛（吞的决心归 doctor 调用方）。
 401（凭据失效：opencode serve 重启轮换密码）＝凭据自愈触发面（ag-dfc5f6）：重读 service.json，
 与失败请求所用 url+password 对有变即换认证面并原调用重试恰一次；二次 401/发现不到新凭据照抛。
 网络故障（连接拒绝/超时/网络类 URLError）→OcUnavailable；非 2xx→OcUnavailable（.status 带码）；
@@ -149,6 +153,33 @@ class Oc:
     def probe(self) -> dict:
         info = self._get("/info")
         return {"ok": True, "oc_version": info.get("version")}
+
+    def models(self) -> list[str]:
+        """候选模型清单（F56）：/agent 生效绑定 ∪ /config 缺省与 agents 绑定，policies 过滤。
+
+        输出去重排序 "providerID/modelID"（task_create model 字段合法值形态）；
+        形状与过滤算法见模块 docstring；任一端点不可达照抛 OcUnavailable。
+        """
+        models_map, policies = {}, []  # None＝缺省 model 位，agent id＝绑定位（后文档覆盖前）
+        for doc in self._get("/config").get("data") or []:
+            info = doc.get("info") or {}
+            if isinstance(info.get("model"), dict):
+                models_map[None] = info["model"]
+            for aid, a in (info.get("agents") or {}).items():
+                if isinstance(a, dict) and isinstance(a.get("model"), dict):
+                    models_map[aid] = a["model"]
+            policies.extend(info.get("policies") or [])
+        pairs = {(m["providerID"], m["model"]) for m in models_map.values()
+                 if m.get("providerID") and m.get("model")}
+        for a in self._get("/agent") or []:  # 顶层裸数组无信封，模型键 id
+            m = a.get("model") or {}
+            if m.get("providerID") and m.get("id"):
+                pairs.add((m["providerID"], m["id"]))
+        use = [p for p in policies if p.get("action") == "provider.use"]
+        deny = {p.get("resource") for p in use if p.get("effect") == "deny"}
+        allow = {p.get("resource") for p in use if p.get("effect") == "allow"}
+        return sorted(f"{p}/{m}" for p, m in pairs
+                      if p not in deny and (not allow or p in allow))
 
     def _req(self, path: str, data=None, method: str | None = None):
         with self._lock:  # 构造与交换同锁：并发首试不吃撕裂凭据对

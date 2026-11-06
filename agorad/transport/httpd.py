@@ -173,7 +173,11 @@ class _Handler(BaseHTTPRequestHandler):
                     "chain": report.chain_view(snap, sid),
                     "forest": report.forest_view(snap)}
         if name == "doctor":
-            return report.doctor_view(app.state.snapshot(), app.store.home)
+            try:  # R2 禁 import access：OcUnavailable/假件缺 models 面不可判型——兜 Exception 同降级
+                models = app.oc.models()
+            except Exception:
+                models = None
+            return report.doctor_view(app.state.snapshot(), app.store.home, models=models)
         if name == "repo_board":  # F22：worker 按己任务仓分区；root/dispatcher 可传 repo 诊断
             snap = app.state.snapshot()
             repo = (app.peer.partition(sid) if role == "worker"
