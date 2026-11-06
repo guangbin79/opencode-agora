@@ -141,6 +141,15 @@ class TestAccessOc401Heal(unittest.TestCase):
             self.oc.probe()
         self.assertEqual(cm.exception.status, 401)  # 二次 401 照常上抛（重试恰一次）
 
+    def test_peer_healed_still_retries(self):  # Req: ag-dfc5f6（评审 R2：并发 401 他线程先换面）
+        self._rotate("pw2")
+        req, face = self.oc._req("/info")  # 本请求持旧凭据面对（并发窗：换面尚未落）
+        self.oc._swap(self.stub.base_url, "pw2")  # 他线程先换面＝实例当前面已新
+        with self.assertRaises(OcUnavailable):
+            self.oc._do(req)  # 旧凭据请求照吃 401
+        self.assertTrue(self.oc._refresh(face))  # 判据对比失败请求的面（非当前面）→ 仍判可重试
+        self.assertTrue(self.oc.probe())  # 重试放行
+
 
 if __name__ == "__main__":
     unittest.main()

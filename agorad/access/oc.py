@@ -17,7 +17,7 @@
   旧版 role 字段兼容读）；取尾条，空会话/404→None，OcUnavailable 照抛（吞的决心归调用方）。
 - probe：GET /info→{version,...}（无 /health 端点）。
 401（凭据失效：opencode serve 重启轮换密码）＝凭据自愈触发面（ag-dfc5f6）：重读 service.json，
-url+password 对有变即换认证面并原调用重试恰一次；二次 401/发现不到新凭据照抛。
+与失败请求所用 url+password 对有变即换认证面并原调用重试恰一次；二次 401/发现不到新凭据照抛。
 网络故障（连接拒绝/超时/网络类 URLError）→OcUnavailable；非 2xx→OcUnavailable（.status 带码）；
 死会话 inject 返回 False 不抛。
 """
@@ -65,11 +65,13 @@ class Oc:
         self._headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
         self.base = url.rstrip("/") + "/api"
 
-    def _refresh(self) -> bool:
-        """401 自愈：重读 service.json；url+password 对有变才换面回 True（缺落/未变→False）。"""
+    def _refresh(self, stale_face) -> bool:
+        """401 自愈：重读 service.json；与失败请求所用凭据对有变才换面回 True。
+
+        判据取失败请求的面（非实例当前面）：他线程已先换面时仍判可重试（再换幂等）。"""
         with self._lock:
             url, password = discover()
-            if not url or (url, password or "") == (self._url, self._password or ""):
+            if not url or (url, password or "") == stale_face:
                 return False
             self._swap(url, password)
             return True
@@ -134,10 +136,11 @@ class Oc:
         info = self._get("/info")
         return {"ok": True, "oc_version": info.get("version")}
 
-    def _req(self, path: str, data=None, method: str | None = None) -> urllib.request.Request:
+    def _req(self, path: str, data=None, method: str | None = None):
         with self._lock:  # 构造与交换同锁：并发首试不吃撕裂凭据对
+            face = (self._url, self._password or "")  # 本请求所用凭据对（401 重试判据）
             return urllib.request.Request(self.base + path, data=data,
-                                          headers=self._headers, method=method)
+                                          headers=self._headers, method=method), face
 
     def _post(self, path: str, obj: dict) -> dict:
         return self._call(lambda: self._req(path, json.dumps(obj).encode(), "POST"))
@@ -147,12 +150,13 @@ class Oc:
 
     def _call(self, mk) -> dict:
         """发请求；401→凭据自愈（重发现有变才重试）恰一次，二次 401 照抛。"""
+        req, face = mk()
         try:
-            return self._do(mk())
+            return self._do(req)
         except OcUnavailable as e:
-            if e.status != 401 or not self._refresh():
+            if e.status != 401 or not self._refresh(face):
                 raise
-        return self._do(mk())
+        return self._do(mk()[0])
 
     @staticmethod
     def _do(req: urllib.request.Request) -> dict:
