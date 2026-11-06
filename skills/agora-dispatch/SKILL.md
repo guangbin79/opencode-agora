@@ -20,6 +20,8 @@ description: 主会话委托编排剧本。用户说"派发/委托/让 agent 修
 - **嵌套派发闭环（F37 验收录回）**：worker 也是其子任务的 dispatcher，可 `task_create→task_dispatch`；但验收授权在主会话——worker 建单**缺省继承父任务 `project_dir` 与验证配置**，`project_dir／verify_cmd／target_branch` 显式传入即拒，`task_update` 登记 verify 对全局 worker 角色永拒（子任务验收只能来自继承，或由主会话派发方/root 登记父任务配置后继承）。子任务 `closed／blocked／cancelled` 由服务以 `result` 回传父 worker（离线留库，恢复后 `check_mail` 补拉）。父 worker 必须等全部子任务 `merged／closed` 或有意取消后才能 `post(done)`；`blocked` 子任务须重派或取消，依赖失败造成的自动取消须由 dispatcher 再 `task_cancel` 一次显式确认跳过。父 worker 恢复／换号会保留未结案子任务所有权。
 - 同仓并行任务后合并者遇 non-ff：干净同步门内 rebase 自愈；同步冲突才 reopened 弹回 worker 解冲突重报 done——这是门的自愈，勿人工介入。
 - **多任务或含 after: 的编排：先写编排单再执行**——`wiki_write` 到 `wiki/orch/<主题>-<日期>.md`，内容＝任务清单（每条 goal 草案＋目标仓）＋after 边＋并行分组；写完后照单逐条 task_create/task_dispatch。执行中偏离（增删任务、改 goal）在编排单**追加一行记因**，不回改原文。单任务直接派发免单。
+- **派发即挂看门狗（机制级，2026-11-06 hook 落地）**：插件钩子在 task_dispatch 放行时自动 spawn `agora wait <tid>` 后台看门狗（detached，终态退出=完成通知唤醒派发会话）——派发即等待，agent 无需任何动作。事故溯源 2026-11-05 夜：dispatch 与等待分属两动作被回合边界隔开，ag-b594a6 派发滞留 6h+（21:06 建单，通知排队至次晨用户发消息才涌入）。
+- **等非本会话派发的任务**（同事任务/跨会话遗留，无 hook 代挂）：`agora wait <tid> --timeout 7200` 后台驻留（shell 工具 background:true），终态完成通知唤醒；exit 1=超时仍在飞，重挂即可非事故。
 - 无 task 时"进展如何"走第 4 节 board，"取消任务"走第 5/6 节。
 
 > 来源：§2 自主姿态／F9 决策记录／F3；e2e S2（B7 拒＋相对路径见前仓新主）；T6 拒因文案（hook.ts 派发引导）；编排单＝2026-10-27 用户裁定增补（审计前置，零服务改动，复用 wiki_write）；F50 跨仓交付两纪律＝2026-11-04 用户裁定（纯文档不改 gate，ag-f9137c 实证）；F53 why 页留痕＝2026-11-04 用户裁定（按需不强制，服务端零改动）
