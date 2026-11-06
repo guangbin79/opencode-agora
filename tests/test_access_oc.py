@@ -1,5 +1,9 @@
 """T1 访问层契约：oc 对 stub opencode 的调用形状（真本地 HTTP stub，无 mock）。"""
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
 from agorad.access.oc import Oc, OcUnavailable
 from tests.stub_opencode import StubOpencode
@@ -84,6 +88,58 @@ class TestAccessOc(unittest.TestCase):
         self.stub.stop()
         with self.assertRaises(OcUnavailable):
             self.oc.last_message("ses_x")  # 服务不可达照抛（吞的决心归 health）
+
+
+class TestAccessOc401Heal(unittest.TestCase):
+    """401 凭据自愈（ag-dfc5f6）：opencode serve 重启轮换密码后，同一 Oc 实例
+    重读 service.json 换认证面并原调用重试恰一次；二次 401/无新凭据照抛。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name) / "state"
+        (self.state / "opencode").mkdir(parents=True)
+        self._saved_state = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(self.state)  # discover() 刷新源指向临时 service.json
+        self.stub = StubOpencode()
+        self.stub.password = "pw1"
+        self.stub.start()
+        self._write_service("pw1")
+        self.oc = Oc(self.stub.base_url, "pw1")
+
+    def tearDown(self):
+        if self.stub.httpd is not None:
+            self.stub.stop()
+        if self._saved_state is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self._saved_state
+        self.tmp.cleanup()
+
+    def _write_service(self, password, url=None):
+        (self.state / "opencode" / "service.json").write_text(
+            json.dumps({"url": url or self.stub.base_url, "password": password}))
+
+    def _rotate(self, stub_pw, service_pw=None):
+        self.stub.password = stub_pw  # 模拟 opencode serve 重启：密码即刻轮换
+        self._write_service(service_pw if service_pw is not None else stub_pw)
+
+    def test_rotation_self_heals_same_instance(self):  # Req: ag-dfc5f6
+        self._rotate("pw2")
+        self.assertTrue(self.oc.probe())  # 旧凭据先吃 401→重发现→对新密码放行
+        sid = self.oc.create("/e", "B")  # 换面后同一实例后续调用直接走新凭据
+        self.assertTrue(self.oc.inject(sid, "hi"))
+
+    def test_rotation_stale_service_still_401(self):  # Req: ag-dfc5f6
+        self._rotate("pw2", service_pw="pw1")  # service.json 未跟上轮换＝无新凭据可换
+        with self.assertRaises(OcUnavailable) as cm:
+            self.oc.probe()
+        self.assertEqual(cm.exception.status, 401)  # 凭据对未变不重试：原 401 照抛
+
+    def test_second_401_raises(self):  # Req: ag-dfc5f6
+        self._rotate("pw2", service_pw="pw3")  # 刷新源与 stub 各持一密：换面重试仍 401
+        with self.assertRaises(OcUnavailable) as cm:
+            self.oc.probe()
+        self.assertEqual(cm.exception.status, 401)  # 二次 401 照常上抛（重试恰一次）
 
 
 if __name__ == "__main__":

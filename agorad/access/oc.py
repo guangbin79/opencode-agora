@@ -16,12 +16,15 @@
   assistant/idle…、time.created 毫秒、assistant.content 内 tool part 带 name＋state，title 可缺；
   旧版 role 字段兼容读）；取尾条，空会话/404→None，OcUnavailable 照抛（吞的决心归调用方）。
 - probe：GET /info→{version,...}（无 /health 端点）。
+401（凭据失效：opencode serve 重启轮换密码）＝凭据自愈触发面（ag-dfc5f6）：重读 service.json，
+url+password 对有变即换认证面并原调用重试恰一次；二次 401/发现不到新凭据照抛。
 网络故障（连接拒绝/超时/网络类 URLError）→OcUnavailable；非 2xx→OcUnavailable（.status 带码）；
 死会话 inject 返回 False 不抛。
 """
 import base64
 import json
 import os
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -52,9 +55,24 @@ class OcUnavailable(Exception):
 
 class Oc:
     def __init__(self, base_url: str, password: str | None = None):
-        self.base = base_url.rstrip("/") + "/api"
+        self._lock = threading.Lock()  # 凭据交换锁：httpd 多线程＋probe 线程共用同一实例
+        self._swap(base_url, password)
+
+    def _swap(self, url: str, password: str | None) -> None:
+        """重建认证面（调用方持 _lock）。"""
+        self._url, self._password = url, password
         token = base64.b64encode(f"opencode:{password or ''}".encode()).decode()
         self._headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+        self.base = url.rstrip("/") + "/api"
+
+    def _refresh(self) -> bool:
+        """401 自愈：重读 service.json；url+password 对有变才换面回 True（缺落/未变→False）。"""
+        with self._lock:
+            url, password = discover()
+            if not url or (url, password or "") == (self._url, self._password or ""):
+                return False
+            self._swap(url, password)
+            return True
 
     def create(self, cwd: str, boot: str, title: str = None) -> str:
         """建 worker 会话并绑任务 env 目录，boot 文本作首条注入；回 sid。title 传给 opencode 供会话命名。"""
@@ -116,13 +134,25 @@ class Oc:
         info = self._get("/info")
         return {"ok": True, "oc_version": info.get("version")}
 
+    def _req(self, path: str, data=None, method: str | None = None) -> urllib.request.Request:
+        with self._lock:  # 构造与交换同锁：并发首试不吃撕裂凭据对
+            return urllib.request.Request(self.base + path, data=data,
+                                          headers=self._headers, method=method)
+
     def _post(self, path: str, obj: dict) -> dict:
-        req = urllib.request.Request(self.base + path, data=json.dumps(obj).encode(),
-                                     headers=self._headers, method="POST")
-        return self._do(req)
+        return self._call(lambda: self._req(path, json.dumps(obj).encode(), "POST"))
 
     def _get(self, path: str) -> dict:
-        return self._do(urllib.request.Request(self.base + path, headers=self._headers))
+        return self._call(lambda: self._req(path))
+
+    def _call(self, mk) -> dict:
+        """发请求；401→凭据自愈（重发现有变才重试）恰一次，二次 401 照抛。"""
+        try:
+            return self._do(mk())
+        except OcUnavailable as e:
+            if e.status != 401 or not self._refresh():
+                raise
+        return self._do(mk())
 
     @staticmethod
     def _do(req: urllib.request.Request) -> dict:
@@ -131,6 +161,7 @@ class Oc:
                 raw = r.read()
                 return json.loads(raw) if raw else {}  # 204 无体（move/delete）
         except urllib.error.HTTPError as e:  # 非 2xx：服务在，应答错
+            e.close()  # 401 自愈面常态命中：不关即漏 socket（ResourceWarning 实证）
             u = OcUnavailable(f"{req.full_url}: HTTP {e.code}", status=e.code)
             raise u from e
         except OSError as e:  # URLError/socket.timeout＝网络故障

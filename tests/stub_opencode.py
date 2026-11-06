@@ -8,9 +8,11 @@
   （idle 不在 map）；GET /info→{version,...}（真服务无 /health）；
   GET /session/{sid}/message→{data:[...]}（F52 消息面：sessions[sid]["messages"] 脚本化，空缺省 []）。
 脚本化接口＝StubOpencode 实例：create 注册会话、kill() 即删（死＝GET/prompt 404）、
-sessions[sid]["injects"] 记录注入序、sessions[sid]["busy"] 拨 busy 探测面、stop() 停机。
+sessions[sid]["injects"] 记录注入序、sessions[sid]["busy"] 拨 busy 探测面、stop() 停机；
+password 拨密码面（None＝不校验；拨定后 Basic 错凭据一律 401——凭据轮换自愈测试面）。
 作进程跑：`python3 tests/stub_opencode.py`（stdout 打印监听端口，kill 进程即停）。
 """
+import base64
 import json
 import threading
 import uuid
@@ -25,6 +27,7 @@ class StubOpencode:
         self.sessions = {}  # sid -> {"injects": [text, ...], "directory": str,
     #                     "req": dict, "busy": bool（F28 探测面拨杆）}
         self.poison_html = False  # T5 修正：置 True 时 GET /api/info 回 200 text/html（SPA 兜底同族面）
+        self.password = None  # 凭据面：None＝不校验；拨定后 Basic 错凭据一律 401（轮换自愈拨杆）
         self.httpd = None
         self.thread = None
 
@@ -34,6 +37,17 @@ class StubOpencode:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *a):  # 静音，保持测试输出 pristine
                 pass
+
+            def _auth(self) -> bool:
+                if stub.password is None:
+                    return True
+                want = "Basic " + base64.b64encode(f"opencode:{stub.password}".encode()).decode()
+                if self.headers.get("Authorization") == want:
+                    return True
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
 
             def _json(self, code, obj):
                 if stub.poison_html:  # T5 修正：毒化＝全端点 200 text/html（SPA 兜底同族面）
@@ -63,6 +77,8 @@ class StubOpencode:
                 return parts, self._body() if self.command == "POST" else None
 
             def do_POST(self):
+                if not self._auth():
+                    return
                 parts, req = self._route()
                 with stub.lock:
                     if parts == ["session"]:  # 真 shape：多余字段（cwd/message）静默忽略；title 接受
@@ -92,6 +108,8 @@ class StubOpencode:
                         self._json(404, {"error": "not found"})
 
             def do_GET(self):
+                if not self._auth():
+                    return
                 parts, _ = self._route()
                 with stub.lock:
                     if parts == ["info"]:  # 真服务无 /health：version 来源即 /info
@@ -120,6 +138,8 @@ class StubOpencode:
                         self._json(404, {"error": "not found"})
 
             def do_DELETE(self):
+                if not self._auth():
+                    return
                 parts, _ = self._route()
                 with stub.lock:
                     if len(parts) == 2 and parts[0] == "session":
