@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -353,6 +354,31 @@ class TestWait(unittest.TestCase):
             srv.stop()
 
 
+class TestTimeoutResolve(unittest.TestCase):
+    """F61 wait 超时解析：--timeout 旗 > AGORA_WAIT_TIMEOUT env > 缺省 3600。"""
+
+    def test_flag_beats_env(self):  # Req: F61
+        with patch.dict(os.environ, {"AGORA_WAIT_TIMEOUT": "999999"}):
+            self.assertEqual(agora._resolve_timeout(7), 7)
+
+    def test_env_overrides_default(self):  # Req: F61
+        with patch.dict(os.environ, {"AGORA_WAIT_TIMEOUT": "45.5"}):
+            self.assertEqual(agora._resolve_timeout(None), 45.5)
+
+    def test_no_env_default_3600(self):  # Req: F61  缺省 1800 → 3600（F61 supersede F14）
+        with patch.dict(os.environ):
+            os.environ.pop("AGORA_WAIT_TIMEOUT", None)
+            self.assertEqual(agora._resolve_timeout(None), 3600)
+
+    def test_env_invalid_fails(self):  # Req: F61  env 走 _timeout_arg 同一道校验
+        for bad in ("abc", "nan", "inf", "-1"):
+            with self.subTest(bad=bad), patch.dict(
+                    os.environ, {"AGORA_WAIT_TIMEOUT": bad}):
+                with self.assertRaises(agora.Fail) as cm:
+                    agora._resolve_timeout(None)
+            self.assertIn("AGORA_WAIT_TIMEOUT", str(cm.exception))
+
+
 class TestCli(unittest.TestCase):
     def setUp(self):
         self.homes = []
@@ -460,11 +486,39 @@ class TestCli(unittest.TestCase):
             p = run_cli(["wait", "t1", "--timeout", bad], self.home(None))
             self.assertEqual(p.returncode, 2, bad)
 
+    def test_env_timeout_override_and_flag_priority(self):  # Req: F61  壳级
+        srv = _Srv(["running"])
+        try:
+            home = self.home(srv)
+            with patch.dict(os.environ, {"AGORA_WAIT_TIMEOUT": "1"}):
+                p = run_cli(["wait", "t1"], home)  # env 覆盖生效
+            self.assertEqual((p.returncode, p.stdout.strip()),
+                             (1, "in-flight: running"))
+            with patch.dict(os.environ, {"AGORA_WAIT_TIMEOUT": "999999"}):
+                p = run_cli(["wait", "t1", "--timeout", "1"], home)  # 旗优先
+            self.assertEqual((p.returncode, p.stdout.strip()),
+                             (1, "in-flight: running"))
+        finally:
+            srv.stop()
+
+    def test_env_timeout_invalid_exit_two(self):  # Req: F61  非法 env 不发请求
+        srv = _Srv(["running"])
+        try:
+            home = self.home(srv)
+            with patch.dict(os.environ, {"AGORA_WAIT_TIMEOUT": "abc"}):
+                p = run_cli(["wait", "t1", "--once"], home)
+            self.assertEqual(p.returncode, 2)
+            self.assertIn("AGORA_WAIT_TIMEOUT 须为正数秒", p.stderr)
+            self.assertIn("'abc'", p.stderr)
+        finally:
+            srv.stop()
+
     def test_help_usage_and_exit_code_table(self):  # Req: F14
         p = run_cli(["wait", "--help"], self.home(None))
         self.assertEqual(p.returncode, 0)
         for frag in ("agora wait", "task-id", "--timeout", "--once",
-                     "退出码", "非 MCP agora.wait(seconds)"):
+                     "退出码", "非 MCP agora.wait(seconds)",
+                     "AGORA_WAIT_TIMEOUT", "3600"):  # F61 缺省＋env 提及
             self.assertIn(frag, p.stdout, frag)
 
 

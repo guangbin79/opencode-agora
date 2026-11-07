@@ -104,7 +104,7 @@ dispatcher↔worker 结构化消息，方向不限：接收方会话存活即实
 post 调用参数错误频发（gt-e103ae 三连拒：verify 未登记时序、短 sha、body 混附言均被报成 anchor 问题，指引错向）。防纠双面：①壳层 schema 充实——post.kind 枚举 note/question/answer/done/verify/verify_reject（与派发 skill 词汇对齐）、body 的 done＝纯 40 位完整 sha 契约、任务 id 形态、worker 不可用工具（task_update/task_cancel/board/doctor）与 enforce（仅 root）标注于描述；②accept_done 新增 body-format 先行拒（非 40 位 hex 报格式并附收到内容），anchor 拆无锚／≠分支 HEAD／未绿各配正确指引；③httpd 客户端 kind 白名单校验（服务内部 process/milestone/cancel 直调 Router 不经此路）；④400 与 done 拒收落审计（bad_request／done_rejected 事件）——参数错误从零记录变可计量；⑤403 拒绝文案附 worker 可用面与 task_update 退路（post(kind=question) 请派发方）。
 **验收**：短 sha／文本 body 的 done 得 rejected:body-format 且文案含收到内容与 40 位契约；sha≠HEAD 文案含双方 sha；未知 kind 得 400 且列举词汇；坏参调用后 events 含 bad_request；done 拒收后含 done_rejected；worker 403 文案含可用工具；全量测试绿。
 
-### F14 agora wait 阻塞谓词（2026-10-28）
+### F14 agora wait 阻塞谓词（2026-10-28；缺省超时 1800 被 F61 替代）
 agora 此前只有 MCP 工具面，bash 无可判定只读条件——bg-wait 类看门狗被迫逆向内部文件（gt-9ea9 七轮误诊、poll.sh/derive-board.sh 格式假设、gt-7db149 派发会话手搓看门狗连出两 bug）。补 CLI 谓词整类逆向消失：仓根新增可执行脚本 `agora`（Python3 stdlib），子命令 `wait <task-id> [--timeout 秒] [--once]` 阻塞等待任务终态（merged/closed/blocked/cancelled，对齐 docker wait / kubectl wait 约定）。退出码 0＝终态到达（stdout `<state> @<sha 前 12 位>`，无 commit 只打状态）；1＝--timeout 到期仍在飞（缺省 1800）或 --once 下当前在飞（stdout `in-flight: <state>`）；2＝用法错/任务未知 404/root 牌缺失/重试至超时仍不可达（stderr）。内部轮询 15s；瞬时连接拒由重试吸收。取数照抄 board_tui.py 形态（AGORA_HOME/.agora/{root.token,service.json} → POST /board），零直读状态文件、零格式逆向；状态分类与 HTTP 取数分函数留测试缝。配套：MCP wait 工具 description 消歧（本地休眠≠任务条件等待，终态等待用 CLI）；install.sh 拷贝到 ~/.local/bin/agora。明确排除：--expect 谓词参数、stall/心跳分支（归看门狗层）。
 **验收**：终态四类各 exit 0 且 stdout 含状态（merged 附 sha）；--once 在飞 exit 1；--timeout 到期 exit 1；404/连接拒耗尽/用法错 exit 2；MCP schema 含 CLI 消歧行；全量测试绿。
 
@@ -368,3 +368,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：①worker 经验记稿入 boot 合同：踩坑/权衡决策随发 post(kind=note)（F42 digest 既有通道），公共记忆面（memory_store/agentctl capture）勿直写——ag-f0dbb5 判例（收尾 capture 写 .agent-experiences 绊 ensure_clean 门）＋共享召回池噪音不可接受（2026-11-07 v2 用户裁定），聚稿判断归主会话。②merged 直投 dispatcher 的 result 单行追加沉淀提示「——沉淀: 聚本任务 note/task page 走 knowledge ingest」——复用 ag-acae3b 通道零新面。不改 msg.py 格式面、不动 closed/cancelled 通知与 milestone worker 回执。
 **落点**：agorad/core/task.py（_boot 合同一行）、agorad/core/gate.py（_succeed merged detail）、tests/test_core_task.py（boot 断言×2）、tests/test_core_gate.py（merged 等式断言更新）、docs/reqs/opencode-agora.md（本条）。
 **验收**：test_boot_carries_opening_and_shell_contract 扩展（沉淀行＋公共记忆面勿直写两断言）；test_merged_result_returns_to_dispatcher 更新（merged body 等式含沉淀提示）；`python3 -m pytest tests/ -q` 全绿＋`grep -q '### F60 ' docs/reqs/opencode-agora.md`。
+
+### F61 agora wait 超时可外部定义＋缺省抬至 1 小时（2026-11-07，dispatcher 裁定；承接 ag-649620 评审②）
+**现状**：wait 超时硬编码缺省 1800（F14）——事故类任务 6h+ 在飞，30 分钟缺省罩不住，无外部定义旋钮，看门狗只能逐调用手写 --timeout。
+**裁定**：supersede F14 缺省 1800——ag-649620 评审②裁定事故类 6h+ 罩不住，缺省抬 3600＋env 外部定义。超时解析优先级 --timeout 旗 > AGORA_WAIT_TIMEOUT env > 缺省 3600；env 值过 _timeout_arg 同一道校验（拒负值/nan/inf），非法 env → Fail exit 2（报错仿 AGORA_VERIFY_TIMEOUT 形态 `AGORA_WAIT_TIMEOUT 须为正数秒（收到 {raw!r}）`，且先于取数不发请求）；argparse 缺省改 None 哨兵、run_wait 内解析，--once 语义不动。env 随进程环境继承，一个旋钮全覆盖三消费者——L2b agent 侧看门狗/插件看门狗（env 继承）/手动 CLI。F14「防调用方永挂」口径保留（抬缺省不改谓词性质），help/epilog 文案同步。
+**落点**：agora（_DEFAULT_TIMEOUT＋_resolve_timeout＋run_wait 接线＋help/epilog）、tests/test_agora_wait.py（解析四用例＋壳级 env/旗优先/非法 exit 2＋help 断言扩展）、docs/reqs/opencode-agora.md（本条）。
+**验收**：`python3 -m pytest tests/ -q` 全绿（新增 Req: F61 锚：env 覆盖生效、旗优先于 env、env 非法 exit 2、无 env 缺省 3600）＋`grep -q '### F61 ' docs/reqs/opencode-agora.md`。
