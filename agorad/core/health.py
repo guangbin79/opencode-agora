@@ -52,6 +52,33 @@ def _subprocess_runner(cmd, input_text):
     return r
 
 
+def send_email(store, tid, body_text, runner=None):
+    """可选邮件外呼公共函数（F63 自 F5 决策记录抽出，msg/health 单实现）：opt-in。
+
+    email.json 缺失/缺字段→静默跳过；失败/超时吞异常（邮件尽力而为），
+    成败各落一行审计事件（actor=health：邮件基建归属本模块）。runner＝外呼缝
+    （Health 与 main 装配的 Router 终态邮件共用），缺省真 subprocess。
+    返回 bool：True＝发送成功；False＝未配置或发送失败（Router 据此不占去重窗）。
+    """
+    try:
+        cfg = json.loads((store.home / ".agora" / "email.json")
+                         .read_text(encoding="utf-8"))
+        to, command = cfg["to"], cfg["command"]
+    except Exception:
+        return False  # 未配置＝零行为（F5 opt-in），返回值仍如实报未发
+    try:
+        (runner or _subprocess_runner)(shlex.split(command), body_text)
+        event = "email_sent"
+    except Exception:
+        event = "email_failed"
+    # shortcut: 同步外呼 ≤30s/封，终态与僵态皆稀有事件——health tick 批量同僵最坏
+    # N×30s 阻塞定时线程、msg 终态邮件阻塞 httpd/gate 单写线程同量级（可接受
+    # 上限），规模化再改异步聚合单邮件
+    store.append_event({"ts": time.time(), "actor": "health",
+                        "event": event, "task": tid, "to": to})
+    return event == "email_sent"  # False＝确认败（含未配置）：调用方可据此重试
+
+
 class Health:
     """tick 由 main 定时线程驱动；单写者口径（httpd 串行调用）。"""
 
@@ -120,27 +147,6 @@ class Health:
                 self.escalate(KIND_STALLED, tid)
                 self._stale_seen.add(tid)  # 拍到才记：escalate 失败下轮重试不丢报
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
-
-    def _notify_email(self, tid, body_text):
-        """可选邮件外呼（F5 决策记录 2026-10-28，opt-in）：未配置＝零行为变化。
-
-        email.json 缺失/缺字段→静默跳过；失败/超时吞异常（邮件尽力而为），
-        成败各落一行审计事件。
-        """
-        try:
-            cfg = json.loads((self._store.home / ".agora" / "email.json")
-                             .read_text(encoding="utf-8"))
-            to, command = cfg["to"], cfg["command"]
-        except Exception:
-            return
-        try:
-            self._runner(shlex.split(command), body_text)
-            event = "email_sent"
-        except Exception:
-            event = "email_failed"
-        # shortcut: 逐任务同步外呼，批量同僵最坏 N×30s 阻塞 tick 线程；规模化再聚合单邮件
-        self._store.append_event({"ts": time.time(), "actor": "health",
-                                  "event": event, "task": tid, "to": to})
 
     def touch(self, sid):
         """last_seen 刷新入口：仅 worker 服务调用刷——dispatcher 查看≠worker
@@ -239,7 +245,7 @@ class Health:
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
                           silent=(kind == KIND_STALLED))  # stalled 免通知通道：不弹窗（gt-5bc312）
         if kind == KIND_STALLED:  # 僵态邮件例外（§6 决策记录）：仅此 kind 外呼
-            self._notify_email(tid, body)
+            send_email(self._store, tid, body, runner=self._runner)
 
     def _root(self, tid):
         """沿 dispatcher_sid 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）。"""

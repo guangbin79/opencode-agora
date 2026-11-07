@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from agorad.access.store import Store
+from agorad.core.health import send_email
 from agorad.core.msg import NotChainEdge, Router
 from agorad.core.peer import PeerBoard, Rejected as PeerRejected
 from agorad.core.state import State
@@ -277,7 +278,8 @@ class TestF42NoteDigest(unittest.TestCase):
 class TestLifecycleNotify(unittest.TestCase):
     """任务生命周期迁移→dispatcher 实时单行通知（ag-acae3b）：终态直投不经
     F42 digest 缓冲（kind=result 天然旁路）；同迁移重放不重推；dispatcher
-    未登记静默跳过——通知面异常不得断裂门链。"""
+    未登记静默跳过——通知面异常不得断裂门链。F63：终态迁移经注入 mail 外呼
+    一封（正文＝服务合成），(tid,60s) 窗吞相邻双终态第二封，非终态不发。"""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -293,7 +295,9 @@ class TestLifecycleNotify(unittest.TestCase):
         })
         self.state = State(self.store)
         self.oc = FakeOc()
-        self.r = Router(self.store, self.state, self.oc)
+        self.mailed = []  # F63 邮件外呼记录：[(tid, body)]
+        self.r = Router(self.store, self.state, self.oc,
+                        mail=lambda tid, body: self.mailed.append((tid, body)))
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -352,6 +356,90 @@ class TestLifecycleNotify(unittest.TestCase):
                               "dispatcher_sid": None, "worker_sid": "w9"})
         self.assertEqual(self.r.notify_transition("t9", "merged", "@abc1234"), None)
         self.assertEqual(self.store.read_messages(), [])
+
+    # ---- F63 终态邮件必达 ----
+
+    def test_terminal_email_body_matches_session_line(self):  # Req: F63
+        """终态迁移触发邮件：正文与会话行同源服务合成（tid＋终态＋detail/sha）。"""
+        body = "任务 t1 已 closed；commit=abc1234"
+        self.r.notify_transition("t1", "closed", body=body)
+        self.assertEqual(self.mailed, [("t1", body)])
+
+    def test_replay_same_transition_email_deduped(self):  # Req: F63
+        """重放去重恰一封：(tid,to,updated) 键在邮件外呼前置门，重放零二发。"""
+        self.r.notify_transition("t1", "cancelled", body="任务 t1 已取消")
+        self.r.notify_transition("t1", "cancelled", body="任务 t1 已取消")
+        self.assertEqual(len(self.mailed), 1)
+        self.assertEqual(len(self.store.read_messages()), 1)  # 会话行同键去重
+
+    def test_merged_then_closed_window_single_email(self):  # Req: F63
+        """(tid,60s) 窗只吞 merged→closed 门尾相邻对：窗内 closed 不发；会话行照推。"""
+        self.r.notify_transition("t1", "merged", "@abc1234")
+        self.r.notify_transition("t1", "closed", "commit=abc1234")
+        self.assertEqual([b for _, b in self.mailed], ["任务 t1 merged @abc1234"])
+        self.assertEqual(len(self.oc.events), 2)  # 两迁移会话行各推不吞
+
+    def test_blocked_then_merged_same_window_both_sent(self):  # Req: F63（终闸 B 册）
+        """窗不跨终态对吞：blocked→重派再走完门→merged 60s 内各自必达（含 sha 那封不丢）。"""
+        self.r.notify_transition("t1", "blocked", body="任务 t1 已 blocked")
+        self.state.transition("t1", "done")  # 重派后快走完门（updated 必变）
+        self.state.transition("t1", "merged")
+        self.r.notify_transition("t1", "merged", "@abc1234")  # blocked 后 60s 内照发
+        self.assertEqual(self.mailed, [("t1", "任务 t1 已 blocked"),
+                                       ("t1", "任务 t1 merged @abc1234")])
+
+    def test_window_expiry_refires_after_60s(self):  # Req: F63
+        """窗过期再发：距上次邮件 ≥60s 的后续终态不吞（假时钟注入）。"""
+        now = [1000.0]
+        r = Router(self.store, self.state, self.oc, clock=lambda: now[0],
+                   mail=lambda tid, b: self.mailed.append((tid, b)))
+        r.notify_transition("t1", "merged", "@abc1234")
+        now[0] += 30
+        r.notify_transition("t1", "closed", "commit=abc1234")  # 窗内吞
+        now[0] += 31
+        r.notify_transition("t1", "blocked", "请重派或取消")  # 跨窗再发
+        self.assertEqual([b.split()[-1] for _, b in self.mailed],
+                         ["@abc1234", "请重派或取消"])
+
+    def test_non_terminal_no_email(self):  # Req: F63
+        """非终态（reopened 拒因摘要）不发邮件。"""
+        self.r.notify_transition("t1", "reopened", "同步冲突")
+        self.assertEqual(self.mailed, [])
+
+    def test_email_exception_swallowed_session_intact(self):  # Req: F63
+        """邮件缝异常不抛不断链：会话行照常落库直投（终态优先）。"""
+        def boom(tid, body):
+            raise RuntimeError("mail down")
+        r = Router(self.store, self.state, self.oc, mail=boom)
+        mid = r.notify_transition("t1", "cancelled", body="任务 t1 已取消")
+        (m,) = [x for x in self.store.read_messages() if x["id"] == mid]
+        self.assertEqual(m["body"], "任务 t1 已取消")
+
+    def test_session_failure_does_not_swallow_email(self):  # Req: F63
+        """dispatcher 未登记（会话面败）不吞邮件兜底：必达恰在故障场景兑现。"""
+        self.state.add("t9", {"state": "done", "fail_streak": 0, "title": "x",
+                              "created": 0.0, "updated": 0.0,
+                              "dispatcher_sid": None, "worker_sid": "w9"})
+        self.assertEqual(self.r.notify_transition("t9", "cancelled", body="任务 t9 已取消"),
+                         None)  # 会话行落库零
+        self.assertEqual(self.mailed, [("t9", "任务 t9 已取消")])  # 邮件照发
+
+    def test_failed_send_window_not_consumed_retry_on_next(self):  # Req: F63
+        """mail 返回 False＝确认败不占窗：merged 败后 closed 照发（必达重试）。"""
+        attempts = []
+        results = iter([False, True])
+        r = Router(self.store, self.state, self.oc,
+                   mail=lambda tid, b: attempts.append(b) or next(results))
+        r.notify_transition("t1", "merged", "@abc1234")  # 败：窗不占
+        r.notify_transition("t1", "closed", "commit=abc1234")  # 窗未占：重试再发
+        self.assertEqual(len(attempts), 2)  # 第二封未被窗吞
+
+    def test_email_json_missing_silent(self):  # Req: F63
+        """email.json 缺失＝静默跳过不抛（opt-in 与 stalled 同语义，真 send_email）。"""
+        r = Router(self.store, self.state, self.oc,
+                   mail=lambda tid, b: send_email(self.store, tid, b))
+        r.notify_transition("t1", "closed", "commit=abc1234")
+        self.assertEqual(self.store.read_events("t1"), [])  # 零审计行＝零外呼
 
 
 class TestPeerBoard(unittest.TestCase):

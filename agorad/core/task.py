@@ -331,10 +331,10 @@ class TaskService:
                         self._store.append_event({"ts": time.time(), "actor": sid,
                                                   "event": "reclaim_failed", "task": tid,
                                                   "note": str(e)[:200]})
-                self._router.notify_dispatcher(
-                    tid, "result",
-                    f"任务 {tid} 已取消（actor={sid}）"
-                    + (f"；原因 {cancel_reason}" if cancel_reason else ""))
+                self._router.notify_transition(  # F63：终态并线（会话行原文不变＋邮件必达）
+                    tid, "cancelled",
+                    body=f"任务 {tid} 已取消（actor={sid}）"
+                         + (f"；原因 {cancel_reason}" if cancel_reason else ""))
                 total = 1
         kids = [k for k, x in self._state.snapshot()["tasks"].items()
                 if x.get("dispatcher_sid") == t.get("worker_sid")]

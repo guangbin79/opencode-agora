@@ -17,11 +17,17 @@ inject_silent 免通知投递（落转录不调度回合），其余 kind 保持
 生命周期通知（ag-acae3b）：终态迁移（merged/closed/blocked/cancelled）与
 reopened 拒因摘要经 notify_transition 以 kind=result 实时直投 dispatcher——
 缓冲只收 note，天然旁路（终态优先级最高）；(tid,to,detail) 去重防重试窗口重推。
+F63 终态邮件必达：终态迁移经注入 mail 缝外呼公共 send_email（health 单实现），
+正文＝会话行同源服务合成（零 worker 文本），(tid,60s) 窗吞 merged→closed
+门尾相邻双发（merged 崩窗滞留仍有一封）。
 """
 import time
 
 _DIGEST_N = 5    # F42：阈值可调
 _DIGEST_T = 120  # F42：阈值可调
+
+_TERMINAL_MAIL = {"merged", "closed", "blocked", "cancelled"}  # F63 邮件终态集
+_MAIL_WINDOW = 60  # F63：窗去重秒数——只吞 merged→closed 门尾相邻对（见下）
 
 
 class NotChainEdge(Exception):
@@ -31,7 +37,7 @@ class NotChainEdge(Exception):
 class Router:
     """单写者路由：无锁无线程，httpd 串行调用（设计 §4.8 并发口径）。"""
 
-    def __init__(self, store, state, oc, same_lineage=None, clock=None):
+    def __init__(self, store, state, oc, same_lineage=None, clock=None, mail=None):
         self._store = store
         self._state = state
         self._oc = oc
@@ -40,6 +46,8 @@ class Router:
         self._pending = {}  # F42：(to_sid, tid) -> [(mid, ts, body)]，内存态可丢
         self._notified = set()  # ag-acae3b 生命周期通知去重：(tid, to, detail)
         self._clock = clock or time.time  # 假时钟注入口（测试）
+        self._mail = mail  # F63 终态邮件外呼缝（公共 send_email 闭包，None＝不启用）
+        self._mailed = {}  # F63：(tid) -> 上次邮件 clock 时点，60s 窗去重
 
     def is_dispatcher(self, sid, t):
         """sid 是否本任务派发方：现 sid 相等，或血统含旧 dispatcher_sid
@@ -61,20 +69,43 @@ class Router:
             raise NotChainEdge(f"{tid}: dispatcher 未登记")
         return self._deliver("agorad", to_sid, tid, kind, body)
 
-    def notify_transition(self, tid, to, detail=""):
+    def notify_transition(self, tid, to, detail="", body=None):
         """生命周期迁移→dispatcher 实时单行（ag-acae3b）：终态（merged/closed/
         blocked/cancelled）与 reopened 拒因摘要。kind=result 走弹通道直投——
         F42 缓冲只收 note，天然旁路（分级）；去重键含迁移时点（state.updated）：
         同迁移重放（状态未再动，gate 重试/崩溃重排窗口）不重推，跨迁移照推——
         裸 (tid,to,detail) 键会吞 worker 修复后再败的合法重复（评审环 B 册）。
-        通知面任何异常（未登记/落库 I/O）静默尽力而为：不得断裂门链。"""
+        F63 终态邮件必达：to∈终态集且注入 mail 时外呼一封，正文＝会话行同源
+        服务合成（tid＋终态＋detail/sha，零 worker 文本插值）；独立于会话投递
+        ——dispatcher 未登记/落库 I/O 败不吞邮件兜底（必达恰在故障场景兑现）。
+        (tid,60s) 窗只吞 merged→closed 门尾相邻对（merged 发信 60s 内到达的
+        closed 视为同一事件的门尾重复——生产观测 merged 后必随 closed，双邮件
+        纯噪声；崩窗滞留 merged 仍恰一封到达）：其余终态互不吞——blocked→重派
+        →merged 跨回合、blocked→cancelled 快速终局各自必达。mail 返回 False
+        （确认败）不占窗，closed 可重试。body 显式给定时整体覆盖缺省合成行：
+        终态接线点保既有会话文案逐字节不变。通知面任何异常（未登记/落库 I/O）
+        静默尽力而为：不得断裂门链。"""
         try:
             key = (tid, to, self._state.get(tid).get("updated"))
             if key in self._notified:
                 return None
             self._notified.add(key)
-            return self.notify_dispatcher(
-                tid, "result", f"任务 {tid} {to} {detail}".rstrip())
+            text = body if body is not None else f"任务 {tid} {to} {detail}".rstrip()
+            try:  # 会话面尽力而为：败不吞邮件兜底（F63）
+                mid = self.notify_dispatcher(tid, "result", text)
+            except Exception:
+                mid = None
+            if self._mail is not None and to in _TERMINAL_MAIL:
+                now = self._clock()
+                last = self._mailed.get(tid)
+                if to != "closed" or last is None or now - last >= _MAIL_WINDOW:
+                    try:  # 外缝异常不抛（send_email 内吞已返 False）
+                        if self._mail(tid, text) is not False:  # None/True 视同已交
+                            if to == "merged":  # 仅 merged 发信占窗：closed 照此判邻
+                                self._mailed[tid] = now
+                    except Exception:
+                        pass
+            return mid
         except Exception:  # 同 _deliver 注入口径：投递面异常不抛、不断链
             return None
 

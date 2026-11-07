@@ -505,8 +505,8 @@ class Gate:
         except Exception:
             pass
         try:
-            self._router.notify_dispatcher(
-                tid, "result", f"任务 {tid} 已 blocked；请重派或取消")
+            self._router.notify_transition(  # F63：终态并线（会话行原文不变＋邮件必达）
+                tid, "blocked", body=f"任务 {tid} 已 blocked；请重派或取消")
         except Exception:
             pass
         if self._on_blocked is not None:  # 链尾取消（task.stop_after_failed）不随通知败跳过
@@ -530,12 +530,13 @@ class Gate:
                 self._router.post(t["dispatcher_sid"], ("down", tid), "cancel",
                                   f"task {tid} cancelled at gate tail")
                 self._auth.revoke_session(t["worker_sid"])
-            self._router.notify_dispatcher(tid, "result", f"任务 {tid} 已取消")
+            self._router.notify_transition(  # F63：终态并线（会话行原文不变＋邮件必达）
+                tid, "cancelled", body=f"任务 {tid} 已取消")
         elif t["state"] == "closed":
             self._audit(tid, "closed")
-            self._router.notify_dispatcher(
-                tid, "result",
-                f"任务 {tid} 已 closed；commit={t.get('commit') or '-'}")
+            self._router.notify_transition(  # F63：终态并线（会话行原文不变＋邮件必达）
+                tid, "closed",
+                body=f"任务 {tid} 已 closed；commit={t.get('commit') or '-'}")
 
     def _audit(self, tid, event, **extra):
         """F8 门段审计：迁移即 events.jsonl 一行（事件名＝迁移后状态名）。"""

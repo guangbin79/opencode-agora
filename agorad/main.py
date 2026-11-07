@@ -24,7 +24,7 @@ from agorad.core import report
 from agorad.core.app import App
 from agorad.core.auth import Auth
 from agorad.core.gate import Gate
-from agorad.core.health import Health
+from agorad.core.health import Health, send_email
 from agorad.core.msg import Router
 from agorad.core.peer import PeerBoard
 from agorad.core.recover import Recover
@@ -134,7 +134,9 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     oc = oc if oc is not None else Oc(oc_url, oc_password)
     gitx = gitx if gitx is not None else Gitx()
     router = Router(store, state, oc,
-                    same_lineage=auth.same_lineage)  # F16 血统链边（装配注入）
+                    same_lineage=auth.same_lineage,  # F16 血统链边（装配注入）
+                    mail=lambda tid, text: send_email(  # F63 终态邮件必达（外呼缝同 Health）
+                        store, tid, text, runner=mail_runner))
     task = TaskService(
         state, auth, gitx, oc, store, router,
         lambda home, tid, row: write_task_page(  # F44：快照与事件装配注入

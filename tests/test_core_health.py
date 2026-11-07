@@ -20,7 +20,7 @@ from agorad.core.app import App
 from agorad.core.auth import Auth
 from agorad.core.health import (KIND_DISPATCHER_DEAD, KIND_GATEFILES,
                                 KIND_QUALITY, KIND_REINJECT, KIND_STALLED,
-                                Health)
+                                Health, send_email)
 from agorad.core.msg import Router
 from agorad.core.state import State
 
@@ -258,6 +258,35 @@ class TestCoreHealth(unittest.TestCase):
         self.seed("t1")
         self.health.escalate(KIND_STALLED, "t1")  # 邮件失败不抛
         self.assertEqual(len(self.main_msgs()), 1)  # escalate 照发
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"].startswith("email")], ["email_failed"])
+
+    # ---- F63：公共 send_email（msg 终态邮件共用同一实现）----
+
+    def test_send_email_configured_sends_and_audits(self):  # Req: F63
+        (self.tmp / ".agora").mkdir(exist_ok=True)
+        (self.tmp / ".agora" / "email.json").write_text(
+            '{"to": "ops@example.com", "command": "mailx -s subj ops@example.com"}')
+        calls = []
+        ok = send_email(self.store, "t1", "任务 t1 已 closed",
+                        runner=lambda c, i: calls.append((c, i)))
+        self.assertTrue(ok)  # 成功返 True：Router 据此占窗
+        self.assertEqual(calls, [(["mailx", "-s", "subj", "ops@example.com"],
+                                  "任务 t1 已 closed")])
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"].startswith("email")], ["email_sent"])
+
+    def test_send_email_missing_fields_silent(self):  # Req: F63
+        (self.tmp / ".agora").mkdir(exist_ok=True)
+        (self.tmp / ".agora" / "email.json").write_text('{"to": "ops@example.com"}')
+        self.assertFalse(send_email(self.store, "t1", "x"))  # 缺 command：静默且报未发
+        self.assertEqual(self.store.read_events("t1"), [])
+
+    def test_send_email_failure_returns_false(self):  # Req: F63
+        def boom(cmd, inp):
+            raise RuntimeError("smtp down")
+        self.wire_email(boom)
+        self.assertFalse(send_email(self.store, "t1", "x"))  # 败返 False：不占窗可重试
         self.assertEqual([e["event"] for e in self.store.read_events("t1")
                           if e["event"].startswith("email")], ["email_failed"])
 
