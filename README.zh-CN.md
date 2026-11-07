@@ -91,9 +91,9 @@ agora-install
 
 **评审门**——开放标准，评审器自带。契约只有一个锚文件：
 
-- 任务 worktree 内存在 `.review-loop/` 目录时，`done` 受理检查锚，**合并前重验**（堵住"评审过又偷提交"的窗口）。
+- `done` 受理即检查锚（缺失/落后/未绿 → 拒收退回 worker），**合并前重验**（堵住"评审过又偷提交"的窗口；重验失败自动 reopened 回 worker 自愈，不再驻留）。
 - 锚绿＋verify 绿 = 自动 ff-only 合并——任务支落后（non-ff）时门内自动 rebase 干净同步自愈，同步冲突才重开。
-- 没有 `.review-loop/` 目录？一切照常——任务完成驻留 `done`，**你手动合并**。自治是两道闸挣来的，不是默认送的。
+- 没有 `.review-loop/` 目录？`done` 会被拒收并附补建指引——自动合并必须两道闸齐全。自治是挣来的，不是默认送的。
 
 任何评审器都行——OpenCodeReview、CodeRabbit、人工清单——agora 只认锚。最小评审器约 10 行：
 
@@ -178,7 +178,7 @@ rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch
 
 （`~/plaza` 是缺省 `AGORA_HOME`——若你配置了自定义路径，请删那个目录而非 `~/plaza`。）
 
-**没有 review-loop 能用吗？** 能——verify 照跑照拦；任务完成驻留 `done`，手动合并。实现[开放标准](docs/review-loop.md)即解锁自动合并。
+**没有 review-loop 能用吗？** verify 照跑照拦，但 `done` 需要锚：没有就拒收退回 worker 并附补建指引。实现[开放标准](docs/review-loop.md)即解锁自动合并。
 
 **我的代码会被传到哪？** 哪都不去。agorad 只绑 localhost，worker 是本地 opencode 会话，无遥测、无云端、无需给 agora 任何 API key。opencode 配什么模型，agora 就编排什么模型。
 

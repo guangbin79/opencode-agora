@@ -167,24 +167,22 @@ class Gate:
                 tid, "children",
                 f"嵌套子任务未结案：{', '.join(sorted(open_children))}——"
                 "等待 result 回传，或由你取消子任务；成功/有意跳过后再 post(done)")
-        # 锚检查仅评审环在位时适用：缺失→放行 done，由门体 review_absent 分支驻留
-        if (Path(t["env_dir"]) / ".review-loop").is_dir():
-            a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
-            if a is None:
-                return self._deny_done(
-                    tid, "anchor",
-                    f"任务 {tid} 评审环无锚或锚落后（.review-loop/.last-reviewed 缺失"
-                    "或不等于分支 HEAD）——跑 /review-loop 至锚绿，重新 post(done, commit)")
-            if a.get("head") != commit:
-                return self._deny_done(
-                    tid, "anchor",
-                    f"任务 {tid} {commit} ≠ 分支 HEAD {a.get('head')}——"
-                    "以 env 内完整 HEAD sha 重新 post(done, commit)")
-            if not a.get("clean"):
-                return self._deny_done(
-                    tid, "anchor",
-                    f"任务 {tid} 评审环未绿——修复 blocker/high 后"
-                    "重新 post(done, commit)")
+        # 锚检查＝合并前置（ag-084a22 A）：锚存在 ∧ 锚==done commit ∧ 评审环绿，
+        # 不满足即拒收（无条件——评审环缺失不再放行入门）——死锁驻留态不可达
+        a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
+        if a is None:
+            return self._deny_anchor(
+                tid, f"任务 {tid} 合并前置失败：锚缺失/落后（.review-loop/"
+                ".last-reviewed 缺失或不等于分支 HEAD）——跑评审环重建锚"
+                "（==HEAD 且评审环绿）后重新 post(done, commit)")
+        if a.get("head") != commit:
+            return self._deny_anchor(
+                tid, f"任务 {tid} 合并前置失败：{commit} ≠ 分支 HEAD "
+                f"{a.get('head')}——以 env 内完整 HEAD sha 重新 post(done, commit)")
+        if not a.get("clean"):
+            return self._deny_anchor(
+                tid, f"任务 {tid} 合并前置失败：评审环未绿——修复 blocker/high "
+                "后重新 post(done, commit)")
         usage = self._collect_usage(worker_sid)  # oc 可失败原语先于 transition：败则零账面
         self._state.transition(tid, "done", commit=commit,
                                rebased_from=None)  # F32：受理即清陈旧留痕（门内直通对齐处亦清）
@@ -227,6 +225,12 @@ class Gate:
                 usage["cache_write"] += _num(cache.get("write"), 0)
             usage["cost"] += _num(m.get("cost"), 0.0)
         return usage if seen else None  # 无 assistant＝无计量，不设键
+
+    def _deny_anchor(self, tid, msg):
+        """ag-084a22 A/C：锚拒收＝合并前置败——计连败（3 连败 blocked 拍人）＋带因拒回。"""
+        self._state.fail_streak_bump(tid)
+        self._escalate_if_blocked(tid)
+        return self._deny_done(tid, "anchor", msg)
 
     def _deny_done(self, tid, tag, msg):
         """F13：done 拒收统一出口——先审计 done_rejected（note=tag）再带因拒回。"""
@@ -309,17 +313,12 @@ class Gate:
             if not a or a.get("head") != (t.get("rebased_from") or t.get("commit")) \
                     or not a.get("clean"):
                 self._audit(tid, "review_absent_no_merge")
-                self._post(tid, "verify 绿但合并时 .review-loop 锚缺失/落后/未绿——"
-                                "任务驻留 done 待人工审阅合并（dispatcher 可 "
-                                "cancel 或人工 git 合并）")
-                try:  # F54 同口径：通知面尽力而为——通知败不得把驻留 done 翻成误导 reopened
-                    self._router.notify_dispatcher(  # ag-8f41ff：驻留实时直投派发方（ag-d987b9 事故面）
-                        tid, "result",
-                        f"任务 {tid} 驻留 done——verify 绿但合并时 .review-loop 锚"
-                        f"缺失/落后/未绿（commit={t.get('commit')}）；建议：重派复位"
-                        "（worker 在 env 重建锚后 re-done）或人工审阅合并")
-                except Exception:
-                    pass
+                self._quality_fail(  # ag-084a22 B：自动 reopened 回 worker 自愈
+                    tid, "reopened",  # （无出边的驻留 done 态封死）
+                    "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/未绿"
+                    "——重建锚（.review-loop/.last-reviewed ==HEAD 且评审环绿）后"
+                    "重新 post(done, commit)",
+                    reason="锚缺失/落后/未绿")
                 return
             # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
             self._gitx.build_integration(target, integration, branch)
@@ -476,21 +475,44 @@ class Gate:
             "无需操作、确认挂死才 cancel")
 
     def _quality_fail(self, tid, to, body, reason=""):
-        """质量败（verify 败/集成败）：迁移＋审计＋实时回 worker＋计连败（3 连败拍人）。
-        reopened 时向 dispatcher 推拒因摘要单行（ag-acae3b：原文归 worker）。"""
+        """质量败（verify 败/集成败/合并前锚败）：迁移＋审计＋实时回 worker＋计连败
+        （3 连败拍人）。reopened 时向 dispatcher 推拒因摘要单行（ag-acae3b：原文归
+        worker）；通知面尽力而为（F54 同口径）——败不得断连败计数或改写门结果。"""
         self._state.transition(tid, to)
         self._audit(tid, to)
         self._post(tid, body)
-        if to == "reopened":
-            self._router.notify_transition(tid, "reopened", reason)
+        try:
+            if to == "reopened":
+                self._router.notify_transition(tid, "reopened", reason)
+        except Exception:
+            pass
         self._state.fail_streak_bump(tid)
-        if self._state.get(tid)["state"] == "blocked":
+        self._escalate_if_blocked(tid)
+
+    def _escalate_if_blocked(self, tid):
+        """连败拍人公共尾（ag-084a22 C：受理锚拒与门体质量败同口径）。
+        blocked 已由 fail_streak_bump 落账；升级/通知面逐通道尽力而为（F54 同
+        口径，run() 门启动拍同款）——一侧败不压另一侧，不断裂受理链或门链。"""
+        if self._state.get(tid)["state"] != "blocked":
+            return
+        try:
             self._audit(tid, "blocked")
+        except Exception:
+            pass
+        try:
             self._health.escalate(KIND_QUALITY, tid)
+        except Exception:
+            pass
+        try:
             self._router.notify_dispatcher(
                 tid, "result", f"任务 {tid} 已 blocked；请重派或取消")
-            if self._on_blocked is not None:
+        except Exception:
+            pass
+        if self._on_blocked is not None:  # 链尾取消（task.stop_after_failed）不随通知败跳过
+            try:
                 self._on_blocked(tid)
+            except Exception:
+                pass
 
     def _tail(self, tid):
         """门走完：pending-cancel 经 State.gate_tail 原子结算（merged 不逆转历史）；副作用随终态。"""

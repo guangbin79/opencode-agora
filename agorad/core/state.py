@@ -131,7 +131,7 @@ class State:
     def settle_parked_cancel(self, tid, cancel_reason=None) -> bool:
         """F36 R2：驻留 done（门已走完，in_gate=False）的排队取消直结 cancelled。
 
-        verify_overrun/锚缺失驻留后门尾不再可达——排队必悬挂至重启重跑整轮
+        verify_overrun 驻留后门尾不再可达——排队必悬挂至重启重跑整轮
         verify，取消方直结防悬挂。在门内（in_gate=True）不直结：门尾消费
         语义（F-4）不变。
         """
@@ -172,7 +172,7 @@ class State:
             if pending and t["state"] != EV_MERGED:
                 fields = {"cancel_reason": cancel_reason} if cancel_reason else {}
                 if t["state"] == EV_DONE:
-                    # F36/评审环 R1：驻留 done（verify_overrun/锚缺失）＋排队取消——
+                    # F36 R2：驻留 done（verify_overrun 超硬顶）＋排队取消——
                     # 矩阵 done 无 cancelled 出口，门尾直结防 InvalidTransition 吞取消
                     t["state"] = EV_CANCELLED
                     t["in_gate"] = False

@@ -310,7 +310,7 @@ class TestNestedDispatch(TestCoreTask):
         self.assertEqual(self.state.get(child)["state"], "todo")
 
     def test_parked_done_cancel_settles_directly(self):  # Req: F36
-        """F36 R2：verify_overrun/锚缺失驻留 done 后门尾不可达——cancel 直结
+        """F36 R2：verify_overrun 驻留 done 后门尾不可达——cancel 直结
         （cancelled=1）＋取消副作用照常（worker 撤凭据＋env 回收＋result 通知）。"""
         self.seed("parked", state="done", disp="main", worker="w1",
                   env="/envs/parked")

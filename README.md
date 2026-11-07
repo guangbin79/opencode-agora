@@ -92,9 +92,9 @@ After install, your session gains two skills (agora-dispatch / agora-ops) and 13
 
 **Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 
-- If `.review-loop/` exists in the task worktree, the last-reviewed anchor is checked at `done` and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window).
+- The last-reviewed anchor is checked at `done` — missing, stale, or not green rejects `done` back to the worker — and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window; a failed re-check auto-reopens the task, it never parks).
 - Anchor green + verify green = automatic ff-only merge — a behind task branch is rebased onto the target in-gate first (clean sync self-heals; only sync conflicts reopen).
-- No `.review-loop/` directory? Everything still works — tasks complete at `done` and **you merge manually**. Autonomy is earned by both gates, not assumed.
+- No `.review-loop/` directory? `done` is rejected with instructions to add one — auto-merge requires both gates. Autonomy is earned, not assumed.
 
 Any reviewer fits — OpenCodeReview, CodeRabbit, a human checklist — agora only reads the anchor. A minimal reviewer is ~10 lines:
 
@@ -179,7 +179,7 @@ rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch
 
 (`~/plaza` is the default `AGORA_HOME` — if you configured a custom one, remove that directory instead.)
 
-**Does it work without a review-loop?** Yes — verify still runs and gates everything; tasks finish at `done` and you merge manually. Implement the [open standard](docs/review-loop.md) to unlock auto-merge.
+**Does it work without a review-loop?** Verify still gates everything, but `done` needs an anchor: without one, `done` is bounced back to the worker with instructions. Implement the [open standard](docs/review-loop.md) to unlock auto-merge.
 
 **Where does my code go?** Nowhere. agorad binds to localhost, workers are local opencode sessions, there is no telemetry, no cloud, no agora API keys. Whatever models your opencode uses, agora orchestrates them.
 

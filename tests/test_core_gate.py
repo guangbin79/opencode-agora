@@ -372,6 +372,66 @@ class TestAcceptDone(TestCoreGate):
         self.assertIn("未绿", r)
         self.assertEqual(self.state.get("t1")["state"], "running")
 
+    def test_review_loop_absent_rejects_done_with_guidance(self):  # Req: ag-084a22
+        """锚门无条件（A）：.review-loop 缺失＝锚缺失→done 拒收——原降级受理
+        （gt-8c8fe8）放无锚任务入门内驻留 done，死锁态由此封死。"""
+        shutil.rmtree(self.env / ".review-loop")
+        self.anchor = None
+        self.seed()
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)
+        self.assertIn("合并前置失败", r)
+        self.assertIn("review-loop", r)  # 动作指引：重建锚
+        self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
+        evs = [e for e in self.store.read_events("t1")
+               if e["event"] == "done_rejected"]
+        self.assertEqual([e["note"] for e in evs], ["anchor"])
+
+    def test_anchor_rejections_count_and_block_at_three(self):  # Req: ag-084a22
+        """防抖（C）：锚拒收计入 fail_streak——3 连败 blocked＋health 升级＋拍派发方。"""
+        blocked = []
+        self.mk_gate(on_blocked=blocked.append)
+        self.anchor = None
+        self.seed()
+        for _ in range(2):
+            self.assertIn("rejected:anchor",
+                          self.gate.accept_done("t1", "s-w1", SHA))
+            self.assertEqual(self.state.get("t1")["state"], "running")  # 未到阈值只拒收
+        self.assertIn("rejected:anchor", self.gate.accept_done("t1", "s-w1", SHA))
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(t["fail_streak"], 3)
+        self.assertEqual(self.health.calls, [("quality", "t1")])
+        self.assertEqual(blocked, ["t1"])
+        self.assertTrue(any("已 blocked" in m["body"]
+                            for m in self.store.read_messages()
+                            if m["to"] == "disp1" and m["kind"] == "result"))
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertEqual(names.count("done_rejected"), 3)
+        self.assertIn("blocked", names)
+
+    def test_blocked_escalation_survives_notify_failure(self):  # Req: ag-084a22
+        """拍人尾尽力而为（F54 同口径）：升级/通知面败不丢 worker 拒因与审计。"""
+        class BoomRouter:
+            def notify_dispatcher(self, tid, kind, body):
+                raise OSError("disk full")
+
+            def notify_transition(self, tid, to, detail=""):
+                raise OSError("disk full")
+
+            def post(self, *a, **k):
+                return 1
+
+        self.gate._router = BoomRouter()
+        self.anchor = None
+        self.seed(streak=2)
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)  # worker 照常拿到拒因
+        self.assertEqual(self.state.get("t1")["state"], "blocked")
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("done_rejected", names)  # 拒收审计未丢
+        self.assertIn("blocked", names)
+
     def test_reject_empty_verify_cmd(self):  # Req: F7
         self.seed()
         self.state.set_fields("t1", verify={"cmd": "  ", "state": "registered",
@@ -557,109 +617,83 @@ class TestGateRun(TestCoreGate):
         self.assertTrue(all("环境已回收" not in m["body"]
                             for m in self.store.read_messages()))  # 禁假账文案
 
-    def test_review_absent_keeps_done_no_merge(self):  # Req: F7
-        """评审环缺失：verify 绿亦不自动合并——驻留 done＋审计＋回 worker。"""
-        shutil.rmtree(self.env / ".review-loop")
-        self.in_gate()
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        self.assertEqual(t["state"], "done")  # 不 merged／closed
-        self.assertEqual(t["fail_streak"], 0)  # 非质量败：不计连败
-        self.assertEqual(self.gx.merge_calls, [])
-        self.assertEqual(self.gx.removed, [])  # 环境保留（补基础设施后重入）
-        self.assertEqual(len(self.runner.calls), 1)  # 不跑集成 verify
-        self.assertFalse(t.get("in_gate"))  # 门闩照常落
-        names = [e["event"] for e in self.store.read_events("t1")]
-        self.assertIn("review_absent_no_merge", names)
-        self.assertIn("review-loop", self.worker_msgs()[-1]["body"])
-
-    def test_review_loop_absent_accepts_done_then_stays_done(self):  # Req: gt-8c8fe8
-        """评审环缺失降级：受理不再锚拒，done 放行；门体绿亦驻留 done 不合并。"""
-        shutil.rmtree(self.env / ".review-loop")
-        self.anchor = None  # 无锚：评审环缺失即不查锚
-        self.seed()
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        self.assertEqual(t["state"], "done")  # 驻留 done：人工审合并
-        self.assertEqual(t["fail_streak"], 0)  # 非质量败：不计连败
-        self.assertEqual(self.gx.merge_calls, [])  # 无自动合并
-        names = [e["event"] for e in self.store.read_events("t1")]
-        self.assertIn("review_absent_no_merge", names)
-        self.assertIn("review-loop", self.worker_msgs()[-1]["body"])  # 补设施指引
-
-    def test_merge_time_anchor_missing_degrades(self):  # Req: gt-3e7301
-        """合并前锚重验：受理后锚不在/未绿（accept→run 窗口 TOCTOU）→驻留 done。"""
+    def test_merge_time_anchor_failure_reopens(self):  # Req: ag-084a22
+        """合并前锚重验失败（accept→run 窗口 TOCTOU）：自动 reopened 回 worker
+        自愈（B）——无出边的驻留 done 态封死；锚败计连败（C）。"""
         self.in_gate()  # 正常受理：目录在＋锚绿
         self.anchor = None  # 合并时锚不在/未绿
         self.gate.run("t1")
         t = self.state.get("t1")
-        self.assertEqual(t["state"], "done")  # 驻留 done：人工审合并
-        self.assertEqual(t["fail_streak"], 0)  # 非质量败：不计连败
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(t["fail_streak"], 1)
         self.assertEqual(self.gx.merge_calls, [])  # 零合并
+        self.assertEqual(self.gx.removed, [])  # 环境保留：重建锚后 re-done
+        self.assertEqual(len(self.runner.calls), 1)  # 不跑集成 verify
         names = [e["event"] for e in self.store.read_events("t1")]
         self.assertIn("review_absent_no_merge", names)
+        self.assertIn("reopened", names)
+        self.assertIn("合并前置失败", self.worker_msgs()[-1]["body"])
+        self.assertIn("重建锚", self.worker_msgs()[-1]["body"])
+
+    def test_merge_time_anchor_streak_carries_to_blocked(self):  # Req: ag-084a22
+        """C 通路 B 侧：门内锚败与前序连败累计——3 连败 blocked（与受理拒同尾）。"""
+        self.in_gate(streak=2)  # 前序两连败
+        self.anchor = None
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(t["fail_streak"], 3)
+        self.assertEqual(self.health.calls, [("quality", "t1")])
+        self.assertTrue(any("已 blocked" in m["body"]
+                            for m in self.store.read_messages()
+                            if m["to"] == "disp1" and m["kind"] == "result"))
 
     def disp_results(self):
         return [m for m in self.store.read_messages()
                 if m["to"] == "disp1" and m["kind"] == "result"]
 
-    def test_anchor_missing_park_notifies_dispatcher_realtime(self):  # Req: ag-8f41ff
-        """驻留 done 同拍 dispatcher 收 result 实时通知（ag-d987b9 事故面：
-        只靠任务页文案考古数小时）；驻留语义与 worker 侧 _post 文案不变（纯增量）。"""
+    def test_anchor_missing_reopen_notifies_dispatcher_realtime(self):  # Req: ag-084a22
+        """reopened 同拍 dispatcher 收实时拒因摘要（ag-acae3b 通道）。"""
         self.in_gate()
         self.anchor = None  # 合并时锚缺失（accept→run 窗口 TOCTOU 同款注入）
         self.gate.run("t1")
-        self.assertEqual(self.state.get("t1")["state"], "done")  # 驻留不变
-        self.assertEqual(self.state.get("t1")["fail_streak"], 0)
-        self.assertIn("review-loop", self.worker_msgs()[-1]["body"])  # 既有 _post 文案仍在
-        body = self.disp_results()[-1]["body"]  # F54 启动拍在前，取本路径末拍
-        self.assertIn("t1", body)  # 任务 id
-        self.assertIn(SHA, body)  # commit
-        self.assertIn("锚缺失", body)  # 原因
-        self.assertIn("re-done", body)  # 建议动作：重建锚后 re-done
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        body = self.disp_results()[-1]["body"]
+        self.assertIn("t1", body)
+        self.assertIn("reopened", body)
+        self.assertIn("锚缺失/落后/未绿", body)
 
-    def test_anchor_unclean_park_notifies_dispatcher_realtime(self):  # Req: ag-8f41ff
+    def test_anchor_unclean_reopen_notifies_dispatcher_realtime(self):  # Req: ag-084a22
         self.in_gate()
         self.anchor = {"head": SHA, "clean": False}  # 合并时评审环未绿
         self.gate.run("t1")
-        self.assertEqual(self.state.get("t1")["state"], "done")  # 驻留不变
-        body = self.disp_results()[-1]["body"]
-        self.assertIn(SHA, body)  # commit
-        self.assertIn("未绿", body)  # 原因
-        self.assertIn("人工审阅合并", body)  # 建议动作备选
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.assertIn("未绿", self.worker_msgs()[-1]["body"])  # 拒因原文归 worker
+        self.assertIn("锚缺失/落后/未绿",
+                      self.disp_results()[-1]["body"])  # 摘要单行归 dispatcher
 
-    def test_park_survives_notify_failure(self):  # Req: ag-8f41ff
-        """通知面尽力而为（F54 同口径）：驻留通知败不得把驻留 done 翻成误导 reopened。"""
+    def test_reopen_survives_notify_failure(self):  # Req: F54
+        """通知面尽力而为（F54 同口径）：注入 router 断链时迁移照落、连败照计，
+        不落 reclaim_failed 误导留痕。"""
         class BoomRouter:
             def notify_dispatcher(self, tid, kind, body):
                 raise OSError("disk full")
 
-            def post(self, *a, **k):  # _post 面照常（启动拍/驻留文案归 worker）
+            def notify_transition(self, tid, to, detail=""):
+                raise OSError("disk full")
+
+            def post(self, *a, **k):
                 return 1
 
         self.gate._router = BoomRouter()
         self.in_gate()
         self.anchor = None
         self.gate.run("t1")
-        self.assertEqual(self.state.get("t1")["state"], "done")  # 驻留语义不破
+        self.assertEqual(self.state.get("t1")["state"], "reopened")  # 门结果不受通知败影响
+        self.assertEqual(self.state.get("t1")["fail_streak"], 1)  # 防抖计数不丢
         names = [e["event"] for e in self.store.read_events("t1")]
-        self.assertNotIn("reopened", names)
-
-    def test_review_green_during_verify_merges(self):  # Req: gt-3e7301
-        """降级受理后 verify 期间评审环跑绿：锚绿于 commit 即照常合并（正路径）。"""
-        shutil.rmtree(self.env / ".review-loop")
-        self.anchor = None  # 降级受理（评审环缺失）
-        self.seed()
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
-        (self.env / ".review-loop").mkdir(parents=True)  # verify 期间 idle 评审环跑绿
-        self.anchor = {"head": SHA, "clean": True}
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        self.assertEqual(t["state"], "closed")  # merged→closed
-        integration = f"{self.env}__gate"
-        self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
-                                               (str(self.env), "/repo", None)])
+        self.assertIn("reopened", names)
+        self.assertNotIn("reclaim_failed", names)
 
     def test_rebase_conflict_reopens_without_merge_or_bump(self):  # Req: F7, F32
         """F32 后拒并 reopened 来源①：rebase 同步冲突——不计连败，环境保留。"""
@@ -1074,13 +1108,13 @@ class TestGateVerifyOverrun(TestCoreGate):
     def test_default_runner_soft_notifies_once(self):  # Req: F36
         """未注入 runner：run() 按 tid 构造默认 runner，软顶提醒派发方恰一次。"""
         self.seed(cmd="sleep 0.3; echo ok")
-        shutil.rmtree(self.env / ".review-loop")  # 锚缺失驻留：仅 env verify 一跑
         gate = Gate(self.state, self.gx, self.router, self.oc,
-                    lambda env: None, self.health, self.auth, self.store,
+                    lambda env: self.anchor, self.health, self.auth, self.store,
                     runner=None, verify_timeout=0.05, verify_ceiling=5)
         self.assertEqual(gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.anchor = None  # 合并时锚缺失→reopened（ag-084a22 B）：仅 env verify 一跑
         gate.run("t1")
-        self.assertEqual(self.state.get("t1")["state"], "done")  # verify 绿（rc=0）
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
         soft = [m for m in self.store.read_messages()
                 if m["to"] == "disp1" and "仍在跑" in m["body"]]
         self.assertEqual(len(soft), 1)
@@ -1138,12 +1172,13 @@ class TestGateTaskBudget(TestCoreGate):
     def test_soft_reminder_contains_effective_budget(self):  # Req: F51
         """默认 runner：软顶文案报任务级生效预算（非服务缺省）。"""
         self.seed(cmd="sleep 0.3; echo ok", timeout=0.1)
-        shutil.rmtree(self.env / ".review-loop")  # 锚缺失驻留：仅 env verify 一跑
         gate = Gate(self.state, self.gx, self.router, self.oc,
-                    lambda env: None, self.health, self.auth, self.store,
+                    lambda env: self.anchor, self.health, self.auth, self.store,
                     runner=None, verify_timeout=0.05, verify_ceiling=5)
         self.assertEqual(gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.anchor = None  # 合并时锚缺失→reopened（ag-084a22 B）：仅 env verify 一跑
         gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
         soft = [m for m in self.store.read_messages()
                 if m["to"] == "disp1" and "仍在跑" in m["body"]]
         self.assertEqual(len(soft), 1)

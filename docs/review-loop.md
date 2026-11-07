@@ -6,7 +6,7 @@ agora 的自动合并由两道质量闸把守：**verify 门**（测试由服务
 
 ## 1. 契约面
 
-- 任务环境（env worktree）内存在 `.review-loop/` 目录 ⇒ 锚门生效。
+- 锚门无条件生效：`done` 受理与合并前都要求锚绿。
 - 锚文件为 `.review-loop/.last-reviewed`，内容是完整 40 位十六进制 commit sha
   （解析容许首尾空白）。服务在 env 内跑 `git rev-parse HEAD` 与文件内容比对；
   格式的唯一权威实现是 `agorad/access/anchors.py` 的 `read_anchor`（经
@@ -17,17 +17,18 @@ agora 的自动合并由两道质量闸把守：**verify 门**（测试由服务
 
 | 时机 | 行为 |
 | --- | --- |
-| `accept_done`（done 受理） | 仅 `.review-loop/` 在位时检查：缺锚/落后 → 拒 done（`anchor`）；head ≠ done body 的 sha → 拒；未绿 → 拒。均审计 `done_rejected` 并附修复指引 |
-| `run()`（合并前重验） | verify 绿后重读锚：缺失/落后/未绿 → 审计 `review_absent_no_merge`，任务驻留 `done` 不合并 |
+| `accept_done`（done 受理） | 无条件检查：缺锚/落后 → 拒 done（`anchor`）；head ≠ done body 的 sha → 拒；未绿 → 拒。均审计 `done_rejected` 并附修复指引，计入 fail_streak（3 连败 blocked） |
+| `run()`（合并前重验） | verify 绿后重读锚：缺失/落后/未绿 → 审计 `review_absent_no_merge`，任务自动 `reopened` 回 worker（计连败，通知面尽力而为） |
 
 合并前重验堵住两个窗口：accept→run 之间锚被改动（TOCTOU）、done 之后偷提交。
 
-## 2. 降级路径（没装评审环也能用）
+## 2. 没装评审环会怎样
 
-- `.review-loop/` 目录不存在：done 受理**完全跳过锚检查**（目录缺失即无此要求）。
-- 门体照常跑 verify；合并前发现锚缺失 → 任务驻留 `done`，**不自动合并**，
-  通知派发方人工审阅合并（或 cancel）。
-- 一句话：**无评审环也可正常用，只是不自动合并**——自治是双闸（测试＋评审）挣来的。
+- 锚门无条件：`.review-loop/.last-reviewed` 缺失即「锚缺失」，done 受理直接
+  **拒收退回 worker**，拒因附补建指引（约 10 行脚本，见 §3）；拒收计入
+  fail_streak，3 连败 blocked 拍人。
+- 一句话：**不装评审环则任务过不了 done**——自治是双闸（测试＋评审）挣来的，
+  门内不做无锚合并。
 
 ## 3. 最小参考实现
 
