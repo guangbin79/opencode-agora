@@ -114,27 +114,57 @@ def forest_view(snap):
 
 # F57 rework 计数事件（board stats 分桶口径，事件名同 state 迁移面）
 _REWORK_EVENTS = ("verify_failed", "reopened")
+# F58 漂移校验阈值（模块级写死不做配置面，要调再立需求）——刻意保守：
+# 10 样本的 rework 率方差大，宁可漏报不误报
+_STATS_WIN = 30
+_STATS_DRIFT_PP = 0.15
+_STATS_WIN_MIN = 10
+
+
+def _bucket_counts(tasks, rework, tids):
+    """一组任务的 F57 三数（全期与窗口同口径复用）：行数、merged 一次过、rework 事件数。"""
+    out = {"tasks": len(tids), "merged": 0, "rework": 0}
+    for tid in tids:
+        out["rework"] += rework[tid]
+        if tasks[tid]["state"] in _MERGED and rework[tid] == 0:
+            out["merged"] += 1
+    return out
 
 
 def _model_stats(tasks, events):
-    """board 按 model 分桶（F57）：{model|"default": {tasks, merged, rework}}。
+    """board 按 model 分桶（F57）：{model|"default": {tasks, merged, rework, ...F58}}。
 
     桶键＝行 model 字段、无 model 归 "default"（服务默认档）；tasks＝桶内行数
     （任意状态）；merged＝终态（merged/closed）且本任务 rework==0 的一次过口径；
     rework＝该桶任务 verify_failed＋reopened 事件计数（事件按 tid 归桶）。
+    F58 窗口对照：win_*＝按 created 倒序取最近 _STATS_WIN 单的同口径三数
+    （窗口按任务入选切，事件仍按 tid 全量归桶，可晚于窗口边界）；first/last_created
+    ＝桶内样本 created min/max（缺 0.0 兜底）；drift 三值——空桶或
+    win_tasks<_STATS_WIN_MIN → null 不下判；|全期率−窗口率| > _STATS_DRIFT_PP
+    → true 否则 false。
     """
     rework = {tid: 0 for tid in tasks}
     for e in events:
         if e.get("event") in _REWORK_EVENTS and e.get("task") in rework:
             rework[e["task"]] += 1
-    out = {}
+    by_model = {}
     for tid, t in tasks.items():
-        b = out.setdefault(t.get("model") or "default",
-                           {"tasks": 0, "merged": 0, "rework": 0})
-        b["tasks"] += 1
-        b["rework"] += rework[tid]
-        if t["state"] in _MERGED and rework[tid] == 0:
-            b["merged"] += 1
+        by_model.setdefault(t.get("model") or "default", []).append(tid)
+    out = {}
+    for model, tids in by_model.items():
+        win = sorted(tids, key=lambda i: (-(tasks[i].get("created") or 0.0),
+                                          i))[:_STATS_WIN]
+        b = _bucket_counts(tasks, rework, tids)
+        w = _bucket_counts(tasks, rework, win)
+        b.update(win_tasks=w["tasks"], win_merged=w["merged"],
+                 win_rework=w["rework"])
+        created = [tasks[i].get("created") or 0.0 for i in tids]
+        b["first_created"] = min(created)
+        b["last_created"] = max(created)
+        b["drift"] = (None if b["tasks"] == 0 or w["tasks"] < _STATS_WIN_MIN
+                      else abs(b["rework"] / b["tasks"]
+                               - w["rework"] / w["tasks"]) > _STATS_DRIFT_PP)
+        out[model] = b
     return out
 
 
@@ -144,7 +174,8 @@ def full_view(snap, store):
     四键＝buckets＋forest＋tasks＋events；tasks＝白名单投影（build_rows 渲染
     所需全集，其余字段不带防上下文膨胀）；events 只含 escalate（五类 kind
     过滤仍归客户端 _KINDS——board_tui 不 import agorad 的既有边界不破）；
-    stats＝F57 按 model 分桶（events 同源 read_events 读一次计数）。
+    stats＝F57 按 model 分桶＋F58 窗口对照与 drift 旗（events 同源
+    read_events 读一次计数）。
     """
     fields = ("state", "title", "worker_sid", "dispatcher_sid", "last_seen",
               "created", "project_dir", "in_gate",

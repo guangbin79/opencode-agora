@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 
 from agorad.access.store import Store
-from agorad.core.report import (_env_activity, buckets, chain_view, detail,
-                                doctor_view, forest_view, full_view,
-                                stale_candidates, view_html)
+from agorad.core.report import (_env_activity, _model_stats, buckets,
+                                chain_view, detail, doctor_view, forest_view,
+                                full_view, stale_candidates, view_html)
 
 
 def row(state="running", disp="d1", worker="w1", created=0.0, last_seen=None,
@@ -108,13 +108,72 @@ class TestReport(unittest.TestCase):
             self.assertEqual([e["event"] for e in v["events"]],
                              ["escalate"])    # 只含 escalate 事件
             self.assertEqual(v["stats"], {   # F57 分桶：merged＝终态且 rework==0 一次过
-                "glm-5.3": {"tasks": 1, "merged": 1, "rework": 0},
-                "flash": {"tasks": 1, "merged": 0, "rework": 1},
-                "default": {"tasks": 2, "merged": 0, "rework": 0}})
+                "glm-5.3": {"tasks": 1, "merged": 1, "rework": 0, "win_tasks": 1,
+                            "win_merged": 1, "win_rework": 0, "first_created": 0.0,
+                            "last_created": 0.0, "drift": None},
+                "flash": {"tasks": 1, "merged": 0, "rework": 1, "win_tasks": 1,
+                          "win_merged": 0, "win_rework": 1, "first_created": 0.0,
+                          "last_created": 0.0, "drift": None},
+                "default": {"tasks": 2, "merged": 0, "rework": 0, "win_tasks": 2,
+                            "win_merged": 0, "win_rework": 0, "first_created": 0.0,
+                            "last_created": 0.0, "drift": None}})
+            # ↑ F58：小桶 win_tasks<10 → drift null 不下判；win_* 口径与全期同
             sparse = full_view(snap(tx={"state": "todo"}), st)  # 缺字段行容错
             self.assertEqual(sparse["tasks"]["tx"], {"state": "todo"})  # 无 usage 不投影
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_stats_drift_flag_divergence(self):  # Req: F58
+        # 失败集中最新 30 单：全期率 0.3 vs 窗口率 1.0，差 >0.15 → true
+        tasks = {f"t{i:03d}": dict(row(state="merged", created=1000.0 + i),
+                                   model="m") for i in range(100)}
+        events = [{"ts": 1.0, "actor": "x", "event": "verify_failed",
+                   "task": f"t{i:03d}"} for i in range(70, 100)]
+        b = _model_stats(tasks, events)["m"]
+        self.assertIs(b["drift"], True)
+        self.assertEqual(b["win_tasks"], 30)
+        self.assertEqual(b["win_rework"], 30)
+        self.assertEqual(b["rework"], 30)
+
+    def test_stats_drift_thin_window(self):  # Req: F58
+        # 桶 5 单 <10：win_tasks 不足 → null 不下判；缺 created 按 0.0 兜底
+        tasks = {f"t{i}": row(state="merged") for i in range(5)}
+        events = [{"ts": 1.0, "actor": "x", "event": "verify_failed", "task": "t0"}]
+        b = _model_stats(tasks, events)["default"]
+        self.assertIsNone(b["drift"])
+        self.assertEqual(b["win_tasks"], 5)
+        self.assertEqual(b["win_rework"], 1)
+        self.assertEqual(b["first_created"], 0.0)
+        self.assertEqual(b["last_created"], 0.0)
+
+    def test_stats_drift_flat(self):  # Req: F58
+        # 失败均匀铺开、窗口＝全桶 → 两率相等 → false
+        tasks = {f"t{i:02d}": dict(row(state="merged", created=100.0 + i),
+                                   model="m") for i in range(12)}
+        events = [{"ts": 1.0, "actor": "x", "event": "reopened",
+                   "task": f"t{i:02d}"} for i in range(3)]
+        self.assertIs(_model_stats(tasks, events)["m"]["drift"], False)
+
+    def test_stats_window_is_most_recent_by_created(self):  # Req: F58
+        # 35 单取最近 30：窗口按任务入选切——旧 5 单的失败不进 win_*，跨度仍覆盖全桶
+        tasks = {f"t{i:02d}": dict(row(state="merged", created=500.0 + i),
+                                   model="m") for i in range(35)}
+        events = ([{"ts": 1.0, "actor": "x", "event": "verify_failed",
+                    "task": f"t{i:02d}"} for i in range(3)]        # 旧 3 单窗口外
+                  + [{"ts": 1.0, "actor": "x", "event": "verify_failed",
+                      "task": f"t{i:02d}"} for i in range(5, 15)])  # 新 10 单窗口内
+        b = _model_stats(tasks, events)["m"]
+        self.assertEqual((b["tasks"], b["rework"]), (35, 13))
+        self.assertEqual(b["win_tasks"], 30)
+        self.assertEqual(b["win_rework"], 10)   # 旧 5 单的 3 失败不入窗
+        self.assertEqual(b["first_created"], 500.0)
+        self.assertEqual(b["last_created"], 534.0)
+
+    def test_stats_empty_bucket_drift_null(self):  # Req: F58
+        # 空任务集不产出桶（不伪造 win_*/drift）；孤儿事件不许凭空造桶
+        self.assertEqual(_model_stats({}, [{"ts": 1.0, "actor": "x",
+                                            "event": "verify_failed",
+                                            "task": "tx"}]), {})
 
     def test_detail_row_events_done_body(self):  # Req: F10
         tmp = Path(tempfile.mkdtemp())
