@@ -28,7 +28,7 @@ _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
 _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                           "reopened", "blocked"})  # 拉取面＝在飞非冻结（F25 修正；牌活性二道守卫）
 _DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/wiki_write/"
-                        "task_create/task_dispatch/wait；task_cancel 仅限己建子任务；"
+                        "task_create/task_dispatch/sleep；task_cancel 仅限己建子任务；"
                         "task_update/验收命令写面全局 worker 角色永拒"
                         "（建单缺省继承父任务配置）——需登记 verify→post(kind=verify) 提案"}
 

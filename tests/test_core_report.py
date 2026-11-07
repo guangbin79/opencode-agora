@@ -8,8 +8,9 @@ from pathlib import Path
 
 from agorad.access.store import Store
 from agorad.core.report import (_env_activity, _model_stats, buckets,
-                                chain_view, detail, doctor_view, forest_view,
-                                full_view, stale_candidates, view_html)
+                                chain_view, classify, detail, doctor_view,
+                                forest_view, full_view, stale_candidates,
+                                view_html)
 
 
 def row(state="running", disp="d1", worker="w1", created=0.0, last_seen=None,
@@ -193,6 +194,33 @@ class TestReport(unittest.TestCase):
             self.assertEqual([e["event"] for e in d["events"]],
                              ["dispatched", "done"])
             self.assertEqual(d["done_body"], "结论 v2")  # 最新 done 正文＝当前结论
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_classify_three_states_and_edges(self):  # Req: F64
+        now = 1_000_000.0
+        cases = [
+            (row("running", last_seen=now - 60), set(), "fresh"),
+            (row("running", last_seen=now - 3600), set(), "busy_round"),
+            (row("running", last_seen=now - 3600), {"t1"}, "stale_candidate"),
+            (row("running", last_seen=None), set(), "busy_round"),  # 无心跳＝冷
+            (row("cancelled", last_seen=now - 60), set(), None),  # 终态无判读
+            (row("todo", worker=None), set(), None),  # 无 worker 无判读
+        ]
+        for t, stale, want in cases:
+            self.assertEqual(classify("t1", t, stale, now), want)
+
+    def test_detail_carries_classification(self):  # Req: F64 单任务响应即带判读
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            s = snap(t1=row("running", created=1000.0, last_seen=None),
+                     t2=row("running", last_seen=time.time() - 60),
+                     t3=row("merged"))
+            self.assertEqual(detail(s, st, "t1")["classification"],
+                             "stale_candidate")  # 基线远古→候选
+            self.assertEqual(detail(s, st, "t2")["classification"], "fresh")
+            self.assertIsNone(detail(s, st, "t3")["classification"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

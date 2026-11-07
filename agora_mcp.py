@@ -3,7 +3,7 @@
 
 独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
 stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
-13 工具（12 个→`POST /<tool_name>` 根级路由；`wait` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
+13 工具（12 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
 X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 `$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
 错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
@@ -58,7 +58,9 @@ _TOOLS = [
                                    "任务页取号；不阻止绕过（先例约束）"},
          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
          "required": ["goal"]}},
-    {"name": "task_dispatch", "description": "派发任务给 worker（回传凭据）",
+    {"name": "task_dispatch", "description": "worker 专属嵌套派发（插件附牌限嵌套/链深）；"
+                                             "dispatcher/root 走 CLI agora dispatch"
+                                             "——派发＋等待一体",
      "inputSchema": {"type": "object", "properties": {"task": _TID},
                      "required": ["task"]}},
     {"name": "task_update", "description": "登记 verify 命令（仅主会话派发方/root；"
@@ -117,8 +119,8 @@ _TOOLS = [
     {"name": "enforce", "description": "拨强制旗（仅 root；on 须布尔）",
      "inputSchema": {"type": "object", "properties": {
          "on": {"type": "boolean"}}, "required": ["on"]}},
-    {"name": "wait", "description": "本地休眠指定秒数（Code Mode 无 setTimeout 的补偿；上限 120s）。"
-                                    "本地休眠，非任务条件等待——终态等待用 CLI agora wait <task>",
+    {"name": "sleep", "description": "本地休眠指定秒数（回合内短等补偿）；终态等待"
+                                     "随 agora dispatch 一体，或 agora watch 后台驻留",
      "inputSchema": {"type": "object", "properties": {
          "seconds": {"type": "integer", "minimum": 0, "maximum": 120}}}},
 ]
@@ -197,7 +199,7 @@ def handle(msg):
 
 def _tools_call(rid, params):
     name = params.get("name")
-    if name == "wait":  # 壳层本地休眠（Code Mode 无 setTimeout 的补偿）
+    if name == "sleep":  # 壳层本地休眠（Code Mode 无 setTimeout 的补偿）
         secs = max(0, min(params.get("arguments", {}).get("seconds", 30), 120))
         time.sleep(secs)
         return {"jsonrpc": "2.0", "id": rid,

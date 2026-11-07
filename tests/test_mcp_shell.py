@@ -1,6 +1,6 @@
 """T1 MCP 壳契约：stdio newline-JSON-RPC ↔ 真 agorad（make_server）全链。
 
-壳＝薄代理零逻辑（wait 例外，壳层本地休眠不走 HTTP）：12 工具根级路由 POST /<name>、_token 剥除→X-Agora-Token、
+壳＝薄代理零逻辑（sleep 例外，壳层本地休眠不走 HTTP）：12 工具根级路由 POST /<name>、_token 剥除→X-Agora-Token、
 HTTP 错误档→JSON-RPC 负数区 code（message 服务原文）；未知工具/缺牌壳内
 直错（不打服务）。夹具形态同 test_transport_httpd（假 gitx/锚/runner＋
 StubOpencode，root 牌 sid=main）。
@@ -114,8 +114,8 @@ class TestHandshakeAndList(McpShellTest):
 
     def test_tools_list_exactly_11_matching_httpd_routes(self):  # Req: F2
         names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(len(names), 13)  # 12 服务端 + 1 壳层本地 wait（F22 repo_board）
-        self.assertEqual(set(names) - {"wait"}, set(_TOOLS))  # 服务端五族与 httpd 同集；wait＝壳层本地
+        self.assertEqual(len(names), 13)  # 12 服务端 + 1 壳层本地 sleep（F64 改名不减数）
+        self.assertEqual(set(names) - {"sleep"}, set(_TOOLS))  # 服务端五族与 httpd 同集；sleep＝壳层本地
         for t in self.rpc("tools/list")["result"]["tools"]:
             self.assertTrue(t.get("description"))
             self.assertEqual(t["inputSchema"]["type"], "object")

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 _MERGED = {"merged", "closed"}
+_TERMINAL = _MERGED | {"blocked", "cancelled"}  # F64 判读口径（CLI TERMINAL 同集）
 _STALE_AFTER = 1200
 # 僵态候选口径（F5 决策记录 2026-10-28）：blocked 已属失控拍过人、终态与 todo
 # 无 worker 活动面——均排除。
@@ -190,20 +191,41 @@ def full_view(snap, store):
             "stats": _model_stats(snap["tasks"], raw_events)}
 
 
+def classify(tid, t, stale_ids, now):
+    """单任务三态判读（F64 board detail classification 字段；口径镜像 CLI
+    status_view——fresh/busy_round/stale_candidate，终态或无 worker＝None）。
+    stale_ids＝stale_candidates() 的 tid 集（env 活性融合基线）。
+    """
+    if t["state"] in _TERMINAL or not t.get("worker_sid"):
+        return None
+    if tid in stale_ids:
+        return "stale_candidate"
+    seen = t.get("last_seen")
+    ago = None if not seen else max(0, int(now - seen))
+    return "busy_round" if ago is None or ago > _STALE_AFTER else "fresh"
+
+
 def detail(snap, store, tid):
     """单任务明细三件套：全字段行＋事件链＋done 正文（最新一条＝当前结论）。
 
     F15 增 env_active_seconds_ago：env 在盘时 now-最新 mtime（int 秒）；回收/缺失省略。
+    F64 增 classification：三态判读结论（report.classify），agent 查单任务即得。
     """
+    now = time.time()
+    t = snap["tasks"][tid]
+    act = _env_activity(t.get("env_dir"))  # 一次 walk 双用：判读活性基线＋env_active
+    base = {tid: max(t.get("last_seen") or t.get("created", 0.0), act)}
     done = [m for m in store.read_messages()
             if m.get("task") == tid and m.get("kind") == "done"]
-    out = {"task": dict(snap["tasks"][tid]), "events": store.read_events(tid),
-           "done_body": done[-1]["body"] if done else None}
-    env = out["task"].get("env_dir")
-    if env and Path(env).is_dir():
-        act = _env_activity(env)
-        if act > 0.0:  # is_dir 后被并发回收→walk 空，省略而非输出 1.7e9 假值
-            out["env_active_seconds_ago"] = int(time.time() - act)
+    out = {"task": dict(t), "events": store.read_events(tid),
+           "done_body": done[-1]["body"] if done else None,
+           "classification": classify(
+               tid, t,
+               {c for c, _ in stale_candidates({"tasks": {tid: t}}, now,
+                                               base=base)},
+               now)}  # 单任务快照入判读：候选集只涉本行，不为他任务白走 env
+    if act > 0.0:  # env 回收/缺失 walk 空→省略而非输出 1.7e9 假值
+        out["env_active_seconds_ago"] = int(now - act)
     return out
 
 

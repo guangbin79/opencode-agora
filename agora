@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""agora CLI（F14）：bash 可判定的只读条件谓词——看门狗规范条件等待。
+"""agora CLI（F14→F64）：bash 可判定的条件谓词——看门狗规范条件等待＋派发等待一体（dispatch 为唯一写面）。
 
-wait 子命令阻塞等待任务终态（merged/closed/blocked/cancelled），对齐
+dispatch 子命令派发任务并阻塞等终态（派发＋等待一体）；watch 子命令盯
+非本回合派发的在飞任务（同事任务/跨会话遗留/中断重挂）阻塞至终态，对齐
 docker wait / kubectl wait 约定。status 子命令（F28 防误杀）单查任务三态
 判读：数据全取既有 /board 单任务视图＋/doctor（零服务端新端点），分类
 客户端推导。取数照抄 board_tui.py 形态：
 $AGORA_HOME/.agora/{root.token,service.json}，零直读状态文件、零格式逆向。
-非 MCP agora.wait(seconds)（那是 agent 回合内本地睡眠，两者不互替）。
+非 MCP agora sleep（那是 agent 回合内本地睡眠，两者不互替）。
 """
 import argparse
 import json
@@ -21,6 +22,7 @@ TERMINAL = frozenset(("merged", "closed", "blocked", "cancelled"))
 _INFLIGHT = ("todo", "dispatched", "running", "done", "verify_failed", "reopened")
 _INTERVAL = 15        # 内部轮询间隔（秒）
 _HTTP_TIMEOUT = 5     # 单次请求超时（board_tui 同值）
+_DISPATCH_TIMEOUT = 30  # 派发一跳重活：env 物化＋worker 会话拉起（服务端串行）——对齐 MCP http_call 30s
 _DEFAULT_TIMEOUT = 3600  # F61 wait 超时缺省（原 1800；AGORA_WAIT_TIMEOUT env 可覆写）
 _TIMEOUT_MSG = "须为非负有限秒数"
 _STALE_AFTER = 1200   # 心跳冷阈值（秒）——与 agorad report._STALE_AFTER 同口径（客户端推导锚）
@@ -59,24 +61,34 @@ def discover(home=None):
     return f"http://127.0.0.1:{port}", token
 
 
-def _call(base, token, path, body):
-    """HTTP 取数缝（fetch/status 共用）：POST <path> 带 root 牌回解析 JSON。
+def _err_note(e):
+    """HTTPError 服务拒因透传（F64 dispatch 首个写面消费者：F23 硬闸/quota
+    拒因须直达调用方，不令其翻审计）；空体/坏体/非 dict→空串退回裸状态码。"""
+    try:
+        why = json.loads(e.read().decode()).get("error")
+    except Exception:  # 纯装饰取因绝不改控制流：坏体/断体(IncompleteRead)/非 dict 一律空串
+        return ""
+    return f" {why}" if why else ""
 
-    401/403→Rejected（换模跟随窗按瞬态）、其余 HTTP 错→Fail（404 注任务未知）、
-    网络错（OSError 族）→Transient（可重试）。
+
+def _call(base, token, path, body, timeout=_HTTP_TIMEOUT):
+    """HTTP 取数缝（fetch/dispatch/status 共用）：POST <path> 带根牌回解析 JSON。
+
+    401/403→Rejected（认牌失败）、其余 HTTP 错→Fail（404＋/board 注任务未知，
+    服务端 error 拒因尾透）、网络错（OSError 族）→Transient（可重试）。
     """
     req = urllib.request.Request(
         base + path, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "X-Agora-Token": token},
         method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):  # 认牌失败：牌换代/撕裂对窗口，跟随形态按瞬态
-            raise Rejected(f"HTTP {e.code}: {path}") from None
+            raise Rejected(f"HTTP {e.code}: {path}{_err_note(e)}") from None
         note = "（任务未知）" if e.code == 404 and path == "/board" else ""
-        raise Fail(f"HTTP {e.code}" + note + f": {path}") from None
+        raise Fail(f"HTTP {e.code}" + note + f": {path}{_err_note(e)}") from None
     except OSError as e:  # URLError（连接拒等）＝瞬时，可重试
         raise Transient(str(e)) from None
 
@@ -137,6 +149,31 @@ def run_wait(a):
         raise Fail("root 牌缺失")
     code, line = wait(a.task_id, base, token, timeout=timeout, once=a.once,
                       reread=discover)
+    print(line)
+    return code
+
+
+def run_dispatch(a):
+    """F64 派发＋等待一体：薄代理 agorad 既有 /task_dispatch 端点（服务端
+    逻辑零改动），成功后进程内 wait() 阻塞至终态；退出码沿袭 watch 语义。
+    """
+    timeout = _resolve_timeout(a.timeout)  # AGORA_WAIT_TIMEOUT 平移生效
+    base, token = discover()
+    if not token:
+        raise Fail("root 牌缺失")
+    try:
+        _call(base, token, "/task_dispatch", {"task": a.task_id},
+              timeout=_DISPATCH_TIMEOUT)  # 派发重活＞轮询预算：5s 级超时＝假失败真在飞
+    except Transient as e:
+        if isinstance(e, Rejected):  # 派发被拒（F23 硬闸/quota）＝终局，拒因 exit 2
+            raise
+        # 派发跳瞬时（30s 超时/连接抖动）≠未受理：服务端串行重活可能已落地
+        # （worker 已拉起）——不终局 exit 2，落 wait() 对账：已派发即续等终态；
+        # 仍 todo 则轮询至到期（exit 1，todo 态自证派发未落，重派安全）。
+        # shortcut: 非 401/403 HTTP 错（Fail）仍终局 exit 2——4xx 拒因须直达；
+        # 5xx 窄窗（flip 后 append_event/_pages 抛）＝有意取舍不对账，后果有界
+        # （重派被服务端 todo/blocked 闸守），when: 出现误报实例再议 5xx 对账
+    code, line = wait(a.task_id, base, token, timeout=timeout, reread=discover)
     print(line)
     return code
 
@@ -218,18 +255,36 @@ def _resolve_timeout(flag):
 def _parser():
     ap = argparse.ArgumentParser(
         prog="agora",
-        description="agora CLI——bash 可判定的只读条件谓词（F14）。")
+        description="agora CLI——bash 可判定的条件谓词（F14→F64）：dispatch＝"
+                    "派发＋等待一体（唯一写面），watch/status 只读。")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="command")
-    w = sub.add_parser(
-        "wait", help="阻塞等待任务终态（--once 单查）",
-        description="阻塞等待任务终态（--once 单查）；非 MCP agora.wait(seconds)"
-                    "（那是 agent 回合内本地睡眠）。",
-        epilog="退出码：0＝终态到达（merged/closed/blocked/cancelled 任一）\n"
-               f"1＝--timeout 到期仍在飞（{'/'.join(_INFLIGHT)}），"
-               "或 --once 下当前在飞\n"
-               "2＝异常（用法错/AGORA_WAIT_TIMEOUT 非法/任务未知 404/root 牌缺失"
-               "/认牌失败/重试至超时仍不可达）",
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+    d = sub.add_parser("dispatch",
+                       help="派发任务并阻塞等终态（派发＋等待一体，F64）",
+                       description="派发任务并阻塞等终态（F64 一体化）：薄代理 agorad 既有"
+                                   " dispatch 端点，成功后进程内阻塞至终态——派发与等待一条"
+                                   "命令，退出通知即唤醒派发会话。",
+                       epilog="退出码：0＝终态到达（merged/closed/blocked/cancelled 任一）\n"
+                              f"1＝--timeout 到期仍在飞（{'/'.join(_INFLIGHT)}）\n"
+                              "2＝异常（用法错/AGORA_WAIT_TIMEOUT 非法/派发被拒/任务未知 404"
+                              "/root 牌缺失/认牌失败/重试至超时仍不可达）",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    d.add_argument("task_id", metavar="task-id", help="任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx）")
+    d.add_argument("--timeout", type=_timeout_arg, default=None,
+                   help="到期仍在飞退出 1（秒）；缺省 3600，可经 AGORA_WAIT_TIMEOUT"
+                        " 环境变量覆写（防调用方永挂）")
+    d.set_defaults(fn=run_dispatch)
+    w = sub.add_parser("watch",
+                       help="盯非本回合派发的在飞任务至终态（--once 单查）",
+                       description="盯非本回合派发的在飞任务（同事任务/跨会话遗留/会话中断"
+                                   "重挂）至终态（--once 单查）；本回合派发用 dispatch（派发"
+                                   "＋等待一体）；非 MCP agora sleep（那是 agent 回合内本地"
+                                   "睡眠）。",
+                       epilog="退出码：0＝终态到达（merged/closed/blocked/cancelled 任一）\n"
+                              f"1＝--timeout 到期仍在飞（{'/'.join(_INFLIGHT)}），"
+                              "或 --once 下当前在飞\n"
+                              "2＝异常（用法错/AGORA_WAIT_TIMEOUT 非法/任务未知 404/root 牌缺失"
+                              "/认牌失败/重试至超时仍不可达）",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     w.add_argument("task_id", metavar="task-id", help="任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx）")
     w.add_argument("--timeout", type=_timeout_arg, default=None,
                    help="到期仍在飞退出 1（秒）；缺省 3600，可经 AGORA_WAIT_TIMEOUT"
