@@ -8,10 +8,9 @@
  * 语义与 agorad 服务侧一致：豁免面 B3、读引导、主会话例外、服务不可达默认拒。
  */
 import { readFileSync } from "node:fs";
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { getCredential, pullCredential, type PullResult } from "./cred";
-import { augmentPath, onShellCreate, type ShellCreatePayload } from "./envPath";
+import { onShellCreate, type ShellCreatePayload } from "./envPath";
 import { onInject } from "./inject";
 import {
   AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
@@ -45,30 +44,6 @@ let enforceOverride: boolean | null = null; // 测试/特殊接线显式旗；�
 
 export function setEnforce(on: boolean | null): void {
   enforceOverride = on; // null＝清除显式旗，恢复服务持旗拉取
-}
-
-/** 看门狗实装：后台 spawn `agora wait <tid>`——终态退出落 /tmp 日志＝终态状态记录取证（非唤醒器）。 */
-function spawnWatchdog(tid: string): void {
-  if (!/^[A-Za-z0-9_-]+$/.test(tid)) return; // 注入白名单随命令构造同点收口：缝恢复/新调用面漏校验也不致注入
-  const env: Record<string, string | undefined> = { ...process.env };
-  try {
-    augmentPath(env); // F18 剥皮 PATH 补 ~/.local/bin（agora CLI 安装位），缺补＝看门狗静默失效；入 try——抛错也不得外逸拦派发
-    const child = spawn(
-      "bash",
-      ["-c", `{ agora wait ${tid}; echo "watchdog-exit ${tid} $(agora status ${tid})"; } >> /tmp/agora-watchdog-${tid}.log 2>&1`],
-      { detached: true, stdio: "ignore", env },
-    );
-    child.on("error", () => {}); // 异步拉起失败（ENOENT 等）走 'error' 事件不被 try/catch 接住——吞掉，不拦派发不炸宿主
-    child.unref();
-  } catch {
-    // 拉起路径任何抛错（含 augmentPath）同理吞掉——看门狗失败不拦派发
-  }
-}
-
-let watchdogRun = spawnWatchdog; // 测试缝（同 setEnforce 形态）：测试替换禁真实 detached spawn
-
-export function setWatchdog(fn: ((tid: string) => void) | null): void {
-  watchdogRun = fn ?? spawnWatchdog; // null＝恢复实装
 }
 
 /** root 牌接管文件（F1 唯一落盘点，0600）；缺失/损坏返回 null（调用方按无牌走安全向）。 */
@@ -196,13 +171,6 @@ export default {
           hint = `${hint}（${why}）`;
         }
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
-      }
-      // 派发即挂看门狗（2026-11-05 事故溯源：dispatch 与等待分属两动作、被回合边界隔开
-      // → ag-b594a6 派发滞留 6h+）。局限（2026-11-06 dispatcher 实测裁定）：unref 子进程
-      // opencode 不追踪，无会话唤醒能力——唤醒靠 agent 侧 background:true `agora wait`
-      // （L2b，退出＝system-reminder）。tid 白名单防注入；spawn 失败不拦派发。
-      if (event.tool === "agora_task_dispatch" && /^[A-Za-z0-9_-]+$/.test(String(input.task ?? ""))) {
-        watchdogRun(String(input.task));
       }
     });
   },

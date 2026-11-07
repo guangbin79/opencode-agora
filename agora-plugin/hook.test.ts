@@ -15,7 +15,7 @@ import {
   readCredential, resetCredPull, type Cred,
 } from "./cred";
 import { resetLift } from "./lift";
-import { default as entry, setEnforce, setWatchdog } from "./index";
+import { default as entry, setEnforce } from "./index";
 
 let root: string; // 非豁免夹具根（/tmp 下但不在 /tmp/opencode 内）
 let repo: string; // git 仓夹具（.git 目录桩）
@@ -256,21 +256,6 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     } as any);
     return hooks;
   }
-
-  // 测试卫生：看门狗一律走桩（禁真实 detached bash／沙箱外写盘）
-  const wdCalls: string[] = [];
-  beforeEach(() => {
-    wdCalls.length = 0;
-    setWatchdog((tid) => { wdCalls.push(tid); });
-  });
-  afterEach(() => setWatchdog(null));
-
-  test("派发即挂看门狗：tid 白名单过→spawn(tid)；非法 tid→不 spawn", async () => {
-    const hooks = wire();
-    await hooks["tool.execute.before"]({ tool: "agora_task_dispatch", sessionID: "s-wd", input: { task: "ag-1_x-" } });
-    await hooks["tool.execute.before"]({ tool: "agora_task_dispatch", sessionID: "s-wd", input: { task: "x;rm" } });
-    expect(wdCalls).toEqual(["ag-1_x-"]);
-  });
 
   test("tool hook execute.before：拦 edit 无凭据抛引导；豁免面静默", async () => {
     // Req: F1
