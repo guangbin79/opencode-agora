@@ -1240,15 +1240,18 @@ class TestDispatcherResults(TestCoreGate):
         self.assertIn("已 closed", closed["body"])
         self.assertIn(SHA, closed["body"])
 
-    def test_merged_result_returns_to_dispatcher(self):  # Req: ag-acae3b
-        """merged 迁移实时直达 dispatcher：单行紧凑（id＋终态＋短 sha），
+    def test_merged_result_returns_to_dispatcher(self):  # Req: ag-acae3b / F60
+        """merged 迁移实时直达 dispatcher：单行紧凑（id＋终态＋短 sha＋沉淀提示），
         先于 closed 收官拍；worker milestone 通道不变。"""
         self.in_gate()
         self.gate.run("t1")
         merged, closed = self.results()[-2:]  # F54 启动拍在前，merged/closed 收官
         self.assertEqual(merged["from"], "agorad")
         self.assertEqual(merged["kind"], "result")
-        self.assertEqual(merged["body"], f"任务 t1 merged @{SHA[:7]}")
+        self.assertEqual(
+            merged["body"],
+            f"任务 t1 merged @{SHA[:7]}"
+            "——沉淀: 聚本任务 note/task page 走 knowledge ingest")  # Req: F60
         self.assertLess(merged["id"], closed["id"])
 
     def test_closed_splits_milestone_to_worker_and_result_to_dispatcher(self):

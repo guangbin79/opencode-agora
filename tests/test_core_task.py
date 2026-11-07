@@ -697,6 +697,8 @@ class TestVerifyGate(TestCoreTask):
         self.dispatched_pair()
         boot = self.oc.sessions[-1][2]
         self.assertIn("开工: 进 env 后首个动作 post(kind=note", boot)
+        self.assertIn("沉淀: 过程中的踩坑与权衡决策随发 post(kind=note", boot)  # Req: F60 经验记稿合同
+        self.assertIn("公共记忆面（memory_store/agentctl capture）勿直写", boot)  # Req: F60 噪音防线（worker 稿只走 note）
         self.assertIn("shell: mcp_shell（shell_execute）按 argv 数组执行", boot)
         self.assertIn("ALLOW_COMMANDS", boot)
         self.assertIn("全局 worker 角色永拒", boot)  # F37 验收录回文案

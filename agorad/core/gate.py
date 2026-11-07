@@ -404,7 +404,8 @@ class Gate:
         extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
         self._audit(tid, "merged", commit=t.get("commit"), **extra)
         self._router.notify_transition(  # ag-acae3b：merged 实时直达 dispatcher
-            tid, "merged", f"@{(t.get('commit') or '')[:7]}")
+            tid, "merged",
+            f"@{(t.get('commit') or '')[:7]}——沉淀: 聚本任务 note/task page 走 knowledge ingest")  # Req: F60
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
