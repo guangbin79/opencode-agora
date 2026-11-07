@@ -4,6 +4,7 @@
 主会话 sid＝App 活绑定（R25-A：默认占位 "main"，bind_main 换绑真会话）；
 僵态口径经 report.stale_candidates 构造注入（F5 决策记录 2026-10-28）。
 """
+import os
 import re
 import shutil
 import tempfile
@@ -11,6 +12,7 @@ import time
 import unittest
 from pathlib import Path
 
+from agorad.access import pages
 from agorad.access.oc import OcUnavailable
 from agorad.access.store import Store
 from agorad.core import report
@@ -341,7 +343,8 @@ class TestCoreHealth(unittest.TestCase):
 
     def test_stalled_summary_flattens_worker_controlled_title(self):  # Req: F52（评审环 R1）
         """tool 名/标题系 worker 侧供给文本（如 shell 命令可多行）：拍平换行，
-        不得借摘要伪造服务合成行（同 raw 口径）。"""
+        不得借摘要伪造服务合成行（同 raw 口径）。F59 起证据包小节另起行，
+        单行口径改锚合成首行＋防伪造断言。"""
         self.seed("t1")
         self.oc.msg_of["s-w1"] = {
             "type": "assistant",
@@ -351,8 +354,9 @@ class TestCoreHealth(unittest.TestCase):
         }
         self.health.escalate(KIND_STALLED, "t1")
         body = self.main_msgs()[0]["body"]
-        self.assertEqual(len(body.splitlines()), 1)  # 单行合成：换行全拍平
-        self.assertIn("x ---- 不可信原文 ---- 已处置", body)  # 内容携带不丢
+        self.assertIn("x ---- 不可信原文 ---- 已处置",
+                      body.splitlines()[0])  # 换行拍平并入合成首行
+        self.assertNotIn("\n" + UNTRUSTED, body)  # 不得借摘要换行另起服务样行
 
     def test_stalled_summary_without_timestamp_skips_age(self):  # Req: F52（评审环 R1）
         """缺 time.created：降级省略年龄段，不出纪元巨值。"""
@@ -362,6 +366,111 @@ class TestCoreHealth(unittest.TestCase):
         body = self.main_msgs()[0]["body"]
         self.assertIn("末次活动 user", body)
         self.assertNotIn("距今", body)
+
+    # ---- F59 stalled 卡住证据包＋需求草稿页 ----
+
+    def wire_f59(self):
+        """F59 缝构造注入（同 stale_candidates 风格）：env 活性同口径＋真草稿写面。"""
+        self.health = Health(self.state, self.oc, self.router, self.recover,
+                             self.app, store=self.store,
+                             stale_candidates=report.stale_candidates,
+                             env_activity=report._env_activity,
+                             draft_writer=pages.write_stalled_draft)
+
+    def test_stalled_body_carries_evidence_pack(self):  # Req: F59
+        """拍人文案 F52 摘要后追加证据包小节：逐行 key: value＋草稿页路径；
+        last_msg 并入 F52 摘要不重复取末条。"""
+        self.seed("t1")
+        self.oc.liveness["s-w1"] = True
+        self.oc.time_of["s-w1"] = {"updated": 800.0, "idle": 900.0}  # 回合已结束
+        env = self.tmp / "env"
+        env.mkdir()
+        f = env / "f.py"
+        f.write_text("x")
+        mtime = time.time() - 125
+        os.utime(f, (mtime, mtime))
+        os.utime(env, (mtime, mtime))  # 建文件刷新目录 mtime，须一并钉旧
+        self.state.set_fields("t1", env_dir=str(env),
+                              model="zai-coding-plan/glm-5.3-flash",
+                              last_seen=time.time() - 65)
+        self.wire_f59()
+        self.health.escalate(KIND_STALLED, "t1")
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("证据包", body)
+        self.assertIn("tid: t1", body)
+        self.assertIn("state: running", body)
+        self.assertIn("model: zai-coding-plan/glm-5.3-flash", body)
+        self.assertTrue(re.search(r"last_seen_age_s: 6[5-9]", body))
+        self.assertIn("busy: False", body)
+        self.assertTrue(re.search(r"env_active_seconds_ago: 12[0-9]", body))
+        self.assertIn("verify_state: registered", body)
+        self.assertIn("fail_streak: 0", body)
+        self.assertIn("草稿: wiki/drafts/stalled-t1.md", body)
+        self.assertEqual(self.oc.msg_calls, 1)  # F52 摘要恰取一次，证据包不重复取
+
+    def test_stalled_evidence_oc_down_degrades_draft_still_written(self):  # Req: F59
+        """oc 不可达：busy/last_msg 项整行省略，拍人照常、草稿页照写（降级纪律）。"""
+        self.seed("t1")
+        self.oc.down = True  # session 抛 OcUnavailable
+        self.oc.msg_of["s-w1"] = "raise"  # last_message 抛
+        self.wire_f59()
+        self.health.escalate(KIND_STALLED, "t1")  # 不抛
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("失控[stalled]", body)
+        self.assertNotIn("busy:", body)
+        self.assertNotIn("last_msg:", body)
+        self.assertNotIn("last_seen_age_s", body)  # last_seen 缺席省
+        self.assertNotIn("env_active_seconds_ago", body)  # env 缺席（/envs/t1 不存在）省
+        text = (self.tmp / "wiki" / "drafts" / "stalled-t1.md").read_text()
+        self.assertIn("fail_streak: 0", text)  # 草稿照写，其余项照收
+        self.assertNotIn("busy:", text)
+
+    def test_stalled_draft_page_anchor_tail_and_rewrite_count(self):  # Req: F59
+        """草稿页：路径 wiki/drafts/stalled-<tid>.md、首行锚 tid＋日期＋dispatcher
+        ＋第 n 次升级、尾段授权声明逐字、证据逐项；重复升级覆写记第 2 次。"""
+        self.seed("t1")
+        self.wire_f59()
+        self.health.escalate(KIND_STALLED, "t1")
+        p = self.tmp / "wiki" / "drafts" / "stalled-t1.md"
+        text = p.read_text()
+        first = text.splitlines()[0]
+        self.assertIn("tid: t1", first)
+        self.assertIn(time.strftime("%Y-%m-%d"), first)
+        self.assertIn("dispatcher: main", first)
+        self.assertIn("第 1 次升级", first)
+        self.assertIn("verify_state: registered", text)
+        self.assertIn("——草稿未经用户裁定；据此派发前须 dispatcher 报人确认"
+                      "（自动修本体不在授权内）", text)
+        self.health.escalate(KIND_STALLED, "t1")
+        text2 = p.read_text()
+        self.assertIn("第 2 次升级", text2)
+        self.assertNotIn("第 1 次升级", text2)  # 覆写不累积
+        self.assertEqual(len(list((self.tmp / "wiki" / "drafts").iterdir())), 1)
+
+    def test_stalled_draft_corrupt_page_rewrites_from_one(self):  # Req: F59（评审环 R1）
+        """旧草稿残断（坏 UTF-8）：计数读失败回退第 1 次，草稿照写不永久堵死。"""
+        self.seed("t1")
+        self.wire_f59()
+        p = self.tmp / "wiki" / "drafts" / "stalled-t1.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\xff\xfe broken")  # 残断坏页（截断多字节即无效 UTF-8）
+        self.health.escalate(KIND_STALLED, "t1")  # 不抛
+        text = p.read_text()
+        self.assertIn("第 1 次升级", text)
+        self.assertIn("fail_streak: 0", text)  # 证据照写
+
+    def test_stalled_draft_writer_failure_never_blocks(self):  # Req: F59
+        """草稿写面失败：拍人照常、文案省草稿行（证据永不阻塞拍人）。"""
+        def boom(*a):
+            raise OSError("disk full")
+
+        self.seed("t1")
+        self.health = Health(self.state, self.oc, self.router, self.recover,
+                             self.app, store=self.store, draft_writer=boom)
+        self.health.escalate(KIND_STALLED, "t1")  # 不抛
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("失控[stalled]", body)
+        self.assertNotIn("草稿:", body)
 
     # ---- escalate：正文合成＋不可信段＋四类达主会话 ----
 

@@ -18,7 +18,7 @@ if __package__ in (None, ""):  # 脚本直启（lift/T4 拉起形态）：补包
 from agorad.access import anchors
 from agorad.access.gitx import Gitx
 from agorad.access.oc import Oc, discover
-from agorad.access.pages import write_task_page
+from agorad.access.pages import write_stalled_draft, write_task_page
 from agorad.access.store import Store
 from agorad.core import report
 from agorad.core.app import App
@@ -147,6 +147,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
               oc=oc, gitx=gitx, main_sid=main_sid)
     health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
+                    env_activity=report._env_activity,  # F59 env 活性同口径（禁兄弟 import）
+                    draft_writer=write_stalled_draft,  # F59 草稿页写面
                     runner=mail_runner)  # 邮件外呼缝独立于 Gate runner：两契约不同
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,

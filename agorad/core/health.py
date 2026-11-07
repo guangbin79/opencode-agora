@@ -19,6 +19,7 @@ import json
 import shlex
 import subprocess
 import time
+from pathlib import Path
 
 # 升级事件类别（R9 初始集；gate 的质量连败/闸体变更引用此收口）
 KIND_QUALITY = "quality"
@@ -55,17 +56,21 @@ class Health:
     """tick 由 main 定时线程驱动；单写者口径（httpd 串行调用）。"""
 
     def __init__(self, state, oc, router, recover, app, store,
-                 runner=None, stale_candidates=None):
+                 runner=None, stale_candidates=None, env_activity=None,
+                 draft_writer=None):
         """app 按引用注入：main_sid 是活绑定（R25-A），escalate 每次取当前值。
 
         stale_candidates＝report.stale_candidates（core 禁兄弟 import，构造注入）；
-        runner＝邮件外呼缝（gate 同款），缺省真 subprocess。
-        """
+        env_activity＝report._env_activity（F59 同款构造注入）；draft_writer＝
+        pages.write_stalled_draft（F59 草稿页写面）；runner＝邮件外呼缝（gate
+        同款），缺省真 subprocess。"""
         self._state, self._oc, self._router = state, oc, router
         self._recover, self._app = recover, app
         self._store = store
         self._runner = runner or _subprocess_runner
         self._stale_candidates = stale_candidates
+        self._env_activity = env_activity
+        self._draft_writer = draft_writer
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
 
     def tick(self):
@@ -166,20 +171,64 @@ class Health:
         except Exception:
             return None
 
+    def _stalled_evidence(self, tid, t, note):
+        """卡住证据包（F59）：只收事实读数零根因结论；单项取不到整项省略。
+
+        返回（证据行集, 草稿页相对路径）；草稿写面失败→路径 None——
+        降级纪律：拍人/草稿互不阻塞，通知照发。"""
+        ev = {"tid": tid, "state": t["state"]}
+        if t.get("model"):
+            ev["model"] = t["model"]  # F55 字段，缺席省
+        if t.get("last_seen"):
+            ev["last_seen_age_s"] = max(0, int(time.time() - t["last_seen"]))
+        if t.get("worker_sid"):
+            try:  # busy＝F28 判据 updated>idle；oc 不可达省
+                tm = (self._oc.session(t["worker_sid"]) or {}).get("time") or {}
+                ev["busy"] = (tm.get("updated") or 0) > (tm.get("idle") or 0)
+            except Exception:
+                pass
+        latest = self._env_activity(t.get("env_dir")) if self._env_activity else 0.0
+        if latest > 0.0:  # env 缺席/被回收（活性 0.0）省
+            ev["env_active_seconds_ago"] = max(0, int(time.time() - latest))
+        vstate = (t.get("verify") or {}).get("state")
+        if vstate:
+            ev["verify_state"] = vstate
+        ev["fail_streak"] = t.get("fail_streak", 0)
+        if note:
+            ev["last_msg"] = note  # F52 摘要原样并入，不重复取
+        lines = [f"{k}: {' '.join(str(v).split())}" for k, v in ev.items()]
+        draft = None
+        if self._draft_writer:
+            try:
+                page = self._draft_writer(self._store.home, tid,
+                                          t.get("dispatcher_sid"), lines)
+                draft = str(Path(page).relative_to(self._store.home))
+            except Exception:
+                pass  # 草稿照写失败不阻塞拍人
+        return lines, draft
+
     def escalate(self, kind, tid, raw=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
         stalled 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户裁定），
-        其余 kind 照常会话注入；stalled 边沿附末次活动摘要（F52，失败降级）。"""
+        其余 kind 照常会话注入；stalled 边沿附末次活动摘要（F52，失败降级）
+        ＋证据包小节与草稿页路径（F59，降级纪律：证据永不阻塞拍人）。"""
         t = self._state.get(tid)
         body = (f"失控[{kind}] 任务{tid}：{_KIND_NOTE[kind]}；"
                 f"状态 {t['state']}，worker={t.get('worker_sid') or '-'}，"
                 f"dispatcher={t.get('dispatcher_sid') or '-'}，"
                 f"连败 {t.get('fail_streak', 0)}")
+        note = None
         if kind == KIND_STALLED and t.get("worker_sid"):
             note = self._last_activity(t["worker_sid"])  # 加一次取末条（F52 裁定）
             if note:
                 body += f"；{note}"
+        if kind == KIND_STALLED:  # F59 证据包：逐行 key: value，缺失项整行省略
+            lines, draft = self._stalled_evidence(tid, t, note)
+            if lines:
+                body += "\n证据包\n" + "\n".join(lines)
+            if draft:
+                body += f"\n草稿: {draft}"
         if raw:
             flat = " ".join(str(raw).split())  # 拍平换行：供给文本不得伪造服务合成行
             body += f"\n{_UNTRUSTED}\n{flat[:_RAW_MAX]}"

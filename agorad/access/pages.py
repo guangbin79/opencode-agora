@@ -6,9 +6,16 @@ F44 链式召回：全表快照与事件由装配处 callable 注入（access �
 页尾内联父/子/after 链 id＋近 8 事件摘要；无任何关联整段省略。
 """
 from pathlib import Path
+import re
+import time
 
 _FM_KEYS = ("id", "state", "chain_depth", "project_dir", "env_dir",
             "dispatcher_sid", "worker_sid", "req_id")
+
+# F59 草稿页尾段（授权边界逐字，规格 spec/f59-stall-evidence.md）
+_STALLED_TAIL = ("——草稿未经用户裁定；据此派发前须 dispatcher 报人确认"
+                 "（自动修本体不在授权内）")
+_DRAFT_N = re.compile(r"第 (\d+) 次升级")
 
 
 def write_task_page(home, tid, snap, tasks=None, events=None) -> Path:
@@ -26,6 +33,28 @@ def write_task_page(home, tid, snap, tasks=None, events=None) -> Path:
     if rel:
         body += "\n## 关联\n\n" + rel
     page.write_text(body, encoding="utf-8")
+    return page
+
+
+def write_stalled_draft(home, tid, dispatcher_sid, evidence_lines) -> Path:
+    """卡住证据包草稿页（F59）：wiki/drafts/stalled-<tid>.md，任务页同款写入通道。
+
+    同任务重复升级覆写，首行锚记「第 n 次升级」；草稿止步——据此派发前须
+    dispatcher 报人确认（尾段授权边界逐字）。"""
+    home = Path(home)
+    page = home / "wiki" / "drafts" / f"stalled-{tid}.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    n = 1
+    try:
+        m = _DRAFT_N.search(page.read_text(encoding="utf-8"))
+        if m:
+            n = int(m.group(1)) + 1
+    except (OSError, UnicodeDecodeError):
+        pass  # 首写无旧页/旧页残断（坏 UTF-8）＝第 1 次（覆写续写不堵死）
+    anchor = (f"created: {time.strftime('%Y-%m-%d')} tid: {tid} "
+              f"dispatcher: {dispatcher_sid or '-'} 第 {n} 次升级")
+    page.write_text("\n".join([anchor, "", *evidence_lines, _STALLED_TAIL]) + "\n",
+                    encoding="utf-8")
     return page
 
 
