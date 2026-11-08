@@ -468,7 +468,7 @@ class TaskService:
                     and not t.get("quick") and t["project_dir"] == project_dir
                     and isinstance(t["verify"]["cmd"], str)
                     and t["verify"]["cmd"].strip()):
-                cmd = t["verify"]["cmd"]
+                cmd = t["verify"]["cmd"].strip()  # 空白变体同键计票
                 counts[cmd] = counts.get(cmd, 0) + 1
         evid = ""
         if counts:
@@ -479,7 +479,7 @@ class TaskService:
             evid = "（候选: " + " / ".join(
                 f"{c}×{counts[c]}"
                 for c in sorted(counts, key=lambda k: (-counts[k], k))) + "）"
-        self._reject(tid, sid, "quick 验收按账本历史动态判定：无该仓条目且证据不足"
+        self._reject(tid, sid, "quick 验收按账本历史动态判定：证据不足"
                                + evid)
 
     def _boot(self, tid, env, title=None):

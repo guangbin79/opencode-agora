@@ -1071,16 +1071,27 @@ class TestQuickTask(TestCoreTask):
                       [e["event"] for e in self.events()])  # 登记事件照落
         self.assertTrue(self.svc.dispatch(tid, self.root))  # 建单登记即过派发硬闸
 
+    def test_quick_history_counts_strip(self):  # Req: F67
+        self.merged("python3 -m unittest")
+        self.merged(" python3 -m unittest ")  # 空白变体与原键合并计票
+        tid = self.svc.create("g", "/repo", None, self.root, quick=True)
+        self.assertEqual(self.state.get(tid)["verify"]["cmd"],
+                         "python3 -m unittest")
+
     def test_quick_history_minority_rejected(self):  # Req: F67
         self.merged("only-cmd")  # ×1 < 2：多数不足
         with self.assertRaises(Rejected) as cm:
             self.svc.create("g", "/repo", None, self.root, quick=True)
-        self.assertIn("only-cmd×1", str(cm.exception))
-        # 空历史：无候选即拒（他仓历史不外溢）
+        msg = str(cm.exception)
+        self.assertIn("证据不足", msg)
+        self.assertIn("only-cmd×1", msg)
+        self.assertNotIn("无该仓条目", msg)  # 有候选仍说无条目＝自相矛盾
+        # 空历史：同句式省候选段（他仓历史不外溢）
         with self.assertRaises(Rejected) as cm:
             self.svc.create("g", "/other", None, self.root, quick=True)
         msg = str(cm.exception)
-        self.assertIn("无该仓条目", msg)
+        self.assertIn("证据不足", msg)
+        self.assertNotIn("无该仓条目", msg)
         self.assertNotIn("候选", msg)  # 空历史省候选清单
 
     def test_quick_history_tie_rejected(self):  # Req: F67

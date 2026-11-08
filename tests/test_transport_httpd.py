@@ -1161,7 +1161,8 @@ class TestQuickMicro(HttpdTest):
                      {"goal": "g", "project_dir": "/repo", "quick": True},
                      self.root)
         self.assertEqual(st, 403)
-        self.assertIn("无该仓条目", r["error"])
+        self.assertIn("证据不足", r["error"])
+        self.assertNotIn("无该仓条目", r["error"])
 
     def test_quick_with_verify_cmd_403(self):  # Req: F65
         st, r = call(self.port, "POST", "/task_create",
