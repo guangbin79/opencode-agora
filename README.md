@@ -17,6 +17,8 @@ You:    "How's it going?"   →   board: ✅ merged
 
 The difference in one line: **the LLM holds the steering wheel; the machine holds the brakes.** Orchestration — what to run, in what order, when to replan — stays in your conversation, so mid-flight intent (*"now apply the same fix to repoB and repoC"*) becomes a new schedule on the spot. And agents don't grade their own homework here: the verify command runs under the service, not the worker — green means the tests actually passed on the exact commit being merged.
 
+> **Super Agent pillars**: this repo is the dispatch pillar (Router). The other two: [silicon-memory](https://github.com/guangbin79/silicon-memory) (memory/state separation) and [coding-gates](https://github.com/guangbin79/coding-gates) (quality supervision gates). Together they form the super agent implementation.
+
 ## Quick Start
 
 Prerequisites: [opencode](https://opencode.ai) v2 (`curl -fsSL https://opencode.ai/v2/install | bash`), [bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`), `git`, `python3` ≥ 3.10 (stdlib only — zero pip dependencies).

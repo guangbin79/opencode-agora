@@ -17,6 +17,8 @@ agora：  └─ 在隔离的 git worktree 里派一个 worker
 
 一句话说清差异：**LLM 握方向盘，机器握刹车。** 编排权——跑什么、什么顺序、何时重排——留在对话里，运行中浮现的意图（*"把同样的修复再应用到 repoB 和 repoC"*）当场变成新调度。而这里 agent 不能给自己的作业打分：verify 命令在服务侧执行而非 worker 侧——绿＝测试真的在要合并的那个提交上跑过。
 
+> **Super Agent 三支柱**：本仓为「调度」支柱（Router）。另两根：[silicon-memory](https://github.com/guangbin79/silicon-memory)（存算分离：记忆/状态层）· [coding-gates](https://github.com/guangbin79/coding-gates)（质量监督门）。三仓协同构成 super agent 实现。
+
 ## 快速开始
 
 前置：[opencode](https://opencode.ai) v2（`curl -fsSL https://opencode.ai/v2/install | bash`）、[bun](https://bun.sh)（`curl -fsSL https://bun.sh/install | bash`）、`git`、`python3` ≥ 3.10（仅标准库，零 pip 依赖）。
