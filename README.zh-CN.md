@@ -122,7 +122,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 - **实时问责**——失控实时拍主会话；每次状态变更落只追加 JSONL 审计；健康巡检兜底 dispatcher 死亡
 - **兼容 PR 工作流**——`task_create(target_branch="feature/x")` 合并进特性分支而非 main
 - **req 编号服务端发放**——`task_create(req_id="F34")` 登记发放并查重（种子扫 `docs/reqs/`，重复发放拒绝）。服务端分配＝权威号源，worker 从任务页取号；不阻止绕过（先例约束，非闸）
-- **quick 微任务**——单仓小改轻车道：`task_create(quick=true)` 免 verify_cmd，验收从仓级清单（`verify-presets.json`）原子登记；超包络（文件数/行数旋钮）在验证门被机械量出、按 verify 红退回；BOOT 减配三行信息行
+- **quick 微任务**——单仓小改轻车道：`task_create(quick=true)` 免 verify_cmd，验收按账本历史动态判定（同仓 merged 非 quick 任务中唯一最高频命令且 ≥2 次；证据不足即拒并报候选——被拒直接转正规派发，无人工补表路径）；超包络（文件数/行数旋钮）在验证门被机械量出、按 verify 红退回；BOOT 减配三行信息行
 - **轻量**——Python stdlib 服务，零 pip 依赖，只绑 localhost，无遥测
 
 ## 对比
@@ -146,7 +146,6 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 | `AGORA_HEALTH_INTERVAL` | `300` | dispatcher 健康巡检（秒） |
 | `AGORA_VERIFY_TIMEOUT` | `300` | 单次任务／集成 verify 软顶（秒）：到点提醒派发方、不杀 |
 | `AGORA_VERIFY_CEILING` | `4× 软顶` | 硬顶（秒）：到点终止验证进程组；超顶路由派发方（不弹 worker、任务驻留 done） |
-| `$AGORA_HOME/.agora/verify-presets.json` | 无 | quick 任务仓级验收清单（`{绝对仓径: 验收命令}`）；缺文件＝无清单，quick 建单即拒 |
 | `AGORA_QUICK_MAX_FILES` | `3` | quick 任务包络：累计改动文件数上限，verify 前机械量出、超限按 verify 红退回 |
 | `AGORA_QUICK_MAX_LINES` | `30` | quick 任务包络：累计增删行数上限，超限按 verify 红退回 worker |
 | `$AGORA_HOME/.agora/agorad.env` | — | 旋钮缺省文件（`KEY=VALUE` 逐行、`#` 注释）；显式 env 优先，daemon 重启不丢 |

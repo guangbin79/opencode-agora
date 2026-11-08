@@ -8,7 +8,6 @@ merged 不动、空链幂等。cancel 忙碌闸防误杀（F28）：worker 回�
 （health 僵态豁免同款 busy 信号），force:true 强杀，oc 探测失败 fail-open。
 core 只 import stdlib；依赖全构造注入。
 """
-import json
 import pathlib
 import re
 import secrets
@@ -93,11 +92,11 @@ class TaskService:
             model = parent.get("model")  # F55：缺省继承父任务
         if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
             self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
-        if quick and verify_cmd is not None:  # F65：quick 清单外自带命令拒
-            self._reject(tid, sid, "quick 验收只认仓级清单，勿自带命令")
+        if quick and verify_cmd is not None:  # F65：quick 自带命令拒（防自查）
+            self._reject(tid, sid, "quick 验收按账本历史动态判定，勿自带命令")
         if quick and verify_pending:  # F65：quick 原子登记与豁免旗同款互斥
             self._reject(tid, sid, "quick 与 verify_pending 互斥——二选一")
-        preset = self._preset_cmd(tid, sid, project_dir) if quick else None
+        resolved = self._history_cmd(tid, sid, project_dir) if quick else None
         if verify_cmd is not None and not verify_cmd.strip():
             self._reject(tid, sid, "verify 命令为空——task_create 登记非空命令")
         if timeout is not None and _bad_timeout(timeout):  # F51：坏值 fail-fast，文案与服务级同款风格
@@ -126,8 +125,8 @@ class TaskService:
             verify = {"cmd": verify_cmd, "state": "registered",
                       "registered_by": sid, "registered_at": now,
                       "timeout": timeout}
-        elif preset is not None:  # F65：quick 仓级清单原子登记（同 registered 形状）
-            verify = {"cmd": preset, "state": "registered",
+        elif resolved is not None:  # F67：quick 历史判定原子登记（同 registered 形状）
+            verify = {"cmd": resolved, "state": "registered",
                       "registered_by": sid, "registered_at": now,
                       "timeout": timeout}
         elif role == "worker":  # F37 缺省继承：验证配置随父任务（registered 才过闸）
@@ -148,7 +147,7 @@ class TaskService:
             "created": now, "updated": now})
         self._store.append_event({"ts": now, "actor": sid,
                                   "event": EV_CREATED, "task": tid})
-        if verify_cmd is not None or preset is not None:  # 登记事件照落（与 update 路同款审计）
+        if verify_cmd is not None or resolved is not None:  # 登记事件照落（与 update 路同款审计）
             self._store.append_event({"ts": now, "actor": sid,
                                       "event": EV_VERIFY, "task": tid})
         self._pages(self._store.home, tid, self._state.get(tid))  # F44：事件先落再渲染
@@ -458,21 +457,30 @@ class TaskService:
             pass
         return tid
 
-    def _preset_cmd(self, tid, sid, project_dir):
-        """F65 quick 仓级清单：$AGORA_HOME/.agora/verify-presets.json
-        （绝对仓径→验收命令串；email.json 同款读面）。缺文件/坏 JSON/非 dict/
-        无该仓条目一律＝无清单，报因一致——quick 验收只认清单，清单外命令拒。"""
-        try:
-            presets = json.loads((self._store.home / ".agora"
-                                  / "verify-presets.json").read_text(
-                                      encoding="utf-8"))
-        except Exception:
-            presets = None
-        cmd = presets.get(project_dir) if isinstance(presets, dict) else None
-        if not (isinstance(cmd, str) and cmd.strip()):
-            self._reject(tid, sid, "quick 任务验收只认仓级清单"
-                                   "（verify-presets.json 无该仓条目）")
-        return cmd
+    def _history_cmd(self, tid, sid, project_dir):
+        """F67 quick 验收动态判定：账本历史多数（同仓 merged 非 quick 且
+        verify.cmd 非空串）。收＝唯一最高频且次数 ≥2，取该命令原子登记；
+        否则拒并报候选证据（空历史省候选清单）。quick 行不计——其 cmd 本是
+        判定产物（防自证）；常规路不读本函数（历史零染非 quick 建单）。"""
+        counts = {}
+        for t in self._state.snapshot()["tasks"].values():
+            if (t["state"] in ("merged", "closed") and t.get("commit")
+                    and not t.get("quick") and t["project_dir"] == project_dir
+                    and isinstance(t["verify"]["cmd"], str)
+                    and t["verify"]["cmd"].strip()):
+                cmd = t["verify"]["cmd"]
+                counts[cmd] = counts.get(cmd, 0) + 1
+        evid = ""
+        if counts:
+            top = max(counts.values())
+            wins = [c for c, n in counts.items() if n == top]
+            if top >= 2 and len(wins) == 1:
+                return wins[0]
+            evid = "（候选: " + " / ".join(
+                f"{c}×{counts[c]}"
+                for c in sorted(counts, key=lambda k: (-counts[k], k))) + "）"
+        self._reject(tid, sid, "quick 验收按账本历史动态判定：无该仓条目且证据不足"
+                               + evid)
 
     def _boot(self, tid, env, title=None):
         if title:  # F46 B-1 纵深防御：存量脏 title 同款压平，断多行穿透开场解析面

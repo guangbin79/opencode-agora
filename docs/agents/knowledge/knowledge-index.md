@@ -15,7 +15,7 @@
 - **会话牌认证**：root/dispatcher/worker 角色矩阵＋附牌链
 - **验收授权全局角色判定**（F37，2026-11-01）：worker 保留嵌套建单/派发，但 verify_cmd 写面（task_create 携带＋task_update 登记）一律按 token 全局 role 拒——子任务局部 dispatcher 归属不构成授权；建单 project_dir/target_branch 强制继承现役父任务，verify_pending 自旗拒且豁免旗不随父，verify 字典缺省随父——未获配置 dispatch 硬闸拒
 - **门记录豁免作用域约束**（F38，2026-11-01）：basename 级豁免（.omo/.req-gate/.review-loop）须配作用域腿——写目标 ∈ 当前 env（cred.envDir）或当前仓根才豁免，跨 env/跨仓一律拒；「路径含字样即放行」类豁免是投毒面，放宽只认工作区＋精确路径授权
-- **quick 微任务车道**（F65）：task_create(quick=true) 建单原子登记——验收只认仓级清单 $AGORA_HOME/.agora/verify-presets.json（绝对仓径→命令；缺清单条目/自带 verify_cmd 即拒）；合并门前量 merge-base 累计 diff，超 AGORA_QUICK_MAX_FILES/LINES（缺省 3/30）按 verify 红既有路径退回（复用 verify-failed＋3-strike 零新状态）；BOOT 减配砍嵌套/协作/沉淀三行；非 quick 任务零变化
+- **quick 微任务车道**（F65/F67）：task_create(quick=true) 建单原子登记——验收按账本历史动态判定（同仓 merged 非 quick 的 verify.cmd 唯一最高频且 ≥2 次；证据不足即拒并报候选，quick 行不计证据；自带 verify_cmd 即拒）；合并门前量 merge-base 累计 diff，超 AGORA_QUICK_MAX_FILES/LINES（缺省 3/30）按 verify 红既有路径退回（复用 verify-failed＋3-strike 零新状态）；BOOT 减配砍嵌套/协作/沉淀三行；非 quick 任务零变化
 
 ## 关键模式
 

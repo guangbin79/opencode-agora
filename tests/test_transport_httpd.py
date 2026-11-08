@@ -1115,15 +1115,23 @@ class TestReqIdPassthrough(HttpdTest):
 
 
 class TestQuickMicro(HttpdTest):
-    """F65 quick 微任务全链：端点布尔校验/透传＋仓级清单原子登记＋BOOT 减配。"""
+    """F67 quick 微任务全链：端点布尔校验/透传＋账本历史判定原子登记＋BOOT 减配。"""
 
-    def preset(self, mapping):
-        (self.tmp / ".agora").mkdir(exist_ok=True)
-        (self.tmp / ".agora" / "verify-presets.json").write_text(
-            json.dumps(mapping), encoding="utf-8")
+    def merged(self, cmd="true"):
+        """播种判定证据：非 quick 任务建单带 cmd，直迁 merged（账本历史）。"""
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "verify_cmd": cmd},
+                     self.root)
+        assert st == 200, r
+        tid = r["task"]
+        self.app.state.transition(tid, "dispatched")
+        self.app.state.transition(tid, "running")
+        self.app.state.transition(tid, "done", commit="c" * 40)
+        self.app.state.transition(tid, "merged")
 
-    def test_quick_preset_registers_and_boot_loses_three_lines(self):  # Req: F65
-        self.preset({"/repo": "true"})
+    def test_quick_history_registers_and_boot_loses_three_lines(self):  # Req: F67
+        self.merged()
+        self.merged()
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "g", "project_dir": "/repo", "quick": True},
                      self.root)
@@ -1148,15 +1156,14 @@ class TestQuickMicro(HttpdTest):
         for line in ("嵌套:", "协作:", "沉淀:"):
             self.assertIn(line, boot)  # 非 quick BOOT 不变
 
-    def test_quick_without_preset_403(self):  # Req: F65
+    def test_quick_without_history_403(self):  # Req: F67
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "g", "project_dir": "/repo", "quick": True},
                      self.root)
         self.assertEqual(st, 403)
-        self.assertIn("quick 任务验收只认仓级清单", r["error"])
+        self.assertIn("无该仓条目", r["error"])
 
     def test_quick_with_verify_cmd_403(self):  # Req: F65
-        self.preset({"/repo": "true"})
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "g", "project_dir": "/repo", "quick": True,
                       "verify_cmd": "pytest -q"}, self.root)

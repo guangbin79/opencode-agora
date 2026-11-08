@@ -1039,26 +1039,29 @@ class TestCredentialPointer(TestCoreTask):
 
 
 class TestQuickTask(TestCoreTask):
-    """F65 quick 微任务建单契约：仓级清单准入＋原子登记＋非 quick 不受染。"""
+    """F67 quick 微任务建单契约：账本历史动态判定＋原子登记＋非 quick 不受染。"""
 
-    def preset(self, mapping):
-        d = self.tmp / ".agora"
-        d.mkdir(exist_ok=True)
-        (d / "verify-presets.json").write_text(json.dumps(mapping),
-                                               encoding="utf-8")
+    def merged(self, cmd="true", project_dir="/repo"):
+        """播种历史证据：非 quick merged 任务带登记命令（判定只认账本）。"""
+        tid = self.svc.create("g", project_dir, None, self.root, verify_cmd=cmd)
+        for to in ("dispatched", "running"):
+            self.state.transition(tid, to)
+        self.state.transition(tid, "done", commit="c" * 40)
+        self.state.transition(tid, "merged")
+        return tid
 
-    def test_quick_without_preset_rejected(self):  # Req: F65
-        # 缺文件＝无清单：建单即拒
-        with self.assertRaises(Rejected) as cm:
-            self.svc.create("g", "/repo", None, self.root, quick=True)
-        self.assertIn("quick 任务验收只认仓级清单", str(cm.exception))
-        # 有清单但无该仓条目：同因拒
-        self.preset({"/other": "true"})
-        with self.assertRaises(Rejected):
-            self.svc.create("g", "/repo", None, self.root, quick=True)
+    def merged_quick(self):
+        """merge 一个 quick 任务（其 cmd 来自判定本身，不入证据）。"""
+        tid = self.svc.create("g", "/repo", None, self.root, quick=True)
+        for to in ("dispatched", "running"):
+            self.state.transition(tid, to)
+        self.state.transition(tid, "done", commit="c" * 40)
+        self.state.transition(tid, "merged")
+        return tid
 
-    def test_quick_with_preset_registers_atomically(self):  # Req: F65
-        self.preset({"/repo": "python3 -m unittest"})
+    def test_quick_history_majority_registers(self):  # Req: F67
+        self.merged("python3 -m unittest")
+        self.merged("python3 -m unittest")
         tid = self.svc.create("g", "/repo", None, self.root, quick=True)
         t = self.state.get(tid)
         self.assertEqual(t["verify"]["cmd"], "python3 -m unittest")
@@ -1068,25 +1071,57 @@ class TestQuickTask(TestCoreTask):
                       [e["event"] for e in self.events()])  # 登记事件照落
         self.assertTrue(self.svc.dispatch(tid, self.root))  # 建单登记即过派发硬闸
 
+    def test_quick_history_minority_rejected(self):  # Req: F67
+        self.merged("only-cmd")  # ×1 < 2：多数不足
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, quick=True)
+        self.assertIn("only-cmd×1", str(cm.exception))
+        # 空历史：无候选即拒（他仓历史不外溢）
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/other", None, self.root, quick=True)
+        msg = str(cm.exception)
+        self.assertIn("无该仓条目", msg)
+        self.assertNotIn("候选", msg)  # 空历史省候选清单
+
+    def test_quick_history_tie_rejected(self):  # Req: F67
+        self.merged("cmd-a")
+        self.merged("cmd-b")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, quick=True)
+        msg = str(cm.exception)
+        self.assertIn("证据不足", msg)
+        self.assertIn("cmd-a×1", msg)  # 平局报因点名列者
+        self.assertIn("cmd-b×1", msg)
+
+    def test_quick_rows_excluded_from_evidence(self):  # Req: F67
+        self.merged("cmd-a")
+        self.merged("cmd-a")
+        self.merged_quick()  # quick 行 cmd 同为 cmd-a——判定产物不入证据
+        self.merged("cmd-b")
+        self.merged("cmd-b")
+        # 计入则 cmd-a×3 破平局；排除后 2:2 平局即拒
+        with self.assertRaises(Rejected):
+            self.svc.create("g", "/repo", None, self.root, quick=True)
+
     def test_quick_with_explicit_verify_cmd_rejected(self):  # Req: F65
-        self.preset({"/repo": "true"})
         with self.assertRaises(Rejected) as cm:
             self.svc.create("g", "/repo", None, self.root,
                             verify_cmd="pytest -q", quick=True)
         self.assertIn("勿自带命令", str(cm.exception))
 
     def test_quick_with_verify_pending_rejected(self):  # Req: F65
-        # quick＝原子登记路，与探索豁免旗语义互斥（verify_cmd 同款口径）
+        # quick＝动态判定路，与探索豁免旗语义互斥（verify_cmd 同款口径）
         with self.assertRaises(Rejected) as cm:
             self.svc.create("g", "/repo", None, self.root,
                             verify_pending=True, quick=True)
         self.assertIn("互斥", str(cm.exception))
 
-    def test_non_quick_unaffected_by_presets(self):  # Req: F65
-        self.preset({"/repo": "preset-cmd"})
-        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+    def test_non_quick_unaffected_by_history(self):  # Req: F67
+        self.merged("true")
+        self.merged("true")
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="other")
         t = self.state.get(tid)
-        self.assertEqual(t["verify"]["cmd"], "true")  # 清单不染常规路
+        self.assertEqual(t["verify"]["cmd"], "other")  # 历史不染常规路
         self.assertFalse(t["quick"])
 
 
