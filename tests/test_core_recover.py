@@ -194,6 +194,13 @@ class TestCoreRecover(unittest.TestCase):
         self.assertEqual(self.oc.sessions, [])
         self.assertEqual(self.state.get("t1")["worker_sid"], "w1")
 
+    def test_reinject_defers_when_sid_changed(self):  # Req: ag-d1d8c1
+        self.seed("t1", worker="w1")
+        self.assertIsNone(self.rec.reinject("t1", expect_wsid="w9"))
+        self.assertEqual(self.oc.sessions, [])  # 身份已易主：让位他车道零副作用（None≠失败）
+        self.assertEqual(self.state.get("t1")["worker_sid"], "w1")
+        self.assertTrue(self.rec.reinject("t1", expect_wsid="w1"))  # 相符照常重建
+
     def test_reinjected_worker_posts_over_chain_edge(self):  # Req: F6
         self.seed("t1")
         self.auth.issue("w1", "worker")

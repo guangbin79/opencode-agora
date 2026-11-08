@@ -8,12 +8,14 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from agorad.access.oc import OcUnavailable
 from agorad.access.pages import write_task_page
 from agorad.access.store import Store
+from agorad.core import report
 from agorad.core.auth import Auth
 from agorad.core.msg import Router
 from agorad.core.state import State
@@ -1036,6 +1038,182 @@ class TestCredentialPointer(TestCoreTask):
         self.assertEqual(self.gitx.removed, [f"/envs/{tid}"])  # 新建 env 回收
         self.assertIsNone(self.auth.token_for("s1"))  # 签出的新牌即废
         self.assertEqual(self.oc.injected, [])  # 零凭据文本注入
+
+
+class TestStalledRedispatch(TestCoreTask):
+    """ag-d1d8c1 状态门扩展：running 且 stalled 可重派（与 blocked 重派同语义）。
+
+    stalled 判定复用 report.stale_candidates 同一口径（单一事实源，禁第二套
+    阈值）；会话死让位 reinject 自愈车道（并发双绑封闭）、busy 免判（F28 同款
+    updated>idle）、oc 探测失败 fail-closed（宁拒派不双跑）——拒绝文案带因。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.svc = TaskService(self.state, self.auth, self.gitx, self.oc,
+                               self.store, self.router, write_task_page,
+                               stale_candidates=report.stale_candidates)
+
+    def running_pair(self, last_seen_ago):
+        """dispatched_pair 升 running＋回拨 last_seen 制造（非）僵态；
+        worker 会话（s1）默认在场且空闲且早于行基线（created=0 非年轻）。"""
+        tid, disp, old = self.dispatched_pair()
+        self.state.transition(tid, "running")
+        self.state.set_fields(tid, last_seen=time.time() - last_seen_ago)
+        self.oc.detail["s1"] = {"time": {"updated": 5.0, "idle": 10.0,
+                                         "created": 0.0}}
+        return tid, disp, old
+
+    def test_stalled_running_redispatch_allowed(self):  # Req: ag-d1d8c1
+        tid, disp, old = self.running_pair(last_seen_ago=1300)
+        new = self.svc.dispatch(tid, disp)
+        self.assertIsNone(self.auth.identify(old))  # 旧牌即废
+        self.assertEqual(self.auth.identify(new)[1], "worker")  # 签新牌
+        self.assertEqual(self.state.get(tid)["state"], "dispatched")
+        self.assertEqual(self.state.get(tid)["fail_streak"], 0)  # 清零同 blocked
+        note = [e for e in self.events()
+                if e["event"] == "dispatched"][-1].get("note", "")
+        self.assertIn("stalled_redispatch", note)  # 审计事件
+        self.assertIn("last_seen_age_s", note)  # 证据字段
+
+    def test_fresh_running_redispatch_rejected(self):  # Req: ag-d1d8c1
+        tid, _, _ = self.running_pair(last_seen_ago=0)
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("stalled 可重派", str(cm.exception))
+        self.assertIn("fresh", str(cm.exception))  # fail-closed 报因
+        self.assertEqual(self.state.get(tid)["state"], "running")  # 拒绝零副作用
+
+    def test_stale_but_busy_running_rejected(self):  # Req: ag-d1d8c1
+        tid, _, _ = self.running_pair(last_seen_ago=1300)
+        self.oc.detail["s1"] = {"time": {"updated": 10.0, "idle": 5.0}}  # 回合进行中
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("busy", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+
+    def test_stale_dead_session_rejected_reinject_lane(self):  # Req: ag-d1d8c1
+        tid, _, _ = self.running_pair(last_seen_ago=1300)
+        self.oc.detail.pop("s1")  # 会话死：reinject 自愈车道所有
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)  # 重派抢跑＝与 tick reinject 并发双绑
+        self.assertIn("session_dead", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+
+    def test_stale_with_young_session_rejected(self):  # Req: ag-d1d8c1
+        tid, _, _ = self.running_pair(last_seen_ago=1300)
+        # reinject 只 set_fields 不刷基线：替换会话刚出生（created 晚于基线），
+        # idle 读数不构成僵证——拒绝待其真干活（touch 刷 last_seen）再判
+        self.oc.detail["s1"] = {"time": {"updated": 5.0, "idle": 10.0,
+                                         "created": time.time() * 1000}}
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("session_young", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+
+    def test_redispatch_aborts_when_sid_rebound_midflight(self):  # Req: ag-d1d8c1
+        tid, disp, old = self.running_pair(last_seen_ago=1300)
+        inner = self.oc.session
+
+        def session(sid):  # 模拟 tick reinject 在判僵 probe 后落 set_fields 抢绑
+            d = inner(sid)
+            if d is not None:
+                self.state.set_fields(tid, worker_sid="s2rebind")
+            return d
+
+        self.oc.session = session
+        n = len(self.oc.sessions)
+        cred = (self.tmp / "credentials" / f"{tid}.token").read_text()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("session_replaced", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")  # 未落 dispatched
+        self.assertEqual(self.state.get(tid)["worker_sid"], "s2rebind")  # 抢绑者持有
+        self.assertEqual(len(self.oc.sessions), n)  # 前置卫兵：零新会话零牌副作用
+        self.assertEqual((self.tmp / "credentials" / f"{tid}.token").read_text(),
+                         cred)  # 牌文件未被覆写（round-3：卫兵前置零破坏）
+
+    def test_redispatch_resid_guard_drops_poisoned_cred(self):  # Req: ag-d1d8c1
+        tid, disp, old = self.running_pair(last_seen_ago=1300)
+        inner_create = self.oc.create
+
+        def create(cwd, boot, title=None, model=None):
+            sid = inner_create(cwd, boot, title=title, model=model)
+            self.state.set_fields(tid, worker_sid="s2rebind")  # create 期间 tick 抢绑
+            return sid
+
+        self.oc.create = create
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("session_replaced", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+        self.assertEqual(self.state.get(tid)["worker_sid"], "s2rebind")
+        self.assertIsNone(self.auth.token_for(self.oc.sessions[-1][0]))  # 弃新牌
+        self.assertFalse(
+            (self.tmp / "credentials" / f"{tid}.token").exists())  # 覆写件回收→pull 自愈
+        self.assertIsNotNone(self.auth.identify(old))  # 旧牌未被本 lane 废（rebind 不断链）
+
+    def test_session_young_veto_decays(self):  # Req: ag-d1d8c1
+        # 惰性替换会话出生已超僵态阈：钳制基线过期→照常可重派（非永久否决）
+        tid, disp, _ = self.dispatched_pair()
+        self.state.transition(tid, "running")
+        self.state.set_fields(tid, last_seen=time.time() - 13000)  # 行僵 3.6h
+        self.oc.detail["s1"] = {"time": {"updated": 5.0, "idle": 10.0,
+                                         "created": (time.time() - 1800) * 1000}}
+        new = self.svc.dispatch(tid, disp)
+        self.assertEqual(self.auth.identify(new)[1], "worker")
+        note = [e for e in self.events()
+                if e["event"] == "dispatched"][-1].get("note", "")
+        self.assertIn("stale_age_s=180", note)  # 证据钳到出生（≈1800s，非 13000s）
+
+    def test_resid_guard_covers_state_only_mutations(self):  # Req: ag-d1d8c1
+        # 惰性旧 worker 在 create 窗口抢先 done（状态面易主，不动 worker_sid）
+        tid, disp, old = self.running_pair(last_seen_ago=1300)
+        inner_create = self.oc.create
+
+        def create(cwd, boot, title=None, model=None):
+            sid = inner_create(cwd, boot, title=title, model=model)
+            self.state.transition(tid, "done")
+            return sid
+
+        self.oc.create = create
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("session_replaced", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "done")  # 易主结果保持
+        self.assertIsNone(self.auth.token_for(self.oc.sessions[-1][0]))  # 弃新牌
+        self.assertFalse(
+            (self.tmp / "credentials" / f"{tid}.token").exists())  # done 无活牌
+
+    def test_stalled_with_open_children_rejected(self):  # Req: ag-d1d8c1
+        # 名下未结案子任务：重派丢所有权且 gate open-children 闸按申报 sid 匹配
+        tid, disp, _ = self.running_pair(last_seen_ago=1300)
+        self.seed("kid", state="running", disp="s1", worker="w-kid")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("open_children", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+        self.state.set_fields("kid", state="merged")  # 子链结案→放行
+        self.assertTrue(self.svc.dispatch(tid, disp))
+        self.assertEqual(self.state.get(tid)["state"], "dispatched")
+
+    def test_stale_running_oc_down_fail_closed(self):  # Req: ag-d1d8c1
+        tid, _, _ = self.running_pair(last_seen_ago=1300)
+        self.oc.down = True  # busy 探不可：宁拒派不双跑
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("oc_down", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+
+    def test_running_without_classifier_fail_closed(self):  # Req: ag-d1d8c1
+        tid = self.seed("t9", state="running", worker="w9")
+        bare = TaskService(self.state, self.auth, self.gitx, self.oc,
+                           self.store, self.router, write_task_page)
+        with self.assertRaises(Rejected) as cm:
+            bare.dispatch(tid, self.root)  # 无分类器注入：fail-closed
+        self.assertIn("no_classifier", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "running")
+        self.assertEqual(self.state.get(tid)["state"], "running")
 
 
 class TestQuickTask(TestCoreTask):

@@ -41,14 +41,21 @@ class Recover:
             if not alive:
                 self.reinject(tid)
 
-    def reinject(self, tid) -> bool:
-        """死 worker 重建：成功 True；复查不通过/创建失败一律 False。"""
+    def reinject(self, tid, expect_wsid=None):
+        """死 worker 重建：成功 True；复查不通过/创建失败 False。
+
+        expect_wsid＝tick 判死时的会话身份（ag-d1d8c1 双跑封闭）：重读行
+        worker_sid 不一致＝他车道（重派/reinject）已改绑——让位返回 None
+        （tick 据此免误报 escalate，round-3；startup 路缺省不传，行为不变）。
+        """
         try:
             t = self._state.get(tid)
         except KeyError:
             return False
         if t["state"] not in _REINJECTABLE or not t.get("env_dir"):
             return False  # 复查：终态/blocked/verify_failed(等续修) 不重注入
+        if expect_wsid is not None and t.get("worker_sid") != expect_wsid:
+            return None  # 身份已易主：让位他车道（CAS，与失败区分）
         try:
             self._gitx.head(t["env_dir"])  # 环境在册探针：worktree 已失不盲注
             wsid = self._oc.create(t["env_dir"], self._boot(tid, t),

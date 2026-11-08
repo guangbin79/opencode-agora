@@ -49,9 +49,11 @@ class Rejected(Exception):
 class TaskService:
     """单写者串行调用；无锁无线程（同 Router 口径）。"""
 
-    def __init__(self, state, auth, gitx, oc, store, router, pages):
+    def __init__(self, state, auth, gitx, oc, store, router, pages,
+                 stale_candidates=None):
         self._state, self._auth, self._gitx, self._oc = state, auth, gitx, oc
         self._store, self._router, self._pages = store, router, pages
+        self._stale_candidates = stale_candidates  # ag-d1d8c1：僵态口径单一事实源
 
     # ---- F2 建任务 ----
 
@@ -159,8 +161,20 @@ class TaskService:
         t = self._state.get(tid)
         sid, _ = self._gate(dispatcher_token, "task_dispatch", tid, t,
                             owner=t.get("dispatcher_sid"))
+        stale_note = None
         if t["state"] not in ("todo", "blocked"):
-            self._reject(tid, sid, f"{t['state']} 不可派发（仅 todo/blocked）")
+            if t["state"] == "running":  # ag-d1d8c1：stalled 的 running 可重派
+                base, why = self._stalled_running(tid, t)
+                if base is None:
+                    self._reject(tid, sid, f"running 不可重派（{why}；"
+                                           "stalled 可重派；仅 todo/blocked）")
+                stale_note = ("stalled_redispatch "
+                              f"stale_age_s={max(0, int(time.time() - base))}")
+                if t.get("last_seen"):
+                    stale_note += (f" last_seen_age_s="
+                                   f"{max(0, int(time.time() - t['last_seen']))}")
+            else:
+                self._reject(tid, sid, f"{t['state']} 不可派发（仅 todo/blocked）")
         if (t["verify"]["state"] != "registered" and not t.get("verify_pending")):
             # 派发硬闸：两步舞漏登记在派发瞬间拍死（gt-e103ae/gt-87f3c2 同根因）；
             # 唯一豁免＝建单显式 verify_pending（探索路：worker 提案→task_update 登记）
@@ -207,6 +221,14 @@ class TaskService:
                 self._store.append_event({"ts": time.time(), "actor": sid,
                                           "event": "checkout_materialize",
                                           "task": tid, "note": report})
+        fresh = self._state.get(tid)
+        if fresh["state"] not in ("todo", "blocked", "running") \
+                or fresh.get("worker_sid") != t.get("worker_sid"):
+            # 身份卫兵（前置，ag-d1d8c1 round-3/5）：probe 后 tick reinject 改绑
+            # 或状态面易主（旧 worker 抢 done／dispatcher cancel——均不动
+            # worker_sid）即让位——此刻零破坏（旧牌仍在册，rebind 链不断）
+            self._reject(tid, sid, "running 不可重派（session_replaced；"
+                                   "stalled 可重派；仅 todo/blocked）")
         try:
             wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
                                     title=f"{tid}: {t.get('title', tid)}",
@@ -215,7 +237,6 @@ class TaskService:
             if not t.get("env_dir"):
                 self._gitx.remove_env(env)
             self._reject(tid, sid, f"can_spawn: {e}")
-        self._revoke_worker(t.get("worker_sid"))  # 重派先废旧牌再签新牌
         token = self._auth.issue(wsid, "worker")
         try:
             cred_file = self._store.write_credential(tid, token)  # F43：牌落盘 0600（迁移前：败则零账面残局）
@@ -224,10 +245,24 @@ class TaskService:
             if not t.get("env_dir"):
                 self._gitx.remove_env(env)
             self._reject(tid, sid, f"credential_write: {e}")
+        fresh = self._state.get(tid)
+        if fresh["state"] not in ("todo", "blocked", "running") \
+                or fresh.get("worker_sid") != t.get("worker_sid"):
+            # 残余窗口卫兵：create/落盘期间 tick reinject 抢绑或状态面易主
+            # （round-5：旧 worker 抢 done／cancel 不动 worker_sid）——废旧牌
+            # 后置到卫兵之后，rebind 依赖旧牌在册不断链；牌文件已覆写即删
+            # （missing→插件 pull 自愈兜底，F25 /cred_for_sid），弃新牌防双绑
+            self._revoke_worker(wsid)
+            self._store.remove_credential(tid)
+            self._reject(tid, sid, "running 不可重派（session_replaced；"
+                                   "stalled 可重派；仅 todo/blocked）")
+        self._revoke_worker(t.get("worker_sid"))  # 重派废旧牌（卫兵后置：rebind 不落空）
         self._state.transition(tid, "dispatched", worker_sid=wsid, env_dir=env,
                                dispatcher_sid=sid)
+        note = {"note": stale_note} if stale_note else {}  # stalled 重派审计证据
         self._store.append_event({"ts": time.time(), "actor": sid,
-                                  "event": EV_DISPATCHED, "task": tid, "worker": wsid})
+                                  "event": EV_DISPATCHED, "task": tid,
+                                  "worker": wsid, **note})
         self._pages(self._store.home, tid, self._state.get(tid))  # F44：事件先落再渲染
         text = f"[agora] credential {tid}\nfile: {cred_file}"
         try:
@@ -313,6 +348,50 @@ class TaskService:
             return False, False
         tm = data.get("time") or {}  # 缺形状→不 busy→照判
         return (tm.get("updated") or 0) > (tm.get("idle") or 0), False
+
+    def _stalled_running(self, tid, t):
+        """ag-d1d8c1：running+stalled 可重派判定——口径全借 health tick 同款：
+        report.stale_candidates（构造注入，单一事实源禁第二套阈值；单行入判读
+        同 report.detail 口径，不为他任务白走 env walk）。
+        fail-closed 让位语义（评审 round-1 高危封闭）：会话死（None）归 reinject
+        自愈车道——重派抢跑会与 tick reinject 并发双 oc.create 双绑同一 env；
+        busy（F28 同款 updated>idle）回合进行中免判；oc 探测失败宁拒派不双跑。
+        门内（in_gate）行 stale_candidates 自免（门内静默属正常）。
+        回 (僵态基线 ts 或 None, cause)——cause 落拒绝文案作 fail-closed 审计。
+        """
+        if self._stale_candidates is None:
+            return None, "no_classifier"
+        wsid = t.get("worker_sid")
+        if not wsid:
+            return None, "no_worker"
+        if any(x.get("dispatcher_sid") == wsid and x["state"] not in _FROZEN
+               for x in self._state.snapshot()["tasks"].values()):
+            # 名下未结案子任务：重派丢所有权（reinject 有子链改绑语义、本车道
+            # 无）且 gate open-children 闸按申报 sid 匹配——fail-closed 让位，
+            # 归 cancel 先清子链或 reinject 车道（round-4 终审）
+            return None, "open_children"
+        try:
+            data = self._oc.session(wsid)
+        except Exception:  # shortcut: 裸 except 兜 access 层全部失败形态（F28 同款）
+            return None, "oc_down"
+        if data is None:
+            return None, "session_dead"
+        tm = data.get("time") or {}  # 缺形状→不 busy→照判（health 安全回退口径）
+        if (tm.get("updated") or 0) > (tm.get("idle") or 0):
+            return None, "busy"
+        base = dict(self._stale_candidates({"tasks": {tid: t}},
+                                           time.time())).get(tid)
+        born = (tm.get("created") or 0) / 1000.0  # oc time 为 ms epoch
+        if base is not None and born > base:
+            # 行基线早于当前 worker 出生（reinject/重派只换绑不刷基线）——僵证
+            # 起点钳到出生重判：替换会话未干活时按未判拒绝（session_young），
+            # 钳后超僵态阈即否决自然过期（round-3：非永久，惰性替换照样可重派）
+            base = dict(self._stale_candidates(
+                {"tasks": {tid: dict(t, last_seen=born)}},
+                time.time())).get(tid)
+            if base is None:
+                return None, "session_young"
+        return base, ("stale" if base is not None else "fresh")
 
     def _cancel_one(self, tid, sid, cancel_reason=None):
         """中止单任务并递归下级；返回级联取消数（merged/closed/cancelled 不动）。"""

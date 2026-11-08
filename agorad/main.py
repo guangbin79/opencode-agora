@@ -158,7 +158,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
         state, auth, gitx, oc, store, router,
         lambda home, tid, row: write_task_page(  # F44：快照与事件装配注入
             home, tid, row, tasks=state.snapshot()["tasks"],
-            events=store.read_events(tid)))
+            events=store.read_events(tid)),
+        stale_candidates=report.stale_candidates)  # ag-d1d8c1：僵态同口径
     peer = PeerBoard(store, state)  # F22 同仓协作面（写面权限归 httpd 角色判定）
     recover = Recover(state, oc, gitx, store, auth, router=router)
     app = App(store=store, state=state, auth=auth, router=router, task=task,

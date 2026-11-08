@@ -75,8 +75,8 @@ class FakeRecover:
     def __init__(self, ok=True):
         self.ok, self.calls = ok, []
 
-    def reinject(self, tid):
-        self.calls.append(tid)
+    def reinject(self, tid, expect_wsid=None):
+        self.calls.append((tid, expect_wsid))
         return self.ok
 
 
@@ -127,8 +127,15 @@ class TestCoreHealth(unittest.TestCase):
     def test_tick_dead_worker_reinjected_silently(self):  # Req: F5
         self.seed("t1")  # liveness 缺席＝死
         self.health.tick()
-        self.assertEqual(self.recover.calls, ["t1"])  # 自愈层静默
+        self.assertEqual(self.recover.calls, [("t1", "s-w1")])  # 自愈层静默；携判死身份
         self.assertEqual(self.main_msgs(), [])
+
+    def test_tick_reinject_yield_no_escalate(self):  # Req: ag-d1d8c1
+        self.seed("t1")  # liveness 缺席＝死
+        self.recover.ok = None  # 身份已易主让位：他车道（重派）接管中
+        self.health.tick()
+        self.assertEqual(self.recover.calls, [("t1", "s-w1")])
+        self.assertEqual(self.main_msgs(), [])  # None≠失败：不误报 escalate
 
     def test_tick_reinject_fail_escalates(self):  # Req: F5
         self.recover.ok = False
@@ -145,7 +152,7 @@ class TestCoreHealth(unittest.TestCase):
         self.seed("t2", disp="d1", worker="s-w2")
         self.oc.liveness["s-w2"] = True  # d1 死（缺席）
         self.health.tick()
-        self.assertEqual(self.recover.calls, ["t1"])
+        self.assertEqual(self.recover.calls, [("t1", "d1")])
         self.assertEqual(self.main_msgs(), [])
 
     def test_dispatcher_reinject_failure_reports(self):

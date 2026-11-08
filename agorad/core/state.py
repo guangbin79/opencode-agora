@@ -23,13 +23,14 @@ EV_BLOCKED = "blocked"
 EV_CANCELLED = "cancelled"
 
 # 迁移矩阵：主链 todo→dispatched→running→done→merged→closed；blocked 双出口
-# （cancel／对同任务再 dispatch）；done→verify_failed（verify 败）与 reopened
-# （集成败/非 ff）→running 续修再 done。verify_failed→blocked 不在此列——
-# 它只由 fail_streak≥3 自动触发，非手工边。
+# （cancel／对同任务再 dispatch）；running 第三出口 dispatched 仅限 stalled
+# 僵态重派（ag-d1d8c1，门侧先判僵再迁）；done→verify_failed（verify 败）与
+# reopened（集成败/非 ff）→running 续修再 done。verify_failed→blocked 不在
+# 此列——它只由 fail_streak≥3 自动触发，非手工边。
 LEGAL = {
     "todo": {"dispatched", "cancelled"},
     "dispatched": {"running", "cancelled"},
-    "running": {"done", "cancelled"},
+    "running": {"done", "cancelled", "dispatched"},
     "done": {"merged", "verify_failed", "reopened"},
     "verify_failed": {"running", "cancelled"},
     "reopened": {"running", "cancelled"},

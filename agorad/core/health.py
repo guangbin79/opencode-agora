@@ -118,8 +118,9 @@ class Health:
                 manages = any(x.get("dispatcher_sid") == wsid
                               and x["state"] in _IN_FLIGHT for x in tasks.values())
                 if t["state"] in _IN_FLIGHT:
-                    if self._recover.reinject(tid):
-                        continue  # 父 worker 一并恢复；recover 同步改绑嵌套子任务
+                    r = self._recover.reinject(tid, expect_wsid=wsid)
+                    if r is not False:
+                        continue  # True＝重建成功；None＝身份已易主让位（他车道接管，免误报 escalate，round-3）
                     self.escalate(KIND_DISPATCHER_DEAD if manages else KIND_REINJECT, tid)
                 elif manages:
                     self.escalate(KIND_DISPATCHER_DEAD, tid)
