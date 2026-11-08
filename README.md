@@ -123,6 +123,7 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 - **Real-time accountability** — escalation pings to the main session, append-only JSONL audit for every state change, health patrol for dead dispatchers
 - **PR-workflow friendly** — `task_create(target_branch="feature/x")` merges into a feature branch instead of main
 - **Server-side req numbering** — `task_create(req_id="F34")` registers and de-duplicates feature numbers (seeded from `docs/reqs/`, duplicate issuance rejected). Server allocation is the authoritative number source; workers take the number from the task page. Bypassing is not prevented — a convention, not a gate
+- **Quick micro-tasks** — a light lane for small single-repo changes: `task_create(quick=true)` needs no verify_cmd; the verify command is registered atomically from the repo-level list (`verify-presets.json`); over-envelope diffs are measured mechanically at the gate and fail like a verify red; the worker BOOT drops three informational lines
 - **Lightweight** — Python stdlib service, zero pip dependencies, localhost only, no telemetry
 
 ## Comparison
@@ -146,6 +147,9 @@ Full spec — contract details, worker protocol, threat model, idle auto-trigger
 | `AGORA_HEALTH_INTERVAL` | `300` | Dispatcher health patrol (seconds) |
 | `AGORA_VERIFY_TIMEOUT` | `300` | Soft top per task/integration verify run (seconds): notify the dispatcher on expiry, no kill |
 | `AGORA_VERIFY_CEILING` | `4× soft top` | Hard top (seconds): expiry kills the verify process group; overrun routes to the dispatcher (no worker retry, task stays done) |
+| `$AGORA_HOME/.agora/verify-presets.json` | none | Repo-level verify command list for quick tasks (`{absolute repo path: command}`); missing file = no list, quick creation rejected |
+| `AGORA_QUICK_MAX_FILES` | `3` | Quick-task envelope: cumulative changed-files cap, measured mechanically before verify; over the cap the task fails like a verify red |
+| `AGORA_QUICK_MAX_LINES` | `30` | Quick-task envelope: cumulative added+deleted lines cap, same red path |
 | `$AGORA_HOME/.agora/agorad.env` | — | Knob defaults file (`KEY=VALUE`, `#` comments); explicit process env takes precedence, survives daemon restarts |
 | `enforce` | on | Global gate switch (root only, audited) |
 | `$AGORA_HOME/.agora/email.json` | off | Stuck-task email alerts (`{"to","command"}`) |

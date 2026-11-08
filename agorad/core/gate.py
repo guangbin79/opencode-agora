@@ -122,12 +122,14 @@ class Gate:
 
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
                  store, runner=None, verify_timeout=300, verify_ceiling=None,
-                 on_blocked=None, roster_path=None):  # F35：门侧名册（$AGORA_HOME/.agora/ignore.roster）
+                 on_blocked=None, roster_path=None, quick_max_files=3,
+                 quick_max_lines=30):  # F35 门侧名册；F65 quick 包络旋钮
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
         self._roster_path = roster_path
         self._verify_timeout, self._verify_ceiling = verify_timeout, verify_ceiling
+        self._quick_max_files, self._quick_max_lines = quick_max_files, quick_max_lines
         self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
 
     # ---- done 受理（前置六拒，拒收落审计并附动作指引） ----
@@ -293,6 +295,17 @@ class Gate:
                                    "diff 检查发现冲突标记/空白错误——清理后重新"
                                    f" post(done, commit)\n输出尾部:\n{warn[-_TAIL:]}")
                 return
+            if t.get("quick"):  # F65 包络门：verify 前机械量累计 diff，超顶按 verify 红弹回
+                files, lines, detail = self._gitx.diff_stats(env, branch)
+                if files > self._quick_max_files or lines > self._quick_max_lines:
+                    self._quality_fail(
+                        tid, "verify_failed",
+                        f"quick envelope exceeded: {files} files "
+                        f"(max {self._quick_max_files}) / {lines} lines "
+                        f"(max {self._quick_max_lines})"
+                        "——缩减改动后重新 post(done, commit)"
+                        f"\n输出尾部:\n{detail[-_TAIL:]}")
+                    return
             rc, out = runner(env, cmd)
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._audit(tid, "verify_overrun")

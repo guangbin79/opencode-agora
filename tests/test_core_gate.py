@@ -65,6 +65,8 @@ class FakeGitx:
         self.behind_result = False  # ag-49312d strictly_behind 注入（push 前守卫）
         self.materialize_calls = []  # F: 检出后物化调用记录
         self.materialize_result = ""  # 缺省零依赖物＝空报告
+        self.diff_stats_result = (0, 0, "")  # F65 quick 包络读数注入
+        self.diff_stats_calls = []
 
     def rebase_onto(self, env_dir, integration):
         self.rebase_calls.append((env_dir, integration))
@@ -136,6 +138,10 @@ class FakeGitx:
     def materialize_checkout(self, tree_dir, source_dir):
         self.materialize_calls.append((tree_dir, source_dir))
         return self.materialize_result
+
+    def diff_stats(self, env_dir, branch=None):  # Req: F65
+        self.diff_stats_calls.append((env_dir, branch))
+        return self.diff_stats_result
 
 
 class FakeHealth:
@@ -238,7 +244,8 @@ class TestCoreGate(unittest.TestCase):
     # ---- 夹具 ----
 
     def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False,
-                on_blocked=None, roster_path=None):
+                on_blocked=None, roster_path=None,
+                quick_max_files=3, quick_max_lines=30):
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
                            fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
@@ -247,24 +254,27 @@ class TestCoreGate(unittest.TestCase):
         self.gate = Gate(self.state, self.gx, self.router, self.oc,
                          anchor, self.health, self.auth,
                          self.store, runner=self.runner, on_blocked=on_blocked,
-                         roster_path=roster_path)
+                         roster_path=roster_path,
+                         quick_max_files=quick_max_files,
+                         quick_max_lines=quick_max_lines)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None,
-             cmd="pytest -q", timeout=None):
+             cmd="pytest -q", timeout=None, quick=False):
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
                              "env_dir": str(self.env), "after": None,
                              "target_branch": tb,
                              "verify": {"cmd": cmd, "state": "registered",
                                         "registered_by": "disp1", "registered_at": 1.0,
                                         "timeout": timeout},
+                             "quick": quick,
                              "state": state, "dispatcher_sid": "disp1",
                              "worker_sid": "s-w1", "chain_depth": 1,
                              "fail_streak": streak, "created": 0.0, "updated": 0.0})
         return tid
 
-    def in_gate(self, streak=0, timeout=None):
+    def in_gate(self, streak=0, timeout=None, quick=False):
         """播种 running→受理 done（进入门临界段）。"""
-        self.seed(streak=streak, timeout=timeout)
+        self.seed(streak=streak, timeout=timeout, quick=quick)
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
 
     def worker_msgs(self):
@@ -1477,6 +1487,47 @@ class TestGateStaleBaseline(TestCoreGate):
         self.assertNotIn("push_rejected", names)  # 直通不推陈旧支：零假 non-ff 警报
         self.assertEqual(
             self._git(["rev-parse", "master"], cwd=proj).stdout.strip(), stale)  # 主检出未动
+
+
+class TestQuickEnvelope(TestCoreGate):
+    """F65 quick 包络门：verify 前机械量累计 diff，超顶按 verify 红弹回。"""
+
+    def test_envelope_exceeded_red_like_verify_fail(self):  # Req: F65
+        self.in_gate(quick=True)
+        self.gx.diff_stats_result = (5, 30, "2\t20\ta.py\n3\t10\tb.py")
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "verify_failed")
+        self.assertEqual(t["fail_streak"], 1)  # verify 红同口径计连败
+        self.assertEqual(self.runner.calls, [])  # 先于 verify：verify 未跑
+        self.assertEqual(self.gx.merge_calls, [])  # 不合并
+        body = self.worker_msgs()[-1]["body"]
+        self.assertIn("quick envelope exceeded: 5 files (max 3) / 30 lines (max 30)",
+                      body)
+        self.assertIn("b.py", body)  # numstat 明细随尾部回 worker
+        self.assertIn("post(done", body)  # 动作指引
+
+    def test_within_envelope_verify_runs_and_merges(self):  # Req: F65
+        self.in_gate(quick=True)
+        self.gx.diff_stats_result = (2, 10, "1\t5\ta.py\n1\t5\tb.py")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 全链照常
+        self.assertEqual(self.runner.calls,
+                         [(str(self.env), "pytest -q"),
+                          (self.gx.integration_builds[-1][1], "pytest -q")])
+
+    def test_knobs_override_tighten_envelope(self):  # Req: F65
+        self.mk_gate(quick_max_files=1, quick_max_lines=1)
+        self.in_gate(quick=True)
+        self.gx.diff_stats_result = (1, 2, "1\t2\ta.py")  # 行数超 1：红
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "verify_failed")
+        self.assertIn("1 files (max 1) / 2 lines (max 1)",
+                      self.worker_msgs()[-1]["body"])
+        self.mk_gate(quick_max_files=1, quick_max_lines=2)  # 包络内：verify 照跑
+        self.in_gate(quick=True)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
 
 
 if __name__ == "__main__":

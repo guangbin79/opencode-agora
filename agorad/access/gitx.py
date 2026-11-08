@@ -437,6 +437,25 @@ class Gitx:
         out = self._git(["diff", "--name-only", base, env.name], cwd=main).stdout
         return out.splitlines()  # 换行分隔；split() 会把含空格文件名切碎
 
+    def diff_stats(self, env_dir: str, branch: str = None) -> tuple[int, int, str]:
+        """F65 quick 包络读数：merge-base..env numstat——（文件数, 增删行合计, 明细）。
+
+        同 _diff_names 的 merge-base 纪律（基线经 baseline()，外部支自有提交
+        不计入）；二进制条目（"-\t-" 占位）按 0 行计、文件数照计。"""
+        env = Path(env_dir).resolve()
+        main = self._main(env)
+        base = self._merge_base(env, branch, main)
+        out = self._git(["diff", "--numstat", base, env.name], cwd=main).stdout
+        files = lines = 0
+        for ln in out.splitlines():
+            parts = ln.split("\t")
+            if len(parts) < 3:
+                continue
+            files += 1
+            lines += (int(parts[0]) if parts[0].isdigit() else 0) \
+                + (int(parts[1]) if parts[1].isdigit() else 0)
+        return files, lines, out.strip()
+
     def _merge_base(self, env: Path, branch: str = None,
                     main: Path = None) -> str:  # main 可注入：调用方已定位免重复子进程
         # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff；

@@ -122,8 +122,11 @@ class _Handler(BaseHTTPRequestHandler):
             rq = body.get("req_id")
             to = body.get("timeout")  # F51：任务级 verify 预算（正整数秒）
             md = body.get("model")  # F55：任务级 worker 模型
+            qk = body.get("quick", False)  # F65：quick 微任务旗
             if not isinstance(vp, bool):  # "false" 字符串得 True——豁免旗语义反转拒收
                 raise ValueError("verify_pending 须为布尔")
+            if not isinstance(qk, bool):  # 同豁免旗口径
+                raise ValueError("quick 须为布尔")
             if vc is not None and not isinstance(vc, str):  # 非串 500 裸奔→400 报因
                 raise ValueError("verify_cmd 须为字符串")
             if rq is not None and not isinstance(rq, str):  # 同 verify_cmd 口径
@@ -131,7 +134,7 @@ class _Handler(BaseHTTPRequestHandler):
             if md is not None and not isinstance(md, str):  # 同 verify_cmd 口径
                 raise ValueError("model 须为字符串")
             if to is not None and (isinstance(to, bool)
-                                   or not isinstance(to, int)):  # 同 verify_cmd 口径
+                                    or not isinstance(to, int)):  # 同 verify_cmd 口径
                 raise ValueError("timeout 须为正整数秒")
             pd = (body.get("project_dir") if role == "worker"  # F37：worker 缺省继承
                   else body["project_dir"])  # 受信角色仍必填（缺即 400）
@@ -140,7 +143,8 @@ class _Handler(BaseHTTPRequestHandler):
                                             title=body.get("title"),
                                             target_branch=body.get("target_branch"),
                                             verify_cmd=vc, verify_pending=vp,
-                                            req_id=rq, timeout=to, model=md)}
+                                            req_id=rq, timeout=to, model=md,
+                                            quick=qk)}
         if name == "task_dispatch":
             return {"task": body["task"],
                     "token": app.task.dispatch(body["task"], token)}

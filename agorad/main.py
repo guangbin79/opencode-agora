@@ -124,9 +124,26 @@ def verify_ceiling_from_env():
     return ceiling
 
 
+def quick_limits_from_env():
+    """F65 quick 包络旋钮（文件数/行数，正整数）；坏值 fail-fast 同款文案风格。"""
+    limits = []
+    for name, default in (("AGORA_QUICK_MAX_FILES", 3),
+                          ("AGORA_QUICK_MAX_LINES", 30)):
+        raw = os.environ.get(name, str(default))
+        try:
+            v = int(raw)
+        except ValueError:
+            raise ValueError(f"{name} 须为正整数（收到 {raw!r}）") from None
+        if v <= 0:
+            raise ValueError(f"{name} 须为正整数（收到 {raw!r}）")
+        limits.append(v)
+    return tuple(limits)
+
+
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
-             verify_timeout=300, verify_ceiling=None, roster_path=None):
+             verify_timeout=300, verify_ceiling=None, roster_path=None,
+             quick_max_files=3, quick_max_lines=30):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -157,7 +174,9 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 store=store, runner=runner, verify_timeout=verify_timeout,
                 verify_ceiling=verify_ceiling,
                 on_blocked=task.stop_after_failed,
-                roster_path=roster_path or str(Path(home) / ".agora" / "ignore.roster"))
+                roster_path=roster_path or str(Path(home) / ".agora" / "ignore.roster"),
+                quick_max_files=quick_max_files,  # F65 quick 包络旋钮透传
+                quick_max_lines=quick_max_lines)
     app.gate, app.health = gate, health
     return app
 
@@ -213,6 +232,7 @@ def main():
     try:
         verify_timeout = verify_timeout_from_env()
         verify_ceiling = verify_ceiling_from_env()
+        quick_files, quick_lines = quick_limits_from_env()  # F65
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -221,7 +241,8 @@ def main():
         print("agorad 已在运行", file=sys.stderr)
         return 1
     app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store,
-                   verify_timeout=verify_timeout, verify_ceiling=verify_ceiling)
+                   verify_timeout=verify_timeout, verify_ceiling=verify_ceiling,
+                   quick_max_files=quick_files, quick_max_lines=quick_lines)
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）

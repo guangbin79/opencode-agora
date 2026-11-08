@@ -42,6 +42,8 @@ _TOOLS = [
                             "description": "探索路豁免旗：true＝未登记 verify 也可先派发，"
                                            "worker 提案后由主会话派发方/root 登记"
                                            "（worker 建单不可自旗——缺省继承父任务配置）"},
+         "quick": {"type": "boolean",
+                   "description": "quick 微任务——验收只认仓级清单，超包络合并门退回"},
          "timeout": {"type": "integer",
                      "description": "任务级 verify 预算（正整数秒；缺省＝服务"
                                     " AGORA_VERIFY_TIMEOUT；写权限与 verify_cmd 同权"

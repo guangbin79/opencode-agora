@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from agorad.main import assemble, env_config, load_env_file, main, \
-    verify_ceiling_from_env, verify_timeout_from_env
+    quick_limits_from_env, verify_ceiling_from_env, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -126,6 +126,30 @@ class TestEnvFileDefaults(unittest.TestCase):
             self.assertNotIn("AGORA_VERIFY_TIMEOUT", os.environ)
 
 
+class TestQuickLimitsConfig(unittest.TestCase):
+    """F65 quick 包络旋钮：缺省/env 覆盖/坏值 fail-fast（VERIFY_TIMEOUT 同款）。"""
+
+    def test_defaults_and_override(self):  # Req: F65
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(quick_limits_from_env(), (3, 30))
+        with mock.patch.dict(os.environ, {"AGORA_QUICK_MAX_FILES": "5",
+                                          "AGORA_QUICK_MAX_LINES": "40"},
+                             clear=True):
+            self.assertEqual(quick_limits_from_env(), (5, 40))
+
+    def test_invalid_values_fail_fast(self):  # Req: F65
+        for name, raw in (("AGORA_QUICK_MAX_FILES", "0"),
+                          ("AGORA_QUICK_MAX_FILES", "-1"),
+                          ("AGORA_QUICK_MAX_FILES", "abc"),
+                          ("AGORA_QUICK_MAX_LINES", "0"),
+                          ("AGORA_QUICK_MAX_LINES", "2.5")):
+            with self.subTest(name=name, raw=raw), \
+                 mock.patch.dict(os.environ, {name: raw}, clear=True):
+                with self.assertRaises(ValueError) as cm:
+                    quick_limits_from_env()
+                self.assertIn(name, str(cm.exception))
+
+
 class TestAssembleWiring(unittest.TestCase):
     def test_gate_gets_ceiling_and_default_roster_path(self):  # Req: F36
         tmp = tempfile.mkdtemp()
@@ -137,6 +161,18 @@ class TestAssembleWiring(unittest.TestCase):
                              str(Path(tmp) / ".agora" / "ignore.roster"))
             app2 = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
             self.assertIsNone(app2.gate._verify_ceiling)  # 未设＝None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestGateQuickWiring(unittest.TestCase):
+    def test_gate_gets_quick_limits(self):  # Req: F65
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw",
+                           quick_max_files=5, quick_max_lines=40)
+            self.assertEqual(app.gate._quick_max_files, 5)  # 装配透传
+            self.assertEqual(app.gate._quick_max_lines, 40)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

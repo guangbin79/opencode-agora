@@ -1114,5 +1114,62 @@ class TestReqIdPassthrough(HttpdTest):
         self.assertEqual(st, 400)  # 非串 400 报因（同 verify_cmd 口径）
 
 
+class TestQuickMicro(HttpdTest):
+    """F65 quick 微任务全链：端点布尔校验/透传＋仓级清单原子登记＋BOOT 减配。"""
+
+    def preset(self, mapping):
+        (self.tmp / ".agora").mkdir(exist_ok=True)
+        (self.tmp / ".agora" / "verify-presets.json").write_text(
+            json.dumps(mapping), encoding="utf-8")
+
+    def test_quick_preset_registers_and_boot_loses_three_lines(self):  # Req: F65
+        self.preset({"/repo": "true"})
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "quick": True},
+                     self.root)
+        self.assertEqual(st, 200)
+        tid = r["task"]
+        t = self.app.state.get(tid)
+        self.assertTrue(t["quick"])  # 行内落旗（快照随行）
+        self.assertEqual(t["verify"]["state"], "registered")  # 建单原子登记
+        self.assertEqual(t["verify"]["cmd"], "true")
+        st, r = call(self.port, "POST", "/task_dispatch", {"task": tid}, self.root)
+        self.assertEqual(st, 200)  # 登记即过派发硬闸（免两步舞）
+        boot = self.stub.sessions[self.app.state.get(tid)["worker_sid"]]["injects"][0]
+        for line in ("嵌套:", "协作:", "沉淀:"):
+            self.assertNotIn(line, boot)  # F65 减配三行
+        self.assertIn("开工:", boot)  # 其余行逐字不动
+        self.assertIn("done:", boot)
+
+    def test_normal_boot_keeps_three_lines(self):  # Req: F65
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        boot = self.stub.sessions[self.app.state.get(tid)["worker_sid"]]["injects"][0]
+        for line in ("嵌套:", "协作:", "沉淀:"):
+            self.assertIn(line, boot)  # 非 quick BOOT 不变
+
+    def test_quick_without_preset_403(self):  # Req: F65
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "quick": True},
+                     self.root)
+        self.assertEqual(st, 403)
+        self.assertIn("quick 任务验收只认仓级清单", r["error"])
+
+    def test_quick_with_verify_cmd_403(self):  # Req: F65
+        self.preset({"/repo": "true"})
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "quick": True,
+                      "verify_cmd": "pytest -q"}, self.root)
+        self.assertEqual(st, 403)
+        self.assertIn("勿自带命令", r["error"])
+
+    def test_quick_must_be_bool(self):  # Req: F65（verify_pending/enforce 同口径）
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo", "quick": "yes"},
+                     self.root)
+        self.assertEqual(st, 400)
+        self.assertIn("quick", r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

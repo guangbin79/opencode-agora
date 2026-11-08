@@ -1038,5 +1038,57 @@ class TestCredentialPointer(TestCoreTask):
         self.assertEqual(self.oc.injected, [])  # 零凭据文本注入
 
 
+class TestQuickTask(TestCoreTask):
+    """F65 quick 微任务建单契约：仓级清单准入＋原子登记＋非 quick 不受染。"""
+
+    def preset(self, mapping):
+        d = self.tmp / ".agora"
+        d.mkdir(exist_ok=True)
+        (d / "verify-presets.json").write_text(json.dumps(mapping),
+                                               encoding="utf-8")
+
+    def test_quick_without_preset_rejected(self):  # Req: F65
+        # 缺文件＝无清单：建单即拒
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, quick=True)
+        self.assertIn("quick 任务验收只认仓级清单", str(cm.exception))
+        # 有清单但无该仓条目：同因拒
+        self.preset({"/other": "true"})
+        with self.assertRaises(Rejected):
+            self.svc.create("g", "/repo", None, self.root, quick=True)
+
+    def test_quick_with_preset_registers_atomically(self):  # Req: F65
+        self.preset({"/repo": "python3 -m unittest"})
+        tid = self.svc.create("g", "/repo", None, self.root, quick=True)
+        t = self.state.get(tid)
+        self.assertEqual(t["verify"]["cmd"], "python3 -m unittest")
+        self.assertEqual(t["verify"]["state"], "registered")
+        self.assertTrue(t["quick"])
+        self.assertIn("verify_registered",
+                      [e["event"] for e in self.events()])  # 登记事件照落
+        self.assertTrue(self.svc.dispatch(tid, self.root))  # 建单登记即过派发硬闸
+
+    def test_quick_with_explicit_verify_cmd_rejected(self):  # Req: F65
+        self.preset({"/repo": "true"})
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root,
+                            verify_cmd="pytest -q", quick=True)
+        self.assertIn("勿自带命令", str(cm.exception))
+
+    def test_quick_with_verify_pending_rejected(self):  # Req: F65
+        # quick＝原子登记路，与探索豁免旗语义互斥（verify_cmd 同款口径）
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root,
+                            verify_pending=True, quick=True)
+        self.assertIn("互斥", str(cm.exception))
+
+    def test_non_quick_unaffected_by_presets(self):  # Req: F65
+        self.preset({"/repo": "preset-cmd"})
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        t = self.state.get(tid)
+        self.assertEqual(t["verify"]["cmd"], "true")  # 清单不染常规路
+        self.assertFalse(t["quick"])
+
+
 if __name__ == "__main__":
     unittest.main()
