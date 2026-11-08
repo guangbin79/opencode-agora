@@ -181,6 +181,18 @@ class Gate:
             return self._deny_anchor(
                 tid, f"任务 {tid} 合并前置失败：{commit} ≠ 分支 HEAD "
                 f"{a.get('head')}——以 env 内完整 HEAD sha 重新 post(done, commit)")
+        try:  # Req: F69 vacuous-done；谓词病（锚伪造 sha/目标支被删）不拦受理：
+            vacuous = self._gitx.contains(t["project_dir"], commit,
+                                          t.get("target_branch"),
+                                          fetch_timeout=5)  # 同步受理面短 fetch 预算
+        except RuntimeError:  # gitx 失败契约（_git/contains 同款）；编程错误照崩不静默
+            self._audit(tid, "zero_commit_probe_failed")  # 带痕放行：run() 同款异常面兜底
+            vacuous = False
+        if vacuous:
+            return self._deny_anchor(  # 零新增提交＝目标基线已含 HEAD，锚拒同款弹回
+                tid, f"任务 {tid} 零提交 done 拒收：本任务相对目标分支无新增提交"
+                "——若无需改动或活已被上游完成，post(kind=note) 报 no-op，"
+                "由派发方取消归档；勿空回填 done", tag="vacuous-done")
         if not a.get("clean"):
             return self._deny_anchor(
                 tid, f"任务 {tid} 合并前置失败：评审环未绿——修复 blocker/high "
@@ -228,11 +240,11 @@ class Gate:
             usage["cost"] += _num(m.get("cost"), 0.0)
         return usage if seen else None  # 无 assistant＝无计量，不设键
 
-    def _deny_anchor(self, tid, msg):
+    def _deny_anchor(self, tid, msg, tag="anchor"):
         """ag-084a22 A/C：锚拒收＝合并前置败——计连败（3 连败 blocked 拍人）＋带因拒回。"""
         self._state.fail_streak_bump(tid)
         self._escalate_if_blocked(tid)
-        return self._deny_done(tid, "anchor", msg)
+        return self._deny_done(tid, tag, msg)
 
     def _deny_done(self, tid, tag, msg):
         """F13：done 拒收统一出口——先审计 done_rejected（note=tag）再带因拒回。"""

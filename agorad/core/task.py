@@ -586,7 +586,7 @@ class TaskService:
                 + deposit
                 + "shell: mcp_shell（shell_execute）按 argv 数组执行、非 shell——命令须在 ALLOW_COMMANDS 白名单（否则报 Command not allowed）；分号/&&/|| 一律拒（无「|| true」吞退码惯用法，退码调用方自理）；多行内联/heredoc 报 Unexpected shell operator，多行脚本走原生 shell 或先落文件再执行\n"
                 "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记\n"
-                "done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；结论文本另发 post(kind=note)")
+                "done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=note) 报 no-op 等派发方处置；结论文本另发 post(kind=note)")
 
     def _revoke_worker(self, wsid):
         if wsid:

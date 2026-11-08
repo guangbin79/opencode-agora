@@ -321,7 +321,8 @@ class Gitx:
                                f"rc={r.returncode}: {r.stderr.strip()}")
         return self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()
 
-    def baseline(self, repo_dir: str, branch: str = None) -> str:
+    def baseline(self, repo_dir: str, branch: str = None,
+                 fetch_timeout: float = None) -> str:
         """门基线 ref（ag-49312d）：best-effort fetch 后，仅本地严格落后时以 origin 作基。
 
         外部工作流（PR 网页合并）令主检出本地分支落后 origin：基线取远端——
@@ -329,6 +330,8 @@ class Gitx:
         build_integration 落在真实远端头上使 push 恒 ff。领先/分叉/无 origin 一律
         原样返回本地 ref：禁吞未推送的本地提交，行为退回 fetch 前现状；
         branch=None 先 symref 解析默认支（detached 主检出无从谈远端基线，原样 HEAD）。
+        fetch_timeout：同步受理面（F69 accept_done）短预算——缺省＝_PUSH_TIMEOUT，
+        超时降级本地 ref（同网络病口径），慢 origin 不冻单线程服务。
         """
         b = branch or self.symref(repo_dir)
         if b == "HEAD":
@@ -347,7 +350,7 @@ class Gitx:
                                     cwd=str(repo_dir), stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
             try:
-                proc.wait(timeout=_PUSH_TIMEOUT)
+                proc.wait(timeout=fetch_timeout or _PUSH_TIMEOUT)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -377,10 +380,11 @@ class Gitx:
         return r.stdout.strip() != self._git(
             ["rev-parse", f"refs/heads/{branch}"], cwd=repo_dir).stdout.strip()
 
-    def contains(self, repo_dir: str, commit: str, branch: str = None) -> bool:
+    def contains(self, repo_dir: str, commit: str, branch: str = None,
+                 fetch_timeout: float = None) -> bool:
         """目标基线是否已含任务提交：崩溃重排时识别合并已落，禁止重复验收后假重开。
         基线经 baseline()（ag-49312d）：本地支陈旧时认得 origin 上已落库提交。"""
-        target = self.baseline(repo_dir, branch)
+        target = self.baseline(repo_dir, branch, fetch_timeout=fetch_timeout)
         r = self._git(["merge-base", "--is-ancestor", commit, target],
                       cwd=repo_dir, check=False)
         if r.returncode == 0:

@@ -70,7 +70,7 @@ class FakeGitx:
     def check_branch(self, repo_dir, branch):
         pass
 
-    def contains(self, repo_dir, commit, branch=None):
+    def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
         return False
 
     def ensure_clean(self, repo_dir):

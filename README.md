@@ -94,7 +94,7 @@ After install, your session gains two skills (agora-dispatch / agora-ops) and 13
 
 **Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 
-- The last-reviewed anchor is checked at `done` — missing, stale, or not green rejects `done` back to the worker — and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window; a failed re-check auto-reopens the task, it never parks).
+- The last-reviewed anchor is checked at `done` — missing, stale, or not green rejects `done` back to the worker — and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window; a failed re-check auto-reopens the task, it never parks). A done with zero new commits is rejected the same way (the task branch adds nothing over the target, including work already landed upstream) — the worker reports no-op via note and the dispatcher cancels to archive.
 - Anchor green + verify green = automatic ff-only merge — a behind task branch is rebased onto the target in-gate first (clean sync self-heals; only sync conflicts reopen).
 - No `.review-loop/` directory? `done` is rejected with instructions to add one — auto-merge requires both gates. Autonomy is earned, not assumed.
 

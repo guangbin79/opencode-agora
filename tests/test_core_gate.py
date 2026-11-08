@@ -56,6 +56,7 @@ class FakeGitx:
         self.roster_calls = []  # F35 apply_ignore_roster 调用（repo_dir, patterns）
         self.events = []  # F35 公共事件序：apply/ensure_clean 各推一格
         self.contains_result, self.dirty = False, False
+        self.contains_raise = False  # F69 谓词病注入（fail-open 放行面）
         self.contains_results = []  # 逐次覆盖队列：空则回退 contains_result
         self.rebase_result = "conflict"  # F32 缺省冲突：既有 non-ff 用例保持弹回口径
         self.rebase_calls = []
@@ -76,8 +77,10 @@ class FakeGitx:
         self.ff_sha_calls.append((target, sha, branch))
         return self.ff_sha_result
 
-    def contains(self, repo_dir, commit, branch=None):
+    def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
         self.contains_calls.append((repo_dir, commit, branch))
+        if self.contains_raise:
+            raise RuntimeError("git merge-base --is-ancestor: fatal: bad object")
         return self.contains_results.pop(0) if self.contains_results else self.contains_result
 
     def ensure_clean(self, repo_dir):
@@ -282,6 +285,41 @@ class TestCoreGate(unittest.TestCase):
 
 
 class TestAcceptDone(TestCoreGate):
+    def test_reject_zero_commit_done_with_noop_guidance(self):  # Req: F69
+        """vacuous-done 拒收：env HEAD 已被目标支基线包含（零新增提交）→
+        按锚拒收同款机制弹回 worker，拒因指 no-op note 出口，状态零副作用。"""
+        self.seed(tb="main")
+        self.gx.contains_result = True  # 目标基线已含 HEAD＝零新增
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:vacuous-done", r)
+        self.assertIn("零提交 done 拒收", r)
+        self.assertIn("no-op", r)
+        self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
+        self.assertEqual(self.gx.contains_calls, [("/repo", SHA, "main")])
+
+    def test_accept_done_with_new_commit_passes_zero_commit_gate(self):  # Req: F69
+        """≥1 新增提交的 worker 不受影响：基线不含 HEAD 照常受理，判拒谓词已在受理点执行。"""
+        self.seed()
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None)])
+
+    def test_probe_illness_fails_open_with_audit(self):  # Req: F69
+        """判拒谓词病不拦受理：contains 抛错→带痕放行，门体 run() 异常面兜底 reopened。"""
+        self.seed()
+        self.gx.contains_raise = True
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        evs = [e for e in self.store.read_events("t1")
+               if e["event"] == "zero_commit_probe_failed"]
+        self.assertEqual(len(evs), 1)
+
+    def test_anchor_missing_rejection_precedes_zero_commit(self):  # Req: F69
+        """锚缺失拒收意图不变：锚先行，零提交判拒仅在锚==HEAD 后执行。"""
+        (self.env / ".review-loop").rmdir()
+        self.seed()
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("锚缺失/落后", r)
+        self.assertEqual(self.gx.contains_calls, [])
+
     def test_reject_verify_unregistered_with_guidance(self):  # Req: F7
         self.seed()
         self.state.set_fields("t1", verify={"cmd": "", "state": "pending",
@@ -737,7 +775,7 @@ class TestGateRun(TestCoreGate):
         """拒并 reopened 来源②：试合并窗口内 commit 已被人工推进目标支：守卫补终态成功，绝不重开。"""
         self.runner = FakeRunner((0, "pass"))
         self.mk_gate(merge="non-ff")
-        self.gx.contains_results = [False, True]  # 门首探针 False、_non_ff 内 True
+        self.gx.contains_results = [False, False, True]  # 受理探针 False、门首探针 False、_non_ff 内 True
         self.in_gate()
         self.gate.run("t1")
         t = self.state.get("t1")
@@ -801,7 +839,7 @@ class TestGateRun(TestCoreGate):
         self.gx.rebase_result = "ok"
         self.gx.head_shas[f"{self.env}__gate"] = R_SHA
         self.gx.ff_sha_result = "non-ff"  # 推进窗口目标支被人工推进至含 R
-        self.gx.contains_results = [False, True]  # 门首探针 False、_non_ff 内 True
+        self.gx.contains_results = [False, False, True]  # 受理探针 False、门首探针 False、守卫 True
         self.in_gate()
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 守卫路由 _succeed
@@ -907,7 +945,8 @@ class TestGateRun(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "closed")
         self.assertEqual(t["fail_streak"], 0)
-        self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None)])
+        self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None),
+                                                  ("/repo", SHA, None)])  # 受理＋门首各一探
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.clean_calls, [])
@@ -1323,7 +1362,7 @@ class TestReopenDispatcherNotice(TestCoreGate):
         self.gx.rebase_result = "ok"
         self.gx.head_shas[f"{self.env}__gate"] = R_SHA
         self.gx.ff_sha_result = "non-ff"
-        self.gx.contains_results = [False, False]  # 门首探针与守卫均未含
+        self.gx.contains_results = [False, False, False]  # 受理/门首/守卫均未含
         self.in_gate()
         self.gate.run("t1")
         (m,) = self.notices()
@@ -1479,7 +1518,9 @@ class TestGateStaleBaseline(TestCoreGate):
         self.gate = Gate(self.state, gx, self.router, self.oc,
                          lambda e: self.anchor, self.health, self.auth,
                          self.store, runner=self.runner)
-        self.assertEqual(self.gate.accept_done("t1", "s-w1", task), "accepted")
+        # Req: F69 后受理点必拒「已落库＝零新增」的 done（活已被上游完成→note no-op）；
+        # 本测守护门体直通路径，仿崩溃恢复直入 run，不经受理门
+        self.state.transition("t1", "done", commit=task, rebased_from=None)
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
         self.assertEqual(self.runner.calls, [])  # 已落库提交零重验（contains 直通）
