@@ -193,6 +193,19 @@ def issue_root(app):
     return app.auth.issue("root", "root")
 
 
+def audit_root_poison(app):
+    """启动维护（ag-588eb8 裁决 A）：扫存量「会话 sid＋root 角色」污染条目，
+    仅审计计数不撤销——root 牌常为唯一治理牌，撤销即断 CLI/enforce/doctor；
+    账本持久化重启不丢（write_ephemeral），受污染窗口自愈归 cred_issue 换牌面，
+    此处只留账（events 一行，零污染零新行）。"""
+    tokens = app.store.read_ephemeral("tokens") or {}
+    n = sum(1 for v in tokens.values() if v[1] == "root" and v[0] != "root")
+    if n:
+        app.store.append_event({"ts": time.time(), "actor": "agorad",
+                                "event": "root_poison_audit", "note": f"poisoned={n}"})
+    return n
+
+
 def health_loop(app, interval):
     """R10 线程体：按间隔 tick（只探死）＋probe（oc_version 记入 service.json）。"""
     while True:
@@ -251,6 +264,7 @@ def main():
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）
+    audit_root_poison(app)  # ag-588eb8：启动维护审计存量污染（只记账不撤销）
     app.recover.startup()
     try:
         oc_version = app.oc.probe().get("oc_version")

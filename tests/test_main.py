@@ -15,8 +15,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agorad.main import assemble, env_config, issue_root, load_env_file, main, \
-    quick_limits_from_env, verify_ceiling_from_env, verify_timeout_from_env
+from agorad.main import assemble, audit_root_poison, env_config, issue_root, \
+    load_env_file, main, quick_limits_from_env, verify_ceiling_from_env, \
+    verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -191,6 +192,43 @@ class TestGateQuickWiring(unittest.TestCase):
                            quick_max_files=5, quick_max_lines=40)
             self.assertEqual(app.gate._quick_max_files, 5)  # 装配透传
             self.assertEqual(app.gate._quick_max_lines, 40)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestStartupRootPoisonAudit(unittest.TestCase):
+    """ag-588eb8 裁决 A：启动维护只审计不撤销——会话 sid 持 root 的存量条目
+    计数入账（events 一行），真 root（sid=root）与 worker 在飞牌分毫不动
+    （撤销唯一 root 即断 CLI/enforce 面；窗口自愈归 cred_issue 换牌面）。"""
+
+    def test_audit_counts_poisoned_roots_without_revoking(self):  # ag-588eb8
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            tok_daemon = app.auth.issue("root", "root")  # 真 root（daemon 身份）
+            tok_poison = app.auth.issue("ses-poison", "root")  # 会话 sid 污染
+            tok_worker = app.auth.issue("ses-worker", "worker")  # 在飞 worker
+            self.assertEqual(audit_root_poison(app), 1)
+            toks = app.store.read_ephemeral("tokens")
+            self.assertEqual(len(toks), 3)  # 零撤销：账本原样
+            self.assertEqual(app.auth.identify(tok_daemon), ("root", "root"))
+            self.assertEqual(app.auth.identify(tok_poison), ("ses-poison", "root"))
+            self.assertEqual(app.auth.identify(tok_worker), ("ses-worker", "worker"))
+            ev = [e for e in app.store.read_events()
+                  if e["event"] == "root_poison_audit"]
+            self.assertEqual([(e["actor"], e["note"]) for e in ev],
+                             [("agorad", "poisoned=1")])  # 审计一行
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_audit_silent_when_ledger_clean(self):  # ag-588eb8
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            app.auth.issue("ses-w", "worker")
+            self.assertEqual(audit_root_poison(app), 0)
+            self.assertEqual([e for e in app.store.read_events()
+                              if e["event"] == "root_poison_audit"], [])  # 零污染零新行
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
