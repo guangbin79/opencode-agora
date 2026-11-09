@@ -60,6 +60,7 @@ class FakeGitx:
         self.contains_result, self.dirty = False, False
         self.contains_raise = False  # F69 谓词病注入（fail-open 放行面）
         self.contains_results = []  # 逐次覆盖队列：空则回退 contains_result
+        self.ancestor_calls, self.ancestor_result = [], False  # ag-1ae0f1 空集判据 (a)
         self.rebase_result = "conflict"  # F32 缺省冲突：既有 non-ff 用例保持弹回口径
         self.rebase_calls = []
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
@@ -84,6 +85,10 @@ class FakeGitx:
         if self.contains_raise:
             raise RuntimeError("git merge-base --is-ancestor: fatal: bad object")
         return self.contains_results.pop(0) if self.contains_results else self.contains_result
+
+    def is_ancestor(self, repo_dir, base, commit):  # ag-1ae0f1 空集判据 (a)
+        self.ancestor_calls.append((repo_dir, base, commit))
+        return self.ancestor_result
 
     def ensure_clean(self, repo_dir, exempt=()):
         self.clean_calls.append(repo_dir)
@@ -310,6 +315,50 @@ class TestAcceptDone(TestCoreGate):
         self.seed()
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None)])
+
+    def test_accept_delivery_landed_on_target_branch(self):  # Req: ag-1ae0f1
+        """空集放行判据 (a)：交付提交挂目标支自身（hotfix 直推落库）＝空集但
+        env HEAD 相对起点 base 有前进——有效交付受理，不再 vacuous 误拒。"""
+        self.seed(tb="main")
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.gx.contains_result = True  # 目标基线已含 HEAD＝空集
+        self.gx.ancestor_result = True  # base 为 HEAD 祖先＝env 有前进
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertEqual(self.gx.ancestor_calls, [("/repo", OTHER_SHA, SHA)])
+        self.assertEqual(self.state.get("t1")["state"], "done")
+
+    def test_reject_true_zero_commit_with_base_recorded(self):  # Req: ag-1ae0f1
+        """真零提交仍拒：env HEAD==起点 base（worker 未动）＝判据 (a)(b) 皆不
+        成立，vacuous-done 照弹回（F69 护栏不破）。"""
+        self.seed(tb="main")
+        self.state.set_fields("t1", env_base=SHA)
+        self.gx.contains_result = True
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:vacuous-done", r)
+        self.assertIn("零提交 done 拒收", r)
+        self.assertEqual(self.gx.ancestor_calls, [])  # ==base 前置短路，零谓词调用
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
+    def test_accept_redone_when_prev_commit_landed(self):  # Req: ag-1ae0f1
+        """空集放行判据 (b) 等价短路：reopen 后重报同一 commit 且已在目标支——
+        既有 commit 字段留痕与 done body 相等即放行，零补探（与 run() 崩溃重排
+        直通探针同语义）。"""
+        self.seed(tb="main")
+        self.state.set_fields("t1", commit=SHA)  # 前次受理留痕（reopen 不清）
+        self.gx.contains_result = True
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertEqual(self.gx.contains_calls, [("/repo", SHA, "main")])
+        self.assertEqual(self.gx.ancestor_calls, [])
+
+    def test_accept_redone_prev_commit_probe(self):  # Req: ag-1ae0f1
+        """空集放行判据 (b) 补探：重做 done 换新 sha、env_base 缺席（升级前
+        在飞任务）——前次 commit 经 contains 在目标支可达即放行。"""
+        self.seed(tb="main")
+        self.state.set_fields("t1", commit=OTHER_SHA)
+        self.gx.contains_results = [True, True]  # 主探针空集＋(b) 补探可达
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.assertEqual(self.gx.contains_calls,
+                         [("/repo", SHA, "main"), ("/repo", OTHER_SHA, "main")])
 
     def test_probe_illness_fails_open_with_audit(self):  # Req: F69
         """判拒谓词病不拦受理：contains 抛错→带痕放行，门体 run() 异常面兜底 reopened。"""

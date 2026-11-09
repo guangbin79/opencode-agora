@@ -50,6 +50,9 @@ class FakeGitx:
         (env / ".review-loop").mkdir(parents=True)
         return str(env)
 
+    def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
+        return "b" * 40
+
     def materialize_checkout(self, tree_dir, source_dir):  # Req: ag-0d2daa
         self.materials = getattr(self, "materials", [])
         self.materials.append((tree_dir, source_dir))

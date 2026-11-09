@@ -28,6 +28,9 @@ class FakeGitx:
     def build_env(self, project_dir, tid, branch=None):
         return f"/envs/{tid}"
 
+    def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
+        return "b" * 40
+
     def remove_env(self, env_dir):
         pass
 

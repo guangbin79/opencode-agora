@@ -37,6 +37,9 @@ class FakeGitx:
         self.branches.append(branch)
         return env
 
+    def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
+        return "b" * 40
+
     def remove_env(self, env_dir):
         if getattr(self, "remove_raises", False):  # F43 回收失败注入：删牌/级联/通知不得被拦断
             raise RuntimeError("rmtree: Directory not empty")

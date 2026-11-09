@@ -219,8 +219,10 @@ class TaskService:
                 self._reject(tid, sid,
                              f"after: 前任务 {after} 未成功或由 dispatcher 有意跳过（B7）")
         env = t.get("env_dir")
+        env_base = t.get("env_base")
         if env is None:
             env = self._gitx.build_env(t["project_dir"], tid, t.get("target_branch"))
+            env_base = self._gitx.head(env)  # ag-1ae0f1：env 起点 base——done 空集判据 (a) 比较锚
             try:
                 report = self._gitx.materialize_checkout(
                     env, t["project_dir"])  # Req: ag-0d2daa
@@ -268,7 +270,7 @@ class TaskService:
                                    "stalled 可重派；仅 todo/blocked）")
         self._revoke_worker(t.get("worker_sid"))  # 重派废旧牌（卫兵后置：rebind 不落空）
         self._state.transition(tid, "dispatched", worker_sid=wsid, env_dir=env,
-                               dispatcher_sid=sid)
+                               dispatcher_sid=sid, env_base=env_base)
         note = {"note": stale_note} if stale_note else {}  # stalled 重派审计证据
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": EV_DISPATCHED, "task": tid,

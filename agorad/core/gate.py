@@ -187,8 +187,8 @@ class Gate:
         except RuntimeError:  # gitx 失败契约（_git/contains 同款）；编程错误照崩不静默
             self._audit(tid, "zero_commit_probe_failed")  # 带痕放行：run() 同款异常面兜底
             vacuous = False
-        if vacuous:
-            return self._deny_anchor(  # 零新增提交＝目标基线已含 HEAD，锚拒同款弹回
+        if vacuous and not self._vacuous_delivered(tid, t, commit):
+            return self._deny_anchor(  # 真零提交（空集且无在案交付）＝锚拒同款弹回
                 tid, f"任务 {tid} 零提交 done 拒收：本任务相对目标分支无新增提交"
                 "——若无需改动或活已被上游完成，post(kind=note) 报 no-op，"
                 "由派发方取消归档；勿空回填 done", tag="vacuous-done")
@@ -211,6 +211,30 @@ class Gate:
         return [cid for cid, x in children
                 if x["state"] not in ("merged", "closed", "cancelled")
                 or str(x.get("cancel_reason", "")).startswith("dependency_failed")]
+
+    def _vacuous_delivered(self, tid, t, commit):
+        """ag-1ae0f1 空集放行判据：rev-list(目标..HEAD)=空集不再自动等价零提交。
+        任一成立＝有效交付放行：(a) env HEAD 相对任务起点 base 有前进（base 为
+        祖先且 ≠HEAD——交付提交挂目标支自身的 hotfix 形态）；(b) task 行既有
+        commit 字段（前次受理留痕，如 reopen 期间人工合入）在目标支可达——与
+        门体 run() 崩溃重排直通探针同语义。均不成立＝真零提交照拒。env_base
+        缺席（升级前在飞任务）＝判据 (a) 不可确立，按旧口径拒；判据谓词病＝
+        「未确立」不放行（带痕审计），与主探针 fail-open 分工：拒收须正据。"""
+        prev = t.get("commit")
+        if prev == commit:
+            return True  # (b) 等价：空集主探针已证本 commit 目标支可达
+        try:
+            base = t.get("env_base")
+            if base and commit != base \
+                    and self._gitx.is_ancestor(t["project_dir"], base, commit):
+                return True  # (a)
+            if prev and self._gitx.contains(t["project_dir"], prev,
+                                            t.get("target_branch"),
+                                            fetch_timeout=5):
+                return True  # (b)
+        except RuntimeError:  # gitx 失败契约；编程错误照崩不静默
+            self._audit(tid, "zero_commit_probe_failed")
+        return False
 
     def _accept_out_of_band(self, tid, worker_sid, ref):
         """ag-af96bb② review-only（deliverable=out_of_band）done 受理豁免分支：

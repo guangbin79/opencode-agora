@@ -429,6 +429,18 @@ class Gitx:
             return False
         raise RuntimeError(f"git merge-base --is-ancestor {commit} {target}: {r.stderr.strip()}")
 
+    def is_ancestor(self, repo_dir: str, base: str, commit: str) -> bool:
+        """raw 祖先判定（ag-1ae0f1 空集判据 a）：base 是否 commit 的祖先——
+        env HEAD 相对任务起点 base 有前进即真。不经 baseline() 不 fetch（两端
+        均为具体 sha，基线解析无意义）；rc 0/1 分类同 contains，其余病如实抛。"""
+        r = self._git(["merge-base", "--is-ancestor", base, commit],
+                      cwd=repo_dir, check=False)
+        if r.returncode == 0:
+            return True
+        if r.returncode == 1:
+            return False
+        raise RuntimeError(f"git merge-base --is-ancestor {base} {commit}: {r.stderr.strip()}")
+
     def head(self, repo_dir: str, branch: str = None) -> str:
         # 全限定 refs/heads/<branch>：裸名 rev-parse tag 优先，同名 tag 会给出错误回滚点
         return self._git(["rev-parse", f"refs/heads/{branch}" if branch else "HEAD"],
