@@ -29,19 +29,18 @@ class App:
     main_sid: str
 
     def bind_main(self, sid, caller):
-        """R25-A：root 牌调用登记主会话真实 sid（多主会话最近活跃覆盖）。
-
-        sid＝牌当前 sid（占位 "main" 或重启前旧绑定），caller＝X-Agora-Sid 真实
-        会话——改绑牌使后续 task 行 dispatcher 落真实 sid，拍人链边直达真会话；
-        重启后 main_sid 复位与牌不同步亦经此自愈。任务 worker 边会话拒绝绑定：
-        worker 凭据缺失回落 root 牌（B1）＋携 sid 属误附，不得抢主会话绑定。
-        返回对齐后 sid（拒绑＝原 sid）——本笔请求后续归属判定即以新 sid 走。
+        """root 牌身份钉死 daemon 身份（ag-f80309 B 案，替代 R25-A 活绑定 rebind）：
+        携 X-Agora-Sid 的 root 调用只更新 main_sid 活绑定（多主会话最近活跃覆盖），
+        牌面账本 sid 零改绑——污染源（每调用 rebind 会话 sid）就此根除。任务行归属
+        改由 httpd 传对齐 sid 记账（TaskService actor_sid），链边按记录值判定。
+        任务 worker 边会话拒绝绑定：worker 凭据缺失回落 root 牌（B1）＋携 sid 属
+        误附，不得抢主会话绑定。返回本笔归属 sid（拒绑＝牌面 sid）。
         """
-        if caller != sid:
-            if any(t.get("worker_sid") == caller
-                   for t in self.state.snapshot()["tasks"].values()):
-                return sid
-            self.auth.rebind(sid, caller, prefer_role="root")  # ag-588eb8：双角色稳态点名 root 牌
+        if caller == sid:
+            return sid
+        if any(t.get("worker_sid") == caller
+               for t in self.state.snapshot()["tasks"].values()):
+            return sid
         if self.main_sid != caller:
             self.main_sid = caller
             self.store.append_event({"ts": time.time(), "actor": caller,
@@ -101,12 +100,16 @@ class App:
     def bind_dispatcher(self, role, sid, t):
         """F21：dispatcher 侧换号改绑（镜像 bind_worker，补壳重启死号缺口）——
         root 牌 post 命中「非链边」前判愈合：登记 dispatcher_sid ≠ 调用者且该
-        会话已不存在（oc 存在性检查）→ auth.rebind（旧号入血统）＋活动任务行
-        dispatcher_sid 同步覆写＋dispatcher_rebind 审计（含新旧 sid 与任务），
-        本笔 post 按链边放行。守卫（不满足保持既有拒绝）：非 root 牌、活号
-        （防活号互抢）、任务终态（冻结不动）、oc 不可达≠死（recover 同口径免判）。"""
+        会话已不存在（oc 存在性检查）→ auth.rebind 尽力而为挪牌（旧号入血统；
+        死号名下零牌＝无从挪——ag-f80309 B 案起 root 直连窗无窗口牌属常态，
+        血统兜底对其不适用：会话邮件走 cred_issue 每窗 dispatcher 牌，F16 链
+        经本愈合照续）＋活动任务行 dispatcher_sid 同步覆写＋dispatcher_rebind
+        审计（含新旧 sid 与任务），本笔 post 按链边放行。守卫（不满足保持既有
+        拒绝）：非 root 牌、活号（防活号互抢）、任务终态（冻结不动）、daemon
+        身份行（ag-f80309 B 案：dispatcher_sid="root" 归 daemon 恒不愈合——
+        rebind 不得回流触碰 root 牌）、oc 不可达≠死（recover 同口径免判）。"""
         d = t.get("dispatcher_sid")
-        if role != "root" or not d or d == sid:
+        if role != "root" or not d or d == sid or d == "root":  # daemon 行恒不愈合
             return
         tasks = self.state.snapshot()["tasks"]
         hit = [tid for tid, x in tasks.items()

@@ -16,8 +16,8 @@ from pathlib import Path
 from unittest import mock
 
 from agorad.main import assemble, audit_root_poison, env_config, issue_root, \
-    load_env_file, main, quick_limits_from_env, verify_ceiling_from_env, \
-    verify_timeout_from_env
+    load_env_file, main, migrate_root_poison, quick_limits_from_env, \
+    verify_ceiling_from_env, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -229,6 +229,49 @@ class TestStartupRootPoisonAudit(unittest.TestCase):
             self.assertEqual(audit_root_poison(app), 0)
             self.assertEqual([e for e in app.store.read_events()
                               if e["event"] == "root_poison_audit"], [])  # 零污染零新行
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestStartupRootPoisonMigration(unittest.TestCase):
+    """ag-f80309 B 案：存量「会话 sid＋root 角色」污染条目启动一次性归位
+    sid="root"（旧 sid 入血统留痕）；幂等——二扫零迁移零写盘；worker 在飞
+    牌与真 root（daemon 身份）分毫不动；归位后启动审计零残留。"""
+
+    def test_migrate_rewrites_poisoned_roots_once(self):  # ag-f80309
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            tok_daemon = app.auth.issue("root", "root")  # 真 root（daemon 身份）
+            tok_poison = app.auth.issue("ses-poison", "root")  # 会话 sid 污染
+            tok_worker = app.auth.issue("ses-worker", "worker")  # 在飞 worker
+            self.assertEqual(migrate_root_poison(app), 1)
+            toks = app.store.read_ephemeral("tokens")
+            self.assertEqual(len(toks), 3)  # 零撤销：账本条目数不变
+            self.assertEqual(app.auth.identify(tok_daemon), ("root", "root"))
+            self.assertEqual(app.auth.identify(tok_poison), ("root", "root"))  # 归位
+            self.assertEqual(app.auth.identify(tok_worker),
+                             ("ses-worker", "worker"))  # worker 在飞牌原样
+            self.assertIn("ses-poison", toks[tok_poison][2])  # 旧 sid 入血统留痕
+            ev = [e for e in app.store.read_events()
+                  if e["event"] == "root_poison_migrated"]
+            self.assertEqual([(e["actor"], e["note"]) for e in ev],
+                             [("agorad", "migrated=1")])  # 迁移一行审计
+            self.assertEqual(migrate_root_poison(app), 0)  # 幂等：二扫零迁移
+            self.assertEqual(len([e for e in app.store.read_events()
+                                  if e["event"] == "root_poison_migrated"]), 1)
+            self.assertEqual(audit_root_poison(app), 0)  # 归位后审计零残留
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_migrate_silent_when_ledger_clean(self):  # ag-f80309
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            app.auth.issue("ses-w", "worker")
+            self.assertEqual(migrate_root_poison(app), 0)
+            self.assertEqual([e for e in app.store.read_events()
+                              if e["event"] == "root_poison_migrated"], [])  # 零迁移零新行
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

@@ -57,8 +57,9 @@ class Auth:
         """按 sid 改绑牌到新会话（值 [new_sid, role]，token 本体不变）——
         重注入后旧牌即续用；old_sid 入血统集随牌落盘（F16 换号链边连续）。
         prefer_role：同 sid 多牌并存（ag-588eb8 双角色稳态）时优先改绑该角色牌
-        （bind_main 传 "root"——rotate_root 删旧重签会把 root 挪到队尾，首匹配
-        会误绑窗口 dispatcher 牌）。返回牌文本（供 inject 送达），无牌 None。"""
+        （ag-588eb8 双角色稳态：同 sid 多牌并存时点名角色牌，防 rotate_root 删旧
+        重签把 root 挪到队尾后首匹配误绑窗口 dispatcher 牌；ag-f80309 B 案起
+        bind_main 不再改绑，点名面归通用能力）。返回牌文本（供 inject 送达），无牌 None。"""
         cands = [(tok, v) for tok, v in self._tokens.items() if v[0] == old_sid]
         if prefer_role:  # 点名角色牌优先；缺省保持首匹配（既有语义不回归）
             cands.sort(key=lambda kv: kv[1][1] != prefer_role)
@@ -89,6 +90,26 @@ class Auth:
                 return tok, v[1]
             root_hit = root_hit if root_hit is not None else tok
         return (root_hit, "root") if root_hit else None
+
+    def pin_roots(self):
+        """存量迁移（ag-f80309 B 案）：会话 sid 持 root 的污染条目一次性归位
+        daemon 身份 sid="root"（旧 sid 入血统留痕，格式兼容）。幂等——归位后
+        零命中零写盘；worker/dispatcher 在飞牌不动。返回迁移条数。"""
+        n = 0
+        for v in self._tokens.values():
+            if v[1] != "root" or v[0] == "root":
+                continue
+            old = v[0]
+            v[0] = "root"
+            if len(v) < 3:  # 旧格式起档
+                v.append([])
+            if old not in v[2]:
+                v[2].append(old)
+            del v[2][:-LINEAGE_CAP]  # 封顶同 rebind：最旧出局
+            n += 1
+        if n:
+            self._persist()
+        return n
 
     def revoke(self, token):
         if token not in self._tokens:

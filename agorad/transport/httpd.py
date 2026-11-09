@@ -145,10 +145,11 @@ class _Handler(BaseHTTPRequestHandler):
                                             target_branch=body.get("target_branch"),
                                             verify_cmd=vc, verify_pending=vp,
                                             req_id=rq, timeout=to, model=md,
-                                            quick=qk, deliverable=dl)}
+                                            quick=qk, deliverable=dl,
+                                            actor_sid=sid)}  # ag-f80309：归属记真实调用 sid
         if name == "task_dispatch":
             return {"task": body["task"],
-                    "token": app.task.dispatch(body["task"], token)}
+                    "token": app.task.dispatch(body["task"], token, actor_sid=sid)}
         if name == "task_update":
             vc = body["verify_cmd"]
             if not isinstance(vc, str):  # 同 create 口径：非串 400 报因，不落 500
@@ -157,13 +158,15 @@ class _Handler(BaseHTTPRequestHandler):
             if to is not None and (isinstance(to, bool)
                                    or not isinstance(to, int)):  # 同 create 口径
                 raise ValueError("timeout 须为正整数秒")
-            app.task.update_verify(body["task"], token, vc, timeout=to)
+            app.task.update_verify(body["task"], token, vc, timeout=to,
+                                   actor_sid=sid)  # ag-f80309：登记人同口径
             return {"ok": True}
         if name == "task_cancel":
             force = body.get("force", False)
             if not isinstance(force, bool):  # "true" 字符串得 True——强杀语义反转拒收
                 raise ValueError("force 须为布尔")
-            return app.task.cancel(body["task"], token, force=force)  # F28 忙碌闸应答直透
+            return app.task.cancel(body["task"], token, force=force,
+                                   actor_sid=sid)  # F28 忙碌闸应答直透
         if name == "post":
             return self._post(sid, role, body)
         if name == "check_mail":
@@ -208,9 +211,10 @@ class _Handler(BaseHTTPRequestHandler):
         raise KeyError(name)
 
     def _bind_caller(self, sid, role):
-        """R25-A root 活绑定＋gt-d55b9e worker 换号自愈：MCP 壳透传 X-Agora-Sid
-        （调用者真实会话 sid）即对齐牌面；无头直连（T4 冒烟/看板 tui）不动绑定。
-        返回对齐后 sid——改绑发生时后续归属判定须以新 sid 走。"""
+        """ag-f80309 B 案 root 钉死＋gt-d55b9e worker 换号自愈：MCP 壳透传
+        X-Agora-Sid（调用者真实会话 sid）——root 牌只更新 main_sid 活绑定并返回
+        caller 作本笔归属身份（牌面零改绑）；worker 换号照旧改绑；无头直连
+        （T4 冒烟/看板 tui）不动绑定。返回对齐后 sid——后续归属判定以新 sid 走。"""
         caller = self.headers.get("X-Agora-Sid", "")
         if not caller:
             return sid

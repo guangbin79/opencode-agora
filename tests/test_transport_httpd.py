@@ -369,17 +369,21 @@ class TestHttpSmoke(HttpdTest):
         expect = [f"[agora] task {tid} note from main\nm{i}" for i in range(10)]
         self.assertEqual(self.stub.sessions[wsid]["injects"][-10:], expect)
 
-    def test_root_call_with_real_sid_binds_main(self):  # Req: F4（R25-A 拍人真链）
+    def test_root_call_with_real_sid_binds_main(self):  # Req: F4（ag-f80309 B 案）
+        """root 牌携 X-Agora-Sid：main_sid 活绑定照常，牌面账本 sid 零改绑
+        （R25-A rebind 摘除）；无头建任务按牌面 sid 归属（headless 兼容）。"""
         st, _ = call(self.port, "POST", "/board", {}, self.root, sid="ses-m1")
         self.assertEqual(st, 200)
         self.assertEqual(self.app.main_sid, "ses-m1")
+        self.assertEqual(self.app.auth.identify(self.root), ("main", "root"))  # 牌面不动
         ev = [e for e in self.app.store.read_events()
               if e["event"] == "main_sid_bound"]
-        self.assertEqual([e["actor"] for e in ev], ["ses-m1"])  # 换绑审计
-        tid = self.create_task()  # root 牌同步改绑：task 行 dispatcher 落真实 sid
-        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "ses-m1")
+        self.assertEqual([e["actor"] for e in ev], ["ses-m1"])  # 绑定审计
+        tid = self.create_task()  # 无头建任务：归属＝牌面 sid（不再被活绑定牵着走）
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "main")
         st, _ = call(self.port, "POST", "/board", {}, self.root, sid="ses-m2")
         self.assertEqual(self.app.main_sid, "ses-m2")  # 多主会话最近活跃覆盖
+        self.assertEqual(self.app.auth.identify(self.root), ("main", "root"))
         call(self.port, "POST", "/board", {}, self.root)  # 无头直连不动绑定
         self.assertEqual(self.app.main_sid, "ses-m2")
         wtok = self.app.auth.issue("w6", "worker")
@@ -387,30 +391,90 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(st, 403)  # 非 root 携头：矩阵拒，绑定不动
         self.assertEqual(self.app.main_sid, "ses-m2")
 
-    def test_dispatcher_renumber_chain_edge_lineage(self):  # Req: F16
-        """sid 血统：dispatcher 换号（bind_main rebind）后 post 旧任务仍达 worker，
-        旧行 dispatcher_sid 不改写、归因记真实新 sid；无血缘 root 仍拒。"""
+    def test_root_token_pinned_under_sid_calls(self):  # ag-f80309 验收①
+        """daemon 身份 root 牌（签发/迁移后形态）：携 X-Agora-Sid 调用后账本
+        sid 恒 "root"；建任务归属记真实调用 sid。"""
+        tok = self.app.auth.issue("root", "root")
+        st, _ = call(self.port, "POST", "/board", {}, tok, sid="ses-m1")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.auth.identify(tok), ("root", "root"))  # 不 rebind
+        self.assertEqual(self.app.main_sid, "ses-m1")  # 活绑定只进 main_sid
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo"}, tok, sid="ses-m1")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(r["task"])["dispatcher_sid"], "ses-m1")
+
+    def test_dispatcher_chain_edge_by_recorded_sid(self):  # ag-f80309（替代 F16 rebind 链）
+        """链边按记录值判定：携 sid 建任务后同 sid 会话即派发方（down 直达），
+        他窗 root 调用非链边拒；root 牌全程零改绑。"""
         tid = self.create_task()  # 无头建任务：dispatcher_sid=main
         self.dispatch_task(tid)
         wsid = self.app.state.get(tid)["worker_sid"]
-        st, _ = call(self.port, "POST", "/board", {}, self.root, sid="ses2")  # 换号 rebind
-        self.assertEqual(st, 200)
-        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "main")  # 旧行不改写
+        self.app.state.set_fields(tid, dispatcher_sid="ses2")  # 归属迁移后行形态
+        self.stub.sessions["ses2"] = {"injects": [], "directory": "/"}  # 登记号仍活
         st, r = call(self.port, "POST", "/post",
-                     {"task": tid, "kind": "note", "body": "blood-note-16"},
+                     {"task": tid, "kind": "note", "body": "edge-note"},
                      self.root, sid="ses2")
-        self.assertEqual(st, 200)  # 血统放行：down 边直达 worker
+        self.assertEqual(st, 200)  # 记录值判真：down 边直达 worker
         self.assertIn(f"[agora] task {tid} note from ses2",
                       self.stub.sessions[wsid]["injects"][-1])
         (m,) = [x for x in self.app.store.read_messages()
-                if x["body"] == "blood-note-16"]
-        self.assertEqual((m["from"], m["to"]), ("ses2", wsid))  # 归因真实新 sid
+                if x["body"] == "edge-note"]
+        self.assertEqual((m["from"], m["to"]), ("ses2", wsid))  # 归因真实 sid
         outsider = self.app.auth.issue("ses9", "root")
-        self.stub.sessions["main"] = {"injects": [], "directory": "/"}  # F21：登记号仍活
         st, r = call(self.port, "POST", "/post",
                      {"task": tid, "kind": "note", "body": "x"},
                      outsider, sid="ses9")
-        self.assertEqual(st, 400)  # 无血缘且登记号活：非链边（死号则走 F21 改绑）
+        self.assertEqual(st, 400)  # 无血缘且登记号活：非链边（死号才走 F21 愈合）
+        self.assertEqual(self.app.auth.identify(self.root), ("main", "root"))
+
+    def test_f21_heals_legacy_row_keeps_root_pinned(self):  # ag-f80309
+        """存量行（死号登记）愈合：行覆写为调用 sid＋审计，root 牌零触碰。"""
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        self.app.state.set_fields(tid, dispatcher_sid="ses-dead")  # 存量污染行形态
+        st, _ = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "healed"},
+                     self.root, sid="ses-new")
+        self.assertEqual(st, 200)  # 登记号死→愈合后放行
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "ses-new")
+        self.assertEqual(self.app.auth.identify(self.root), ("main", "root"))
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "dispatcher_rebind"]
+        self.assertEqual(ev[-1]["to"], "ses-new")
+
+    def test_daemon_owned_row_not_healed(self):  # ag-f80309
+        """dispatcher_sid="root"（headless daemon 行）不被携 sid 调用愈合：
+        root 牌钉死 daemon 身份，daemon 行归 daemon，rebind 不得回流。"""
+        tid = self.create_task()
+        self.app.state.set_fields(tid, dispatcher_sid="root")
+        st, _ = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "x"},
+                     self.root, sid="ses-x")
+        self.assertEqual(st, 400)  # 非链边：daemon 行不随调用窗迁移
+        self.assertEqual(self.app.state.get(tid)["dispatcher_sid"], "root")
+        self.assertEqual(self.app.auth.identify(self.root), ("main", "root"))
+
+    def test_two_windows_dispatch_attribution(self):  # ag-f80309 验收④
+        """多窗口并发派发：两窗各自携 sid 建/派，任务归属各归各窗，牌面不动。"""
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo"}, self.root, sid="ses-A")
+        a = r["task"]
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g2", "project_dir": "/repo"}, self.root, sid="ses-B")
+        b = r["task"]
+        self.assertEqual(self.app.state.get(a)["dispatcher_sid"], "ses-A")
+        self.assertEqual(self.app.state.get(b)["dispatcher_sid"], "ses-B")
+        self.assertEqual(self.app.auth.identify(self.root), ("main", "root"))
+        st, _ = call(self.port, "POST", "/task_update",
+                     {"task": a, "verify_cmd": "true"}, self.root, sid="ses-A")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(a)["verify"]["registered_by"], "ses-A")
+        st, _ = call(self.port, "POST", "/task_dispatch", {"task": a},
+                     self.root, sid="ses-A")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(a)["dispatcher_sid"], "ses-A")  # 派发不漂
 
     def test_wiki_write_read_and_guards(self):  # Req: F1
         st, r = call(self.port, "POST", "/wiki_write",

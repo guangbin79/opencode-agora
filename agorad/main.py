@@ -193,6 +193,20 @@ def issue_root(app):
     return app.auth.issue("root", "root")
 
 
+def migrate_root_poison(app):
+    """启动迁移（ag-f80309 B 案）：存量「会话 sid＋root 角色」污染条目一次性
+    归位 daemon 身份 sid="root"（auth.pin_roots：旧 sid 入血统留痕，幂等——
+    账本干净即零写盘）；worker 在飞牌不动。迁移>0 才落审计一行（actor=agorad）。
+    B 案起 bind_main 不再制造污染（每调用 rebind 摘除），本面只清一次存量；
+    残留审计（audit_root_poison）排在其后作零残留看门。"""
+    n = app.auth.pin_roots()
+    if n:
+        app.store.append_event({"ts": time.time(), "actor": "agorad",
+                                "event": "root_poison_migrated",
+                                "note": f"migrated={n}"})
+    return n
+
+
 def audit_root_poison(app):
     """启动维护（ag-588eb8 裁决 A）：扫存量「会话 sid＋root 角色」污染条目，
     仅审计计数不撤销——root 牌常为唯一治理牌，撤销即断 CLI/enforce/doctor；
@@ -264,7 +278,8 @@ def main():
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）
-    audit_root_poison(app)  # ag-588eb8：启动维护审计存量污染（只记账不撤销）
+    migrate_root_poison(app)  # ag-f80309：存量污染一次性归位 daemon 身份（幂等）
+    audit_root_poison(app)  # ag-588eb8：迁移后残留看门（只记账不撤销）
     app.recover.startup()
     try:
         oc_version = app.oc.probe().get("oc_version")

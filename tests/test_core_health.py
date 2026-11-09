@@ -268,6 +268,15 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.store.read_events("t1")
                           if e["event"].startswith("email")], ["email_failed"])
 
+    def test_escalate_targets_own_window_not_main(self):  # ag-f80309 不漂移
+        """归属迁移后语义对齐：根任务 disp=ses-a（≠main_sid）时 escalate 拍
+        ses-a 归属窗，不向 main 漂移（health.py _root 比对记录值）。"""
+        self.seed("t1", disp="ses-a", worker="s-w1")
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertEqual([m["to"] for m in self.store.read_messages()
+                          if m["kind"] == "escalate"], ["ses-a"])
+        self.assertEqual(self.main_msgs(), [])  # main 零漂移
+
     # ---- F63：公共 send_email（msg 终态邮件共用同一实现）----
 
     def test_send_email_configured_sends_and_audits(self):  # Req: F63
@@ -564,18 +573,21 @@ class TestCoreHealth(unittest.TestCase):
               if e["event"] == "main_sid_bound"]
         self.assertEqual([e["actor"] for e in ev], ["ses-a", "ses-b"])
 
-    def test_bind_main_rebinds_token_so_task_rows_carry_real_sid(self):  # Req: F4
+    def test_bind_main_keeps_token_so_rows_attribution_moves(self):  # ag-f80309
+        """B 案：bind_main 零改绑——牌面账本 sid 不随调用走，归属改由
+        TaskService actor_sid 记账（httpd 传对齐 sid）。"""
         tok = self.app.auth.issue("main", "root")
-        self.app.bind_main("main", "ses-main")  # 占位 sid→真会话一次性改绑
-        self.assertEqual(self.app.auth.identify(tok), ("ses-main", "root"))
+        self.app.bind_main("main", "ses-main")
+        self.assertEqual(self.app.auth.identify(tok), ("main", "root"))  # 牌面钉死
+        self.assertEqual(self.app.main_sid, "ses-main")  # 活绑定只进 main_sid
 
-    def test_bind_main_dual_role_sid_moves_root_not_window_token(self):  # ag-588eb8
+    def test_bind_main_dual_role_sid_moves_neither_token(self):  # ag-f80309
         tok_d = self.app.auth.issue("ses-x", "dispatcher")  # 窗口牌在前
         tok_r = self.app.auth.issue("ses-x", "root")  # 污染/rotate 重签落队尾
         self.app.bind_main("ses-x", "ses-next")
-        self.assertEqual(self.app.auth.identify(tok_r), ("ses-next", "root"))
+        self.assertEqual(self.app.auth.identify(tok_r), ("ses-x", "root"))
         self.assertEqual(self.app.auth.identify(tok_d),
-                         ("ses-x", "dispatcher"))  # 窗口 dispatcher 牌不被挪走
+                         ("ses-x", "dispatcher"))  # 双牌稳态：均零改绑
 
     def test_bind_main_rejects_task_worker_edge_session(self):  # Req: F4
         self.seed("t1", worker="ses-hijack")  # worker 凭据缺失回落 root 牌的误附面

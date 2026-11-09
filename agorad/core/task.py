@@ -60,8 +60,9 @@ class TaskService:
     def create(self, goal, project_dir, after, actor_token, title=None,
                target_branch=None, verify_cmd=None, verify_pending=False,
                req_id=None, timeout=None, model=None, quick=False,
-               deliverable=None):
+               deliverable=None, actor_sid=None):
         sid, role = self._gate(actor_token, "task_create", None, None)
+        sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
         if role == "worker":  # F37 作用域：验收写面/豁免旗拒＋仓/合并策略强制继承
@@ -165,10 +166,11 @@ class TaskService:
 
     # ---- F3 派发 ----
 
-    def dispatch(self, tid, dispatcher_token):
+    def dispatch(self, tid, dispatcher_token, actor_sid=None):
         t = self._state.get(tid)
         sid, _ = self._gate(dispatcher_token, "task_dispatch", tid, t,
                             owner=t.get("dispatcher_sid"))
+        sid = actor_sid or sid  # ag-f80309：派发归属同建单按对齐调用 sid 记
         stale_note = None
         if t["state"] not in ("todo", "blocked"):
             if t["state"] == "running":  # ag-d1d8c1：stalled 的 running 可重派
@@ -305,10 +307,11 @@ class TaskService:
 
     # ---- F11 中止 ----
 
-    def cancel(self, tid, actor_token, force=False):
+    def cancel(self, tid, actor_token, force=False, actor_sid=None):
         t = self._state.get(tid)
         sid, _ = self._gate(actor_token, "task_cancel", tid, t,
                             owner=t.get("dispatcher_sid"))
+        sid = actor_sid or sid  # ag-f80309：中止审计/通知归因同口径
         previous = str(t.get("cancel_reason", ""))
         if t["state"] == "cancelled" and previous.startswith("dependency_failed"):
             # 自动停链不是成功跳过；dispatcher 显式再 cancel 一次即确认有意跳过，
@@ -461,10 +464,11 @@ class TaskService:
 
     # ---- F2 verify 登记（登记即锁定，worker 必拒） ----
 
-    def update_verify(self, tid, actor_token, cmd, timeout=None):
+    def update_verify(self, tid, actor_token, cmd, timeout=None, actor_sid=None):
         t = self._state.get(tid)
         sid, role = self._gate(actor_token, "task_update", tid, t,
                                owner=t.get("dispatcher_sid"))
+        sid = actor_sid or sid  # ag-f80309：登记人记对齐调用 sid
         if role not in ("root", "dispatcher"):  # F37 全局角色判定：子任务局部
             self._reject(tid, sid, "worker 不得登记/修改验收命令——主会话派发方"
                                    "或 root 登记", ev=EV_DENIED)  # dispatcher 归属非授权

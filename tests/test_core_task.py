@@ -695,6 +695,17 @@ class TestVerifyGate(TestCoreTask):
         self.assertEqual(t["goal"], "my goal")
         self.assertEqual(t["chain_depth"], 1)
 
+    def test_actor_sid_attribution_overrides_ledger(self):  # ag-f80309
+        """B 案归属：root 牌账本 sid 钉死 "root" 后，httpd 传对齐 sid 记账——
+        建单/派发两跳均按真实调用会话落 dispatcher_sid 与 F45 池。"""
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", actor_sid="ses-a")
+        t = self.state.get(tid)
+        self.assertEqual(t["dispatcher_sid"], "ses-a")
+        self.assertEqual(t["root_sid"], "ses-a")  # F45 池随真实窗口
+        self.svc.dispatch(tid, self.root, actor_sid="ses-a")
+        self.assertEqual(self.state.get(tid)["dispatcher_sid"], "ses-a")  # 派发不漂
+
     def test_boot_carries_opening_and_shell_contract(self):  # Req: F13/F37
         self.dispatched_pair()
         boot = self.oc.sessions[-1][2]

@@ -118,7 +118,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 - **强制隔离**——插件级闸拦截无任务凭据的 git 仓写入；worker 碰不到你的主检出。
 - **跨仓与嵌套编排**——`after:` 依赖链；worker 可创建并管理自己的子任务，结果回传后才允许父任务完成；链深（3）与并发（6）硬上限，叶子层 worker 无嵌套派发权（F41）
 - **角色分权**——root / dispatcher / worker 会话牌；worker 只能取消或登记自己子任务的 verify，不能管理父任务／他人任务或看板
-- **root 牌只属 daemon 身份**——签发目标恒为常量 `sid="root"`，永不落到客户端会话 sid；会话 sid 名下永远 dispatcher/worker 牌——`/cred_for_sid` 发现残留 root 绑定（R25-A 活绑定产物）即换发 dispatcher 牌且保留账本条目，老窗口零干预自愈；启动维护对残留只计数审计（一行，不撤销——root 牌常是唯一治理凭据）
+- **root 牌只属 daemon 身份**——签发目标恒为常量 `sid="root"`，永不落到客户端会话 sid；root 牌携 `X-Agora-Sid` 的调用零改绑：活会话只更新 `main_sid`，任务归属改记真实调用会话 sid（链边按记录值判定）。存量「root 牌落会话 sid」的账本条目由启动维护一次性归位 `sid="root"`（旧 sid 入血统留痕，幂等，worker 在飞牌不动）；启动审计保留作残留看门——只计数不撤销（root 牌常是唯一治理凭据）
 - **崩溃恢复**——任意时刻 `kill -9`；只追加状态＋worker 重启后凭原凭据重注入续跑
 - **实时问责**——失控实时拍主会话；每次状态变更落只追加 JSONL 审计；健康巡检兜底 dispatcher 死亡
 - **兼容 PR 工作流**——`task_create(target_branch="feature/x")` 合并进特性分支而非 main
