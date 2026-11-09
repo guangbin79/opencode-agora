@@ -475,7 +475,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/cred_for_sid") {
           return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
-            pulls.push(sid);
+            if (!req.headers.get("x-agora-token")) pulls.push(sid); // 换牌面（ag-32a5e2 root 头）不计拉取
             if (sid === "s-boot-pull-w") {
               return Response.json({ tid: "t-pull", env_dir: envDir, token: "tok-pull" });
             }
@@ -530,7 +530,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/cred_for_sid") {
           return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
-            pulls.push(sid);
+            if (!req.headers.get("x-agora-token")) pulls.push(sid); // 换牌面不计拉取
             if (credMode === "ok" && sid === "s-boot-half") {
               return Response.json({ tid: "t-half", env_dir: envDir, token: "tok-half" });
             }
@@ -584,7 +584,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/cred_for_sid") {
           return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
-            pulls.push(sid);
+            if (!req.headers.get("x-agora-token")) pulls.push(sid); // 换牌面不计拉取
             if (credMode === "ok" && sid === "s-boot-half-inv") {
               return Response.json({ tid: "t-half", env_dir: envDir, token: "tok-half-inv" });
             }
@@ -634,16 +634,24 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     const hooks = wire();
     setEnforce(false);
     const pulls: string[] = [];
+    const exchanges: string[] = [];
     const srv = Bun.serve({
       port: 0,
       fetch(req) {
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          const isExchange = req.headers.get("x-agora-token") !== null;
           return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
-            pulls.push(sid);
             // 30ms 在途窗：放大竞态面，让并发第二调落在首拉未归期
-            return new Promise<Response>((res) =>
-              setTimeout(() => res(new Response("{}", { status: 404 })), 30));
+            const slow = (r: Response) =>
+              new Promise<Response>((res) => setTimeout(() => res(r), 30));
+            if (isExchange) {
+              // lift 换牌面（ag-32a5e2）：root 牌头→签发本会话牌
+              exchanges.push(sid);
+              return slow(Response.json({ token: "tok-disp", role: "dispatcher" }));
+            }
+            pulls.push(sid);
+            return slow(new Response("{}", { status: 404 }));
           });
         }
         return Response.json({ ok: true });
@@ -656,7 +664,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     resetLift();
     resetCredPull();
     try {
-      const sid = "s-race-main"; // 主会话形态：404→root 牌接管回退（worker 牌永不入缓存）
+      const sid = "s-race-main"; // 主会话形态：404→root 头换会话牌（ag-32a5e2，root 本体不附牌）
       const postIn: Record<string, unknown> = { task: "t-race", kind: "answer", body: "x" };
       const wikiIn: Record<string, unknown> = { path: "wiki/race.md", text: "x" };
       await Promise.all([
@@ -664,9 +672,10 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
         hooks["tool.execute.before"]({ tool: "agora_wiki_write", sessionID: sid, input: wikiIn }),
       ]);
       // 两调都必须附上牌（事故形态＝并发第二调零牌即时拒，兄弟调用被取消致 post 丢投）
-      expect(postIn._token).toBe("tok-root");
-      expect(wikiIn._token).toBe("tok-root");
+      expect(postIn._token).toBe("tok-disp");
+      expect(wikiIn._token).toBe("tok-disp");
       expect(pulls).toEqual([sid]); // 单飞：并发两调共享一次在途拉取（非两次、非零次）
+      expect(exchanges).toEqual([sid]); // 换牌同在单飞内：恰一次
     } finally {
       if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
       else process.env.AGORA_OC_URL = savedUrl;
@@ -824,8 +833,8 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     }
   });
 
-  test("F27 attach 分流：冷缓存 worker 拉取牌优先不落 root；404 root 牌保持；不可达不附牌；两路皆缺不附", async () => {
-    // Req: F27
+  test("F27 attach 分流：冷缓存 worker 拉取牌优先不落 root；404 root 头换会话牌不落 root；不可达不附牌；两路皆缺不附", async () => {
+    // Req: F27＋ag-32a5e2（换牌后 root 本体退出附牌面）
     const hooks = wire();
     setEnforce(false); // 本例只验附牌面：分流独立于 enforce 旗
     let mode: "ok" | "404" | "500" = "ok";
@@ -834,7 +843,12 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       fetch(req) {
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          const root = req.headers.get("x-agora-token");
           return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            if (root === "tok-rootfile") {
+              // lift 换牌面（ag-32a5e2）：root 牌头→签发本会话牌
+              return Response.json({ token: `tok-disp-${sid}`, role: "dispatcher" });
+            }
             if (mode === "ok" && sid === "s-cold-w") {
               return Response.json({ tid: "t-f27", env_dir: envDir, token: "tok-pulled" });
             }
@@ -857,16 +871,17 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-cold-w", input: w });
       expect(w._token).toBe("tok-pulled");
       expect(getCredential("s-cold-w")?.token).toBe("tok-pulled"); // 拉取填缓存
-      // 404：非在飞 worker（主会话）→维持 root 牌接管文件附牌
+      // 404：非在飞 worker（主会话）→root 头换本会话 dispatcher 牌（root 本体不再附牌）
       mode = "404";
       const m: Record<string, unknown> = { task: "t-m" };
       await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-main-f27", input: m });
-      expect(m._token).toBe("tok-rootfile");
+      expect(m._token).toBe("tok-disp-s-main-f27");
       expect(m._sid).toBe("s-main-f27"); // R25-A 不变
-      // 窗内第二次调用（评审 high 场景：create→dispatch 连发）：回放 not_worker，root 附牌不断
+      expect(getCredential("s-main-f27")?.role).toBe("dispatcher"); // 换牌产物入缓存
+      // 窗内第二次调用（评审 high 场景：create→dispatch 连发）：缓存会话牌直附不重换
       const m2: Record<string, unknown> = { task: "t-m2" };
       await hooks["tool.execute.before"]({ tool: "agora_task_dispatch", sessionID: "s-main-f27", input: m2 });
-      expect(m2._token).toBe("tok-rootfile");
+      expect(m2._token).toBe("tok-disp-s-main-f27");
       // 不可达：绝不落 root→不附牌（MCP 壳 -32001 安全向）
       mode = "500";
       const d: Record<string, unknown> = { task: "t-d" };
@@ -883,6 +898,73 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       const p: Record<string, unknown> = { task: "t-p" };
       await hooks["tool.execute.before"]({ tool: "agora_task_create", sessionID: "s-prio", input: p });
       expect(p._token).toBe("tok-worker");
+    } finally {
+      if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
+      else process.env.AGORA_OC_URL = savedUrl;
+      resetLift();
+      resetCredPull();
+      srv.stop(true);
+      rmSync(join(home, ".agora", "root.token"), { force: true });
+    }
+  });
+
+  test("lift 换牌（ag-32a5e2）：root 头换牌调用发生＋后续调用附会话牌非 root＋换牌被拒窗内回落恰一次不附牌", async () => {
+    // 服务端契约＝TestPerWindowDispatchCred（tests/test_transport_httpd.py）：
+    // root 牌头＋新 sid→200 {token, role:"dispatcher"}＋cred_issue 审计；已持牌幂等回同牌。
+    const hooks = wire();
+    setEnforce(false); // 只验附牌面
+    const exchanges: { root: string | null; sid: string }[] = [];
+    let issue: "ok" | "401" = "ok";
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/cred_for_sid") {
+          const root = req.headers.get("x-agora-token");
+          return (req.json() as Promise<{ sid: string }>).then(({ sid }) => {
+            if (root === "tok-rootfile") {
+              exchanges.push({ root, sid }); // root 换牌调用
+              return issue === "ok"
+                ? Response.json({ token: "tok-disp-1", role: "dispatcher", tid: null, env_dir: null }) // 已持牌幂等支回显形态（httpd._cred_issue）
+                : new Response("{}", { status: 401 }); // 会话牌签发被拒：安全向
+            }
+            return new Response("{}", { status: 404 }); // worker 拉取面：主会话未命中
+          });
+        }
+        return Response.json({ ok: true, enforce_on: false }); // lift 探活面
+      },
+    });
+    writeFileSync(join(home, ".agora", "service.json"), JSON.stringify({ port: srv.port }));
+    writeFileSync(join(home, ".agora", "root.token"), "tok-rootfile\n");
+    const savedUrl = process.env.AGORA_OC_URL;
+    process.env.AGORA_OC_URL = `http://127.0.0.1:${srv.port}`; // lift 直达探活
+    resetLift();
+    resetCredPull();
+    try {
+      // 首个 agora_* 调用：pull 404（not_worker）→root 头换牌→附会话牌非 root
+      const m: Record<string, unknown> = { task: "t-1" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-lift", input: m });
+      expect(exchanges).toEqual([{ root: "tok-rootfile", sid: "s-lift" }]); // 换牌调用发生（root 牌头＋本会话 sid）
+      expect(m._token).toBe("tok-disp-1");
+      expect(m._token).not.toBe("tok-rootfile"); // 非 root 牌本体
+      expect(m._sid).toBe("s-lift");
+      expect(getCredential("s-lift")?.role).toBe("dispatcher"); // 缓存位＝会话牌
+      expect(getCredential("s-lift")?.tid).toBeUndefined(); // 回显 null 归一 undefined（Cred 可选 string 契约）
+      expect(getCredential("s-lift")?.envDir).toBeUndefined();
+      // 后续调用：缓存会话牌直附，窗内零重复换牌
+      const m2: Record<string, unknown> = { task: "t-2" };
+      await hooks["tool.execute.before"]({ tool: "agora_task_create", sessionID: "s-lift", input: m2 });
+      expect(m2._token).toBe("tok-disp-1");
+      expect(exchanges.length).toBe(1);
+      // 换牌被拒（401）：不附牌（既有安全向）；窗内回落重拉恰一次（节流不轰炸）
+      issue = "401";
+      const f: Record<string, unknown> = { task: "t-f" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-lift-401", input: f });
+      expect(f._token).toBeUndefined();
+      const f2: Record<string, unknown> = { task: "t-f2" };
+      await hooks["tool.execute.before"]({ tool: "agora_board", sessionID: "s-lift-401", input: f2 });
+      expect(f2._token).toBeUndefined(); // 窗内回放 not_worker：仍不附
+      expect(exchanges.length).toBe(2); // 第二次＝s-lift-401 首调的重拉；窗内不再重试
     } finally {
       if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
       else process.env.AGORA_OC_URL = savedUrl;

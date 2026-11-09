@@ -7,16 +7,14 @@
  * 会话 cwd＝ctx.session.get({sessionID}).location.directory（异步取，失败回落 process.cwd()）。
  * 语义与 agorad 服务侧一致：豁免面 B3、读引导、主会话例外、服务不可达默认拒。
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getCredential, pullCredential, type PullResult } from "./cred";
 import { onShellCreate, type ShellCreatePayload } from "./envPath";
+import { getCredential, pullCredential, readRootToken, type PullResult } from "./cred";
 import { onInject } from "./inject";
 import {
   AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
 } from "./lift";
 import { isDormant } from "./scope";
-import { agoraHome, enforceRelevant, fold, isWriteTool, NO_CRED_HINT, readishGated, shouldBlock } from "./hook";
+import { enforceRelevant, fold, isWriteTool, NO_CRED_HINT, readishGated, shouldBlock } from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -44,15 +42,6 @@ let enforceOverride: boolean | null = null; // 测试/特殊接线显式旗；�
 
 export function setEnforce(on: boolean | null): void {
   enforceOverride = on; // null＝清除显式旗，恢复服务持旗拉取
-}
-
-/** root 牌接管文件（F1 唯一落盘点，0600）；缺失/损坏返回 null（调用方按无牌走安全向）。 */
-function readRootToken(): string | null {
-  try {
-    return readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim() || null;
-  } catch {
-    return null;
-  }
 }
 
 /** 服务持旗拉取（设计 §5.1 核验面，lift/doctor 接线）：lift 定端口→doctor 查询面读
@@ -138,12 +127,12 @@ export default {
           `[agora-plugin] tool=${event.tool} sid=${event.sessionID} cred=${credSrc} pull=${pull?.reason ?? "-"} enforce=${on}\n`);
       }
       // 附牌主案（T5 实证②：改 ev.input 直达 MCP）：仅 agora MCP 工具面附 _token。
-      // F27 attach 分流：缓存/拉取命中的 worker 牌优先；拉取 404＝非 worker 会话→维持
-      // root 牌接管文件（主会话合法路径不动）；节流/不可达/lift 败态→不附牌——绝不落
-      // root（堵破口：worker 冷缓存首调不得以 root 身份行动，task_cancel/enforce 级）。
+      // lift 换牌（ag-32a5e2）后本面只附会话牌——worker 拉取牌或主会话换得的
+      // dispatcher 牌（统一出自 cred 缓存），root 牌接管文件不再进附牌面（多窗口
+      // 混 sid 修复）；换牌落空即不附（MCP 壳 -32001 安全向，与不可达同口径）。
       // _sid 携调用者真实会话 id（R25-A：服务登记主会话绑定，拍人注入真会话）。
       if (isAgora) {
-        const token = cred?.token ?? (pull?.reason === "not_worker" ? readRootToken() : null);
+        const token = cred?.token;
         if (token) {
           input._token = token;
           input._sid = event.sessionID;

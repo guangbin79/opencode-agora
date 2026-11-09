@@ -3,9 +3,12 @@
  * 牌随任务生死——cancel/重派即废（缓存清理由 inject 侧 T3 对齐）。
  * F25 修正推改拉：推送通道（inject_silent）证伪后，缓存未命中经 pullCredential
  * 主动向 agorad /cred_for_sid 拉取自愈（节流，失败安全向 null＝默认拒）。
+ * ag-32a5e2 lift 换牌：主会话拉取 404 即以 root 牌头换本会话 dispatcher 牌入缓存
+ * （root 牌本体自此退出附牌面——多窗口审计归各自 sid；幂等面窗内回同牌自愈）。
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { agoraHome } from "./hook";
 import { AGORAD_TIMEOUT_MS, agoradUrl } from "./lift";
 
 export type AgoraRole = "root" | "dispatcher" | "worker";
@@ -35,13 +38,55 @@ export function resetCredPull(): void {
   inFlight.clear();
 }
 
-/** 拉取拒因四分支（F27）：ok＝命中；not_worker＝404 服务侧无在飞任务绑本会话（主会话常态）；
- * unreachable＝连接拒/超时/5xx/形状缺（异常安全向）；throttled＝节流窗内零网络。 */
+/** 拉取拒因四分支（F27）：ok＝命中；not_worker＝404 服务侧无在飞任务绑本会话（主会话常态，
+ * cred 可为 lift 换牌产物＝本会话 dispatcher 牌）；unreachable＝连接拒/超时/5xx/形状缺（异常
+ * 安全向）；throttled＝节流窗内零网络。 */
 export type PullReason = "ok" | "not_worker" | "unreachable" | "throttled";
 export type PullResult = { reason: PullReason; cred: Cred | null };
 
+/** root 牌接管文件（F1 唯一落盘点，0600）；缺失/损坏返回 null（调用方按无牌走安全向）。 */
+export function readRootToken(): string | null {
+  try {
+    return readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** lift 换牌（ag-32a5e2，服务端签发面 ag-af96bb①）：root 牌头＋本会话 sid 经
+ * /cred_for_sid 签发面换会话牌——新 sid 签发 dispatcher 牌（cred_issue 审计），
+ * 已持牌幂等回同牌；坏/缺 root 头回落 worker 拉取面。仅在 404 判定后调用；
+ * 非 200/形状缺/异常一律 null（既有 not_worker 安全向不动）。 */
+async function exchangeCredential(sid: string, port: number): Promise<Cred | null> {
+  const root = readRootToken();
+  if (!root) return null;
+  try {
+    const r = await fetch(agoradUrl(port, "/cred_for_sid"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Agora-Token": root },
+      body: JSON.stringify({ sid }),
+      signal: AbortSignal.timeout(AGORAD_TIMEOUT_MS),
+    });
+    if (!r.ok) return null;
+    const d = (await r.json()) as { token?: string; role?: string; tid?: string; env_dir?: string };
+    if (!d.token || (d.role !== "dispatcher" && d.role !== "worker")) return null;
+    // tid/env_dir 归一 undefined：签发面已持牌幂等支回显 JSON null（httpd._cred_issue），
+    // Cred 类型契约是可选 string 非 null——直存会让缓存条目带 null 值（下游 truthy 守卫
+    // 今皆成立，但 === undefined 比对/序列化会踩）。
+    const cred: Cred = {
+      token: d.token, sid, role: d.role,
+      tid: d.tid ?? undefined, envDir: d.env_dir ?? undefined,
+    };
+    cacheCredential(cred);
+    return cred;
+  } catch {
+    return null;
+  }
+}
+
 /** 缓存未命中拉取自愈（F25 修正推改拉）：命中即填缓存并返回；其余按拒因枚举返回
- * cred=null＝走现有默认拒文案。短超时 2s：不拖垮工具调用判定链。 */
+ * cred=null＝走现有默认拒文案（例外：not_worker 可携 lift 换牌产物，见 PullReason）。
+ * 单跳短超时 2s；404 路径拉取＋换牌两跳串行（换牌仅 404 判定后发），判定链最坏 ~2×2s。 */
 export async function pullCredential(sid: string, port: number): Promise<PullResult> {
   // 单飞（ag-6099ba 根修，先于节流窗判）：并发同 sid 调用共享在途拉取——
   // 否则第二调落节流空窗（lastVerdict 尚空）回放 throttled→零牌即时拒，
@@ -50,8 +95,9 @@ export async function pullCredential(sid: string, port: number): Promise<PullRes
   if (flight) return flight;
   const now = Date.now();
   if (now - (pullSeen.get(sid) ?? 0) < PULL_INTERVAL_MS) {
-    // 窗内零网络但回放上次判据——裸 throttled 会把已知 not_worker 降级：root 牌永不入
-    // 缓存，主会话窗内第二次调用将断附牌/误吃 READ_HINT（≤30s 陈旧度与节流设计同界）。
+    // 窗内零网络但回放上次判据——裸 throttled 会把已知 not_worker 降级：主会话
+    // （dispatcher 换牌缓存）窗内第二次调用将误吃 READ_HINT/断写面路由
+    // （≤30s 陈旧度与节流设计同界）。
     return { reason: lastVerdict.get(sid) ?? "throttled", cred: null };
   }
   for (const [k, ts] of pullSeen) { // 出账：只留窗内活跃 sid，防常驻进程无界增长
@@ -71,7 +117,10 @@ export async function pullCredential(sid: string, port: number): Promise<PullRes
       });
       if (r.status === 404) {
         lastVerdict.set(sid, "not_worker"); // 非在飞 worker：常态未命中（窗内回放防降级）
-        return { reason: "not_worker", cred: null };
+        // lift 换牌（ag-32a5e2）：主会话判定即以 root 头换本会话牌入缓存——后续 agorad
+        // 调用附会话牌（审计/邮件路由归各自 sid），root 牌本体退出附牌面。
+        const issued = await exchangeCredential(sid, port);
+        return { reason: "not_worker", cred: issued };
       }
       if (!r.ok) {
         lastVerdict.set(sid, "unreachable");
