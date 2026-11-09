@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agorad.main import assemble, env_config, load_env_file, main, \
+from agorad.main import assemble, env_config, issue_root, load_env_file, main, \
     quick_limits_from_env, verify_ceiling_from_env, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -161,6 +161,24 @@ class TestAssembleWiring(unittest.TestCase):
                              str(Path(tmp) / ".agora" / "ignore.roster"))
             app2 = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
             self.assertIsNone(app2.gate._verify_ceiling)  # 未设＝None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestIssueRoot(unittest.TestCase):
+    """ag-588eb8：启动 root 签发面收窄（裁决 A·新装防御）——root 牌只属 daemon
+    常量身份 sid="root"，占位/客户端会话 sid 不进 root 签发。"""
+
+    def test_bootstrap_issues_root_to_daemon_identity(self):  # ag-588eb8
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            tok = issue_root(app)
+            self.assertIsNotNone(tok)
+            self.assertEqual(app.auth.identify(tok), ("root", "root"))
+            self.assertIsNone(app.auth.token_for("main"))  # 占位 sid 零 root 落名
+            self.assertIsNone(app.auth.token_for("ses-client"))  # 客户端 sid 同
+            self.assertIsNone(issue_root(app))  # 已有 root 不重签（rotate 语义保留）
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

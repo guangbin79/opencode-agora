@@ -184,11 +184,13 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
 
 
 def issue_root(app):
-    """无 root 牌则授予（sid=main）；已有 root 返回 None（rotate_root 语义保留）。"""
+    """无 root 牌则授予 daemon 常量身份 sid="root"（ag-588eb8：占位/客户端 sid
+    不进 root 签发——活绑定后牌落会话 sid 属 R25-A 归属设计，污染由 cred_issue
+    换牌面自愈）；已有 root 返回 None（rotate_root 语义保留）。"""
     tokens = app.store.read_ephemeral("tokens") or {}
     if any(v[1] == "root" for v in tokens.values()):
         return None
-    return app.auth.issue(app.main_sid, "root")
+    return app.auth.issue("root", "root")
 
 
 def health_loop(app, interval):
