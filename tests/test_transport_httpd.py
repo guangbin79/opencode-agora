@@ -1085,6 +1085,53 @@ class TestCredForSid(HttpdTest):
         self.assertEqual(st, 400)  # body 非 JSON 对象
 
 
+class TestPerWindowDispatchCred(HttpdTest):
+    """ag-af96bb① 每窗口独立派发牌：root 牌持有者经 /cred_for_sid 拉取面为
+    新 sid（无牌）签发 dispatcher 牌（服务端单侧，插件 lift 适配属后续任务）——
+    多窗口操作审计/邮件路由归各自 sid（混 sid 修复）。"""
+
+    def test_root_issues_dispatcher_token_for_new_sid(self):  # ag-af96bb①
+        st, r = call(self.port, "POST", "/cred_for_sid",
+                     {"sid": "ses-win-b"}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["role"], "dispatcher")
+        self.assertEqual(self.app.auth.identify(r["token"]),
+                         ("ses-win-b", "dispatcher"))  # issue(sid, role) 已有机制
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_issue"]
+        self.assertEqual([(e["actor"], e["note"]) for e in ev],
+                         [("main", "dispatcher:ses-win-b")])  # 签发审计一行
+
+    def test_dispatched_task_attributes_to_own_sid(self):  # ag-af96bb① 混 sid 归位
+        _, r = call(self.port, "POST", "/cred_for_sid",
+                    {"sid": "ses-win-b"}, self.root)
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo"},
+                     r["token"], sid="ses-win-b")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(r["task"])["dispatcher_sid"],
+                         "ses-win-b")  # 任务归本窗口 sid（非 root 绑定 sid）
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "task_created"]
+        self.assertEqual([e["actor"] for e in ev], ["ses-win-b"])  # 审计同归位
+
+    def test_issue_idempotent_pull_returns_same_token(self):  # ag-af96bb①
+        _, r1 = call(self.port, "POST", "/cred_for_sid",
+                     {"sid": "ses-win-b"}, self.root)
+        _, r2 = call(self.port, "POST", "/cred_for_sid",
+                     {"sid": "ses-win-b"}, self.root)
+        self.assertEqual(r1["token"], r2["token"])  # 已持牌＝拉取不重签
+        self.assertEqual(r2["role"], "dispatcher")
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_issue"]
+        self.assertEqual(len(ev), 1)
+
+    def test_bad_root_header_keeps_worker_pull_semantics(self):  # ag-af96bb①
+        st, _ = call(self.port, "POST", "/cred_for_sid",
+                     {"sid": "ses-win-b"}, "garbage")
+        self.assertEqual(st, 404)  # 非 root 牌：回落原 worker 拉取面（未命中 404）
+        st, _ = call(self.port, "POST", "/cred_for_sid", {"sid": ""}, self.root)
+        self.assertEqual(st, 404)  # 空 sid 不签发
+
+
 class TestReqIdPassthrough(HttpdTest):
     """F34：req_id httpd→task 全链透传＋重复发放非 200 拒。"""
 

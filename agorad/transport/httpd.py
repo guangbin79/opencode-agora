@@ -1,5 +1,5 @@
-"""入向 JSON 口（B4）：12 工具端点＋/cred_for_sid（插件凭据拉取面）＋/view＋/health；
-单线程串行＋后台门队列。
+"""入向 JSON 口（B4）：12 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
+牌签发面）＋/view＋/health；单线程串行＋后台门队列。
 
 transport 只 import agorad.core（R2）——access 件经 App 属性触达（store.home
 下 wiki 裸读写，无 import）。鉴权两段（R18）：X-Agora-Token→identify（无牌
@@ -273,7 +273,11 @@ class _Handler(BaseHTTPRequestHandler):
         sid 是某在飞（非冻结）任务 worker_sid 且牌活 → {tid, env_dir, token}，
         否则 404；无牌调用放行（server 仅绑 127.0.0.1＝回环单用户 plaza 信任
         模型，与既有 localhost 面同口径）；每请求一行审计，防噪归插件侧节流。
+        ag-af96bb①：携有效 root 牌改走签发/拉取面（每窗口独立派发牌）。
         """
+        root = self.app.auth.identify(self.headers.get("X-Agora-Token", ""))
+        if root is not None and root[1] == "root":  # ag-af96bb① 先于 worker 拉取面
+            return self._cred_issue(root[0], str(body.get("sid") or ""))
         asker = str(body.get("sid") or "")
         hit = next(((tid, t) for tid, t in self.app.state.snapshot()["tasks"].items()
                     if t.get("worker_sid") == asker and t["state"] in _PULL_STATES
@@ -288,6 +292,36 @@ class _Handler(BaseHTTPRequestHandler):
         # 等价（单用户回环模型，本端点仅 127.0.0.1 可达）——未新增攻击面，勿过度加固。
         return self._json(200, {"tid": hit[0], "env_dir": hit[1]["env_dir"],
                                 "token": tok})
+
+    def _cred_issue(self, root_sid, asker):
+        """每窗口独立派发牌（ag-af96bb①，服务端单侧先行——插件 lift 适配属后续任务）：
+        新 sid（无牌）→ auth.issue(sid, "dispatcher") 签发＋cred_issue 审计——插件
+        lift 可据此换 root 牌为本会话 dispatcher 牌，任务行/审计/邮件路由归各自
+        sid（多窗口混 sid 修复）；已持牌→照旧牌幂等回（worker 在飞行随带
+        tid/env_dir）。授权＝root 牌（may() 全量同口径），信任边界同 F27 等价性
+        注释（回环单用户，签发不扩面）。"""
+        if not asker:
+            return self._json(404, {"error": "no cred for sid"})
+        tok = self.app.auth.token_for(asker)
+        if tok is not None:  # 拉取面语义：已持牌不重签（幂等）
+            hit = next(((tid, t) for tid, t in
+                        self.app.state.snapshot()["tasks"].items()
+                        if t.get("worker_sid") == asker and t["state"] in _PULL_STATES
+                        and t.get("env_dir")), None)
+            self.app.store.append_event({"ts": time.time(), "actor": root_sid,
+                                         "event": "cred_pull",
+                                         "task": hit[0] if hit else None})
+            ident = self.app.auth.identify(tok)  # 门线程 revoke 竞窗（snapshot/审计窗）防 None
+            if ident is None:  # 牌已废：与 worker 拉取面同 404 出口
+                return self._json(404, {"error": "no cred for sid"})
+            return self._json(200, {"tid": hit[0] if hit else None,
+                                    "env_dir": hit[1]["env_dir"] if hit else None,
+                                    "token": tok, "role": ident[1]})
+        tok = self.app.auth.issue(asker, "dispatcher")
+        self.app.store.append_event({"ts": time.time(), "actor": root_sid,
+                                     "event": "cred_issue",
+                                     "note": f"dispatcher:{asker}"})
+        return self._json(200, {"token": tok, "role": "dispatcher"})
 
     def _wiki(self, rel):
         root = (Path(self.app.store.home) / "wiki").resolve()
