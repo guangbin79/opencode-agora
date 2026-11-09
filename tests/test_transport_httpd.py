@@ -1135,6 +1135,46 @@ class TestPerWindowDispatchCred(HttpdTest):
         self.assertEqual(st, 404)  # 空 sid 不签发
 
 
+class TestRootPoisonReissue(HttpdTest):
+    """ag-588eb8 裁决 A：会话 sid 持 root 牌（R25-A 活绑定产物）＝污染——
+    cred_issue 换牌面幂等回 dispatcher 新牌；root 条目保留不撤（root 常为唯一
+    治理牌，撤销即断 CLI/enforce/doctor）。换牌防膨胀：先扫该 sid 名下非 root
+    活牌，有则幂等回它，无才新签（插件侧有牌缓存，换牌是低频事件）。"""
+
+    def test_poisoned_sid_reissues_dispatcher_and_keeps_root_entry(self):
+        tok_r = self.app.auth.issue("ses-win-p", "root")  # 预置污染条目
+        st, r = call(self.port, "POST", "/cred_for_sid",
+                     {"sid": "ses-win-p"}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["role"], "dispatcher")  # 换牌回 dispatcher（非 root）
+        self.assertNotEqual(r["token"], tok_r)
+        self.assertEqual(self.app.auth.identify(r["token"]),
+                         ("ses-win-p", "dispatcher"))
+        self.assertEqual(self.app.auth.identify(tok_r),
+                         ("ses-win-p", "root"))  # 污染条目保留不撤（裁决授权偏离）
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_issue"]
+        self.assertEqual(ev[-1]["note"],
+                         "dispatcher:ses-win-p root-poison reissue")  # 审计一行
+        st, r2 = call(self.port, "POST", "/cred_for_sid",
+                      {"sid": "ses-win-p"}, self.root)
+        self.assertEqual(r2["token"], r["token"])  # 再问幂等回同牌不重铸
+        self.assertEqual(r2["role"], "dispatcher")
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_issue"]
+        self.assertEqual(len(ev), 1)  # 签发仅一次
+
+    def test_reissue_prefers_existing_non_root_token(self):
+        _, d1 = call(self.port, "POST", "/cred_for_sid",
+                     {"sid": "ses-win-b"}, self.root)
+        self.app.auth.issue("ses-win-b", "root")  # 事后污染叠加（双角色并存）
+        st, d2 = call(self.port, "POST", "/cred_for_sid",
+                      {"sid": "ses-win-b"}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(d2["role"], "dispatcher")
+        self.assertEqual(d2["token"], d1["token"])  # 幂等回既有非 root 活牌
+        ev = [e for e in self.app.store.read_events() if e["event"] == "cred_issue"]
+        self.assertEqual(len(ev), 1)  # 不因污染叠加重签
+
+
 class TestOutOfBandChain(HttpdTest):
     """ag-af96bb② 全链：deliverable 建单→派发→零提交 done→verify 绿→closed（零合入）。"""
 

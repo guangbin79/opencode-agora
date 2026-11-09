@@ -73,6 +73,19 @@ class Auth:
         """按 sid 查牌文本（F25 周期重注入只读面，不改绑不轮换）；无牌 None。"""
         return next((tok for tok, v in self._tokens.items() if v[0] == sid), None)
 
+    def live_token(self, sid):
+        """role-aware 查牌（ag-588eb8 裁决 A）：sid 双角色并存时 token_for 首匹配
+        可能命中 root 污染牌——返回该 sid 名下首个非 root 牌 (token, role)；
+        仅持 root（污染）→ (token, "root")；无牌 None。"""
+        root_hit = None
+        for tok, v in self._tokens.items():
+            if v[0] != sid:
+                continue
+            if v[1] != "root":
+                return tok, v[1]
+            root_hit = root_hit if root_hit is not None else tok
+        return (root_hit, "root") if root_hit else None
+
     def revoke(self, token):
         if token not in self._tokens:
             return False

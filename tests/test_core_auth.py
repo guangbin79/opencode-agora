@@ -109,6 +109,17 @@ class TestCoreAuth(unittest.TestCase):
         self.assertTrue(self.au.same_lineage("s20", "s4"))  # 恰留 16 条：s4 最旧在册
         self.assertFalse(self.au.same_lineage("s20", "s3"))  # 最旧出局
 
+    def test_live_token_prefers_non_root_and_reports_poison(self):  # ag-588eb8
+        self.au.issue("s1", "root")  # 先签 root（占位早于窗口牌＝token_for 首匹配陷阱）
+        self.au.issue("s1", "dispatcher")  # 双角色并存：同一 sid 两块牌
+        tok, role = self.au.live_token("s1")
+        self.assertEqual(role, "dispatcher")  # 非 root 活牌优先（token_for 首匹配会中 root）
+        self.assertEqual(self.au.identify(tok)[1], "dispatcher")
+        self.au.issue("s2", "root")  # 仅持 root＝污染态
+        tok, role = self.au.live_token("s2")
+        self.assertEqual((tok is not None, role), (True, "root"))
+        self.assertIsNone(self.au.live_token("s-none"))  # 无牌 None
+
     def test_lineage_resets_on_rotate_and_old_format_compat(self):  # Req: F16
         self.au.issue("s1", "root")
         self.au.rebind("s1", "s2")

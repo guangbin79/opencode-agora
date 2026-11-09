@@ -296,15 +296,19 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _cred_issue(self, root_sid, asker):
         """每窗口独立派发牌（ag-af96bb①，服务端单侧先行——插件 lift 适配属后续任务）：
-        新 sid（无牌）→ auth.issue(sid, "dispatcher") 签发＋cred_issue 审计——插件
-        lift 可据此换 root 牌为本会话 dispatcher 牌，任务行/审计/邮件路由归各自
-        sid（多窗口混 sid 修复）；已持牌→照旧牌幂等回（worker 在飞行随带
-        tid/env_dir）。授权＝root 牌（may() 全量同口径），信任边界同 F27 等价性
-        注释（回环单用户，签发不扩面）。"""
+        先按 sid 全账本 role-aware 扫描（auth.live_token）——已有非 root 活牌→幂等
+        旧牌回（worker 在飞行随带 tid/env_dir，不重签防铸牌膨胀，ag-588eb8 裁决 A）；
+        仅持 root 牌（R25-A 活绑定落会话 sid 的污染）或无牌→ auth.issue(sid,
+        "dispatcher") 签发＋cred_issue 审计（污染换牌附 root-poison reissue 标记），
+        污染 root 条目保留不撤（root 常为唯一治理牌，撤销即断 CLI/enforce 面）。
+        授权＝root 牌（may() 全量同口径），信任边界同 F27 等价性注释（回环单用户，
+        签发不扩面）。"""
         if not asker:
             return self._json(404, {"error": "no cred for sid"})
-        tok = self.app.auth.token_for(asker)
-        if tok is not None:  # 拉取面语义：已持牌不重签（幂等）
+        found = self.app.auth.live_token(asker)
+        if found is not None and (found[1] != "root" or asker == "root"):
+            # 幂等：非 root 活牌照旧回；daemon 身份 sid="root" 的 root 牌同口径
+            tok = found[0]
             hit = next(((tid, t) for tid, t in
                         self.app.state.snapshot()["tasks"].items()
                         if t.get("worker_sid") == asker and t["state"] in _PULL_STATES
@@ -318,10 +322,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"tid": hit[0] if hit else None,
                                     "env_dir": hit[1]["env_dir"] if hit else None,
                                     "token": tok, "role": ident[1]})
+        poisoned = found is not None  # 走到签发且原持 root＝会话 sid 污染换牌
         tok = self.app.auth.issue(asker, "dispatcher")
         self.app.store.append_event({"ts": time.time(), "actor": root_sid,
                                      "event": "cred_issue",
-                                     "note": f"dispatcher:{asker}"})
+                                     "note": f"dispatcher:{asker}"
+                                             + (" root-poison reissue" if poisoned else "")})
         return self._json(200, {"token": tok, "role": "dispatcher"})
 
     def _wiki(self, rel):
