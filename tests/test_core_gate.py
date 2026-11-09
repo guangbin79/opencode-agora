@@ -535,6 +535,88 @@ class TestNestedDoneGate(TestCoreGate):
         self.assertEqual(self.state.get("t1")["state"], "running")
 
 
+class TestOutOfBandDone(TestCoreGate):
+    """ag-af96bb② review-only（deliverable=out_of_band）done 通道：
+    零提交＋交付物在案豁免——sha 形状/锚/F69 三检跳过，children 归属闸保留；
+    verify 仍跑；未标记任务 F69 语义一字不动。"""
+
+    def seed_oob(self, **kw):
+        tid = self.seed(**kw)
+        self.state.set_fields(tid, deliverable="out_of_band")
+        return tid
+
+    def in_gate_oob(self, streak=0):
+        self.seed_oob(streak=streak)
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", "docs/review.md 在案"),
+                         "accepted")
+
+    def test_accept_zero_commit_ref_skips_anchor_and_probe(self):  # ag-af96bb②
+        self.seed_oob()
+        self.anchor = None  # 锚缺失不拒——review-only 结构性无锚（禁改仓）
+        r = self.gate.accept_done("t1", "s-w1", "docs/review.md: 结论在案")
+        self.assertEqual(r, "accepted")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")
+        self.assertNotIn("commit", t)  # 零提交：无 sha 入行
+        self.assertEqual(self.gx.contains_calls, [])  # F69 谓词不探（无 sha 可探）
+        ev = [e for e in self.store.read_events("t1") if e["event"] == "done"]
+        self.assertEqual(ev[0]["note"], "docs/review.md: 结论在案")  # 交付物在案留痕
+
+    def test_empty_ref_rejected(self):  # ag-af96bb②
+        self.seed_oob()
+        r = self.gate.accept_done("t1", "s-w1", "   ")
+        self.assertIn("rejected:body-format", r)
+        self.assertIn("交付物", r)  # 动作指引：引用随 body 在案
+        self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
+
+    def test_open_children_still_rejected(self):  # ag-af96bb② 归属闸不豁免
+        self.seed_oob()
+        self.seed("child")
+        self.state.set_fields("child", dispatcher_sid="s-w1")
+        self.assertIn("rejected:children",
+                      self.gate.accept_done("t1", "s-w1", "ref"))
+
+    def test_unmarked_zero_commit_still_rejected(self):  # ag-af96bb② F69 不破
+        self.seed()  # 无 deliverable 标记
+        self.gx.contains_result = True
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:vacuous-done", r)
+
+    def test_green_verifies_only_closes_without_merge_push(self):  # ag-af96bb②
+        self.in_gate_oob()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")  # 门尾 merged→closed 既有链结算
+        self.assertEqual(t["fail_streak"], 0)  # 绿清连败（R12 同口径）
+        self.assertNotIn("commit", t)  # 零 sha 落账
+        self.assertEqual(self.runner.calls, [(str(self.env), "pytest -q")])  # 仅 env verify
+        self.assertEqual(self.gx.merge_calls, [])  # 零合入
+        self.assertEqual(self.gx.push_calls, [])  # 零 push
+        self.assertEqual(self.gx.integration_builds, [])  # 无集成环境
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 环境照常回收
+        self.assertTrue(self.worker_msgs())  # worker 收交付回执
+
+    def test_green_removes_credential_file(self):  # ag-af96bb② F43 同序
+        cred = self.tmp / "credentials" / "t1.token"
+        cred.parent.mkdir(parents=True)
+        cred.write_text('{"token": "tok"}')
+        self.in_gate_oob()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertFalse(cred.exists())
+
+    def test_verify_fail_reopens_no_merge(self):  # ag-af96bb② verify 仍跑
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate()
+        self.in_gate_oob()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "verify_failed")
+        self.assertEqual(t["fail_streak"], 1)
+        self.assertEqual(self.gx.merge_calls, [])
+        self.assertIn("post(done", self.worker_msgs()[-1]["body"])
+
+
 class TestGateRun(TestCoreGate):
     def test_gate_entry_milestone_both_sides(self):  # Req: F54
         self.in_gate()

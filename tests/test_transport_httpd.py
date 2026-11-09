@@ -1132,6 +1132,33 @@ class TestPerWindowDispatchCred(HttpdTest):
         self.assertEqual(st, 404)  # 空 sid 不签发
 
 
+class TestOutOfBandChain(HttpdTest):
+    """ag-af96bb② 全链：deliverable 建单→派发→零提交 done→verify 绿→closed（零合入）。"""
+
+    def test_full_chain_zero_commit_done_closes(self):  # ag-af96bb②
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "评审-only", "project_dir": "/repo",
+                      "deliverable": "out_of_band"}, self.root)
+        self.assertEqual(st, 200)
+        tid = r["task"]
+        self.assertEqual(self.app.state.get(tid)["deliverable"], "out_of_band")
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        boot = self.stub.sessions[wsid]["injects"][0]
+        self.assertIn("零提交豁免", boot)  # BOOT done 行换装
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": "docs/review.md 在案"},
+                     wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"result": "accepted"})  # 零提交 done 受理
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(tid)["state"] == "closed"))
+        t = self.app.state.get(tid)
+        self.assertNotIn("commit", t)  # 无 sha 落账
+        self.assertEqual(getattr(self.gitx, "pushes", []), [])  # 零合入零 push
+        self.assertEqual(self.gitx.removed, [t["env_dir"]])  # 环境照常回收
+
+
 class TestReqIdPassthrough(HttpdTest):
     """F34：req_id httpd→task 全链透传＋重复发放非 200 拒。"""
 

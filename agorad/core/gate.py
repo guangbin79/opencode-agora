@@ -152,6 +152,8 @@ class Gate:
                 tid, "verify-empty",
                 f"任务 {tid} verify 命令为空——"
                 "task_update 登记非空命令后重新 post(done, commit)")
+        if t.get("deliverable") == "out_of_band":  # ag-af96bb②：review-only 豁免分支
+            return self._accept_out_of_band(tid, worker_sid, commit)
         c = commit.lower()
         if len(c) != 40 or any(ch not in "0123456789abcdef" for ch in c):
             return self._deny_done(  # F13：body-format 先行，参数错不再伪装成锚问题
@@ -159,11 +161,7 @@ class Gate:
                 f"done body 须为纯 40 位十六进制完整 commit sha（收到 {commit[:20]!r}）"
                 "——无前缀无附言；结论文本另发 post(kind=note)")
         commit = c  # 归一一次：锚比较与落库均用小写，大写 sha 不再伪装成锚问题（OCR）
-        children = [(cid, x) for cid, x in self._state.snapshot()["tasks"].items()
-                    if x.get("dispatcher_sid") == worker_sid]
-        open_children = [cid for cid, x in children
-                         if x["state"] not in ("merged", "closed", "cancelled")
-                         or str(x.get("cancel_reason", "")).startswith("dependency_failed")]
+        open_children = self._open_children(worker_sid)
         if open_children:
             return self._deny_done(
                 tid, "children",
@@ -203,6 +201,39 @@ class Gate:
         if usage is not None:
             self._state.set_fields(tid, usage=usage)
         self._audit(tid, "done", commit=commit)
+        return "accepted"
+
+    def _open_children(self, worker_sid):
+        """嵌套归属闸（受理共用）：申报 worker 名下未结案子任务 id 列表。"""
+        children = [(cid, x) for cid, x in self._state.snapshot()["tasks"].items()
+                    if x.get("dispatcher_sid") == worker_sid]
+        return [cid for cid, x in children
+                if x["state"] not in ("merged", "closed", "cancelled")
+                or str(x.get("cancel_reason", "")).startswith("dependency_failed")]
+
+    def _accept_out_of_band(self, tid, worker_sid, ref):
+        """ag-af96bb② review-only（deliverable=out_of_band）done 受理豁免分支：
+        零提交＋交付物在案——sha 形状/锚/F69 vacuous 三检跳过（禁改仓任务结构性
+        无提交无锚）；state/verify/children 三闸照常；交付物引用＝done body 本体
+        （邮件直达派发方＋done 审计 note 留痕），verify 仍跑。F69 语义不变：
+        未标记任务照走既有六拒。"""
+        ref = ref.strip()
+        if not ref:
+            return self._deny_done(
+                tid, "body-format",
+                f"任务 {tid} review-only done body 须为交付物引用（收到空 body）"
+                "——post(done, body=路径/链接/结论)")
+        open_children = self._open_children(worker_sid)
+        if open_children:
+            return self._deny_done(
+                tid, "children",
+                f"嵌套子任务未结案：{', '.join(sorted(open_children))}——"
+                "等待 result 回传，或由你取消子任务；成功/有意跳过后再 post(done)")
+        usage = self._collect_usage(worker_sid)  # oc 可失败原语先于 transition：败则零账面
+        self._state.transition(tid, "done")  # 零提交：无 sha 入行
+        if usage is not None:
+            self._state.set_fields(tid, usage=usage)
+        self._audit(tid, "done", note=ref[:200])
         return "accepted"
 
     def _collect_usage(self, worker_sid):
@@ -285,6 +316,25 @@ class Gate:
         except Exception:
             pass
         try:
+            if t.get("deliverable") == "out_of_band":  # ag-af96bb② review-only：只验不合
+                rc, out = runner(env, cmd)
+                if rc == 124:
+                    self._verify_overrun(tid, out, budget, ceiling)
+                    return
+                if rc != 0:
+                    self._quality_fail(tid, "verify_failed",
+                                       "verify 失败——修复后重新 post(done, "
+                                       f"交付物引用)\n输出尾部:\n{out[-_TAIL:]}")
+                    return
+                self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
+                self._state.transition(tid, "merged")  # 复用门尾 merged→closed 结算链
+                self._audit(tid, "merged", note="out_of_band")  # 零合入留痕
+                self._router.notify_transition(  # ag-acae3b 直投；closed 门尾邻对窗吞
+                    tid, "merged", "review-only 交付（verify 绿，零合入）")
+                self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
+                self._gitx.remove_env(t["env_dir"])
+                self._post(tid, "review-only 交付在案（零合入）——环境已回收")
+                return
             # kill 落在“目标已推进、merged 未落库”窗口：任务提交已在目标支即只补终态，
             # 绝不重跑集成 verify 后把已合法合并的任务假 reopened，更不需要 reset --hard。
             if self._gitx.contains(target, t["commit"], branch):
@@ -333,12 +383,7 @@ class Gate:
                     return
             rc, out = runner(env, cmd)
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
-                self._audit(tid, "verify_overrun")
-                self._router.notify_dispatcher(
-                    tid, "result",
-                    f"verify 超硬顶——进程组已终止（非质量败，无需 worker 重试）；"
-                    f"生效预算 {budget:g}s（硬顶 {ceiling:g}s）；"
-                    f"输出尾部:\n{out[-_TAIL:]}")
+                self._verify_overrun(tid, out, budget, ceiling)
                 return
             if rc != 0:
                 self._quality_fail(tid, "verify_failed",
@@ -512,6 +557,15 @@ class Gate:
             tid, "milestone",
             f"任务 {tid} verify 超软顶（>{timeout:g}s）——仍在跑、"
             "无需操作、确认挂死才 cancel")
+
+    def _verify_overrun(self, tid, out, budget, ceiling):
+        """F36 超硬顶分类路由：审计＋派发方告知（普通与 review-only 门共用文案）。"""
+        self._audit(tid, "verify_overrun")
+        self._router.notify_dispatcher(
+            tid, "result",
+            f"verify 超硬顶——进程组已终止（非质量败，无需 worker 重试）；"
+            f"生效预算 {budget:g}s（硬顶 {ceiling:g}s）；"
+            f"输出尾部:\n{out[-_TAIL:]}")
 
     def _quality_fail(self, tid, to, body, reason=""):
         """质量败（verify 败/集成败/合并前锚败）：迁移＋审计＋实时回 worker＋计连败

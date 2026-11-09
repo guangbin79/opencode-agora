@@ -123,6 +123,7 @@ class _Handler(BaseHTTPRequestHandler):
             to = body.get("timeout")  # F51：任务级 verify 预算（正整数秒）
             md = body.get("model")  # F55：任务级 worker 模型
             qk = body.get("quick", False)  # F65：quick 微任务旗
+            dl = body.get("deliverable")  # ag-af96bb②：review-only 交付契约（值白名单归 task 域）
             if not isinstance(vp, bool):  # "false" 字符串得 True——豁免旗语义反转拒收
                 raise ValueError("verify_pending 须为布尔")
             if not isinstance(qk, bool):  # 同豁免旗口径
@@ -144,7 +145,7 @@ class _Handler(BaseHTTPRequestHandler):
                                             target_branch=body.get("target_branch"),
                                             verify_cmd=vc, verify_pending=vp,
                                             req_id=rq, timeout=to, model=md,
-                                            quick=qk)}
+                                            quick=qk, deliverable=dl)}
         if name == "task_dispatch":
             return {"task": body["task"],
                     "token": app.task.dispatch(body["task"], token)}

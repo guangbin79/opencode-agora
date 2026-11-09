@@ -932,6 +932,51 @@ class TestModelRouting(TestCoreTask):
                          self.state.get(parent)["model"])  # 缺省继承父任务
 
 
+class TestDeliverable(TestCoreTask):
+    """ag-af96bb② deliverable=out_of_band 建单面：值白名单＋worker 拒/继承（F37 同族）
+    ＋review-only BOOT done 行换装（普通任务逐字不变）。"""
+
+    def test_create_flows_to_row_and_defaults_none(self):  # ag-af96bb②
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", deliverable="out_of_band")
+        self.assertEqual(self.state.get(tid)["deliverable"], "out_of_band")
+        tid2 = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertIsNone(self.state.get(tid2)["deliverable"])  # 未标记＝None
+
+    def test_bad_value_rejected(self):  # ag-af96bb②
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                            deliverable="inline")
+        self.assertIn("out_of_band", str(cm.exception))
+
+    def test_worker_cannot_set_and_inherits_parent(self):  # ag-af96bb② F37 同族
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true", deliverable="out_of_band")
+        token = self.svc.dispatch(parent, self.root)
+        with self.assertRaises(Rejected) as cm:  # 契约面派发方持有：worker 显式拒
+            self.svc.create("child", None, None, token, deliverable="out_of_band")
+        self.assertIn("deliverable", str(cm.exception))
+        self.assertTrue(any(e["event"] == "auth_denied" for e in self.events()))
+        child = self.svc.create("child", None, None, token)
+        self.assertEqual(self.state.get(child)["deliverable"],
+                         self.state.get(parent)["deliverable"])  # 缺省继承父任务
+
+    def test_out_of_band_boot_swaps_done_line(self):  # ag-af96bb②
+        tid = self.svc.create("review-only", "/repo", None, self.root,
+                              verify_cmd="true", deliverable="out_of_band")
+        self.svc.dispatch(tid, self.root)
+        boot = self.oc.sessions[-1][2]
+        self.assertIn("零提交豁免", boot)  # done 行换装：交付物引用形态
+        self.assertNotIn("零提交 done 必拒", boot)  # 普通契约不适用于标记任务
+        self.assertNotIn("body=完整 commit sha", boot)  # contract 行同步换装（R1 评审）
+        normal = self.svc.create("normal", "/repo", None, self.root,
+                                 verify_cmd="true")
+        self.svc.dispatch(normal, self.root)
+        normal_boot = self.oc.sessions[-1][2]
+        self.assertIn("零提交 done 必拒", normal_boot)  # 普通逐字不变
+        self.assertIn("body=完整 commit sha", normal_boot)
+
+
 class TestReqId(TestCoreTask):
     """F34 req 编号服务端发放：发放登记＋查重拒绝（含已发指针）＋种子扫描。"""
 

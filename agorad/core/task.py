@@ -59,7 +59,8 @@ class TaskService:
 
     def create(self, goal, project_dir, after, actor_token, title=None,
                target_branch=None, verify_cmd=None, verify_pending=False,
-               req_id=None, timeout=None, model=None, quick=False):
+               req_id=None, timeout=None, model=None, quick=False,
+               deliverable=None):
         sid, role = self._gate(actor_token, "task_create", None, None)
         tid = self._new_tid()
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
@@ -85,6 +86,9 @@ class TaskService:
             if model is not None:  # F55：模型面派发方持有，与 target_branch 同口径
                 self._reject(tid, sid, "worker 不得改变 worker 模型面（model）"
                                        "——缺省继承父任务", ev=EV_DENIED)
+            if deliverable is not None:  # ag-af96bb②：契约面派发方持有，同 model 口径
+                self._reject(tid, sid, "worker 不得指定 deliverable（review-only"
+                                       " 标记）——缺省继承父任务", ev=EV_DENIED)
             if project_dir is not None and project_dir != parent["project_dir"]:
                 self._reject(tid, sid, f"worker 建单 project_dir 强制继承父任务仓"
                                        f"（{parent['project_dir']}），指定他径拒",
@@ -92,6 +96,7 @@ class TaskService:
             project_dir = parent["project_dir"]
             target_branch = parent["target_branch"]
             model = parent.get("model")  # F55：缺省继承父任务
+            deliverable = parent.get("deliverable")  # ag-af96bb②：缺省继承父任务
         if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
             self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
         if quick and verify_cmd is not None:  # F65：quick 自带命令拒（防自查）
@@ -105,6 +110,8 @@ class TaskService:
             self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
         if model is not None and not _MODEL_RE.fullmatch(model):  # F55：坏格式 fail-fast（错名由 can_spawn 熔断暴露）
             self._reject(tid, sid, f"model 须为 providerID/modelID 形（收到 {model!r}）")
+        if deliverable is not None and deliverable != "out_of_band":  # ag-af96bb②：单值白名单 fail-fast
+            self._reject(tid, sid, f"deliverable 仅支持 out_of_band（收到 {deliverable!r}）")
         if after is not None:
             try:
                 self._state.get(after)
@@ -140,6 +147,7 @@ class TaskService:
             "title": " ".join(str(head).split()),  # F46 B-1：压平 title（boot 开场按行解析；goal 合法多行不动）
             "goal": goal, "project_dir": project_dir, "target_branch": target_branch,
             "req_id": req_id, "model": model,  # model 恒在键，None 缺省（F55）
+            "deliverable": deliverable,  # ag-af96bb②：恒在键，None＝普通合并任务
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
             "quick": bool(quick),  # F65：quick 旗随行（快照/事件自然携带）
@@ -566,6 +574,16 @@ class TaskService:
             title = " ".join(str(title).split())
         page = pathlib.Path(self._store.home) / "wiki" / "tasks" / f"{tid}.md"
         quick = bool(self._state.get(tid).get("quick"))  # F65：减配三行信息行
+        if self._state.get(tid).get("deliverable") == "out_of_band":  # ag-af96bb②
+            contract = ("contract: 只在 env 内工作；结论经 post(done) 回填，"
+                        "body=交付物引用（路径/链接/结论），结论文本走 note")
+            done = ("done: 本任务 review-only（deliverable=out_of_band）——post(done, "
+                    "body=交付物引用（路径/链接/结论），零提交豁免（锚/sha 检查跳过）；"
+                    "verify 仍跑；结论文本另发 post(kind=note)")
+        else:
+            contract = ("contract: 只在 env 内工作；结论经 post(done) 回填，"
+                        "body=完整 commit sha，结论文本走 note")
+            done = ("done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=note) 报 no-op 等派发方处置；结论文本另发 post(kind=note)")
         nested = "" if quick else (
             "嵌套: task_create(缺省继承父任务 project_dir 与验证配置；project_dir/"
             "target_branch/verify_cmd 显式传入即拒)→dispatch 子任务；done 仅子 worker 申报，closed/blocked/cancelled "
@@ -574,7 +592,7 @@ class TaskService:
         deposit = "" if quick else (
             "沉淀: 过程中的踩坑与权衡决策随发 post(kind=note)——merged 后派发方聚稿走 knowledge ingest；公共记忆面（memory_store/agentctl capture）勿直写\n")
         return (f"[agora] {tid}: {title or tid}\npage: {page}\nenv: {env}\n"
-                "contract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note\n"
+                + contract + "\n"
                 "goal 中的主仓路径仅指代——你的可写区＝env 副本（同构 worktree），编辑一律用副本内对应路径\n"
                 "role: worker。可用: post/check_mail/repo_board/wiki_read/wiki_write/"
                 "task_create/task_dispatch/task_cancel(仅限己建子任务)/sleep\n"
@@ -586,7 +604,7 @@ class TaskService:
                 + deposit
                 + "shell: mcp_shell（shell_execute）按 argv 数组执行、非 shell——命令须在 ALLOW_COMMANDS 白名单（否则报 Command not allowed）；分号/&&/|| 一律拒（无「|| true」吞退码惯用法，退码调用方自理）；多行内联/heredoc 报 Unexpected shell operator，多行脚本走原生 shell 或先落文件再执行\n"
                 "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记\n"
-                "done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=note) 报 no-op 等派发方处置；结论文本另发 post(kind=note)")
+                + done)
 
     def _revoke_worker(self, wsid):
         if wsid:
