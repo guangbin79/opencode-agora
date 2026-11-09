@@ -73,8 +73,11 @@ class FakeGitx:
     def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
         return False
 
-    def ensure_clean(self, repo_dir):
+    def ensure_clean(self, repo_dir, exempt=()):
         pass
+
+    def clean_ignore(self, repo_dir, env_value=""):
+        return []
 
     def build_integration(self, target_dir, integration_dir, branch=None):
         Path(integration_dir).mkdir(parents=True, exist_ok=True)

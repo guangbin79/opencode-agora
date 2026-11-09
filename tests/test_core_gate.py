@@ -53,6 +53,8 @@ class FakeGitx:
         self.head_shas = {}  # repo_dir→sha 覆盖：双头可区分（F29 拒因实值断言）
         self.integration_builds, self.integration_removed = [], []
         self.clean_calls, self.contains_calls = [], []
+        self.exempt_calls = []  # ag-f5aa4d ensure_clean 豁免面逐调用记录
+        self.clean_ignore_calls, self.clean_ignore_result = [], []
         self.roster_calls = []  # F35 apply_ignore_roster 调用（repo_dir, patterns）
         self.events = []  # F35 公共事件序：apply/ensure_clean 各推一格
         self.contains_result, self.dirty = False, False
@@ -83,11 +85,16 @@ class FakeGitx:
             raise RuntimeError("git merge-base --is-ancestor: fatal: bad object")
         return self.contains_results.pop(0) if self.contains_results else self.contains_result
 
-    def ensure_clean(self, repo_dir):
+    def ensure_clean(self, repo_dir, exempt=()):
         self.clean_calls.append(repo_dir)
+        self.exempt_calls.append(list(exempt))
         self.events.append("clean")
         if self.dirty:
             raise RuntimeError("目标仓工作区不干净")
+
+    def clean_ignore(self, repo_dir, env_value=""):  # Req: ag-f5aa4d
+        self.clean_ignore_calls.append((repo_dir, env_value))
+        return self.clean_ignore_result
 
     def apply_ignore_roster(self, repo_dir, patterns):  # Req: F35
         self.roster_calls.append((repo_dir, list(patterns)))
@@ -248,7 +255,7 @@ class TestCoreGate(unittest.TestCase):
 
     def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False,
                 on_blocked=None, roster_path=None,
-                quick_max_files=3, quick_max_lines=30):
+                quick_max_files=3, quick_max_lines=30, clean_ignore_env=""):
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
                            fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
@@ -259,7 +266,8 @@ class TestCoreGate(unittest.TestCase):
                          self.store, runner=self.runner, on_blocked=on_blocked,
                          roster_path=roster_path,
                          quick_max_files=quick_max_files,
-                         quick_max_lines=quick_max_lines)
+                         quick_max_lines=quick_max_lines,
+                         clean_ignore_env=clean_ignore_env)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None,
              cmd="pytest -q", timeout=None, quick=False):
@@ -1356,6 +1364,40 @@ class TestGateIgnoreRoster(TestCoreGate):
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
         self.assertEqual(self.gx.roster_calls, [])  # 空名册＝现状全净
+
+
+class TestGateCleanIgnore(TestCoreGate):
+    """ag-f5aa4d 数据层豁免：声明面（仓根 .agora/clean-ignore ∪
+    AGORA_CLEAN_IGNORE）在首道干净检查前解析，同一份豁免传入两处 ensure_clean。"""
+
+    def test_file_and_env_union_reaches_both_clean_checks(self):  # Req: ag-f5aa4d
+        target = self.tmp / "target"
+        (target / ".agora").mkdir(parents=True)
+        (target / ".agora" / "clean-ignore").write_text(
+            "# 注释\n.agent-experiences/\n.dup/\n")
+        self.mk_gate(clean_ignore_env=".dup/, envonly/")
+        union = [".agent-experiences/", ".dup/", "envonly/"]  # 并集计算归 access 层测
+        self.gx.clean_ignore_result = union
+        self.seed()
+        self.state.set_fields("t1", project_dir=str(target))
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 豁免不拦正常合并
+        self.assertEqual(self.gx.clean_ignore_calls,
+                         [(str(target), ".dup/, envonly/")])  # env 值透传解析
+        self.assertEqual(self.gx.exempt_calls, [union, union])  # 首道＋终前复查同面
+
+    def test_declaration_file_missing_env_still_applies(self):  # Req: ag-f5aa4d
+        target = self.tmp / "target"
+        target.mkdir()
+        self.mk_gate(clean_ignore_env="data/")
+        self.gx.clean_ignore_result = ["data/"]
+        self.seed()
+        self.state.set_fields("t1", project_dir=str(target))
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.exempt_calls, [["data/"], ["data/"]])  # 缺文件＝仅 env
 
 
 class TestDispatcherResults(TestCoreGate):

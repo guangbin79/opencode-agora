@@ -84,11 +84,47 @@ class Gitx:
                 raise RuntimeError(f"integration 目录删除失败（并发写入未停）: {integration}")
         self._git(["worktree", "prune"], cwd=target, check=False)
 
-    def ensure_clean(self, repo_dir: str) -> None:
-        """主检出写前硬闸：任何已跟踪或未跟踪变更都拒绝，防合并/回滚伤用户工作。"""
-        r = self._git(["status", "--porcelain", "--untracked-files=normal"], cwd=repo_dir)
-        if r.stdout.strip():
-            raise RuntimeError("目标仓工作区不干净——请先提交、stash 或清理后重新 post(done, commit)")
+    def ensure_clean(self, repo_dir: str, exempt=()) -> None:
+        """主检出写前硬闸：任何已跟踪或未跟踪变更都拒绝，防合并/回滚伤用户工作。
+
+        exempt＝clean-ignore 数据层豁免（ag-f5aa4d 产品裁定，有意打破旧「全净
+        口径不变」设计）：门防的是代码任务污染主检出，声明路径上的数据层心跳
+        不再拦门；条目按仓根锚定的目录前缀语义匹配（`data/` 豁免 data 本体与
+        整棵子树，非子串匹配）。缺省空＝逐条目全计，与旧口径行为等价。status
+        用 -z 机读解析：路径含空格/引号/非 ASCII 不撕裂；rename/copy 条目的
+        第二段（orig 路径）非工作树条目，不评脏面。"""
+        r = self._git(["status", "--porcelain", "-z", "--untracked-files=normal"],
+                      cwd=repo_dir)
+        bases = [b for b in (e.rstrip("/") for e in exempt) if b]
+        dirty, skip = [], False
+        for rec in r.stdout.split("\0"):
+            if not rec:
+                continue
+            if skip:  # rename/copy 的 orig 路径段：非工作树条目，不评脏面
+                skip = False
+                continue
+            skip = rec[0] in "RC"
+            path = rec[3:]
+            if not any(path == b or path.startswith(b + "/") for b in bases):
+                dirty.append(rec)
+        if dirty:
+            raise RuntimeError(
+                "目标仓工作区不干净——请先提交、stash 或清理后重新 post(done, commit)")
+
+    def clean_ignore(self, repo_dir: str, env_value: str = "") -> list[str]:
+        """clean-ignore 声明解析（ag-f5aa4d）：仓根 .agora/clean-ignore（一行一条，
+        # 注释/空行丢弃）∪ 部署 env AGORA_CLEAN_IGNORE（逗号分隔，调用点透传），
+        文件在前 env 在后，保序去重。缺文件/不可读/非 UTF-8＝空声明（F35 名册
+        解析同款容错）；两层皆缺＝无豁免＝全净口径不变。"""
+        try:
+            lines = (Path(repo_dir) / ".agora" / "clean-ignore").read_text(
+                encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        entries = [ln.strip() for ln in lines
+                   if ln.strip() and not ln.strip().startswith("#")]
+        entries += [p.strip() for p in env_value.split(",") if p.strip()]
+        return list(dict.fromkeys(entries))  # 保序去重
 
     def apply_ignore_roster(self, repo_dir: str, patterns) -> None:  # Req: F35
         """F35：名册幂等写入 info/exclude——空名册零动作（不建文件）；

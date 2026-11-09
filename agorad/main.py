@@ -143,7 +143,7 @@ def quick_limits_from_env():
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
              verify_timeout=300, verify_ceiling=None, roster_path=None,
-             quick_max_files=3, quick_max_lines=30):
+             quick_max_files=3, quick_max_lines=30, clean_ignore_env=""):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -177,7 +177,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 on_blocked=task.stop_after_failed,
                 roster_path=roster_path or str(Path(home) / ".agora" / "ignore.roster"),
                 quick_max_files=quick_max_files,  # F65 quick 包络旋钮透传
-                quick_max_lines=quick_max_lines)
+                quick_max_lines=quick_max_lines,
+                clean_ignore_env=clean_ignore_env)  # ag-f5aa4d 数据层豁免 env 面
     app.gate, app.health = gate, health
     return app
 
@@ -243,7 +244,8 @@ def main():
         return 1
     app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store,
                    verify_timeout=verify_timeout, verify_ceiling=verify_ceiling,
-                   quick_max_files=quick_files, quick_max_lines=quick_lines)
+                   quick_max_files=quick_files, quick_max_lines=quick_lines,
+                   clean_ignore_env=os.environ.get("AGORA_CLEAN_IGNORE", ""))
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）

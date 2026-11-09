@@ -123,11 +123,12 @@ class Gate:
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
                  store, runner=None, verify_timeout=300, verify_ceiling=None,
                  on_blocked=None, roster_path=None, quick_max_files=3,
-                 quick_max_lines=30):  # F35 门侧名册；F65 quick 包络旋钮
+                 quick_max_lines=30, clean_ignore_env=""):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
         self._roster_path = roster_path
+        self._clean_ignore_env = clean_ignore_env  # ag-f5aa4d 数据层豁免 env 面
         self._verify_timeout, self._verify_ceiling = verify_timeout, verify_ceiling
         self._quick_max_files, self._quick_max_lines = quick_max_files, quick_max_lines
         self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
@@ -352,11 +353,15 @@ class Gate:
                         "目标检出已脱离分支（detached HEAD），无法解析缺省目标支"
                         "——恢复分支检出后重新 post(done, commit)")
             # F35：首道干净检查前把名册幂等写入目标仓 info/exclude——exclude 后
-            # 名册路径不进 status，ensure_clean 谓词零改动、全净口径不变。
+            # 名册路径不进 status，未跟踪名册路径在谓词外隐身（跟踪改动豁免归
+            # clean-ignore，两机制分工见 README）。
             roster = _roster_from_file(self._roster_path) if self._roster_path else []
             if roster:
                 self._gitx.apply_ignore_roster(target, roster)
-            self._gitx.ensure_clean(target)  # 主检出写前硬闸：用户未提交/未跟踪工作一律不碰
+            # ag-f5aa4d 数据层豁免：声明（仓根 clean-ignore ∪ 部署 env）传入硬闸，
+            # 跟踪中的数据层心跳不再制造结构性脏（两处检查共用同一份豁免面）。
+            exempt = self._gitx.clean_ignore(target, self._clean_ignore_env)
+            self._gitx.ensure_clean(target, exempt)  # 主检出写前硬闸：用户未提交/未跟踪工作一律不碰
             if explicit:  # 显式支才采分支位（缺省支实名解析不扩还原面）
                 origin = origin or self._gitx.symref(target)
                 self._state.set_fields(tid, gate_origin_branch=origin)
@@ -438,7 +443,7 @@ class Gate:
                                    reason=where)
                 return
             # 集成验证可能耗时较长，最终推进前复查，关闭“开始干净、结束时变脏”窗口。
-            self._gitx.ensure_clean(target)
+            self._gitx.ensure_clean(target, exempt)
             if r is not None:  # 重放推进：sha 级 ff（env 分支仍在 E，不可再作合并源）
                 if self._gitx.ff_sha(target, r, branch) != "ok":
                     self._non_ff(tid, branch, self._gitx.head(target, branch))

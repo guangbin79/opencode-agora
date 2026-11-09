@@ -319,6 +319,63 @@ class TestAccessGitx(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.gx.ensure_clean(str(self.repo))
 
+    def test_ensure_clean_exempt_prefix_passes_declared_paths(self):  # Req: ag-f5aa4d
+        """clean-ignore 数据层豁免：仓根锚定目录前缀语义（`data/`＝本体＋子树）；
+        跟踪/未跟踪在豁免路径→放行，不在→拒；`data` 不误放 `database/`（非子串）。"""
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "heartbeat.db").write_text("v1")
+        self._git(["add", "-A"], cwd=self.repo)
+        self._git(["commit", "-m", "data dir"], cwd=self.repo)
+        self.gx.ensure_clean(str(self.repo), ["data/"])  # 干净仓照常放行
+        (self.repo / "data" / "heartbeat.db").write_text("v2")
+        self.gx.ensure_clean(str(self.repo), ["data/"])  # 跟踪改动在豁免路径→放行
+        with self.assertRaises(RuntimeError):
+            self.gx.ensure_clean(str(self.repo))  # 未声明→拒（旧口径）
+        (self.repo / "data" / "pulse.db").write_text("beat")  # 未跟踪在豁免路径→放行
+        self.gx.ensure_clean(str(self.repo), ["data"])
+        (self.repo / "database").mkdir()  # 前缀按目录边界：`data` 不豁免 `database/`
+        (self.repo / "database" / "x.db").write_text("x")
+        with self.assertRaises(RuntimeError):
+            self.gx.ensure_clean(str(self.repo), ["data/"])
+        (self.repo / "src.py").write_text("uncommitted")  # 豁免外跟踪改动→拒
+        with self.assertRaises(RuntimeError):
+            self.gx.ensure_clean(str(self.repo), ["data/"])
+
+    def test_ensure_clean_z_parsing_spaced_and_quoted_names(self):  # Req: ag-f5aa4d
+        """-z 机读解析：空格/引号路径不撕裂（误撕裂＝漏报或错位匹配）；
+        rename 条目按新路径评脏面，orig 段不参与匹配。"""
+        d = self.repo / "my data dir"
+        d.mkdir()
+        (d / "a b.conf").write_text("v1")
+        (d / 'q "uote.conf').write_text("v1")
+        self._git(["add", "-A"], cwd=self.repo)
+        self._git(["commit", "-m", "spaced"], cwd=self.repo)
+        (d / "a b.conf").write_text("v2")
+        self.gx.ensure_clean(str(self.repo), ["my data dir"])  # 含空格＋引号命中→放行
+        with self.assertRaises(RuntimeError):  # 不在豁免表→拒（解析未撕裂漏放行）
+            self.gx.ensure_clean(str(self.repo))
+        self._git(["add", "-A"], cwd=self.repo)
+        self._git(["commit", "-m", "v2"], cwd=self.repo)
+        self._git(["mv", "src.py", "my data dir/src.py"], cwd=self.repo)  # rename 条目
+        self.gx.ensure_clean(str(self.repo), ["my data dir"])  # 新路径命中→放行
+        with self.assertRaises(RuntimeError):  # orig 段不评脏面：豁免旧路径不放行
+            self.gx.ensure_clean(str(self.repo), ["src.py"])
+        self._git(["reset", "--hard", "HEAD"], cwd=self.repo)  # 收敛夹具
+
+    def test_clean_ignore_union_file_and_env(self):  # Req: ag-f5aa4d
+        """声明两层并集：仓根 .agora/clean-ignore ∪ env（逗号分隔），文件在前
+        env 在后保序去重；# 注释/空行丢；缺声明文件→仅 env 生效；双缺＝无豁免。"""
+        d = self.repo / ".agora"
+        d.mkdir()
+        (d / "clean-ignore").write_text("# 注释\n\n.agent-experiences/\n.dup/\n")
+        self.assertEqual(self.gx.clean_ignore(str(self.repo), ".dup/, data"),
+                         [".agent-experiences/", ".dup/", "data"])
+        (d / "clean-ignore").unlink()
+        d.rmdir()
+        self.assertEqual(self.gx.clean_ignore(str(self.repo), "data/, x"),
+                         ["data/", "x"])  # 缺声明文件＝仅 env 生效
+        self.assertEqual(self.gx.clean_ignore(str(self.repo), ""), [])  # 双缺＝无豁免
+
     def test_target_branch_start_and_merge(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/7"], cwd=self.repo)
         issue_sha = self._commit(self.repo, {"issue.txt": "i1"}, "issue work")
