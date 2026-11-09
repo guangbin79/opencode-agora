@@ -612,7 +612,7 @@ class TestGateRun(TestCoreGate):
         self.in_gate()
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 干净零影响照常合并
-        self.assertEqual(self.gx.check_calls, [(str(self.env), None)])  # env＋branch 口径
+        self.assertEqual(self.gx.check_calls, [(str(self.env), "main")])  # env＋branch 口径（缺省支实名解析）
 
     def test_merge_recycle_removes_credential_file(self):  # Req: F43
         self.in_gate()
@@ -642,7 +642,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["fail_streak"], 0)  # 绿清连败（R12）
         integration = f"{self.env}__gate"
         self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
-                                               (str(self.env), "/repo", None)])
+                                               (str(self.env), "/repo", "main")])
         self.assertEqual(self.gx.removed, [str(self.env)])  # 环境即回收
         self.assertEqual(self.runner.calls,  # env verify→detached 集成环境 verify
                          [(str(self.env), "pytest -q"), (integration, "pytest -q")])
@@ -798,7 +798,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["rebased_from"], SHA)  # 留痕成对（E）
         self.assertEqual(t["fail_streak"], 0)  # 全绿清连败
         self.assertEqual(self.gx.rebase_calls, [(str(self.env), f"{self.env}__gate")])
-        self.assertEqual(self.gx.ff_sha_calls, [("/repo", R_SHA, None)])  # R 级 ff 推进
+        self.assertEqual(self.gx.ff_sha_calls, [("/repo", R_SHA, "main")])  # R 级 ff 推进（实时分支 ref）
         self.assertEqual(self.gx.merge_calls,
                          [(str(self.env), f"{self.env}__gate", None)])  # 仅试合并
         self.assertEqual(self.gx.removed, [str(self.env)])
@@ -843,7 +843,7 @@ class TestGateRun(TestCoreGate):
         self.in_gate()
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 守卫路由 _succeed
-        self.assertEqual(self.gx.ff_sha_calls, [("/repo", R_SHA, None)])
+        self.assertEqual(self.gx.ff_sha_calls, [("/repo", R_SHA, "main")])
 
     def test_crash_after_set_fields_reruns_rebase_lands_new_r(self):  # Req: F32
         """崩溃态②（落库后推进前崩，commit=R、锚=E）：contains(R)=False → 再 rebase
@@ -946,7 +946,7 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "closed")
         self.assertEqual(t["fail_streak"], 0)
         self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None),
-                                                  ("/repo", SHA, None)])  # 受理＋门首各一探
+                                                  ("/repo", SHA, None)])  # 受理＋门首各一探（探针先于实名解析：补终态优先）
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.clean_calls, [])
@@ -996,7 +996,7 @@ class TestGateRun(TestCoreGate):
         t = self.state.get("t1")
         integration = f"{self.env}__gate"
         self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
-                                               (str(self.env), "/repo", None)])  # 照常合并
+                                               (str(self.env), "/repo", "main")])  # 照常合并
         self.assertEqual(t["state"], "closed")  # merged 不逆转历史，走完置 closed
         self.assertNotEqual(t["state"], "cancelled")
 
@@ -1435,14 +1435,40 @@ class TestGateAudit(TestCoreGate):
         self.assertIn("merged", names)
         self.assertEqual(self.state.get("t1")["state"], "closed")
 
-    def test_target_branch_absent_keeps_default_target(self):  # Req: gt-132747
+    def test_default_branch_resolved_to_live_ref(self):  # Req: ag-bf61e7
+        """缺省支实名解析（ag-bf61e7）：target_branch 缺省时门入口解析实时 symref，
+        基线/试合并/最终推进全走 refs/heads/<支>——检出 HEAD 不再是事实源。"""
         self.in_gate()
         self.gate.run("t1")
         integration = f"{self.env}__gate"
+        self.assertEqual(self.gx.integration_builds, [("/repo", integration, "main")])
         self.assertEqual(self.gx.merge_calls, [(str(self.env), integration, None),
-                                               (str(self.env), "/repo", None)])
+                                               (str(self.env), "/repo", "main")])
         self.assertEqual(self.gx.head_calls, [(integration, None)])
         self.assertEqual(self.state.get("t1")["state"], "closed")
+
+    def test_detached_default_checkout_refused_before_verify(self):  # Req: ag-bf61e7
+        """detached 检出拒判（ag-bf61e7）：symref=HEAD 时无法定位缺省目标支 ref——
+        HEAD 基线会以陈旧检出位误判 non-ff，detached 推进只挪 HEAD 不动分支 ref
+        （静默丢合并）——verify 零消耗弹回，恢复分支检出后重跑。"""
+        self.in_gate()
+        self.gx.symref = lambda repo_dir: "HEAD"
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.assertEqual(self.runner.calls, [])  # 拒判先于门体：verify 零消耗
+        self.assertEqual(self.gx.merge_calls, [])  # 无试合并/无推进——分支 ref 零风险
+        self.assertTrue(any("detached" in m["body"] for m in self.worker_msgs()))
+
+    def test_detached_kill_window_probe_precedes_refusal(self):  # Req: ag-bf61e7
+        """拒判次序（终闸 B 册）：contains 补终态探针先于 detached 拒判——kill
+        窗口×detached 组合下已合法合并的任务照常补终态，绝不假 reopened。"""
+        self.in_gate()
+        self.gx.symref = lambda repo_dir: "HEAD"
+        self.gx.contains_result = True
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 补终态优先
+        self.assertEqual(self.runner.calls, [])  # 零 verify 消耗
+        self.assertEqual(self.gx.merge_calls, [])  # 零重复合并
 
     def test_green_path_audits_done_merged_closed_with_commit(self):  # Req: F8
         self.in_gate()
@@ -1528,6 +1554,49 @@ class TestGateStaleBaseline(TestCoreGate):
         self.assertNotIn("push_rejected", names)  # 直通不推陈旧支：零假 non-ff 警报
         self.assertEqual(
             self._git(["rev-parse", "master"], cwd=proj).stdout.strip(), stale)  # 主检出未动
+
+    def test_detached_checkout_refused_not_silent_loss(self):  # Req: ag-bf61e7
+        """事故形态端到端（真 Gitx）：主检出 detached 而分支 ref 独立——旧码以检出
+        HEAD 判 ff 并把 --ff-only 推进落在 detached HEAD 上（refs/heads/master 不动，
+        merged 落账但内容静默丢失）；新码门入口实名解析遇 detached 拒判，verify
+        零消耗、分支 ref 零风险，恢复检出后重跑即正常落库。"""
+        proj = self.tmp / "proj2"
+        proj.mkdir()
+        self._git(["init", "-b", "master"], cwd=proj)
+        self._git(["config", "user.email", "t@t"], cwd=proj)
+        self._git(["config", "user.name", "t"], cwd=proj)
+        self._git(["commit", "--allow-empty", "-m", "init"], cwd=proj)
+        origin = self.tmp / "origin2.git"
+        self._git(["init", "--bare", "-b", "master", str(origin)])
+        self._git(["remote", "add", "origin", str(origin)], cwd=proj)
+        self._git(["push", "-q", "origin", "master"], cwd=proj)
+        gx = Gitx()
+        env = gx.build_env(str(proj), "t1")
+        self._git(["commit", "--allow-empty", "-m", "task"], cwd=env)
+        task = self._git(["rev-parse", "HEAD"], cwd=env).stdout.strip()
+        self._git(["checkout", "-q", "--detach"], cwd=proj)  # 回滚残留：检出脱离分支
+        self.seed()  # tb=None＝缺省支任务
+        self.state.set_fields("t1", project_dir=str(proj), env_dir=env)
+        self.anchor = {"head": task, "clean": True}
+        self.gate = Gate(self.state, gx, self.router, self.oc,
+                         lambda e: self.anchor, self.health, self.auth,
+                         self.store, runner=self.runner)
+        self.state.transition("t1", "done", commit=task, rebased_from=None)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")  # 拒判弹回非假合并
+        self.assertEqual(self.runner.calls, [])  # verify 零消耗
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("merged", names)  # 分支 ref 零风险：无静默丢合并
+        stale = self._git(["rev-parse", "master"], cwd=proj).stdout.strip()
+        self.state.transition("t1", "running")  # 恢复分支检出（派发方处置）
+        self._git(["checkout", "-q", "master"], cwd=proj)
+        self.assertEqual(
+            self._git(["rev-parse", "master"], cwd=proj).stdout.strip(), stale)  # ref 未动
+        self.state.transition("t1", "done", commit=task, rebased_from=None)
+        self.gate.run("t1")  # 恢复后重跑：实名解析 refs/heads/master 正常落库
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(
+            self._git(["rev-parse", "master"], cwd=proj).stdout.strip(), task)  # 内容落库
 
 
 class TestQuickEnvelope(TestCoreGate):

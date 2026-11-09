@@ -258,6 +258,7 @@ class Gate:
         if t["state"] != "done":
             return  # F36 R2：驻留取消直结后，重启残留队列里的非 done 任务不跑门
         branch = t.get("target_branch")  # 合入目标支（外部工作流）；缺省＝仓默认支
+        explicit = branch is not None  # ag-bf61e7：分支位还原面只挂显式支（缺省支任务不还原）
         env, target, cmd = t["env_dir"], t["project_dir"], t["verify"]["cmd"]
         integration = t.get("gate_env") or f"{env}__gate"
         origin = t.get("gate_origin_branch")  # 崩溃重排沿用首轮分支位，不采信漂移后的现场
@@ -289,17 +290,29 @@ class Gate:
             if self._gitx.contains(target, t["commit"], branch):
                 self._succeed(tid)
                 return
+            # ag-bf61e7 缺省支实名解析：基线与推进的单一事实源＝实时分支 ref，而非
+            # 检出 HEAD——检出位漂移（回滚 checkout/人工切支）时 HEAD 判据会以陈旧位
+            # 误判 non-ff，且 detached 下 merge --ff-only 只挪 HEAD、分支 ref 不动
+            # （merged 落账但内容静默丢失）。detached 拒判如实上抛走门内 except；
+            # 置于 contains 补终态探针之后——kill 窗口补终态优先于拒判（终闸 B 册）。
+            if branch is None:
+                branch = self._gitx.symref(target)
+                if branch == "HEAD":
+                    raise RuntimeError(
+                        "目标检出已脱离分支（detached HEAD），无法解析缺省目标支"
+                        "——恢复分支检出后重新 post(done, commit)")
             # F35：首道干净检查前把名册幂等写入目标仓 info/exclude——exclude 后
             # 名册路径不进 status，ensure_clean 谓词零改动、全净口径不变。
             roster = _roster_from_file(self._roster_path) if self._roster_path else []
             if roster:
                 self._gitx.apply_ignore_roster(target, roster)
             self._gitx.ensure_clean(target)  # 主检出写前硬闸：用户未提交/未跟踪工作一律不碰
-            if branch:
+            if explicit:  # 显式支才采分支位（缺省支实名解析不扩还原面）
                 origin = origin or self._gitx.symref(target)
                 self._state.set_fields(tid, gate_origin_branch=origin)
             if self.gate_files_touched(tid, list(_GATE_PATTERNS)
-                                       + _roster_gate_patterns(roster)):  # 闸体变更：拍人不拦门
+                                       + _roster_gate_patterns(roster),
+                                       branch=branch):  # 闸体变更：拍人不拦门（ag-bf61e7 实名支同源）
                 self._health.escalate(KIND_GATEFILES, tid)
             warn = self._gitx.diff_check(env, branch)  # 冲突标记机械检查，先于用户 verify
             if warn:  # gt-83185d R3：非空走 verify_failed 口径（截 2000 与 verify 败一致）
@@ -483,11 +496,11 @@ class Gate:
                         f" vs branch@{self._gitx.head(t['env_dir'])}——{act}"
                         "重新 post(done, commit)")
 
-    def gate_files_touched(self, tid, patterns=None):
+    def gate_files_touched(self, tid, patterns=None, branch=None):
         t = self._state.get(tid)
         return bool(t.get("env_dir")) and self._gitx.touches_gate(
             t["env_dir"], patterns if patterns is not None else _GATE_PATTERNS,
-            t.get("target_branch"))
+            branch if branch is not None else t.get("target_branch"))
 
     # ---- 内部 ----
 
