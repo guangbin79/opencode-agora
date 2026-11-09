@@ -41,7 +41,7 @@ class App:
             if any(t.get("worker_sid") == caller
                    for t in self.state.snapshot()["tasks"].values()):
                 return sid
-            self.auth.rebind(sid, caller)
+            self.auth.rebind(sid, caller, prefer_role="root")  # ag-588eb8：双角色稳态点名 root 牌
         if self.main_sid != caller:
             self.main_sid = caller
             self.store.append_event({"ts": time.time(), "actor": caller,

@@ -53,20 +53,24 @@ class Auth:
         v = self._tokens.get(token)
         return (v[0], v[1]) if v else None
 
-    def rebind(self, old_sid, new_sid):
+    def rebind(self, old_sid, new_sid, prefer_role=None):
         """按 sid 改绑牌到新会话（值 [new_sid, role]，token 本体不变）——
         重注入后旧牌即续用；old_sid 入血统集随牌落盘（F16 换号链边连续）。
-        返回牌文本（供 inject 送达），无牌 None。"""
-        for tok, v in self._tokens.items():
-            if v[0] == old_sid:
-                v[0] = new_sid
-                if len(v) < 3:  # 旧格式起档
-                    v.append([])
-                if old_sid not in v[2]:
-                    v[2].append(old_sid)
-                del v[2][:-LINEAGE_CAP]  # 封顶：最旧出局
-                self._persist()
-                return tok
+        prefer_role：同 sid 多牌并存（ag-588eb8 双角色稳态）时优先改绑该角色牌
+        （bind_main 传 "root"——rotate_root 删旧重签会把 root 挪到队尾，首匹配
+        会误绑窗口 dispatcher 牌）。返回牌文本（供 inject 送达），无牌 None。"""
+        cands = [(tok, v) for tok, v in self._tokens.items() if v[0] == old_sid]
+        if prefer_role:  # 点名角色牌优先；缺省保持首匹配（既有语义不回归）
+            cands.sort(key=lambda kv: kv[1][1] != prefer_role)
+        for tok, v in cands:
+            v[0] = new_sid
+            if len(v) < 3:  # 旧格式起档
+                v.append([])
+            if old_sid not in v[2]:
+                v[2].append(old_sid)
+            del v[2][:-LINEAGE_CAP]  # 封顶：最旧出局
+            self._persist()
+            return tok
         return None
 
     def token_for(self, sid):

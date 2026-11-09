@@ -569,6 +569,14 @@ class TestCoreHealth(unittest.TestCase):
         self.app.bind_main("main", "ses-main")  # 占位 sid→真会话一次性改绑
         self.assertEqual(self.app.auth.identify(tok), ("ses-main", "root"))
 
+    def test_bind_main_dual_role_sid_moves_root_not_window_token(self):  # ag-588eb8
+        tok_d = self.app.auth.issue("ses-x", "dispatcher")  # 窗口牌在前
+        tok_r = self.app.auth.issue("ses-x", "root")  # 污染/rotate 重签落队尾
+        self.app.bind_main("ses-x", "ses-next")
+        self.assertEqual(self.app.auth.identify(tok_r), ("ses-next", "root"))
+        self.assertEqual(self.app.auth.identify(tok_d),
+                         ("ses-x", "dispatcher"))  # 窗口 dispatcher 牌不被挪走
+
     def test_bind_main_rejects_task_worker_edge_session(self):  # Req: F4
         self.seed("t1", worker="ses-hijack")  # worker 凭据缺失回落 root 牌的误附面
         self.app.bind_main("main", "ses-hijack")

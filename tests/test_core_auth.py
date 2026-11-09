@@ -120,6 +120,17 @@ class TestCoreAuth(unittest.TestCase):
         self.assertEqual((tok is not None, role), (True, "root"))
         self.assertIsNone(self.au.live_token("s-none"))  # 无牌 None
 
+    def test_rebind_prefer_role_picks_role_token_over_insertion_order(self):  # ag-588eb8
+        self.au.issue("s1", "dispatcher")  # 窗口牌在前
+        tok_r = self.au.issue("s1", "root")  # rotate_root 重签即落队尾（root 后至）
+        tok_d = self.au.token_for("s1")
+        self.assertEqual(self.au.identify(tok_d), ("s1", "dispatcher"))
+        self.au.rebind("s1", "s2", prefer_role="root")  # 双角色：点名改绑 root 牌
+        self.assertEqual(self.au.identify(tok_r), ("s2", "root"))
+        self.assertEqual(self.au.identify(tok_d), ("s1", "dispatcher"))  # 窗口牌不动
+        self.au.rebind("s2", "s3")  # 缺省＝首匹配（既有语义不回归）
+        self.assertEqual(self.au.identify(tok_r), ("s3", "root"))
+
     def test_lineage_resets_on_rotate_and_old_format_compat(self):  # Req: F16
         self.au.issue("s1", "root")
         self.au.rebind("s1", "s2")
