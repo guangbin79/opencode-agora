@@ -35,6 +35,7 @@ class FakeOc:
         self.silent_injected = []  # 免通知通道（stalled 降噪）
         self.silent_down = False  # True＝免通知通道不可达（契约 False）
         self.inject_down = False  # F70：True＝prompt 注入不可达（自检提示失败面）
+        self.inject_result = True  # F70：False＝真 Oc 400/404 契约（未注入返 False）
         self.inject_calls = []  # F70：注入尝试计数（含失败，观测不重试）
         self.down = False
         self.msg_of = {}  # F52：sid->末条消息记录；None＝空会话；"raise"＝服务不可达
@@ -66,6 +67,8 @@ class FakeOc:
         self.inject_calls.append((sid, text))
         if self.inject_down:
             raise OcUnavailable("stub inject down")
+        if not self.inject_result:
+            return False  # 真 Oc 契约：死/未知会话不抛，返 False
         self.injected.append((sid, text))
         return True
 
@@ -322,6 +325,29 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.store.read_events("t1")
                           if e["event"] == "escalate"], ["escalate"])
         self.health.tick()  # 同轮失败不重试
+        self.assertEqual(len(self.oc.inject_calls), 1)
+        self.assertEqual(len(self.main_msgs()), 1)
+
+    def test_stalled_edge_without_worker_sid_alerts_only(self):  # Req: F70
+        """无 worker 号的僵态候选照常拍人，自检注入面零触碰、不抛。"""
+        self.seed("t1", worker=None)
+        self.state.set_fields("t1", created=0.0)
+        self.health.tick()
+        self.assertEqual(self.oc.inject_calls, [])
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("失控[stalled]", body)
+
+    def test_stalled_worker_nudge_false_contract_preserves_alert(self):  # Req: F70
+        """真 Oc 死/未知会话返 False：照常拍人，同轮不重试、零成功注入。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.oc.inject_result = False
+        self.health.tick()
+        self.assertEqual(len(self.oc.inject_calls), 1)  # 尝试过恰一次
+        self.assertEqual(self.oc.injected, [])
+        self.assertIn("失控[stalled]", self.main_msgs()[0]["body"])
+        self.health.tick()  # 同轮 False 不重试
         self.assertEqual(len(self.oc.inject_calls), 1)
         self.assertEqual(len(self.main_msgs()), 1)
 

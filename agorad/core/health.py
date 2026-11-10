@@ -5,9 +5,10 @@ tick 只探活动任务的直接下级会话（无全局巡检）；死下级→
 子任务；只有无法重注入的失管 dispatcher 才直接拍人。
 worker 凭据自愈已推改拉（F25 修正）：inject_silent 推送通道证伪（v2.2.0
 synthetic 不触发 prompt 钩子），改由插件 hook 缓存未命中经 /cred_for_sid 拉取。
-边沿判僵（F5 决策记录 2026-10-28，只提醒不处置）：tick 顺带按 doctor 同口径
-（20min 无活动，report.stale_candidates 构造注入）算僵态候选，新进候选集→
-stalled 升级＋可选邮件（email.json opt-in）；离开候选集复位，oc 不可达轮次
+边沿判僵（F5 决策记录 2026-10-28；F70 自检提示，不处置）：tick 顺带按 doctor
+同口径（20min 无活动，report.stale_candidates 构造注入）算僵态候选，新进候选集→
+stalled 升级＋worker prompt 自检一次（不强制打断，失败不重试）＋可选邮件
+（email.json opt-in）；离开候选集复位，oc 不可达轮次
 免判；同任务重复升级（复位后再僵再拍）间隔×4 指数退避、封顶 24h，正文带
 连续升级计数（ag-0f537d 降噪，ag-4628f9 宿主排队忙/闲抖动误报实证）；
 "僵"的处置仍归人工。升级正文由服务权威合成；任务/worker 供给文本以
@@ -108,7 +109,8 @@ class Health:
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
 
     def tick(self):
-        """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵只提醒不处置。"""
+        """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵拍人＋F70 worker
+        自检提示，不处置。"""
         tasks = self._state.snapshot()["tasks"]
         oc_down = False
         busy = set()  # updated>idle＝回合进行中：僵态本轮免判（doctor 口径减 busy 免决）
@@ -146,6 +148,8 @@ class Health:
         （离开即移除，之后再僵再拍）；重复升级间隔×4 指数退避封顶 24h——
         首拍不变，宿主排队忙/闲抖动反复再僵时降噪（ag-4628f9 实证）；
         退避窗内边沿不拍不记（下轮到期重试，拍到才记不丢报）。
+        拍人后向 worker 注入一次 prompt 自检提示（F70）：模型自行纠偏，不强制
+        打断/取消/重派；注入失败同轮不重试、不阻断拍人。
         """
         if self._stale_candidates is None:
             return
