@@ -205,8 +205,80 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(len(self.main_msgs()), 1)
         self.state.set_fields("t1", last_seen=time.time() - 1300)  # 再次超阈
         self.health.tick()
+        self.assertEqual(len(self.main_msgs()), 1)  # ag-0f537d：退避窗内不重拍
+        self.health._stale_esc["t1"] = (1, time.time() - 1201)  # 首档窗外（4×300s）
+        self.health.tick()
         self.assertEqual(sum("失控[stalled]" in m["body"]
-                             for m in self.main_msgs()), 2)  # 离开复位→再僵再拍
+                             for m in self.main_msgs()), 2)  # 离开复位→窗外再拍
+
+    def test_stale_repeat_backoff_quadruples_capped(self):  # Req: ag-0f537d
+        """重复升级间隔×4 指数退避封顶 24h；正文带连续升级计数。
+
+        重复拍人只经「离开候选集复位→再僵」边沿（忙/闲抖动口径），
+        连续在集不重拍（F5 边沿语义不变，退避只门重复拍）。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()
+        self.assertIn("第 1 次升级", self.main_msgs()[0]["body"])  # 首拍带计数
+
+        def flicker():  # 抖动：离开候选集（复位边沿）→再进
+            self.health.touch("s-w1")
+            self.health.tick()
+            self.state.set_fields("t1", last_seen=time.time() - 1300)
+
+        self.assertEqual([self.health._stale_gap(n) for n in range(1, 5)],
+                         [1200.0, 4800.0, 19200.0, 76800.0])  # 已拍 n 次后的窗
+        self.assertEqual(self.health._stale_gap(5), 86400.0)  # 封顶 24h
+        flicker()
+        self.health.tick()
+        self.assertEqual(len(self.main_msgs()), 1)  # 首档窗内：抑制
+        self.health._stale_esc["t1"] = (1, time.time() - 1201)  # 首档窗外
+        self.health.tick()
+        self.assertIn("第 2 次升级", self.main_msgs()[1]["body"])
+        flicker()
+        self.health._stale_esc["t1"] = (2, time.time() - 3000)  # 二档窗内（<4800s）
+        self.health.tick()
+        self.assertEqual(len(self.main_msgs()), 2)  # 抑制：间隔须逐档拉长
+        self.health._stale_esc["t1"] = (2, time.time() - 4801)  # 二档窗外
+        self.health.tick()
+        self.assertIn("第 3 次升级", self.main_msgs()[2]["body"])
+        flicker()
+        self.health._stale_esc["t1"] = (3, time.time() - 19201)  # 三档窗外
+        self.health.tick()
+        self.assertIn("第 4 次升级", self.main_msgs()[3]["body"])
+        flicker()
+        self.health._stale_esc["t1"] = (4, time.time() - 86401)  # 封顶窗外仍再拍
+        self.health.tick()
+        self.assertIn("第 5 次升级", self.main_msgs()[4]["body"])
+
+    def test_stale_backoff_state_pruned_on_terminal(self):  # Req: ag-0f537d（终闸 B1）
+        """终态任务出账：_stale_esc 只留活动任务，长驻 daemon 无界增长收口。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()
+        self.assertIn("t1", self.health._stale_esc)
+        self.state.transition("t1", "done")  # 迁移矩阵：running→done→merged 两跳
+        self.state.transition("t1", "merged")  # 终态（_ACTIVE 外）→ 出账
+        self.health.tick()
+        self.assertNotIn("t1", self.health._stale_esc)
+
+    def test_stale_backoff_count_resets_for_new_task(self):  # Req: ag-0f537d
+        """退避计数按任务隔离：新任务首拍即发且计数归 1，不继承他任务连拍。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()
+        self.health._stale_esc["t1"] = (3, time.time() - 90000)  # t1 已连拍 3 次
+        self.seed("t2", worker="s-w2")
+        self.state.set_fields("t2", created=0.0)
+        self.oc.liveness["s-w2"] = True
+        self.health.tick()
+        bodies = [m["body"] for m in self.main_msgs()]
+        self.assertEqual(len(bodies), 2)
+        self.assertIn("第 1 次升级", bodies[1])  # 新任务重置：首拍即发计 1
+        self.assertNotIn("第 4 次升级", bodies[1])
 
     def test_stale_skips_fresh_and_terminal(self):  # Req: F5
         self.seed("t1")

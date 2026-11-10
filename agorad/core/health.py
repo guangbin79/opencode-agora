@@ -8,7 +8,9 @@ synthetic 不触发 prompt 钩子），改由插件 hook 缓存未命中经 /cre
 边沿判僵（F5 决策记录 2026-10-28，只提醒不处置）：tick 顺带按 doctor 同口径
 （20min 无活动，report.stale_candidates 构造注入）算僵态候选，新进候选集→
 stalled 升级＋可选邮件（email.json opt-in）；离开候选集复位，oc 不可达轮次
-免判；"僵"的处置仍归人工。升级正文由服务权威合成；任务/worker 供给文本以
+免判；同任务重复升级（复位后再僵再拍）间隔×4 指数退避、封顶 24h，正文带
+连续升级计数（ag-0f537d 降噪，ag-4628f9 宿主排队忙/闲抖动误报实证）；
+"僵"的处置仍归人工。升级正文由服务权威合成；任务/worker 供给文本以
 "不可信原文"段携带（拍平换行，防伪造服务行）。escalate 沿 dispatcher_sid
 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）经 router post——
 落库先行，注入即视为拍到（stalled 例外：synthetic 免通知通道，不弹窗）；
@@ -30,6 +32,10 @@ KIND_STALLED = "stalled"
 
 _UNTRUSTED = "---- 不可信原文 ----"
 _RAW_MAX = 500
+# 重复升级退避（ag-0f537d）：首档＝4×tick 节奏（默认 AGORA_HEALTH_INTERVAL 300s），
+# 逐档再×4，封顶 24h
+_STALE_GAP0 = 1200.0
+_STALE_CAP = 86400.0
 # 活动面＝探活与 last_seen 的任务集（verify_failed/reopened 归在飞，同 task 口径）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _IN_FLIGHT = {"dispatched", "running"}  # 自愈重注入仅限 worker 在跑的两态
@@ -99,6 +105,7 @@ class Health:
         self._env_activity = env_activity
         self._draft_writer = draft_writer
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
+        self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
 
     def tick(self):
         """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵只提醒不处置。"""
@@ -132,22 +139,38 @@ class Health:
             self._stale_scan(tasks, busy)
 
     def _stale_scan(self, tasks, busy):
-        """边沿判僵（F5 决策记录 2026-10-28）：新进候选集→stalled 拍人。
+        """边沿判僵（F5 决策记录 2026-10-28）＋重复升级退避（ag-0f537d）。
 
         免判口径（二批）：busy（updated>idle，回合进行中）本轮从候选集剔除；
         离开 busy 再超阈重新边沿触发。_stale_seen 每轮同步为当前候选集
-        （离开即移除，之后再僵再拍）。
+        （离开即移除，之后再僵再拍）；重复升级间隔×4 指数退避封顶 24h——
+        首拍不变，宿主排队忙/闲抖动反复再僵时降噪（ag-4628f9 实证）；
+        退避窗内边沿不拍不记（下轮到期重试，拍到才记不丢报）。
         """
         if self._stale_candidates is None:
             return
         cand = [(tid, b) for tid, b
                 in self._stale_candidates({"tasks": tasks}, time.time())
                 if tid not in busy]
+        now = time.time()
         for tid, _ in cand:
             if tid not in self._stale_seen:  # 边沿：在候选集而不在记忆集
-                self.escalate(KIND_STALLED, tid)
+                n, last = self._stale_esc.get(tid, (0, 0.0))
+                if now - last < self._stale_gap(n):
+                    continue  # 退避窗内：抑制本轮拍人，不记边沿下轮重试
+                self.escalate(KIND_STALLED, tid, streak=n + 1)
+                self._stale_esc[tid] = (n + 1, time.time())
                 self._stale_seen.add(tid)  # 拍到才记：escalate 失败下轮重试不丢报
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
+        # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
+        self._stale_esc = {tid: v for tid, v in self._stale_esc.items()
+                           if tasks.get(tid, {}).get("state") in _ACTIVE}
+
+    def _stale_gap(self, count):
+        """已连拍 count 次后的再拍退避窗（秒）：首档 1200s 逐档×4，封顶 24h。"""
+        # 指数钳 15：count 数百时 4**count 先于 min 爆 float 上限（OverflowError
+        # 每轮重抛会静默杀掉整条升级链，终闸 B2）
+        return min(_STALE_GAP0 * 4 ** min(max(count - 1, 0), 15), _STALE_CAP)
 
     def touch(self, sid):
         """last_seen 刷新入口：仅 worker 服务调用刷——dispatcher 查看≠worker
@@ -214,17 +237,20 @@ class Health:
                 pass  # 草稿照写失败不阻塞拍人
         return lines, draft
 
-    def escalate(self, kind, tid, raw=None):
+    def escalate(self, kind, tid, raw=None, streak=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
         stalled 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户裁定），
         其余 kind 照常会话注入；stalled 边沿附末次活动摘要（F52，失败降级）
-        ＋证据包小节与草稿页路径（F59，降级纪律：证据永不阻塞拍人）。"""
+        ＋证据包小节与草稿页路径（F59，降级纪律：证据永不阻塞拍人）。
+        streak＝同任务连续升级计数（退避节奏见 _stale_scan），正文随带。"""
         t = self._state.get(tid)
         body = (f"失控[{kind}] 任务{tid}：{_KIND_NOTE[kind]}；"
                 f"状态 {t['state']}，worker={t.get('worker_sid') or '-'}，"
                 f"dispatcher={t.get('dispatcher_sid') or '-'}，"
                 f"连败 {t.get('fail_streak', 0)}")
+        if streak:
+            body += f"，第 {streak} 次升级"
         note = None
         if kind == KIND_STALLED and t.get("worker_sid"):
             note = self._last_activity(t["worker_sid"])  # 加一次取末条（F52 裁定）
