@@ -161,6 +161,16 @@ class Health:
                 self.escalate(KIND_STALLED, tid, streak=n + 1)
                 self._stale_esc[tid] = (n + 1, time.time())
                 self._stale_seen.add(tid)  # 拍到才记：escalate 失败下轮重试不丢报
+                wsid = tasks[tid].get("worker_sid")
+                if wsid:  # F70 自检提示：模型自行纠偏；注入败不重试不阻断拍人
+                    try:
+                        self._oc.inject(wsid, (
+                            f"[agora] 僵态自检（任务 {tid}）：核对任务目标、"
+                            "当前动作与程序状态。若正常，简述当前进展后继续；"
+                            "若异常或偏离目标，先安全停止当前动作，说明原因，"
+                            "再选择安全的恢复方式；不要机械重启。"))
+                    except Exception:
+                        pass
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
         self._stale_esc = {tid: v for tid, v in self._stale_esc.items()

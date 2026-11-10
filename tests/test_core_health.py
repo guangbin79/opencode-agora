@@ -34,6 +34,8 @@ class FakeOc:
         self.sessions, self.injected = [], []
         self.silent_injected = []  # 免通知通道（stalled 降噪）
         self.silent_down = False  # True＝免通知通道不可达（契约 False）
+        self.inject_down = False  # F70：True＝prompt 注入不可达（自检提示失败面）
+        self.inject_calls = []  # F70：注入尝试计数（含失败，观测不重试）
         self.down = False
         self.msg_of = {}  # F52：sid->末条消息记录；None＝空会话；"raise"＝服务不可达
         self.msg_calls = 0
@@ -61,6 +63,9 @@ class FakeOc:
         return sid
 
     def inject(self, sid, text):
+        self.inject_calls.append((sid, text))
+        if self.inject_down:
+            raise OcUnavailable("stub inject down")
         self.injected.append((sid, text))
         return True
 
@@ -279,6 +284,46 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(len(bodies), 2)
         self.assertIn("第 1 次升级", bodies[1])  # 新任务重置：首拍即发计 1
         self.assertNotIn("第 4 次升级", bodies[1])
+
+    def test_stalled_edge_nudges_worker_once_per_episode(self):  # Req: F70
+        """新进僵态边沿 prompt 自检恰一次：不强制打断，复位后再次入僵可再提示。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()
+        self.assertEqual(len(self.oc.injected), 1)
+        sid, text = self.oc.injected[0]
+        self.assertEqual(sid, "s-w1")
+        self.assertIn("t1", text)
+        self.assertIn("核对", text)
+        self.assertIn("安全停止", text)
+        self.assertIn("失控[stalled]", self.main_msgs()[0]["body"])  # 拍人不变
+        self.health.tick()  # 仍在僵态：同轮不重复注入
+        self.assertEqual(len(self.oc.injected), 1)
+        self.state.set_fields("t1", last_seen=time.time())  # 活动刷新→复位
+        self.health.tick()
+        self.assertEqual(len(self.oc.injected), 1)
+        self.state.set_fields("t1", last_seen=time.time() - 1300)  # 再次入僵
+        self.health._stale_esc["t1"] = (1, time.time() - 1201)  # 首档退避窗外
+        self.health.tick()
+        self.assertEqual(len(self.oc.injected), 2)
+
+    def test_stalled_worker_nudge_failure_preserves_alert(self):  # Req: F70
+        """自检注入失败不阻断拍人；同轮不重试，主会话提醒与审计照常。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.oc.inject_down = True
+        self.health.tick()  # prompt 注入抛异常：吞掉，拍人照常
+        self.assertEqual(len(self.oc.inject_calls), 1)  # 尝试过恰一次
+        self.assertEqual(self.oc.injected, [])
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("失控[stalled]", body)
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"] == "escalate"], ["escalate"])
+        self.health.tick()  # 同轮失败不重试
+        self.assertEqual(len(self.oc.inject_calls), 1)
+        self.assertEqual(len(self.main_msgs()), 1)
 
     def test_stale_skips_fresh_and_terminal(self):  # Req: F5
         self.seed("t1")

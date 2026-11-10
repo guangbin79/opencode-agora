@@ -50,11 +50,11 @@ MCP 路径的 `task_cancel` 无确认门（无 board-tui 式 y/n），确认纪�
 
 - **`age_rank`**：任务年龄排行（创建至今）——前列者占额嫌疑。
 - **`last_seen_rank`**：最后活动排行——last_seen 仅 worker 服务调用刷新（人查看不续命），值＝融合基线 max(last_seen, env 工作区文件活性)（F15：文件在写＝活着）；垫底且超 20min＝**僵态候选**（in_gate 免判；done 滞留照拍＝催合并）。"僵"不自动处置，由人判断后转 dispatch 失控三选一（cancel／再 dispatch／放任）。
-- **僵态提醒（health tick，只提醒不处置）**：tick 边沿判僵（doctor 同口径再剔 busy——oc 会话 updated>idle 回合进行中免判），新进候选集→主会话收 stalled 升级（落转录不弹窗，gt-5bc312）＋可选邮件（$AGORA_HOME/.agora/email.json opt-in，未配置零行为）；离开候选复位、再僵再拍。doctor 候选是纯账本口径（可能含 busy 深潜误标），人工排除用 `agora status <tid>`（fresh／busy_round 均非僵，stale_candidate 才算）。
+- **僵态提醒（health tick，提醒＋worker 自检提示，不处置）**：tick 边沿判僵（doctor 同口径再剔 busy——oc 会话 updated>idle 回合进行中免判），新进候选集→主会话收 stalled 升级（落转录不弹窗，gt-5bc312）＋worker 收一次 prompt 自检提示（F70：不强制打断/取消/重派，注入败不重试）＋可选邮件（$AGORA_HOME/.agora/email.json opt-in，未配置零行为）；离开候选复位、再僵再拍。doctor 候选是纯账本口径（可能含 busy 深潜误标），人工排除用 `agora status <tid>`（fresh／busy_round 均非僵，stale_candidate 才算）。
 - **`env`**：每任务 env_dir 在盘性（`on_disk`）——false＝登记环境已不在盘（merged/cancelled 回收后属正常）。
 - **孤儿目录**：盘上无任务对应的环境目录永不自动删；当前 doctor 只报在册环境的在盘性，盘上孤儿扫描属②期——on_disk 与状态对不上、或人目视发现无主目录时，才值得人 `ls` 复核一圈。
 - **不手动删 worktree 目录**——服务 `remove_env` 负责回收（含 rmtree 兜底）。手动 rm 可能误伤在飞任务的环境（gt-3e7301 事故）。残留排查用 doctor 确认 closed 后由服务清理，不人手 rm。
 
 何时值得人看一眼：age 前列且状态非在飞/blocked、last_seen 长期停滞、on_disk 与任务状态矛盾。三者之外勿主动巡检——不上 cron、不做全局扫描。
 
-> 来源：F5＋2026-10-28 二批免判口径（busy/in_gate 免判、last_seen 只 worker 刷、done 滞留照拍）＋F15（env 活性融合）＋F28（status 三态）／设计§4.7（doctor 含任务年龄/最后活动排行）＋B6（孤儿永不自动删）／agorad/core/report.py:21-34,129-147,149-172（_env_activity／stale_candidates／doctor_view；孤儿扫描属②期）＋agorad/core/health.py（边沿判僵、stalled 免通知、email opt-in）
+> 来源：F5＋F70＋2026-10-28 二批免判口径（busy/in_gate 免判、last_seen 只 worker 刷、done 滞留照拍）＋F15（env 活性融合）＋F28（status 三态）／设计§4.7（doctor 含任务年龄/最后活动排行）＋B6（孤儿永不自动删）／agorad/core/report.py:21-34,129-147,149-172（_env_activity／stale_candidates／doctor_view；孤儿扫描属②期）＋agorad/core/health.py（边沿判僵、stalled 免通知、worker 自检提示、email opt-in）
