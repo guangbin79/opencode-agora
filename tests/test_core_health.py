@@ -798,6 +798,17 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(self.app.auth.identify(tok_d),
                          ("ses-x", "dispatcher"))  # 双牌稳态：均零改绑
 
+    def test_bind_main_ex_worker_of_terminal_task_can_bind(self):  # Req: F75 后续（ag-7bea59）
+        """守卫只拒在飞 worker（ag-7bea59 实证）：终态行 worker_sid 永留（cancel
+        已废牌、merged 仅删牌文件——工具面由冻结行归属终审自限），曾任 worker 的
+        主会话不得永久 headless 化——root 建单归属照常落真实会话。"""
+        self.seed("t-old", state="merged", worker="ses-ex")  # 终态行：worker_sid 永留
+        self.assertEqual(self.app.bind_main("root", "ses-ex"), "ses-ex")  # 可绑
+        self.assertEqual(self.app.main_sid, "ses-ex")
+        self.seed("t-live", state="running", worker="ses-now")
+        self.assertEqual(self.app.bind_main("ses-ex", "ses-now"), "ses-ex")  # 在飞 worker 仍拒
+        self.assertEqual(self.app.main_sid, "ses-ex")
+
     def test_bind_main_rejects_task_worker_edge_session(self):  # Req: F4
         self.seed("t1", worker="ses-hijack")  # worker 凭据缺失回落 root 牌的误附面
         self.app.bind_main("main", "ses-hijack")

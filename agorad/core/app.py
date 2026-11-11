@@ -33,12 +33,15 @@ class App:
         携 X-Agora-Sid 的 root 调用只更新 main_sid 活绑定（多主会话最近活跃覆盖），
         牌面账本 sid 零改绑——污染源（每调用 rebind 会话 sid）就此根除。任务行归属
         改由 httpd 传对齐 sid 记账（TaskService actor_sid），链边按记录值判定。
-        任务 worker 边会话拒绝绑定：worker 凭据缺失回落 root 牌（B1）＋携 sid 属
-        误附，不得抢主会话绑定。返回本笔归属 sid（拒绑＝牌面 sid）。
+        在飞任务 worker 边会话拒绝绑定：worker 凭据缺失回落 root 牌（B1）＋携 sid
+        属误附，不得抢主会话绑定；终态行 worker_sid 永留但牌已废——曾任 worker 的
+        主会话不因此永久 headless 化（ag-7bea59 实证，守卫收窄到活动行）。返回本笔
+        归属 sid（拒绑＝牌面 sid）。
         """
         if caller == sid:
             return sid
         if any(t.get("worker_sid") == caller
+               and t["state"] in _ACTIVE
                for t in self.state.snapshot()["tasks"].values()):
             return sid
         if self.main_sid != caller:
