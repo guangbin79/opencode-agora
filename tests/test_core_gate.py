@@ -17,7 +17,7 @@ from agorad.access.oc import OcUnavailable
 from agorad.access.pages import write_task_page
 from agorad.access.store import Store
 from agorad.core.auth import Auth
-from agorad.core.gate import Gate, _subprocess_runner
+from agorad.core.gate import Gate, _cmd_dead, _subprocess_runner
 from agorad.core.msg import Router
 from agorad.core.state import State
 from agorad.core.task import TaskService
@@ -1458,6 +1458,52 @@ class TestGateVerifyDead(TestCoreGate):
         self.assertEqual(rc_missing, 127)
         self.assertEqual(rc_nofile, 127)
         self.assertEqual(rc_noexec, 126)
+
+
+class TestGateVerifyDeadRc2(TestCoreGate):
+    """Req: F82 死分类补 rc=2＋ENOENT：ag-c49b21 原始形态——命令在、文件参数
+    不存在（grep 缺文件 exit 2）照入死类；文案仅作 rc==2 加严条件不独立触发。"""
+
+    def test_rc2_enoent_parks_done_escalates_dispatcher(self):  # Req: F82
+        """rc=2＋ENOENT 文案（ag-c49b21 原始形态）＝命令自身死：驻留 done＋
+        不 bump＋escalate verify-dead＋不弹回（F80 死类同款处置）。"""
+        self.runner = FakeRunner(
+            (2, "grep: no-such-fixture.txt: No such file or directory"))
+        self.mk_gate()
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留：不 transition
+        self.assertEqual(t["fail_streak"], 1)  # 不 bump
+        self.assertIn(("verify-dead", "t1"), self.health.calls)  # escalate 通道
+        events = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("verify_dead", events)
+        self.assertNotIn("verify_failed", events)
+        bodies = [m["body"] for m in self.worker_msgs()]
+        self.assertFalse(any("重新 post(done" in b for b in bodies))  # 不弹回自愈
+        self.assertFalse(any("no-such-fixture" in b for b in bodies))  # 尾部不下发
+
+    def test_rc2_without_enoent_still_bounces_verify_failed(self):  # Req: F82
+        """rc=2 但输出无该文案（如用法错误）＝活不达标防误报控制组：照旧弹回。"""
+        self.runner = FakeRunner((2, "usage: grep [-abcDEF] pattern [file]"))
+        self.mk_gate()
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "verify_failed")
+        self.assertEqual(t["fail_streak"], 2)  # bump 照旧
+        self.assertNotIn(("verify-dead", "t1"), self.health.calls)
+        self.assertTrue(any("重新 post(done" in m["body"]
+                            for m in self.worker_msgs()))  # 弹回自愈照旧
+
+    def test_cmd_dead_judgement_scope(self):  # Req: F82
+        """判定矩阵：126/127 死（F80 回归）；rc=2 仅含 ENOENT 文案才死；文案不独立触发（rc=1 带同文案不入死类）。"""
+        self.assertTrue(_cmd_dead(126, ""))
+        self.assertTrue(_cmd_dead(127, ""))
+        self.assertTrue(_cmd_dead(2, "grep: x: No such file or directory"))
+        self.assertFalse(_cmd_dead(2, "usage: grep"))
+        self.assertFalse(_cmd_dead(2, ""))
+        self.assertFalse(_cmd_dead(1, "No such file or directory"))
 
 
 class TestGateTaskBudget(TestCoreGate):
