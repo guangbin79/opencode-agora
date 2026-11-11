@@ -97,7 +97,8 @@ def send_email(store, tid, body_text, runner=None):
 
 
 class Health:
-    """tick 由 main 定时线程驱动；单写者口径（httpd 串行调用）。"""
+    """tick 由 main 定时线程驱动；消息写面三线程并发（httpd/gate/health），
+    消息号配给经 Store._mid_lock 串行（Req: F75 评审残留 D3）。"""
 
     def __init__(self, state, oc, router, recover, app, store,
                  runner=None, stale_candidates=None, env_activity=None,

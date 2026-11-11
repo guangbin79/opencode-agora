@@ -47,7 +47,9 @@ class Rejected(Exception):
 
 
 class TaskService:
-    """单写者串行调用；无锁无线程（同 Router 口径）。"""
+    """工具面（create/dispatch/update_verify/cancel）httpd 单线程串行独占；
+    stop_after_failed 经 on_blocked 回调由 gate 线程调用（与 httpd 二写者并发，
+    口径同 Health 消息写面）；无锁无线程。"""
 
     def __init__(self, state, auth, gitx, oc, store, router, pages,
                  stale_candidates=None):
