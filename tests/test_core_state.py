@@ -184,5 +184,50 @@ class TestCoreState(unittest.TestCase):
             self.assertFalse(row.get("pending_cancel"), f"{tid} pending 悬挂")
 
 
+class TestSnapshotNormalization(unittest.TestCase):
+    """F91：快照入口补旧行缺省、坏行启动即报，不延迟到 dispatch/done。"""
+
+    def load(self, row, version=1):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        store = Store(tmp)
+        store.append_state({"version": version, "tasks": {"t1": row},
+                            "mail_read": {}})
+        return State(store)
+
+    def test_legacy_row_gets_defaults_and_can_transition(self):  # Req: F91
+        st = self.load({"state": "todo", "title": "old",
+                        "dispatcher_sid": "d1",
+                        "created": 0.0, "updated": 0.0})
+        t = st.get("t1")
+        self.assertEqual(t["verify"], {
+            "cmd": "", "state": "pending", "registered_by": None,
+            "registered_at": None, "timeout": None})
+        self.assertEqual(
+            (t["chain_depth"], t["fail_streak"], t["quick"],
+             t["verify_pending"], t["model"], t["deliverable"],
+             t["root_sid"]),
+            (1, 0, False, False, None, None, "d1"))
+        st.transition("t1", "dispatched", worker_sid="w1")  # 补缺后可继续迁移
+
+    def test_bad_snapshot_fails_fast_with_field_context(self):  # Req: F91
+        base = {"state": "todo", "title": "x", "created": 0.0,
+                "updated": 0.0}
+        cases = [
+            (2, {**base}, "version"),
+            (1, {**base, "state": "later"}, "state"),
+            (1, {**base, "verify": 123}, "verify"),
+            (1, {**base, "verify": {"cmd": 123}}, "verify.cmd"),
+            (1, {**base, "chain_depth": 0}, "chain_depth"),
+            (1, {**base, "fail_streak": -1}, "fail_streak"),
+        ]
+        for version, row, fragment in cases:
+            with self.subTest(fragment=fragment):
+                with self.assertRaises(ValueError) as cm:
+                    self.load(row, version=version)
+                self.assertIn("t1", str(cm.exception))
+                self.assertIn(fragment, str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

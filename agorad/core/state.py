@@ -55,12 +55,81 @@ class State:
     快照行序＝迁移序（§4.8）。
     """
 
+    @staticmethod
+    def _normalize_snapshot(snap: dict) -> dict:
+        """F91 快照入口：版本/坏行 fail-fast，旧行缺既定字段补缺省。
+
+        只规范内存视图，不回写账本；缺 verify/chain_depth/fail_streak 的最小
+        旧行可继续迁移，坏类型在启动点带 tid＋字段报错。"""
+        version = snap.get("version")
+        tasks = snap.get("tasks", {})
+        if version != 1:
+            raise ValueError(
+                f"snapshot version 须为 1（收到 {version!r}，"
+                f"tasks={sorted(tasks)}）")
+        if not isinstance(tasks, dict):
+            raise ValueError(f"snapshot tasks 须为 dict（收到 {type(tasks).__name__}）")
+        out = {}
+        for tid, row in tasks.items():
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"{tid}: 任务行须为 dict（收到 {type(row).__name__}）")
+            r = dict(row)
+            if r.get("state") not in LEGAL:
+                raise ValueError(
+                    f"{tid}: state 未知（收到 {r.get('state')!r}，"
+                    f"合法={sorted(LEGAL)}）")
+            verify = r.get("verify")
+            if verify is None:
+                verify = {}
+            if not isinstance(verify, dict):
+                raise ValueError(
+                    f"{tid}: verify 须为 dict（收到 {verify!r}）")
+            verify = dict(verify)
+            verify.setdefault("cmd", "")
+            if not isinstance(verify["cmd"], str):
+                raise ValueError(
+                    f"{tid}: verify.cmd 须为字符串（收到 {verify['cmd']!r}）")
+            verify.setdefault("state", "pending")
+            verify.setdefault("registered_by", None)
+            verify.setdefault("registered_at", None)
+            verify.setdefault("timeout", None)
+            r["verify"] = verify
+            if "chain_depth" not in r:
+                r["chain_depth"] = 1
+            elif (isinstance(r["chain_depth"], bool)
+                    or not isinstance(r["chain_depth"], int)
+                    or r["chain_depth"] <= 0):
+                raise ValueError(
+                    f"{tid}: chain_depth 须为正整数（收到 {r['chain_depth']!r}）")
+            if "fail_streak" not in r:
+                r["fail_streak"] = 0
+            elif (isinstance(r["fail_streak"], bool)
+                    or not isinstance(r["fail_streak"], int)
+                    or r["fail_streak"] < 0):
+                raise ValueError(
+                    f"{tid}: fail_streak 须为非负整数（收到 {r['fail_streak']!r}）")
+            r.setdefault("quick", False)
+            r.setdefault("verify_pending", False)
+            r.setdefault("model", None)
+            r.setdefault("deliverable", None)
+            if "root_sid" not in r:
+                r["root_sid"] = r.get("dispatcher_sid")
+            out[tid] = r
+        mail = snap.get("mail_read", {})
+        if not isinstance(mail, dict):
+            raise ValueError(
+                f"snapshot mail_read 须为 dict（收到 {type(mail).__name__}）")
+        return {"version": 1, "tasks": out, "mail_read": dict(mail)}
+
     def __init__(self, store):
         self._store = store
         self._lock = threading.RLock()
-        snap = store.load_state() or {}
-        self._tasks = {tid: dict(t) for tid, t in snap.get("tasks", {}).items()}
-        self._mail_read = dict(snap.get("mail_read", {}))
+        snap = store.load_state()
+        snap = (self._normalize_snapshot(snap) if snap is not None
+                else {"version": 1, "tasks": {}, "mail_read": {}})
+        self._tasks = {tid: dict(t) for tid, t in snap["tasks"].items()}
+        self._mail_read = dict(snap["mail_read"])
 
     def get(self, tid):
         with self._lock:

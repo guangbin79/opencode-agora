@@ -511,3 +511,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：TaskService 新增 `_repo_key(path)=str(Path(path).resolve())`，建单入账、worker 父仓比较、quick 历史比较共用；peer 分区与存量 peer 消息 repo 用 `os.path.realpath` 同口径比较。响应字段结构不变，值归一为规范仓根；跨仓仍拒，不做历史账本重写。
 **落点**：agorad/core/task.py（_repo_key＋create/_history_cmd）、agorad/core/peer.py（分区键＋存量消息比较）、tests/test_core_task.py（别名入账/quick 历史/worker 继承）、tests/test_core_msg.py（peer 双向同分区）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F90 锚）——旧实现 quick 证据不足、worker 等价路径拒、peer 任务漏显共 3 fail；新实现 `python3 -m pytest tests/test_core_task.py tests/test_core_msg.py -q` 192 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F91 快照入口规范化——版本/坏行 fail-fast＋旧行补缺省（2026-11-12，用户目标「稳定性、性能」）
+**现状**：State 直接复制末行快照，version 只写不读；新增字段兼容散落在调用点 `.get()`。坏 state/verify/chain_depth/fail_streak 会延迟到 dispatch/done 才 TypeError/KeyError，缺 verify 的最小旧行也无法直接迁移。
+**裁定**：State 构造统一过 `_normalize_snapshot`：仅接受 version=1；校验 state∈LEGAL、verify 为 dict 且 cmd 为字符串、chain_depth 正整数、fail_streak 非负整数，坏行带 tid＋字段 ValueError。缺 verify 补完整 pending 形状，另补 chain_depth=1、fail_streak=0、quick=False、verify_pending=False、model=None、deliverable=None，root_sid 缺席回退 dispatcher_sid。只修内存视图，不回写账本，不要求最小测试夹具补无关字段。
+**落点**：agorad/core/state.py（_normalize_snapshot＋构造入口）、tests/test_core_state.py（旧行缺省可迁移、六坏行矩阵）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F91 锚）——旧实现缺 verify KeyError、六坏行零 ValueError；新实现 `python3 -m pytest tests/test_core_state.py tests/test_core_recover.py tests/test_main.py -q` 59 passed＋24 subtests，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
