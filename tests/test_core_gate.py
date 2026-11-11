@@ -181,7 +181,7 @@ class FakeHealth:
     def __init__(self):
         self.calls = []
 
-    def escalate(self, kind, tid):
+    def escalate(self, kind, tid, raw=None, streak=None):  # raw/streak：F79/退避面签名对齐
         self.calls.append((kind, tid))
 
 
@@ -1392,6 +1392,70 @@ class TestGateVerifyOverrun(TestCoreGate):
         self.assertEqual(len(soft), 1)
         self.assertIn("t1", soft[0]["body"])
         self.assertIn("无需操作", soft[0]["body"])
+
+
+class TestGateVerifyDead(TestCoreGate):
+    """Req: F79 verify 命令死分类：命令死≠活差——死类驻留 done、不计连败、
+    不弹回 worker 自愈，escalate 通知通道唤醒派发方；断言不中照旧 verify_failed。"""
+
+    def test_cmd_dead_parks_done_escalates_dispatcher(self):  # Req: F79
+        """命令不存在（rc=127）＝命令自身死：非活不达标——worker 无从自愈，
+        F36 超顶同款驻留语义（不 transition、不 bump），escalate 拍派发方，
+        worker 只留最小等待说明（失败尾部不下发）。"""
+        self.runner = FakeRunner((127, "noise"))
+        self.mk_gate()
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留：不 transition
+        self.assertEqual(t["fail_streak"], 1)  # 不 bump
+        self.assertIn(("verify-dead", "t1"), self.health.calls)  # escalate 通道
+        events = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("verify_dead", events)
+        self.assertNotIn("verify_failed", events)
+        bodies = [m["body"] for m in self.worker_msgs()]
+        self.assertFalse(any("重新 post(done" in b for b in bodies))  # 不弹回自愈
+        self.assertFalse(any("noise" in b for b in bodies))  # 失败尾部不下发
+        self.assertTrue(any("等待" in b for b in bodies))  # 最小等待说明
+
+    def test_integration_cmd_dead_parks_done(self):  # Req: F79
+        """集成阶段命令死（env 绿后 cwd 换 integration 仍 126/127）：同款分类
+        路由，目标分支未改动。"""
+        self.runner = FakeRunner((0, "pass"), (126, "itail"))
+        self.mk_gate()
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "done")
+        self.assertEqual(self.state.get("t1")["fail_streak"], 0)
+        self.assertIn(("verify-dead", "t1"), self.health.calls)
+
+    def test_assertion_miss_still_bounces_verify_failed(self):  # Req: F79
+        """断言不中（grep 无匹配 exit 1）＝活不达标：照旧 verify_failed 弹回
+        worker＋连败计数，零变化。"""
+        self.runner = FakeRunner((1, "no match"))
+        self.mk_gate()
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "verify_failed")
+        self.assertEqual(t["fail_streak"], 2)  # bump 照旧
+        self.assertNotIn(("verify-dead", "t1"), self.health.calls)
+        self.assertTrue(any("重新 post(done" in m["body"]
+                            for m in self.worker_msgs()))  # 弹回自愈照旧
+
+    def test_dead_rc_source_mechanical(self):  # Req: F79
+        """判定源实证：命令不存在/引用路径不存在→127、在盘非 executable→126
+        ——shell 自身退出码语义，不匹配输出文案（管道混合退出码歧义不在本口径）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc_missing, _ = _subprocess_runner(tmp, "no-such-cmd-ag-f79")
+            rc_nofile, _ = _subprocess_runner(tmp, "./no-such-script.sh")
+            script = Path(tmp) / "x.sh"
+            script.write_text("true\n", encoding="utf-8")
+            script.chmod(0o644)  # 在盘但非 executable
+            rc_noexec, _ = _subprocess_runner(tmp, "./x.sh")
+        self.assertEqual(rc_missing, 127)
+        self.assertEqual(rc_nofile, 127)
+        self.assertEqual(rc_noexec, 126)
 
 
 class TestGateTaskBudget(TestCoreGate):

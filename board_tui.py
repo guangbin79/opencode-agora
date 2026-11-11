@@ -20,9 +20,9 @@ import urllib.request
 from collections import namedtuple
 from pathlib import Path
 
-# 升级事件五类（与 core/health 字面量对齐——独立命令不 import agorad）
+# 升级事件类别（与 core/health 字面量对齐——独立命令不 import agorad）
 _KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead",
-                    "stalled"))
+                    "stalled", "env-gone", "verify-dead"))
 
 # 五桶固序（计数行与数字键 1-5 同序）；桶归属映射 _bucket 单点，禁两套口径
 _BUCKETS = ("已合并", "在飞", "失败", "阻塞", "已取消")
@@ -88,7 +88,7 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
-    行，只取五类 escalate 紧随其任务行高亮；filt 子串滤（tid/title/state，
+    行，只取各 escalate 类紧随其任务行高亮；filt 子串滤（tid/title/state，
     桶行恒在）；bucket＝激活桶视图（数字键 1-5）：只显该桶任务行，与文本
     过滤 AND 叠加、同样穿透折叠，计数行恒全局口径；桶行带键位数字前缀
     （"N Label count"，gt-87f3c2），激活桶头并置 "*"。

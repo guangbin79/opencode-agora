@@ -16,8 +16,8 @@ ag-724152 /tmp 清理事故）：每丢失周期一次、持续丢失不拍 stal
 恢复在盘回常规 stalled 边沿，终态出账。升级正文由服务权威合成；任务/worker 供给文本以
 "不可信原文"段携带（拍平换行，防伪造服务行）。escalate 沿 dispatcher_sid
 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）经 router post——
-落库先行，注入即视为拍到（stalled/env-gone 例外：synthetic notify 通道
-resume:true——落消息并调度回合＝弹消息通知、无选择框，ag-3016f1 勘误
+落库先行，注入即视为拍到（stalled/env-gone/verify-dead 例外：synthetic notify
+通道 resume:true——落消息并调度回合＝弹消息通知、无选择框，ag-3016f1 勘误
 gt-5bc312 原降噪裁定只免选择框不免通知）；
 escalate 同时落 events.jsonl 审计行（F8）。
 core 只 import stdlib，依赖全注入。
@@ -35,6 +35,7 @@ KIND_REINJECT = "reinject-fail"
 KIND_DISPATCHER_DEAD = "dispatcher-dead"
 KIND_STALLED = "stalled"
 KIND_ENV_GONE = "env-gone"
+KIND_VERIFY_DEAD = "verify-dead"
 
 _UNTRUSTED = "---- 不可信原文 ----"
 _RAW_MAX = 500
@@ -54,6 +55,8 @@ _KIND_NOTE = {
     KIND_STALLED: "在飞超 20min 无活动（僵态候选），请人工关注",
     KIND_ENV_GONE: "任务环境已不在盘——项目仓仍在则重派可重建 env（F71），"
                    "项目仓已亡则 cancel 归档",
+    KIND_VERIFY_DEAD: "verify 命令自身死（exit 126/127：命令不存在/不可执行）"
+                      "——非活不达标，worker 无从自愈；请修正验收命令或取消",
 }
 
 # F70/F73 共用提示：单源防 board 手动面与 health 自动面漂移
@@ -338,9 +341,10 @@ class Health:
     def escalate(self, kind, tid, raw=None, streak=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
-        stalled/env-gone 走通知通道（synthetic resume:true——落合成消息并调度
-        回合：弹消息通知、无选择框，idle dispatcher 被唤醒；gt-5bc312 勘误
-        ag-3016f1，原裁定只免选择框；F72 env-gone 同款），其余 kind 照常真实
+        stalled/env-gone/verify-dead 走通知通道（synthetic resume:true——落合成消息
+        并调度回合：弹消息通知、无选择框，idle dispatcher 被唤醒；gt-5bc312 勘误
+        ag-3016f1，原裁定只免选择框；F72 env-gone、F79 verify-dead 同款），其余
+        kind 照常真实
         会话注入；stalled 边沿附末次活动摘要（F52，失败降级）＋证据包小节
         与草稿页路径（F59，降级纪律：证据永不阻塞拍人；env-gone 正文自足
         不给）。streak＝同任务连续升级计数（退避节奏见 _stale_scan），正文随带。"""
@@ -369,10 +373,10 @@ class Health:
         rt = self._state.get(root)
         self._store.append_event({"ts": time.time(), "actor": "health",
                                   "event": "escalate", "task": tid, "kind": kind})
-        quiet = kind in (KIND_STALLED, KIND_ENV_GONE)
+        quiet = kind in (KIND_STALLED, KIND_ENV_GONE, KIND_VERIFY_DEAD)
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
-                          notify=quiet)  # stalled/env-gone 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72 同款）
-        if quiet:  # 僵态类邮件例外（§6 决策记录）：stalled 与 env-gone（F72 同款）
+                          notify=quiet)  # stalled/env-gone/verify-dead 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F79 同款）
+        if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F79：命令死需人工处置）
             send_email(self._store, tid, body, runner=self._runner)
 
     def _root(self, tid):

@@ -20,7 +20,8 @@ from agorad.core.app import App
 from agorad.core.auth import Auth
 from agorad.core.health import (KIND_DISPATCHER_DEAD, KIND_ENV_GONE,
                                 KIND_GATEFILES, KIND_QUALITY, KIND_REINJECT,
-                                KIND_STALLED, Health, send_email)
+                                KIND_STALLED, KIND_VERIFY_DEAD, Health,
+                                send_email)
 from agorad.core.msg import Router
 from agorad.core.state import State
 
@@ -553,6 +554,20 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(self.oc.notify_injected[0][0], "main")
         self.assertEqual(self.oc.silent_injected, [])
         self.assertEqual(self.oc.injected, [])
+
+    def test_verify_dead_escalate_goes_notify_channel(self):  # Req: F79
+        """verify-dead 同款走通知通道（F79 复用 ag-3016f1 通道：唤醒 idle
+        dispatcher，无选择框）；raw 输出尾以不可信原文随行供诊断。"""
+        self.seed("t1")
+        self.health.escalate(KIND_VERIFY_DEAD, "t1", raw="exit=127 boom")
+        self.assertEqual(len(self.oc.notify_injected), 1)
+        self.assertEqual(self.oc.notify_injected[0][0], "main")
+        self.assertEqual(self.oc.injected, [])  # 真实 prompt 通道零调用
+        self.assertEqual(self.oc.silent_injected, [])  # silent 通道零调用
+        body = self.main_msgs()[0]["body"]
+        self.assertIn("失控[verify-dead]", body)
+        self.assertIn(UNTRUSTED, body)
+        self.assertIn("exit=127 boom", body)
 
     def test_stalled_notify_channel_down_falls_back_to_pull(self):  # Req: F5
         self.seed("t1")

@@ -9,7 +9,9 @@ verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-
 
 默认 runner 以独立进程组执行命令，双顶（F36）：软顶到点提醒派发方一次不杀继续
 跑，硬顶（缺省 4×软顶）到点杀全组返回 124；rc=124 分类路由派发方（不计 worker
-连败、任务驻留 done），避免单个挂死验证永久堵住串行门。崩溃重排先探测目标支是否
+连败、任务驻留 done），避免单个挂死验证永久堵住串行门。命令自身死（rc=126/127，
+F79）同款驻留分类——escalate 通知通道拍派发方，不弹回 worker 自愈。
+崩溃重排先探测目标支是否
 已含任务 commit：已含说明上轮最终推进已完成，只补 merged/closed 终态，不重验后
 假 reopened。gate_env 与 target_branch 的原始分支位随任务快照持久化，集成环境和
 分支位均可跨重启收敛。
@@ -26,6 +28,7 @@ from pathlib import Path
 # 升级 kind 与 health 的类别词汇对齐（core 禁 import 兄弟模块，字面量本地定义）
 KIND_QUALITY = "quality"
 KIND_GATEFILES = "gatefiles"
+KIND_VERIFY_DEAD = "verify-dead"
 
 _TAIL = 2000
 # F36 软硬双顶轮询步长：硬顶判死及时性 0.5s 级（秒）
@@ -351,6 +354,9 @@ class Gate:
                 if rc == 124:
                     self._verify_overrun(tid, out, budget, ceiling)
                     return
+                if rc in (126, 127):  # Req: F79 命令自身死：分类路由，不弹 worker
+                    self._verify_dead(tid, rc, out)
+                    return
                 if rc != 0:
                     self._quality_fail(tid, "verify_failed",
                                        "verify 失败——修复后重新 post(done, "
@@ -419,6 +425,9 @@ class Gate:
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._verify_overrun(tid, out, budget, ceiling)
                 return
+            if rc in (126, 127):  # Req: F79 命令自身死（不存在/不可执行）≠活不达标
+                self._verify_dead(tid, rc, out)
+                return
             if rc != 0:
                 self._quality_fail(tid, "verify_failed",
                                    f"verify 失败——修复后重新 post(done, commit)"
@@ -471,6 +480,9 @@ class Gate:
                     f"集成 verify 超硬顶，目标分支未改动——进程组已终止"
                     f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
                     f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
+                return
+            if irc in (126, 127):  # Req: F79 集成阶段命令死：同款分类路由
+                self._verify_dead(tid, irc, iout)
                 return
             if irc != 0:
                 where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
@@ -617,6 +629,25 @@ class Gate:
             f"verify 超硬顶——进程组已终止（非质量败，无需 worker 重试）；"
             f"生效预算 {budget:g}s（硬顶 {ceiling:g}s）；"
             f"输出尾部:\n{out[-_TAIL:]}")
+
+    def _verify_dead(self, tid, rc, out):
+        """Req: F79 命令自身死分类（exit 126/127）：与活不达标分开——驻留 done、
+        不计连败、不下发失败尾部（不弹回 worker 自愈：命令死了 worker 无从修）；
+        escalate verify-dead 走通知通道唤醒派发方（8122a2e inject_notify/
+        synthetic resume:true 复用勿新造；上行至根——嵌套链 verify 写面 worker
+        永拒，只有主会话能处置），输出尾以不可信原文随行；worker 留最小等待说明。
+        通知面尽力而为（F54 同口径）——败不改变驻留语义。"""
+        self._audit(tid, "verify_dead", rc=rc)
+        try:
+            self._health.escalate(KIND_VERIFY_DEAD, tid, raw=f"exit={rc} {out}")
+        except Exception:
+            pass
+        try:
+            self._post(tid, f"verify 命令自身死（exit {rc}：命令不存在/不可执行）"
+                            "——非活不达标，无需自愈重试；已升级派发方处置，"
+                            "等待通知即可")
+        except Exception:
+            pass
 
     def _quality_fail(self, tid, to, body, reason=""):
         """质量败（verify 败/集成败/合并前锚败）：迁移＋审计＋实时回 worker＋计连败
