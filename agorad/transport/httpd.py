@@ -15,6 +15,7 @@ from pathlib import Path
 
 from agorad.core import report
 from agorad.core.auth import EV_AUTH_DENIED
+from agorad.core.health import _ACTIVE, KIND_STALLED
 from agorad.core.msg import NotChainEdge
 from agorad.core.peer import Rejected as PeerRejected
 from agorad.core.state import EV_RUNNING, InvalidTransition
@@ -64,7 +65,8 @@ class _Handler(BaseHTTPRequestHandler):
         sid = None
         try:
             name = self.path.strip("/").split("?")[0]
-            if name not in _TOOLS and name not in ("cred_for_sid", "task_nudge"):
+            if name not in _TOOLS and name not in ("cred_for_sid", "task_nudge",
+                                                   "task_alarm"):
                 return self._json(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -87,6 +89,8 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(404, {"error": f"task {tid} 不存在"})
             if name == "task_nudge":  # board 内部面：细授权不走通用 may 矩阵
                 return self._json(200, self._task_nudge(sid, role, body, row))
+            if name == "task_alarm":  # F77 同款内部面：root-only 手动拍僵
+                return self._json(200, self._task_alarm(sid, role, body, row))
             if not self.app.auth.may(role, name, tid, row):
                 return self._deny(sid, role, name, tid)
             self.app.health.touch(sid)  # last_seen：每次工具调用即刷新
@@ -302,6 +306,29 @@ class _Handler(BaseHTTPRequestHandler):
         if ok:
             return {"nudged": True}
         return {"nudged": False, "reason": "inject_failed"}
+
+    def _task_alarm(self, sid, role, body, row):
+        """F77 手动立即拍僵：root-only 直调 escalate＋nudge 两原语。
+
+        绕过 20min 阈值与退避计数、不触碰 _stale_seen/_stale_esc（自动判僵
+        边沿照常可触发）；无 worker 零投递零审计（同 task_nudge 口径）；
+        非活动态（终态/todo）拒——评审环 B 册：终态行 worker_sid 永留，
+        无闸会对已取消任务注入「继续」自检、唤醒已废牌 worker。"""
+        tid = body["task"]
+        if role != "root":
+            raise Rejected(f"{sid}->{tid}: alarm 仅 root")
+        if not row.get("worker_sid"):
+            return {"alarmed": False, "reason": "no_worker"}
+        if row["state"] not in _ACTIVE:
+            return {"alarmed": False, "reason": "not_active"}
+        self.app.health.escalate(KIND_STALLED, tid)
+        ok = self.app.health.nudge_worker(tid)
+        self.app.store.append_event(
+            {"ts": time.time(), "actor": sid, "event": "task_alarm",
+             "task": tid,
+             "note": f"manual=1 delivered={str(ok).lower()}"})
+        return ({"alarmed": True} if ok
+                else {"alarmed": False, "reason": "inject_failed"})
 
     def _cred_for_sid(self, body):
         """F25 修正推改拉面：插件 hook 缓存未命中按会话 sid 拉凭据。

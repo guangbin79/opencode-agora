@@ -242,7 +242,7 @@ def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
     键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
-    p 自检 P 自定义提示（任务锁定） x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员）
+    p 自检 P 自定义提示（任务锁定） ! 手动拍僵（root，F77） x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员）
     Z 全折全展 / 过滤（单行输入态） 1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤/提示单行输入态
@@ -316,6 +316,10 @@ def handle_key(m, key):
             m["prompt"], m["input"], m["buf"] = True, "", ""
             m["prompt_task"] = r.tid  # 锁定武装目标任务，输入期 reflow 不换人
             return Action("noop")
+        return Action("noop")
+    if key == "!":
+        if m.get("view") == "board" and r and r.kind == "task":
+            return Action("alarm", task=r.tid)  # F77：root 手动拍僵（服务端细授权）
         return Action("noop")
     if key == "x":
         if m.get("view") == "board" and r and r.kind == "task":
@@ -425,6 +429,17 @@ def try_nudge(base, token, task, body=None):
         return f"prompt failed: {e}"
 
 
+def try_alarm(base, token, task):
+    """task_alarm 一次并回状态文本：发送失败≠离线（离线只由轮询上报）。"""
+    try:
+        r = _call(base, token, "/task_alarm", {"task": task})
+        if r.get("alarmed"):
+            return f"alarm {task}: sent"
+        return f"alarm {task}: {r.get('reason', 'failed')}"
+    except Exception as e:
+        return f"alarm failed: {e}"
+
+
 def tail_session(sid, limit=40):
     """opencode 会话只读 tail：sqlite ro 读 session_message 尾段文本。"""
     data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
@@ -531,7 +546,8 @@ def draw_board(stdscr, m, status="", err=None):
         stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor"
-                   " | p/P prompt | x cancel | r refresh | z/Z fold | q quit",
+                   " | p/P prompt | ! alarm | x cancel | r refresh | z/Z fold"
+                   " | q quit",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
                    f" 1-5 bucket | 0 proj | / filter[{m['filter']}]",
@@ -612,6 +628,10 @@ def run(stdscr, base, token):
         elif a.op == "nudge":
             msg = try_nudge(base, token, a.task, a.arg)
             poll()                                 # 提示已发 HTTP，顺势刷一帧
+            status = msg
+        elif a.op == "alarm":
+            msg = try_alarm(base, token, a.task)
+            poll()                                 # 拍僵已发 HTTP，顺势刷一帧
             status = msg
         elif a.op == "refresh":
             poll()                                 # r 手动刷：立即拉一帧

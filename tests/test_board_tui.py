@@ -20,7 +20,7 @@ from pathlib import Path
 import board_tui
 from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
                        detail_page, doctor_page, handle_key, load_board,
-                       rel_time, run, try_cancel, try_nudge)
+                       rel_time, run, try_alarm, try_cancel, try_nudge)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -321,6 +321,15 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual(handle_key(m, "p").op, "noop")
         self.assertEqual(handle_key(m, "P").op, "noop")
         self.assertIs(m.get("prompt"), False)
+
+    def test_bang_alarm_selected_task(self):  # Req: F77
+        """! 手动拍僵选中任务；桶头/全屏页不武装（p/P 同款守卫）。"""
+        m = model(self.ROWS, sel=1)
+        self.assertEqual(handle_key(m, "!"), Action("alarm", "t1", None))
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "!").op, "noop")
+        self.assertEqual(
+            handle_key(model(self.ROWS, sel=1, view="detail"), "!").op,
+            "noop")
 
     def test_x_needs_confirm_then_y_cancels(self):  # Req: F11/F10
         m = model(self.ROWS, sel=1)
@@ -725,6 +734,23 @@ class TestTryNudge(unittest.TestCase):
             srv.server_close()
 
 
+class TestTryAlarm(unittest.TestCase):
+    def test_alarm_status_uses_service_reason(self):  # Req: F77
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _NudgeStub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            _NudgeStub.result = {"alarmed": True}
+            self.assertEqual(try_alarm(base, "tok", "t1"), "alarm t1: sent")
+            self.assertEqual(_NudgeStub.body, {"task": "t1"})
+            _NudgeStub.result = {"alarmed": False, "reason": "no_worker"}
+            self.assertEqual(try_alarm(base, "tok", "t1"),
+                             "alarm t1: no_worker")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 class _FlakyBoard(http.server.BaseHTTPRequestHandler):
     """可翻转可用性：alive=False 后 /board 一律 500（err 语义回归用）。"""
     alive = True
@@ -912,6 +938,60 @@ class TestFullViewLazyDetail(unittest.TestCase):
         scr = _FakeStdscr([ord("\r"), ord("q")])
         run(scr, self._serve(_DetailFailBoard), "tok")
         self.assertTrue(any("detail unavailable" in s for _, s in scr.lines))
+
+
+class _AlarmBoard(http.server.BaseHTTPRequestHandler):
+    """F77 run() 夹具：/board 全帧＋/task_alarm 记录请求回执。"""
+    calls = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/task_alarm":
+            _AlarmBoard.calls.append(body)
+            out = {"alarmed": True}
+        else:
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow()}, "events": []}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class TestRunAlarmKey(unittest.TestCase):
+    """F77 `!` 全链：help 行钉死顺序＋alarm 回执进状态栏。"""
+
+    def setUp(self):
+        # 无头环境跑 run()：桩掉 curses 面（同 TestRunErrSemantics）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def test_bang_wires_help_status_and_payload(self):  # Req: F77
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _AlarmBoard)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            _AlarmBoard.calls = []
+            scr = _FakeStdscr([ord("j"), ord("!"), ord("q")])  # j 越桶头选中 t1
+            run(scr, base, "tok")
+            self.assertTrue(any("p/P prompt | ! alarm | x cancel" in s
+                                for _, s in scr.lines))  # help 行钉死顺序
+            self.assertTrue(any("alarm t1: sent" in s for _, s in scr.lines))
+            self.assertEqual(_AlarmBoard.calls, [{"task": "t1"}])
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 class TestSmoke(unittest.TestCase):

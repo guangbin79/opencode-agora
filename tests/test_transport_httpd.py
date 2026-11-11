@@ -344,6 +344,88 @@ class TestHttpSmoke(HttpdTest):
               if e["event"] == "worker_nudge"][-1]
         self.assertIn("delivered=false", ev["note"])
 
+    def test_task_alarm_root_escalates_and_nudges_with_audit(self):  # Req: F77
+        """root 手动拍僵：notify 通道 escalate＋worker 自检两投递＋审计行。"""
+        self.stub.sessions["ses_d1"] = {"injects": []}  # 真派发者会话：notify 可观察
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo"},
+                     self.root, sid="ses_d1")
+        tid = r["task"]
+        # 建/派全程携 sid：dispatcher_sid=真实会话（裸 root 牌派发会落 headless
+        # 常量 main，notify 目标随之不可观察——同 F73 授权用例口径）
+        st, _ = call(self.port, "POST", "/task_update",
+                     {"task": tid, "verify_cmd": "true"}, self.root,
+                     sid="ses_d1")
+        st, _ = call(self.port, "POST", "/task_dispatch", {"task": tid},
+                     self.root, sid="ses_d1")
+        wsid = self.app.state.get(tid)["worker_sid"]
+        before = len(self.stub.sessions[wsid]["injects"])
+        st, r = call(self.port, "POST", "/task_alarm", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"alarmed": True}))
+        text, resume = self.stub.sessions["ses_d1"]["synthetics"][-1]
+        self.assertTrue(resume)                     # escalate 走 notify 通道
+        self.assertIn("失控[stalled]", text)
+        self.assertIn("僵态自检",                    # nudge_worker 自检注入
+                      self.stub.sessions[wsid]["injects"][before])
+        ev = [e for e in self.app.store.read_events(tid)
+              if e["event"] == "task_alarm"][-1]
+        self.assertEqual(ev["actor"], "main")
+        self.assertIn("manual=1", ev["note"])
+        self.assertIn("delivered=true", ev["note"])
+
+    def test_task_alarm_rejects_dispatcher_and_worker(self):  # Req: F77
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        before = len(self.stub.sessions[wsid]["injects"])
+        for tok in (self.app.auth.issue("ses-x", "dispatcher"),
+                    self.app.auth.issue("w9", "worker"), wtok):
+            st, _ = call(self.port, "POST", "/task_alarm", {"task": tid}, tok)
+            self.assertEqual(st, 403)               # 派发方/worker 一律拒
+        self.assertEqual(len(self.stub.sessions[wsid]["injects"]), before)
+        self.assertEqual([e for e in self.app.store.read_events(tid)
+                          if e["event"] in ("task_alarm", "escalate")], [])
+
+    def test_task_alarm_no_worker_zero_delivery(self):  # Req: F77
+        tid = self.create_task()                    # 未派发：无 worker
+        st, r = call(self.port, "POST", "/task_alarm", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"alarmed": False,
+                                         "reason": "no_worker"}))
+        self.assertEqual([e for e in self.app.store.read_events(tid)
+                          if e["event"] in ("task_alarm", "escalate")], [])
+
+    def test_task_alarm_leaves_stale_edge_memory_intact(self):  # Req: F77
+        """手动拍僵不记边沿不进退避；自动判僵边沿照常可触发。"""
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        st, r = call(self.port, "POST", "/task_alarm", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"alarmed": True}))
+        health = self.app.health
+        self.assertEqual(health._stale_seen, set())  # 手动拍零状态残留
+        self.assertEqual(health._stale_esc, {})
+        health._stale_candidates = lambda snap, now: [[tid, 0.0]]  # 强制候选
+        health._stale_scan(self.app.state.snapshot()["tasks"], set())
+        self.assertIn(tid, health._stale_seen)       # 自动边沿照常拍到
+        self.assertEqual(health._stale_esc[tid][0], 1)
+        self.assertEqual(
+            len([e for e in self.app.store.read_events(tid)
+                 if e["event"] == "escalate"]), 2)   # 手动 1＋自动 1
+
+    def test_task_alarm_rejects_terminal_task(self):  # Req: F77
+        """评审环 B 册：终态行 worker_sid 永留，无状态闸会对已取消任务
+        注入「继续」自检、唤醒已废牌 worker——非活动态拒拍零投递。"""
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        st, _ = call(self.port, "POST", "/task_cancel", {"task": tid},
+                     self.root)
+        self.assertEqual(st, 200)
+        self.assertIsNotNone(self.app.state.get(tid)["worker_sid"])  # 永留
+        st, r = call(self.port, "POST", "/task_alarm", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"alarmed": False,
+                                         "reason": "not_active"}))
+        self.assertEqual([e for e in self.app.store.read_events(tid)
+                          if e["event"] in ("task_alarm", "escalate")], [])
+
     def test_missing_or_bad_token_401(self):  # Req: F1
         st, _ = call(self.port, "POST", "/board", {})
         self.assertEqual(st, 401)
