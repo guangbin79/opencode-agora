@@ -10,6 +10,7 @@
 - **verify 任务级预算**（F51）：timeout 随 verify 字典（正整数秒可缺省），写权限与 verify_cmd 完全同权（worker 拒）；子任务随字典继承；gate 两级取值——任务 timeout→服务缺省，任务级硬顶固定 4×生效值（服务级 F36 旋钮不动）；软顶/超顶文案附生效预算；gate→runner 传 (timeout, ceiling) kwargs 即注入观察缝
 - **stalled 拍人摘要**（F52）：边沿 escalate 并入末条消息摘要（oc.last_message＝GET /session/{sid}/message 尾条，2.2.2 记录 role 落 type 字段、assistant.content 内 tool part 带 name＋state.title）；获取失败（异常/空）吞掉照常拍人（同 email 尽力而为）；摘要要素系会话侧供给文本——并权威正文前同 raw 口径拍平（防伪造服务行），缺 time.created 降级省略年龄段；判据（busy/stale_candidates）零改动
 - **僵态自检提示**（F70）：新进候选集拍人后向 worker prompt 注入一次自检（不强制打断/取消/重派；注入 False/异常同轮不重试、不阻断拍人）；离开候选集复位＋ag-0f537d 退避窗外再随升级提示；主会话免通知通道/邮件与其余失控 kind 零变化
+- **board 手动 worker 提示**（F73）：board 任务行 `p` 直发 F70 同源自检、`P` 单行自定义（Esc 取消/空文本缺省）；任意选中任务可触发，不限制僵态；`/task_nudge` 是 board 内部端点不进 MCP 面——root 任意任务、router 血统派发方限己任务；无 worker 零注入零审计，实际注入尝试落 worker_nudge 审计（不落自定义正文）
 - **驻留 done 取消结算不变量**（F36）：cancel 按 in_gate 分流——门内排队（gate_tail 消费）、驻留（in_gate=False）直结（State.settle_parked_cancel）；否则 pending 悬挂至重启；新增「驻留 done」类出口须同步核查取消结算面
 - **三访问层**：agorad 内域核心＋oc（opencode API）＋store（账本）＋gitx（worktree）
 - **12+1 工具面**：12 服务端端点（httpd._TOOLS）＋壳层 wait＝MCP 面 13 工具（agora_mcp._TOOLS）
