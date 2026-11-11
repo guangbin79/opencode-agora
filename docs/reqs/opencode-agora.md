@@ -442,8 +442,8 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agora-plugin/hook.ts（QUESTION_HINT＋questionGate＋MailRunner/setMailRunner 缝＋mailQuestion）、agora-plugin/index.ts（question 三分支接线）、agora-plugin/question.test.ts、agorad/core/task.py（_boot ask 行）、tests/test_core_task.py、tests/test_transport_httpd.py、docs/reqs/opencode-agora.md（本条）。
 **验收**：bun:test 七用例（Req: ag-4f03df 锚，先红后绿）——纯判定四态、worker 拒＋零外呼、主会话放行＋command 被调＋stdin 摘要含 sid/tid/拍平文本、行分隔符不裂行、缺配置/无凭据零外呼零异常、非零退出不抛；pytest boot 断言新纪律行＋quick 减配不含；`bun test agora-plugin/` 与 `python3 -m pytest tests/ -q` 全绿＋`grep -q '### F79 ' docs/reqs/opencode-agora.md`。rebase 注记：F77 已被 /task_alarm（02508ed）占用，本条 F77→F79 改号；BOOT kind 纪律行取 F78 禁令化文案叠 add 行。
 
-### F80 verify 命令死分类——命令死≠活差，死类唤醒派发方不弹 worker（2026-11-11，用户裁定；触发事故 ag-c49b21）
-> F80（原 F79，2026-11-11 撞号让渡：F79 已被 ag-4f03df/baac5ca 合并占用，派发方裁定）
+### F81 verify 命令死分类——命令死≠活差，死类唤醒派发方不弹 worker（2026-11-11，用户裁定；触发事故 ag-c49b21）
+> F81（原 F79，2026-11-11 撞号让渡：F79 已被 ag-4f03df/baac5ca 合并占用改 F80；F80 复经用户裁定 F80↔F81 反向改号让渡给 ag-f951bd 改 F81；任务页 req_id 仍 F79，无改号工具面，本行即审计线）
 **现状**：gate 对 verify 运行结果只有 verify_failed 一个桶（F36 已单列超顶 124）——「验收命令自身死」（引用路径不存在 rc=127／命令不可执行 rc=126）与「活不达标」（断言不中）不分。ag-c49b21 事故：命令死被当质量败弹回 worker 白烧一轮自愈（连败计数照 bump），派发方还得人肉诊断。
 **裁定**：①分类判定＝`_subprocess_runner` returncode∈{126,127}——shell 自身退出码语义，机械可靠，不匹配输出文案（管道混合退出码歧义＝不可判面，本口径不涉，涉之即停并提案）。②死类处置＝F36 超顶同款驻留语义：零迁移驻留 done＋审计事件 verify_dead；不计 fail_streak、不 transition verify_failed、不下发失败尾部（不弹回 worker 自愈——命令死了 worker 无从修）；escalate 新 kind verify-dead 走通知通道（inject_notify/synthetic resume:true，复用 ag-3016f1/8122a2e 通道勿新造）上行至根拍派发方（嵌套链 verify 写面 worker 永拒，只有主会话能处置），输出尾以不可信原文（≤500 拍平）随行，邮件例外同 stalled；worker 侧留一条最小等待说明（无输出尾、无重试指引）。③断言不中（其余非零 rc）照旧 verify_failed：弹回 worker、fail_streak++，零变化。④触点：env/集成/out_of_band 三处 verify 运行点同分支；board_tui._KINDS 补 verify-dead；health._ACTIVE/report/board 状态面零改动（零迁移天然一致）；escalate 上行/审计/文案结构不动。
 **落点**：agorad/core/gate.py（分支×3＋_verify_dead＋KIND_VERIFY_DEAD 字面量）、agorad/core/health.py（kind＋_KIND_NOTE＋通知通道集）、board_tui.py（_KINDS）、tests/test_core_gate.py、tests/test_core_health.py、docs/reqs/opencode-agora.md（本条）。
@@ -451,8 +451,8 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ---
 
-### F81 派发方侧 no-op 申报文案统一 F78 口径（2026-11-11，用户裁定；停止条件裁定 ag-f951bd）
-> F81（原 F80，2026-11-11 撞号让渡：F80 已被 ag-3136b4/c7892f7 合并占用——本任务原 F80 系服务端发放、在飞早于其 21:20 改号提交，派发方裁定）
+### F80 派发方侧 no-op 申报文案统一 F78 口径（2026-11-11，用户裁定；停止条件裁定 ag-f951bd）
+> F80（原 F81，2026-11-11 改号链终态：首让渡系服务端发放号 F80 被 ag-3136b4/c7892f7 手工改号占用而改 F81；同日用户裁定 F80↔F81 反向改号回归 F80，对齐任务页 req_id 服务端发放号）
 **现状**：F78 已把 BOOT kind 纪律禁令化，但派发方侧活文案仍教 worker「以 note 报 no-op」，与新纪律同面互斥：①gate.py vacuous-done 弹回文案（直接发给 worker，矛盾本体——worker 被拒后会被它教去走静默 note）；②skills/agora-dispatch/SKILL.md done 条；③README.zh-CN.md；④README.md；⑤docs/agents/knowledge/knowledge-index.md F69 知识条目「no-op 出口＝worker post(note) 报告＋派发方 cancel 归档」（agent 活体指引面，非 docs/reqs 保护史）——⑤系开工后全仓盘点发现（no-op/post(note)/取消归档等变体），停止条件触发上报，ag-f951bd 裁定 A 并入本条；另 tests/test_core_gate.py:1804 stale 注释「活已被上游完成→note no-op」。
 **裁定**：五处活文案面统一 question 口径——gate.py 弹回改「post(kind=question, body=no-op 结论与证据) 申报——需派发方处置（cancel 归档/确认）；question 唤醒派发方、note 不唤醒勿用」，保留既有断言锚（no-op／零提交 done 拒收／勿空回填 done）；SKILL.md／README 中英各自自然同步；knowledge-index F69 条目保留结构改「worker post(kind=question) 申报＋派发方 cancel 归档（F78/F81 对齐）」；stale 注释随文件对齐（仅注释不动用例逻辑）。不做：不动 task.py _boot（F78 已落）、gate 受理逻辑/状态机（仅弹回字符串常量）、F42 digest/msg/health、docs/reqs F69/F78 历史原文；docs/review-loop.md:61 结论文本走 note＝F78 正当口径，不动。
 **落点**：agorad/core/gate.py、skills/agora-dispatch/SKILL.md、README.md、README.zh-CN.md、docs/agents/knowledge/knowledge-index.md、tests/test_core_gate.py（既有用例补断言＋docstring/注释对齐）、docs/reqs/opencode-agora.md（本条）。
@@ -460,6 +460,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ### F82 verify 死分类补 rc=2＋ENOENT 形态——覆盖 ag-c49b21 原始形态（2026-11-11，用户裁定「补」）
 > F82（原 F81，2026-11-11 撞号让渡：F81 已被 aa9ed9f（no-op 文案统一，原 F80 让渡而来）合并占用——本任务 F81 系服务端发放，与该手工改号撞车；main 已并条目保号、后到者改号（照 c7892f7 判例 worker 自办），任务页 frontmatter req_id 仍 F81（无改号工具面，本行即审计线））
+> 注：2026-11-11 F80↔F81 反向改号后 aa9ed9f 条目现号 F80，上文「F81 已被 aa9ed9f 占用」系改号前事实。
 **现状**：F80 死类口径仅 rc∈{126,127}——立项动机事故 ag-c49b21 的真实形态是「命令存在、文件参数不存在」（grep 对缺失文件 exit 2），未被覆盖：该形态照旧误报活差弹回 worker 白烧一轮。文案匹配的已知边界（双向）：假阴面＝locale 非 C 时 stderr 文案非英文可能漏报——漏报退化回 verify_failed 老路径（活差处置），无害；假阳面（终闸 B/C 册评审发现）＝rc=2 工具族（make 任一 target 失败亦退 2）叠加日志偶含该文案（软包含警告/缺头文件）会误入死类，worker 亦可故意构造——驻留叫停自愈＋连败不计＋worker 文案按 126/127 语义失真；合入路径不可绕越（env/集成 rc==0 双验＋锚复验＋ff-only），派发方经 escalate 不可信原文尾部（≤500 拍平）可见可处置。收窄匹配（行级锚/排除 make 头）＝需求级决策，超出本条裁定口径（「不扩文案面」），留后续条目。
 **落点**：agorad/core/gate.py（新增模块级 `_cmd_dead(rc, out)` 判定单点；env/集成/out_of_band 三运行点统一改用，口径＝rc∈{126,127} 或（rc==2 且输出含 "No such file or directory"）——文案仅作 rc==2 的加严条件，不独立触发（rc=1 断言失败带同文案不入死类））、tests/test_core_gate.py（TestGateVerifyDeadRc2 三例）、docs/reqs/opencode-agora.md（本条）。不动 _verify_dead 处置逻辑与状态机（F80 已定）。
 **验收**：三例先红后绿（Req: F82 锚）——(a) rc=2＋ENOENT 文案→死类（驻留 done＋不 bump＋escalate verify-dead＋审计 verify_dead＋不弹回无尾部）；(b) rc=2 无文案→照旧 verify_failed＋bump＋弹回（防误报控制组）；(c) 126/127 照旧死类（回归）＋判定矩阵（文案不独立触发）；`python3 -m pytest tests/ -q` 全绿（基线 919，+3→922）＋改号自检 `grep -q '### F82 ' docs/reqs/opencode-agora.md`（任务页登记 verify_cmd `grep -q '### F81 '` 登记面不动——F81 命中 aa9ed9f 条目照绿）。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。

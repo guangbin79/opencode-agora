@@ -325,8 +325,8 @@ class TestAcceptDone(TestCoreGate):
         self.assertIn("rejected:vacuous-done", r)
         self.assertIn("零提交 done 拒收", r)
         self.assertIn("no-op", r)
-        self.assertIn("post(kind=question", r)  # Req: F81
-        self.assertNotIn("post(kind=note)", r)  # Req: F81
+        self.assertIn("post(kind=question", r)  # Req: F80
+        self.assertNotIn("post(kind=note)", r)  # Req: F80
         self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
         self.assertEqual(self.gx.contains_calls, [("/repo", SHA, "main")])
 
@@ -1397,10 +1397,10 @@ class TestGateVerifyOverrun(TestCoreGate):
 
 
 class TestGateVerifyDead(TestCoreGate):
-    """Req: F80 verify 命令死分类：命令死≠活差——死类驻留 done、不计连败、
+    """Req: F81 verify 命令死分类：命令死≠活差——死类驻留 done、不计连败、
     不弹回 worker 自愈，escalate 通知通道唤醒派发方；断言不中照旧 verify_failed。"""
 
-    def test_cmd_dead_parks_done_escalates_dispatcher(self):  # Req: F80
+    def test_cmd_dead_parks_done_escalates_dispatcher(self):  # Req: F81
         """命令不存在（rc=127）＝命令自身死：非活不达标——worker 无从自愈，
         F36 超顶同款驻留语义（不 transition、不 bump），escalate 拍派发方，
         worker 只留最小等待说明（失败尾部不下发）。"""
@@ -1420,7 +1420,7 @@ class TestGateVerifyDead(TestCoreGate):
         self.assertFalse(any("noise" in b for b in bodies))  # 失败尾部不下发
         self.assertTrue(any("等待" in b for b in bodies))  # 最小等待说明
 
-    def test_integration_cmd_dead_parks_done(self):  # Req: F80
+    def test_integration_cmd_dead_parks_done(self):  # Req: F81
         """集成阶段命令死（env 绿后 cwd 换 integration 仍 126/127）：同款分类
         路由，目标分支未改动。"""
         self.runner = FakeRunner((0, "pass"), (126, "itail"))
@@ -1431,7 +1431,7 @@ class TestGateVerifyDead(TestCoreGate):
         self.assertEqual(self.state.get("t1")["fail_streak"], 0)
         self.assertIn(("verify-dead", "t1"), self.health.calls)
 
-    def test_assertion_miss_still_bounces_verify_failed(self):  # Req: F80
+    def test_assertion_miss_still_bounces_verify_failed(self):  # Req: F81
         """断言不中（grep 无匹配 exit 1）＝活不达标：照旧 verify_failed 弹回
         worker＋连败计数，零变化。"""
         self.runner = FakeRunner((1, "no match"))
@@ -1445,7 +1445,7 @@ class TestGateVerifyDead(TestCoreGate):
         self.assertTrue(any("重新 post(done" in m["body"]
                             for m in self.worker_msgs()))  # 弹回自愈照旧
 
-    def test_dead_rc_source_mechanical(self):  # Req: F80
+    def test_dead_rc_source_mechanical(self):  # Req: F81
         """判定源实证：命令不存在/引用路径不存在→127、在盘非 executable→126
         ——shell 自身退出码语义，不匹配输出文案（管道混合退出码歧义不在本口径）。"""
         with tempfile.TemporaryDirectory() as tmp:

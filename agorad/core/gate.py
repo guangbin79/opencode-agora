@@ -364,7 +364,7 @@ class Gate:
                 if rc == 124:
                     self._verify_overrun(tid, out, budget, ceiling)
                     return
-                if _cmd_dead(rc, out):  # Req: F80/F82 命令自身死：分类路由，不弹 worker
+                if _cmd_dead(rc, out):  # Req: F81/F82 命令自身死：分类路由，不弹 worker
                     self._verify_dead(tid, rc, out)
                     return
                 if rc != 0:
@@ -435,7 +435,7 @@ class Gate:
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._verify_overrun(tid, out, budget, ceiling)
                 return
-            if _cmd_dead(rc, out):  # Req: F80/F82 命令自身死（不存在/不可执行/缺文件）≠活不达标
+            if _cmd_dead(rc, out):  # Req: F81/F82 命令自身死（不存在/不可执行/缺文件）≠活不达标
                 self._verify_dead(tid, rc, out)
                 return
             if rc != 0:
@@ -491,7 +491,7 @@ class Gate:
                     f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
                     f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
                 return
-            if _cmd_dead(irc, iout):  # Req: F80/F82 集成阶段命令死：同款分类路由
+            if _cmd_dead(irc, iout):  # Req: F81/F82 集成阶段命令死：同款分类路由
                 self._verify_dead(tid, irc, iout)
                 return
             if irc != 0:
@@ -641,7 +641,7 @@ class Gate:
             f"输出尾部:\n{out[-_TAIL:]}")
 
     def _verify_dead(self, tid, rc, out):
-        """Req: F80 命令自身死分类（exit 126/127）：与活不达标分开——驻留 done、
+        """Req: F81 命令自身死分类（exit 126/127）：与活不达标分开——驻留 done、
         不计连败、不下发失败尾部（不弹回 worker 自愈：命令死了 worker 无从修）；
         escalate verify-dead 走通知通道唤醒派发方（8122a2e inject_notify/
         synthetic resume:true 复用勿新造；上行至根——嵌套链 verify 写面 worker

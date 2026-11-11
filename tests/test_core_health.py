@@ -555,7 +555,7 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(self.oc.silent_injected, [])
         self.assertEqual(self.oc.injected, [])
 
-    def test_verify_dead_escalate_goes_notify_channel(self):  # Req: F80
+    def test_verify_dead_escalate_goes_notify_channel(self):  # Req: F81
         """verify-dead 同款走通知通道（F80 复用 ag-3016f1 通道：唤醒 idle
         dispatcher，无选择框）；raw 输出尾以不可信原文随行供诊断。"""
         self.seed("t1")
