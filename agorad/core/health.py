@@ -343,7 +343,7 @@ class Health:
 
         stalled/env-gone/verify-dead 走通知通道（synthetic resume:true——落合成消息
         并调度回合：弹消息通知、无选择框，idle dispatcher 被唤醒；gt-5bc312 勘误
-        ag-3016f1，原裁定只免选择框；F72 env-gone、F79 verify-dead 同款），其余
+        ag-3016f1，原裁定只免选择框；F72 env-gone、F80 verify-dead 同款），其余
         kind 照常真实
         会话注入；stalled 边沿附末次活动摘要（F52，失败降级）＋证据包小节
         与草稿页路径（F59，降级纪律：证据永不阻塞拍人；env-gone 正文自足
@@ -375,8 +375,8 @@ class Health:
                                   "event": "escalate", "task": tid, "kind": kind})
         quiet = kind in (KIND_STALLED, KIND_ENV_GONE, KIND_VERIFY_DEAD)
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
-                          notify=quiet)  # stalled/env-gone/verify-dead 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F79 同款）
-        if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F79：命令死需人工处置）
+                          notify=quiet)  # stalled/env-gone/verify-dead 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F80 同款）
+        if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F80：命令死需人工处置）
             send_email(self._store, tid, body, runner=self._runner)
 
     def _root(self, tid):

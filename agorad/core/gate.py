@@ -10,7 +10,7 @@ verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-
 默认 runner 以独立进程组执行命令，双顶（F36）：软顶到点提醒派发方一次不杀继续
 跑，硬顶（缺省 4×软顶）到点杀全组返回 124；rc=124 分类路由派发方（不计 worker
 连败、任务驻留 done），避免单个挂死验证永久堵住串行门。命令自身死（rc=126/127，
-F79）同款驻留分类——escalate 通知通道拍派发方，不弹回 worker 自愈。
+F80）同款驻留分类——escalate 通知通道拍派发方，不弹回 worker 自愈。
 崩溃重排先探测目标支是否
 已含任务 commit：已含说明上轮最终推进已完成，只补 merged/closed 终态，不重验后
 假 reopened。gate_env 与 target_branch 的原始分支位随任务快照持久化，集成环境和
@@ -354,7 +354,7 @@ class Gate:
                 if rc == 124:
                     self._verify_overrun(tid, out, budget, ceiling)
                     return
-                if rc in (126, 127):  # Req: F79 命令自身死：分类路由，不弹 worker
+                if rc in (126, 127):  # Req: F80 命令自身死：分类路由，不弹 worker
                     self._verify_dead(tid, rc, out)
                     return
                 if rc != 0:
@@ -425,7 +425,7 @@ class Gate:
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._verify_overrun(tid, out, budget, ceiling)
                 return
-            if rc in (126, 127):  # Req: F79 命令自身死（不存在/不可执行）≠活不达标
+            if rc in (126, 127):  # Req: F80 命令自身死（不存在/不可执行）≠活不达标
                 self._verify_dead(tid, rc, out)
                 return
             if rc != 0:
@@ -481,7 +481,7 @@ class Gate:
                     f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
                     f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
                 return
-            if irc in (126, 127):  # Req: F79 集成阶段命令死：同款分类路由
+            if irc in (126, 127):  # Req: F80 集成阶段命令死：同款分类路由
                 self._verify_dead(tid, irc, iout)
                 return
             if irc != 0:
@@ -631,7 +631,7 @@ class Gate:
             f"输出尾部:\n{out[-_TAIL:]}")
 
     def _verify_dead(self, tid, rc, out):
-        """Req: F79 命令自身死分类（exit 126/127）：与活不达标分开——驻留 done、
+        """Req: F80 命令自身死分类（exit 126/127）：与活不达标分开——驻留 done、
         不计连败、不下发失败尾部（不弹回 worker 自愈：命令死了 worker 无从修）；
         escalate verify-dead 走通知通道唤醒派发方（8122a2e inject_notify/
         synthetic resume:true 复用勿新造；上行至根——嵌套链 verify 写面 worker
