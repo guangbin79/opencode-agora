@@ -7,8 +7,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { agoraHome } from "./hook";
 
-let cache: string[] | null = null;  // 测试兼容（resetScope 清缓存钩子）；生产已去缓存
-
 function norm(p: string): string {
   return p.replace(/\/+$/, "");
 }
@@ -25,12 +23,7 @@ export function loadInactiveRepos(): string[] {
   }
 }
 
-/** 会话仓根是否休眠：对启动时缓存精确匹配（worktree toplevel≠主检出路径→不受名册影响）。 */
+/** 会话仓根是否休眠：名册每次重读后精确匹配（worktree toplevel≠主检出路径→不受名册影响）。 */
 export function isDormant(repoRoot: string): boolean {
   return loadInactiveRepos().includes(norm(repoRoot));
-}
-
-/** 新会话重置（R26 不热载：名册变更经重启会话生效；亦供测试隔离）。 */
-export function resetScope(): void {
-  cache = null;
 }

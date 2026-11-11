@@ -523,3 +523,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：Store 增加消息/事件各自惰性缓存与锁；首载走 `_load_messages_from_disk/_load_events_from_disk`，append 在写盘成功同临界区发布缓存。读取返回一层 dict 拷贝（现行记录值均为标量，保持旧“每次新对象”语义，避免 deepcopy 反向拖慢全量事件读）；消息缓存形状对齐磁盘解析面（frontmatter 字符串＋id=int）。磁盘格式、公开签名、消息 id 配给与断尾容错不变。
 **落点**：agorad/access/store.py（缓存/锁/loader/append 发布）、tests/test_access_store.py（热读零触盘、append 可见恰一次、返回值隔离、并发读写、重载一致）、tests/bench_scale.py（固定规模可重复基准）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F92 锚）——旧实现热读触盘 AssertionError；新实现 `python3 -m pytest tests/test_access_store.py tests/test_core_msg.py tests/test_core_report.py -q` 112 passed。同机基准（200 任务/1000 消息/5000 事件/20 读，单次、仅前后对照）：read_messages 0.0134306→0.0001012s、read_events 0.0089930→0.0004708s、board_full_view 0.0118536→0.0052162s、check_mail 0.0154026→0.0024450s；缓存后仍是内存全量遍历＋拷贝，非索引查询。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F93 退役插件接口清理与全量收尾（2026-11-12，用户目标「稳定性、性能」）
+**现状**：cred.ts 保留无生产消费者的会话目录落盘凭据读写与纯测试 attachToken helper；scope.ts 保留已无效果的 cache/resetScope 测试兼容面。install 自验收仍调用 F64 已退役的 `agora wait --help`，对现行 CLI 必红。
+**裁定**：全树引用核对后删除 `readCredential/writeCredential/attachToken` 与仅测这些面的用例；删除 scope 无效果缓存/复位，测试直接依赖名册热载。install 断言按 F64 改为 `agora watch --help`。保留生产 cred 缓存/pull/附牌路径、旧 token 文本消息解析与所有真实消费者。
+**落点**：agora-plugin/cred.ts、scope.ts、hook.test.ts、scope.test.ts、tests/test_install.sh、tests/e2e/t2_enforce.sh、tests/e2e/t3_chain.sh、docs/reqs/opencode-agora.md（本条）。
+**验收**：`cd agora-plugin && bun test` 95 passed；`python3 -m pytest tests/ -q` 948 passed＋32 subtests；`bash tests/test_install.sh` 67/67；`req-check` exit 0（无 scratch 则 nothing to check）。真实 e2e：T2 enforce 七例＋残留 ALL GREEN；T3 派发链十四场景＋密钥面/残留/语义扫 ALL GREEN（含 F85 凭据文件读取、F27 主会话账本读豁免、F69 非零交付、F28 force cancel、R25-A 真会话归属/拍人）。部署注记：插件/agorad 载荷均为 install 拷贝，merged 后须重跑 ./install.sh 并重启服务。

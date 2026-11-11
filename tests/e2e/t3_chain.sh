@@ -2,7 +2,7 @@
 # T3 派发链 e2e（F3/F4/F6/F7/F11/F23）：真 opencode（tmux 驻留）＋真 agorad 全链十四场景。
 # 隔离同 T6 口径：HOME/XDG_*/AGORA_HOME 全沙箱，绝不触碰本机会话服务；产物 /tmp/opencode。
 # 驱动形态（T6 裁定沿袭＋T7 收敛）：serve/agorad 各驻 tmux；服务侧动作经 agorad HTTP
-# （root 牌＋task_dispatch 回传的 worker 牌）；worker 真会话干活＝目标即指令（goal 窄化，
+# （root 牌＋凭据文件读取 worker 牌——F85 起 task_dispatch 响应不再回传 token）；worker 真会话干活＝目标即指令（goal 窄化，
 # 模型自主落盘/提交），验收＝服务侧状态＋git 事实＋消息库/文件事实，不依赖模型自述，
 # 亦不与其自发续作竞速（run7/16 实证：自发性是契约行为，脚本须状态驱动收敛）。
 # 场景：S0 F23 派发硬闸（无 verify 无旗 dispatch 必拒）/ S1 全链 / S2 跨仓顺序（B7 拒＋相对路径见新主）/ S3 过程沟通（问答一轮）＋
@@ -375,6 +375,10 @@ def git_clean(repo):
     br = git(["branch", "--list", "*__wt-*"], repo)
     return wt == 1 and not br
 
+def worker_token(tid):
+    """F85：dispatch 公共响应不带牌——e2e 驱动同插件口径读凭据文件。"""
+    return json.load(open(f"{PLAZA}/credentials/{tid}.token"))["token"]
+
 def dispatch(goal, repo, after=None):
     """建＋派一体的场景件（goal 即 worker 指令——提示词窄化走任务页）：回 (tid, wtok, env, wsid)。"""
     body = {"goal": goal, "project_dir": f"{WORK}/{repo}", "verify_pending": True}
@@ -384,8 +388,8 @@ def dispatch(goal, repo, after=None):
     assert code == 200, body
     tid = body["task"]
     code, body = agora("/task_dispatch", {"task": tid})
-    assert code == 200, f"dispatch {tid}: {body}"
-    return tid, body["token"], env_of(tid), row(tid)["worker_sid"]
+    assert code == 200 and body == {"task": tid}, f"dispatch {tid}: {body}"
+    return tid, worker_token(tid), env_of(tid), row(tid)["worker_sid"]
 
 def store_msgs():
     """消息库直读（账本面）：milestone 投递对象按设计断言（worker 侧，不经补拉游标）。"""
@@ -435,7 +439,7 @@ tid1, wtok1, env1, wsid1 = dispatch(
     "proj")
 check(tid1.startswith(("gt-", "task-", "ag-")) and wtok1 and env1 and wsid1  # F24/F29 三前缀（新单 ag-，存量 task-/gt-）
       and row(tid1)["state"] == "dispatched" and os.path.isdir(env1),
-      "S1 dispatch（worker 牌回传＋env worktree＋真会话登记） # Req: F3")
+      "S1 dispatch（worker 凭据文件在案＋env worktree＋真会话登记） # Req: F3/F85")
 check(api(f"/session/{wsid1}")["data"]["id"] == wsid1,
       "S1 worker 会话真实存在于 opencode # Req: F3")
 
@@ -491,6 +495,7 @@ check(bool(ms) or any(m["kind"] == "milestone" and m.get("task") == tid1
 tidA, wtokA, envA, wsidA = dispatch(
     "Create a file named merged.md containing exactly one line: s2-marker. Commit it with git.",
     "repoA")
+wait_idle(wsidA, time.time() * 1000)  # 先收束初始回合：在线时延测注入面，不测模型 steering 排队
 
 qbody = f"s3-q-{STAMP} what is the marker"
 t0 = time.time() * 1000
@@ -521,12 +526,13 @@ check(bool(ans) and ans[0]["from"] == wsidA,
       "S3 worker 应答→链边上行→留库→main 补拉（from==worker_sid） # Req: F4")
 
 for i in range(10):
-    agora("/post", {"task": tidA, "kind": "chat", "body": f"seq-{i}"})
+    # note 下行到 worker 走实时注入（digest 只缓冲 worker→dispatcher 的 note）
+    agora("/post", {"task": tidA, "kind": "note", "body": f"seq-{i}"})
 dl = time.time() + 300
 seqs = []
 while time.time() < dl:
     seqs = []
-    for x in user_texts(wsidA, f"[agora] task {tidA} chat from main"):
+    for x in user_texts(wsidA, f"[agora] task {tidA} note from"):
         for i in range(10):
             if f"seq-{i}" in x:
                 seqs.append(i)
@@ -563,7 +569,8 @@ check(row(tidA)["state"] == "closed" and os.path.exists(f"{WORK}/repoA/merged.md
       "S2-A merged：前仓主检出呈现新形态（git 事实） # Req: F3")
 
 code, body = agora("/task_dispatch", {"task": tidB})
-wtokB = body.get("token", "")
+assert code == 200 and body == {"task": tidB}, f"dispatch {tidB}: {body}"
+wtokB = worker_token(tidB)  # F85：公共响应不带牌
 envB = env_of(tidB); wsidB = row(tidB)["worker_sid"]
 merged_ts = [e["ts"] for e in detail(tidA)["events"] if e["event"] == "merged"][-1]
 disp_ts = [e["ts"] for e in detail(tidB)["events"] if e["event"] == "dispatched"][-1]
@@ -695,7 +702,7 @@ check(new_sid != wsidR and "reinjected" in evs(tidR),
 cred = []
 dl = time.time() + 30
 while time.time() < dl and not cred:
-    cred = [x for x in user_texts(new_sid, "[agora] credential") if "token:" in x]
+    cred = [x for x in user_texts(new_sid, "[agora] credential") if "file:" in x]
     time.sleep(1)
 check(bool(cred), "F6-c 新会话收到 BOOT＋凭据重发 # Req: F6")
 file_ok = wait_file(f"{envR}/reinject.md", "reinject-ok")
@@ -740,21 +747,25 @@ check(sh(["git", "show", "HEAD:win.md"], f"{WORK}/repoX").stdout.strip() == "x-w
 # ============================================================
 tidY, wtokY, envY, wsidY = dispatch("Standby: no work required right now.", "repoY")
 agora("/task_update", {"task": tidY, "verify_cmd": "sleep 6 && false"})
-shaY = git(["rev-parse", "HEAD"], envY)   # 无 diff：锚=基线 HEAD 亦可入门
-os.makedirs(f"{envY}/.review-loop", exist_ok=True)
-with open(f"{envY}/.review-loop/.last-reviewed", "w") as f:
-    f.write(shaY)
+with open(f"{envY}/standby.md", "w") as f:  # F69：真零提交 done 必拒，先造非空交付
+    f.write("standby\n")
+shaY = commit_anchor(envY, "y standby work")
 post_done(tidY, wtokY, shaY)
 check(row(tidY)["state"] == "done" and wait_in_gate(tidY), "F11 done 入门 # Req: F11")
-code, _ = agora("/task_cancel", {"task": tidY})
+code, _ = agora("/task_cancel", {"task": tidY, "force": True})  # worker 回合仍在 busy：F28 显式强杀才排队
 check(code == 200 and row(tidY).get("pending_cancel") is True,
       "F11 门临界段 cancel 排队（pending_cancel 置位，判定置位不撕裂） # Req: F11")
 t = wait_state(tidY, {"cancelled"}, timeout=60)
 check(t["state"] == "cancelled" and "verify_failed" in evs(tidY)
       and not os.path.exists(envY),
       "F11 门走完生效：verify 败后门尾结算 cancelled＋env 回收 # Req: F11")
-code, _ = agora("/post", {"task": tidY, "kind": "note", "body": "hi"}, wtokY)
-check(code == 401, "F11 cancelled 后旧凭据作废（401） # Req: F11")
+code = 0
+dl = time.time() + 5  # 状态先迁移、revoke 在门尾副作用内：等 401 成立而非零时宽竞跑
+while time.time() < dl and code != 401:
+    code, _ = agora("/post", {"task": tidY, "kind": "note", "body": "hi"}, wtokY)
+    if code != 401:
+        time.sleep(0.2)
+check(code == 401, f"F11 cancelled 后旧凭据作废（最终 {code}） # Req: F11")
 check("merged" not in evs(tidY), "F11 未 merged（无逆转历史面） # Req: F11")
 
 # ============================================================
@@ -766,22 +777,36 @@ def mcp_call(name, args):
     p = subprocess.Popen(["python3", f"{REPO}/agora_mcp.py"],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True,
-                         env=dict(os.environ, AGORA_HOME=PLAZA))
+                         env=dict(os.environ, AGORA_HOME=PLAZA,
+                                  HOME=f"{SANDBOX}/home"))  # MCP write_pointer 不染宿主 ~/.agora-home
     out, _ = p.communicate(json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
          "params": {"name": name, "arguments": args}}) + "\n", timeout=60)
     return json.loads(out.strip().splitlines()[-1])
 
 msid = api("/session", {})["data"]["id"]  # 真 opencode 会话扮演主会话（注入面可断言）
+api(f"/session/{msid}/prompt", {"text": (
+    "Test fixture instruction: you are a passive dispatcher session. Do not call tools, "
+    "manage tasks, answer worker proposals, or take autonomous action. Wait quietly for "
+    "test messages; this keeps the forced quality-failure scenario under driver control.")})
+wait_idle(msid, time.time() * 1000)
+def mcp_payload(r):
+    assert "result" in r, r
+    return json.loads(r["result"]["content"][0]["text"])
 r = mcp_call("board", {"_token": ROOT, "_sid": msid})
-check("result" in r and "buckets" in json.loads(r["result"]["content"][0]["text"]),
+check("buckets" in mcp_payload(r),
       "R25-A 主会话经真 MCP 调 board（root 牌附牌＋_sid 透传） # Req: F4")
 check("main_sid_bound" in open(f"{PLAZA}/events.jsonl").read(),
-      "R25-A 主会话绑定审计留行 # Req: F8")
-tidM, wtokM, envM, wsidM = dispatch("Standby: no work required right now.", "repoM")
+      "R25-A 绑定审计留行 # Req: F8")
+r = mcp_call("task_create", {"_token": ROOT, "_sid": msid,
+                             "goal": "Create a file named m-marker.md containing exactly one line: m-marker. Commit it with git.",
+                             "project_dir": f"{WORK}/repoM", "verify_cmd": "false"})
+tidM = mcp_payload(r)["task"]
+r = mcp_call("task_dispatch", {"_token": ROOT, "_sid": msid, "task": tidM})
+check(mcp_payload(r) == {"task": tidM}, "R25-A MCP dispatch 响应不带 token # Req: F85")
+wtokM, envM, wsidM = worker_token(tidM), env_of(tidM), row(tidM)["worker_sid"]
 check(row(tidM)["dispatcher_sid"] == msid,
       f"R25-A 绑定后建任务 dispatcher＝真实主会话 sid（{row(tidM)['dispatcher_sid']}） # Req: F4")
-agora("/task_update", {"task": tidM, "verify_cmd": "false"})
 for i in range(3):
     if row(tidM)["state"] != "running":  # verify_failed/reopened 续修边：worker 调用即开工
         agora("/post", {"task": tidM, "kind": "note", "body": f"kick-{i}"}, wtokM)
@@ -796,7 +821,7 @@ while time.time() < dl and not hit:
 check(hit, "R25-A 拍人注入真主会话（会话内见失控[quality]） # Req: F4/F5")
 check(any(m.get("kind") == "escalate" and m.get("to") == msid for m in store_msgs()),
       "R25-A 拍人消息库行 to＝真实主会话 sid # Req: F4")
-agora("/task_cancel", {"task": tidM})  # blocked→cancelled：env 回收（残留断言前置）
+agora("/task_cancel", {"task": tidM, "force": True})  # blocked→cancelled：env 回收（残留断言前置）
 wait_state(tidM, {"cancelled"})
 check(row(tidM)["state"] == "cancelled" and not os.path.exists(envM),
       "R25-A blocked 任务中止即环境回收 # Req: F11")
@@ -853,15 +878,15 @@ for repo in sorted(glob.glob(sys.argv[1] + "/*")):
 sys.exit(0 if ok else 1)
 PY
 then note "PASS 残留：9 夹具仓 worktree/分支全净（worktree list＝1）"; else note "FAIL 残留：worktree 残留"; RC=1; fi
-if pgrep -f "agorad/main.py" >/dev/null 2>&1; then note "FAIL 残留：agorad 进程未净"; RC=1; else note "PASS 残留：pgrep agorad 净"; fi
+if pgrep -f "$REPO/agorad/main.py" >/dev/null 2>&1; then note "FAIL 残留：沙箱 agorad 进程未净"; RC=1; else note "PASS 残留：沙箱 agorad 进程净（不误报本机生产实例）"; fi
 if tmux ls 2>/dev/null | grep -q "t3-oc\|t3-ad"; then note "FAIL 残留：tmux 会话未净"; RC=1; else note "PASS 残留：tmux 无残会话"; fi
 if compgen -G "$REPO/t3-*" >/dev/null || [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null | grep '^??' | grep -v 'tests/\|.superpowers/\|.omo/\|.review-loop/' || true)" ]; then
   note "FAIL 残留：e2e 在本仓落盘"; RC=1; else note "PASS 残留：本仓无 e2e 落盘"; fi
 if python3 - "$REPO" <<'PY'
-# 反需求语义扫：cron/看门狗/stalled 处置零代码路径（t4-coverage F5 弱锚收口）。
+# 反需求语义扫：cron/看门狗/全局扫描处置零代码路径（stalled 检测/提示自 F5/F70 起为正需求）。
 # docstring/注释剔除——health.py 文档行自述"无巡检"为合法否定，不计数。
 import ast, pathlib, re, sys
-pat = re.compile(r"cron|crontab|\bstalled?\b|watchdog|看门狗|巡检|全局扫描", re.I)
+pat = re.compile(r"cron|crontab|watchdog|看门狗|全局扫描", re.I)
 hits = []
 files = list(pathlib.Path(sys.argv[1], "agorad").rglob("*.py"))
 files.append(pathlib.Path(sys.argv[1]) / "agora_mcp.py")
@@ -893,7 +918,7 @@ for h in hits:
     print(" semantic-hit", h)
 sys.exit(1 if hits else 0)
 PY
-then note "PASS 语义扫：无 cron/巡检/看门狗/stalled 处置代码路径 # Req: F5"; else note "FAIL 语义扫：反需求路径命中"; RC=1; fi
+then note "PASS 语义扫：无 cron/看门狗/全局扫描处置代码路径 # Req: F5"; else note "FAIL 语义扫：反需求路径命中"; RC=1; fi
 
 if [ "$RC" -eq 0 ]; then note "ALL GREEN（十四场景＋残留＋密钥面＋语义扫）"; else note "RED（见上 FAIL 行）"; fi
 exit "$RC"

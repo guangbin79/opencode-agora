@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { isDormant, loadInactiveRepos, resetScope } from "./scope";
+import { isDormant, loadInactiveRepos } from "./scope";
 import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
 
@@ -45,7 +45,6 @@ afterAll(() => {
   if (savedUrl === undefined) delete process.env.AGORA_OC_URL;
   else process.env.AGORA_OC_URL = savedUrl;
   setEnforce(false);
-  resetScope();
   resetLift();
   rmSync(root, { recursive: true, force: true });
 });
@@ -70,11 +69,10 @@ describe("loadInactiveRepos 名册解析", () => {
   });
 });
 
-describe("isDormant 精确匹配（R26 缓存）", () => {
+describe("isDormant 精确匹配", () => {
   test("命中／前缀不扩／worktree 路径不匹配主检出条目／查询尾斜杠容错", () => {
     // Req: F12
     writeFileSync(roster, repo + "\n");
-    resetScope(); // 模拟新会话启动加载
     expect(isDormant(repo)).toBe(true);
     expect(isDormant(repo + "-sibling")).toBe(false); // 精确匹配：无前缀扩match
     expect(isDormant(wt)).toBe(false); // worktree toplevel≠主检出路径→活跃
@@ -84,7 +82,6 @@ describe("isDormant 精确匹配（R26 缓存）", () => {
   test("名册热载：运行中改名册即时生效（去缓存后行为）", () => {
     // Req: F12
     writeFileSync(roster, repo + "\n");
-    resetScope();
     expect(isDormant(repo)).toBe(true);
     writeFileSync(roster, ""); // 运行中清空名册
     expect(isDormant(repo)).toBe(false); // 即时生效（去缓存）
@@ -134,7 +131,6 @@ describe("index 休眠分支（R29：短路在 lift/拉旗/附牌/判定链之�
   test("名册命中：edit 直通（零 HTTP）＋agora_board 拒（文案＋零 HTTP＋零附牌）", async () => {
     // Req: F12
     writeFileSync(roster, repo + "\n");
-    resetScope();
     resetLift();
     setEnforce(null); // 生产形态：非休眠的 edit 必付拉旗 HTTP——休眠短路即零
     const { srv, hits } = startServer();
@@ -158,7 +154,6 @@ describe("index 休眠分支（R29：短路在 lift/拉旗/附牌/判定链之�
   test("名册外现行行为回归：判定链拒照旧＋付 HTTP（计数器有效性对照）", async () => {
     // Req: F12
     writeFileSync(roster, wt + "\n"); // 名册只列 wt；repo 会话在名册外
-    resetScope();
     resetLift();
     setEnforce(null);
     const { srv, hits } = startServer();
@@ -177,7 +172,6 @@ describe("index 休眠分支（R29：短路在 lift/拉旗/附牌/判定链之�
   test("worktree 会话不受主检出名册条目影响：照常活跃走判定链", async () => {
     // Req: F12
     writeFileSync(roster, repo + "\n"); // 名册列主检出；worktree toplevel 不同
-    resetScope();
     resetLift();
     setEnforce(null);
     const { srv, hits } = startServer();

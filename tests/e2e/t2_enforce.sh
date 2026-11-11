@@ -308,13 +308,13 @@ hit = any(p["status"] == "error" and "派发" in p["text"] and "resetLift" in p[
 check(bool(parts) and hit and not os.path.exists(f"{WORK}/denyrepo/s5.md"),
       f"S5 服务停机默认拒＋lift 线索（驱动轮数={n}） # Req: F1")
 
-# —— S6 账本读引导：state/messages 直读→引导；events/wiki 裸读开放 ——
-deny_case("S6a tasks.jsonl 直读拒", B1, A1, main,
-          f"Use the read tool to read the file {SANDBOX}/plaza/state/tasks.jsonl. Do nothing else.",
-          "tasks.jsonl", "账本面")
-deny_case("S6b messages 直读拒", B1, A1, main,
-          f"Use the read tool to read the file {SANDBOX}/plaza/state/messages/00000001.md. Do nothing else.",
-          "00000001.md", "账本面")
+# —— S6 账本读面：F27 主会话例开放 state/messages；events/wiki 裸读开放 ——
+parts, n = drive(B1, A1, main, f"Use the read tool to read the file {SANDBOX}/plaza/state/tasks.jsonl. Do nothing else.", "tasks.jsonl")
+check(bool(parts) and all(p["status"] != "error" or "账本面" not in p["text"] for p in parts),
+      f"S6a tasks.jsonl 主会话直读开放（F27 not_worker 例；驱动轮数={n}） # Req: F27")
+parts, n = drive(B1, A1, main, f"Use the read tool to read the file {SANDBOX}/plaza/state/messages/00000001.md. Do nothing else.", "00000001.md")
+check(bool(parts) and all(p["status"] != "error" or "账本面" not in p["text"] for p in parts),
+      f"S6b messages 主会话直读开放（F27 not_worker 例；驱动轮数={n}） # Req: F27")
 parts, n = drive(B1, A1, main, f"Use the read tool to read the file {SANDBOX}/plaza/events.jsonl. Do nothing else.", "events.jsonl")
 check(bool(parts) and all(p["status"] != "error" or "账本面" not in p["text"] for p in parts),
       f"S6c events.jsonl 裸读开放（驱动轮数={n}） # Req: F1")
@@ -328,7 +328,7 @@ check(any(p["status"] == "completed" for p in parts) and os.path.exists(f"{WORK}
       f"S7 bash 直写主检出不拦（接受面记录在案；驱动轮数={n}） # Req: F1")
 
 # —— 收尾：任务取消级联（env 回收）＋会话删除 ——
-agora("/task_cancel", {"task": tid})
+agora("/task_cancel", {"task": tid, "force": True})  # F28：worker 回合可仍在 busy，收尾强杀由测试显式确认
 time.sleep(1)
 check(not os.path.exists(env_dir), "收尾 task_cancel 级联回收任务 env # Req: F1")
 for sid, b, a in ((main, B1, A1), (worker, B1, A1), (s5, B2, A2)):
@@ -359,7 +359,7 @@ br = subprocess.run(["git", "branch", "--list", "*__wt-*"], cwd=sys.argv[1], cap
 sys.exit(0 if len(wt) == 1 and not br else 1)
 PY
 then note "PASS 残留：任务 worktree/分支清净（worktree list＝1）"; else note "FAIL 残留：worktree 残留"; RC=1; fi
-if pgrep -f "agorad/main.py" >/dev/null 2>&1; then note "FAIL 残留：agorad 进程未净"; RC=1; else note "PASS 残留：pgrep agorad 净"; fi
+if pgrep -f "$REPO/agorad/main.py" >/dev/null 2>&1; then note "FAIL 残留：沙箱 agorad 进程未净"; RC=1; else note "PASS 残留：沙箱 agorad 进程净（不误报本机生产实例）"; fi
 if tmux ls 2>/dev/null | grep -q "t2-oc1\|t2-oc2\|t2-ad"; then note "FAIL 残留：tmux 会话未净"; RC=1; else note "PASS 残留：tmux 无残会话"; fi
 if compgen -G "$REPO/t2-*" >/dev/null || [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null | grep '^??' | grep -v 'tests/\|.superpowers/\|.omo/\|.review-loop/' || true)" ]; then
   note "FAIL 残留：e2e 在本仓落盘（S4 拒例失效）"; RC=1; else note "PASS 残留：本仓无 e2e 落盘"; fi

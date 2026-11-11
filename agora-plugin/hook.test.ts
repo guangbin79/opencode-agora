@@ -11,8 +11,7 @@ import {
   agoraHome, DISPATCH_HINT, GATE_SCOPE_HINT, NO_CRED_HINT, READ_HINT, shouldBlock, wrongDoorHint,
 } from "./hook";
 import {
-  attachToken, cacheCredential, getCredential, pullCredential,
-  readCredential, resetCredPull, type Cred,
+  cacheCredential, getCredential, pullCredential, resetCredPull, type Cred,
 } from "./cred";
 import { resetLift } from "./lift";
 import { default as entry, setEnforce } from "./index";
@@ -221,28 +220,6 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "unreachable")).toBe(NO_CRED_HINT);
     expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "throttled")).toBe(NO_CRED_HINT);
     expect(shouldBlock("write", join(repo, "a.md"), plain, null, true)).toBe(NO_CRED_HINT);
-  });
-});
-
-describe("cred 凭据管家", () => {
-  test("readCredential：在位解析／缺失 null／损坏 null", () => {
-    // Req: F1
-    const dir = join(root, "session-a");
-    mkdirSync(dir);
-    writeFileSync(join(dir, ".agora-cred.json"), JSON.stringify(worker));
-    expect(readCredential(dir)?.token).toBe("tok-w");
-    expect(readCredential(join(root, "absent"))).toBeNull();
-    writeFileSync(join(dir, ".agora-cred.json"), "{oops");
-    expect(readCredential(dir)).toBeNull();
-  });
-
-  test("attachToken：缓存命中附 args._token，未命中不动 args", () => {
-    // Req: F1
-    cacheCredential(worker);
-    const args: Record<string, unknown> = { target: "x" };
-    expect(attachToken(args, "s-worker")).toEqual({ target: "x", _token: "tok-w" });
-    const bare: Record<string, unknown> = { target: "x" };
-    expect(attachToken(bare, "s-none")).toEqual({ target: "x" });
   });
 });
 
