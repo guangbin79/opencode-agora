@@ -187,6 +187,53 @@ class TestAccessStore(unittest.TestCase):
         self.assertEqual([e["e"] for e in self.st.read_events()], [1, 2])
         self.assertEqual([e["e"] for e in self.st.read_events("t1")], [1])
 
+    def test_concurrent_same_name_ephemeral_writes_are_atomic(self):  # Req: F86
+        """同名 ephemeral 并发写不得共享 tmp 互相截断/替换失败。
+
+        首个 os.replace 让位等第二个写者进入：无锁实现两个线程同时持有同一
+        tokens.tmp，必有一个 replace 失败或留下撕裂 JSON；有锁实现首写超时
+        独自完成后次写再进，终件必为两者之一且可解析。"""
+        import threading
+
+        orig_replace = os.replace
+        entered = 0
+        guard = threading.Lock()
+        second_here = threading.Event()
+
+        def overlap_aware_replace(src, dst):
+            nonlocal entered
+            with guard:
+                entered += 1
+                first = entered == 1
+            if first:
+                second_here.wait(1.0)  # 当前实现：第二写者会进；串行实现：超时放行
+            else:
+                second_here.set()
+            return orig_replace(src, dst)
+
+        payloads = ({"v": "short"}, {"v": "x" * 512})
+        errs = []
+
+        def write(payload):
+            try:
+                self.st.write_ephemeral("tokens", payload)
+            except Exception as e:
+                errs.append(repr(e))
+
+        os.replace = overlap_aware_replace
+        try:
+            ts = [threading.Thread(target=write, args=(p,)) for p in payloads]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        finally:
+            os.replace = orig_replace
+        self.assertEqual(errs, [])
+        on_disk = json.loads(
+            (self.tmp / "tokens").read_text(encoding="utf-8"))
+        self.assertIn(on_disk, payloads)
+
 
 if __name__ == "__main__":
     unittest.main()

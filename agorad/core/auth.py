@@ -5,6 +5,7 @@
 （events.jsonl 经注入 store.append_event）。Store 构造注入，core 只 import stdlib。
 """
 import secrets
+import threading
 import time
 
 # worker 可创建并管理自己的嵌套子任务；update/cancel 的他任务隔离由 TaskService 归属终审
@@ -29,15 +30,17 @@ class Auth:
 
     def __init__(self, store):
         self._store = store
+        self._lock = threading.RLock()  # 三线程写者：修改＋落盘同临界区（F86）
         data = store.read_ephemeral("tokens") or {}
         self._tokens = {t: list(v) for t, v in data.items()}  # token -> [sid, role]
         self._enforce = True  # 重启默认 on（旗标不落盘）
 
     def issue(self, sid, role):
-        token = secrets.token_hex()
-        self._tokens[token] = [sid, role, []]
-        self._persist()
-        return token
+        with self._lock:
+            token = secrets.token_hex()
+            self._tokens[token] = [sid, role, []]
+            self._persist()
+            return token
 
     @staticmethod
     def _lineage(v):
@@ -46,12 +49,14 @@ class Auth:
 
     def same_lineage(self, current_sid, historical_sid):
         """F16：current_sid 现持牌的血统集含 historical_sid（换号链边连续）。"""
-        return any(historical_sid in self._lineage(v)
-                   for v in self._tokens.values() if v[0] == current_sid)
+        with self._lock:
+            return any(historical_sid in self._lineage(v)
+                       for v in self._tokens.values() if v[0] == current_sid)
 
     def identify(self, token):
-        v = self._tokens.get(token)
-        return (v[0], v[1]) if v else None
+        with self._lock:
+            v = self._tokens.get(token)
+            return (v[0], v[1]) if v else None
 
     def rebind(self, old_sid, new_sid, prefer_role=None):
         """按 sid 改绑牌到新会话（值 [new_sid, role]，token 本体不变）——
@@ -60,83 +65,92 @@ class Auth:
         （ag-588eb8 双角色稳态：同 sid 多牌并存时点名角色牌，防 rotate_root 删旧
         重签把 root 挪到队尾后首匹配误绑窗口 dispatcher 牌；ag-f80309 B 案起
         bind_main 不再改绑，点名面归通用能力）。返回牌文本（供 inject 送达），无牌 None。"""
-        cands = [(tok, v) for tok, v in self._tokens.items() if v[0] == old_sid]
-        if prefer_role:  # 点名角色牌优先；缺省保持首匹配（既有语义不回归）
-            cands.sort(key=lambda kv: kv[1][1] != prefer_role)
-        for tok, v in cands:
-            v[0] = new_sid
-            if len(v) < 3:  # 旧格式起档
-                v.append([])
-            if old_sid not in v[2]:
-                v[2].append(old_sid)
-            del v[2][:-LINEAGE_CAP]  # 封顶：最旧出局
-            self._persist()
-            return tok
-        return None
+        with self._lock:
+            cands = [(tok, v) for tok, v in self._tokens.items() if v[0] == old_sid]
+            if prefer_role:  # 点名角色牌优先；缺省保持首匹配（既有语义不回归）
+                cands.sort(key=lambda kv: kv[1][1] != prefer_role)
+            for tok, v in cands:
+                v[0] = new_sid
+                if len(v) < 3:  # 旧格式起档
+                    v.append([])
+                if old_sid not in v[2]:
+                    v[2].append(old_sid)
+                del v[2][:-LINEAGE_CAP]  # 封顶：最旧出局
+                self._persist()
+                return tok
+            return None
 
     def token_for(self, sid):
         """按 sid 查牌文本（F25 周期重注入只读面，不改绑不轮换）；无牌 None。"""
-        return next((tok for tok, v in self._tokens.items() if v[0] == sid), None)
+        with self._lock:
+            return next((tok for tok, v in self._tokens.items()
+                         if v[0] == sid), None)
 
     def live_token(self, sid):
         """role-aware 查牌（ag-588eb8 裁决 A）：sid 双角色并存时 token_for 首匹配
         可能命中 root 污染牌——返回该 sid 名下首个非 root 牌 (token, role)；
         仅持 root（污染）→ (token, "root")；无牌 None。"""
-        root_hit = None
-        for tok, v in self._tokens.items():
-            if v[0] != sid:
-                continue
-            if v[1] != "root":
-                return tok, v[1]
-            root_hit = root_hit if root_hit is not None else tok
-        return (root_hit, "root") if root_hit else None
+        with self._lock:
+            root_hit = None
+            for tok, v in self._tokens.items():
+                if v[0] != sid:
+                    continue
+                if v[1] != "root":
+                    return tok, v[1]
+                root_hit = root_hit if root_hit is not None else tok
+            return (root_hit, "root") if root_hit else None
 
     def pin_roots(self):
         """存量迁移（ag-f80309 B 案）：会话 sid 持 root 的污染条目一次性归位
         daemon 身份 sid="root"（旧 sid 入血统留痕，格式兼容）。幂等——归位后
         零命中零写盘；worker/dispatcher 在飞牌不动。返回迁移条数。"""
-        n = 0
-        for v in self._tokens.values():
-            if v[1] != "root" or v[0] == "root":
-                continue
-            old = v[0]
-            v[0] = "root"
-            if len(v) < 3:  # 旧格式起档
-                v.append([])
-            if old not in v[2]:
-                v[2].append(old)
-            del v[2][:-LINEAGE_CAP]  # 封顶同 rebind：最旧出局
-            n += 1
-        if n:
-            self._persist()
-        return n
+        with self._lock:
+            n = 0
+            for v in self._tokens.values():
+                if v[1] != "root" or v[0] == "root":
+                    continue
+                old = v[0]
+                v[0] = "root"
+                if len(v) < 3:  # 旧格式起档
+                    v.append([])
+                if old not in v[2]:
+                    v[2].append(old)
+                del v[2][:-LINEAGE_CAP]  # 封顶同 rebind：最旧出局
+                n += 1
+            if n:
+                self._persist()
+            return n
 
     def revoke(self, token):
-        if token not in self._tokens:
-            return False
-        del self._tokens[token]
-        self._persist()
-        return True
+        with self._lock:
+            if token not in self._tokens:
+                return False
+            del self._tokens[token]
+            self._persist()
+            return True
 
     def revoke_session(self, sid):
         """按 sid 作废该会话全部牌（worker 单牌语义；cancel/重派/门尾取消共用）。"""
-        hit = [t for t, v in self._tokens.items() if v[0] == sid]
-        for t in hit:
-            del self._tokens[t]
-        if hit:
-            self._persist()
-        return bool(hit)
+        with self._lock:
+            hit = [t for t, v in self._tokens.items() if v[0] == sid]
+            for t in hit:
+                del self._tokens[t]
+            if hit:
+                self._persist()
+            return bool(hit)
 
     def rotate_root(self):
         # doctor 一键轮换：全部旧 root 牌即废，新牌沿用最近 root 的 sid；其余角色不受累
-        roots = [t for t, v in self._tokens.items() if v[1] == "root"]
-        sid = self._tokens[roots[-1]][0] if roots else "root"
-        for t in roots:
-            del self._tokens[t]
-        token = self.issue(sid, "root")
-        self._store.append_event({"ts": time.time(), "actor": "root",
-                                  "event": EV_ROOT_ROTATED, "note": f"revoked={len(roots)}"})
-        return token
+        with self._lock:
+            roots = [t for t, v in self._tokens.items() if v[1] == "root"]
+            sid = self._tokens[roots[-1]][0] if roots else "root"
+            for t in roots:
+                del self._tokens[t]
+            token = self.issue(sid, "root")
+            self._store.append_event({"ts": time.time(), "actor": "root",
+                                      "event": EV_ROOT_ROTATED,
+                                      "note": f"revoked={len(roots)}"})
+            return token
 
     def may(self, role, tool, tid, state):
         """矩阵：root→任意；worker→白名单；dispatcher→通用面＋task 域（须有任务行）。

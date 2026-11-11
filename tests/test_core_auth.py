@@ -142,6 +142,59 @@ class TestCoreAuth(unittest.TestCase):
         au.rebind("s9", "s10")  # 旧格式 rebind 起档不炸
         self.assertTrue(au.same_lineage("s10", "s9"))
 
+    def test_concurrent_issue_and_revoke_serialize_and_reload(self):  # Req: F86
+        """Auth 变更并发落盘：无锁实现共享 tokens.tmp 必炸；串行实现终态可重载。
+
+        首个 os.replace 等第二个 Auth 写者进入以暴露并发；串行实现下首写
+        超时独自完成、次写随后串行，重载后旧牌已废、新牌仍有效。"""
+        import os
+        import threading
+
+        old = self.au.issue("s-old", "worker")
+        orig_replace = os.replace
+        entered = 0
+        guard = threading.Lock()
+        second_here = threading.Event()
+        new_tok = []
+        errs = []
+
+        def overlap_aware_replace(src, dst):
+            nonlocal entered
+            with guard:
+                entered += 1
+                first = entered == 1
+            if first:
+                second_here.wait(1.0)
+            else:
+                second_here.set()
+            return orig_replace(src, dst)
+
+        def issue():
+            try:
+                new_tok.append(self.au.issue("s-new", "worker"))
+            except Exception as e:
+                errs.append(repr(e))
+
+        def revoke():
+            try:
+                self.au.revoke(old)
+            except Exception as e:
+                errs.append(repr(e))
+
+        os.replace = overlap_aware_replace
+        try:
+            ts = [threading.Thread(target=issue), threading.Thread(target=revoke)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        finally:
+            os.replace = orig_replace
+        self.assertEqual(errs, [])
+        fresh = Auth(Store(self.tmp))
+        self.assertIsNone(fresh.identify(old))
+        self.assertEqual(fresh.identify(new_tok[0]), ("s-new", "worker"))
+
 
 if __name__ == "__main__":
     unittest.main()

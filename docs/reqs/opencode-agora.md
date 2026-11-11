@@ -481,3 +481,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：公共成功体收敛为 `{"task": <tid>}`；`TaskService.dispatch()` 内部返回值、凭据文件写入、BOOT/credential 指针注入、离线落库与 `/cred_for_sid` 拉取面全部不动。测试需要 worker 牌时经 `state.get(tid)["worker_sid"]`＋`auth.token_for(wsid)` 获取，不再从公共响应读取。
 **落点**：agorad/transport/httpd.py（task_dispatch 出口）、tests/test_mcp_shell.py（响应形状/序列化无 token）、tests/test_transport_httpd.py（dispatch_task helper 与嵌套 child 牌获取）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F85 锚）——新断言在旧实现下 MCP/HTTP 响应不等且含 token（48 fail 批量暴露）；新实现 `python3 -m pytest tests/test_mcp_shell.py tests/test_transport_httpd.py tests/test_agora_wait.py -q` 179 passed＋8 subtests，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F86 凭据并发串行化——Auth 修改与 ephemeral 原子落盘（2026-11-12，用户目标「稳定性、性能」）
+**现状**：HTTP/gate/health 三线程都会触发 `Auth.issue/rebind/revoke_session`，但 Auth 字典迭代/修改与 `Store.write_ephemeral` 均无锁；同名目标派生同一 `*.tmp`，两个写者可同时截断/写/replace 该文件，造成 FileNotFoundError、撕裂 JSON，重启后凭据丢失或旧牌复活。
+**裁定**：Auth 增加内部 RLock，签发/改绑/撤销/轮换/污染归位与牌表读取的临界区整体串行，锁序固定 Auth→Store；Store 为 `write_ephemeral` 的 open/fchmod/write/fsync/replace 全区间加内部 Lock。公开签名、0600 权限、错误传播与持久化格式零变化。
+**落点**：agorad/core/auth.py（RLock＋方法临界区）、agorad/access/store.py（ephemeral Lock）、tests/test_core_auth.py（并发 issue/revoke 后重载一致）、tests/test_access_store.py（同名 ephemeral 并发原子性）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F86 锚）——并发探针在旧实现下 2 fail（FileNotFoundError）；新实现 `python3 -m pytest tests/test_core_auth.py tests/test_access_store.py -q` 34 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。

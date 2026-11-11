@@ -28,6 +28,7 @@ class Store:
         self._next_mid = self.scan_max_msg_id() + 1
         self._mid_lock = threading.Lock()
         self._task_lines = None  # 懒播种的账本行数（flock 单写者安全）：免每次追加全文件重扫；崩溃漂移只挪瘦身时机
+        self._ephemeral_lock = threading.Lock()  # 同名 tmp/replace 全区间串行（F86）
 
     def append_state(self, snap: dict) -> None:
         if self._task_lines is None:  # 播种在追加前：计磁盘实有行，此后内存自增不重扫
@@ -146,16 +147,17 @@ class Store:
         return out
 
     def write_ephemeral(self, name: str, data: dict) -> None:
-        path = self.home / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 建时即 0600：tokens 含 root 牌，umask 只能收紧
-        os.fchmod(fd, 0o600)  # O_CREAT mode 仅建时生效：复用旧版崩溃遗留 .tmp 时显式收紧，自愈才闭环
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)  # 原子覆写：读者（lift 解析 service.json）不见半写
+        with self._ephemeral_lock:  # tmp 名按目标派生：并发同名写共享 tmp 必撕裂（F86）
+            path = self.home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 建时即 0600：tokens 含 root 牌，umask 只能收紧
+            os.fchmod(fd, 0o600)  # O_CREAT mode 仅建时生效：复用旧版崩溃遗留 .tmp 时显式收紧，自愈才闭环
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)  # 原子覆写：读者（lift 解析 service.json）不见半写
 
     def read_ephemeral(self, name: str) -> dict | None:
         path = self.home / name
