@@ -51,7 +51,8 @@ _TOOLS = [
                                     "gate 硬顶固定 4×生效值）"},
          "model": {"type": "string",
                    "description": "worker 模型（providerID/modelID 全名，如 zai-coding-plan/glm-5.3；"
-                                  "缺省＝服务默认轻模型。机械修改/补漏不传；架构评审、复杂 bug 首次"
+                                  "机械修改/补漏传 zai-coding-plan/glm-5.3-flash（显式传，勿依赖缺省"
+                                  "——缺省走 opencode 服务默认，会漂移）；架构评审、复杂 bug 首次"
                                   "定位、跨模块首次评审传强模型——判据：这单错误产物会不会进 CI/PR/"
                                   "主分支。worker 不可指定——缺省继承父任务）"},
          "req_id": {"type": "string",
