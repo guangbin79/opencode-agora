@@ -105,6 +105,44 @@ class TestAccessStore(unittest.TestCase):
         self.assertEqual(fresh.scan_max_msg_id(), a)
         self.assertEqual(fresh.write_message({"task": "t2"}, "y"), a + 1)
 
+    def test_concurrent_write_message_ids_unique(self):  # Req: F75（评审残留 D3）
+        """跨线程 write_message（httpd/gate/health 三写者，B 册 D3）：id 配给须
+        互斥——丢更新撞号后 open("x") 抛 FileExistsError。GIL 下直线字节码窗口
+        实际不可抢占（压力跑不出红），故注入类级 property 探针在计数读写之间
+        插入让步点，把理论竞态钉成确定性红；加锁后配对原子即绿。"""
+        import threading
+        import time
+        box = {"v": 0}
+
+        def _get(self):  # 数据描述符优先于实例属性：构造期赋值同样过探针
+            return box["v"]
+
+        def _set(self, val):
+            time.sleep(0.001)  # 让步点：读后写前放走 GIL——无锁即双双读到旧值
+            box["v"] = val
+
+        Store._next_mid = property(_get, _set)
+        try:
+            st = Store(self.tmp / "probe")
+            start = threading.Barrier(2)
+            errs = []
+
+            def once():
+                try:
+                    start.wait()
+                    st.write_message({"ts": 0, "task": "t", "kind": "note",
+                                      "from": "a", "to": "b"}, "x")
+                except Exception as e:
+                    errs.append(type(e).__name__)
+
+            ts = [threading.Thread(target=once) for _ in range(2)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+            self.assertEqual(errs, [])  # 无锁：FileExistsError；有锁：双写皆成
+            self.assertEqual(len(st.read_messages()), 2)  # 零丢更新零撞号
+        finally:
+            del Store._next_mid  # 还原类面：他测不受探针影响
+
     def test_msg_filename_sort_equals_time_order(self):  # Req: F4
         ids = [self.st.write_message({"task": "t"}, "") for _ in range(12)]
         names = sorted(p.name for p in self.tmp.joinpath("state/messages").glob("*.md"))

@@ -7,6 +7,7 @@
 import fcntl
 import json
 import os
+import threading
 from pathlib import Path
 
 TAIL_BYTES = 1 << 20  # 启动尾读窗口：load 耗时与账本大小解耦；窗内无完整行回退全扫
@@ -21,8 +22,11 @@ class Store:
         self._messages = self.home / "state" / "messages"
         self._lock_path = self.home / "agorad.lock"
         self._lock_fd = None
-        # 单写者内存计数器；重启扫目录文件名 max+1 恢复
+        # 内存计数器；重启扫目录文件名 max+1 恢复
+        # id 配给锁（Req: F75 评审残留 D3）：httpd/gate/health 三线程写者实证，
+        # 无锁丢更新撞号即 open("x") 抛——配对（读＋自增）须原子，写盘在锁外
         self._next_mid = self.scan_max_msg_id() + 1
+        self._mid_lock = threading.Lock()
         self._task_lines = None  # 懒播种的账本行数（flock 单写者安全）：免每次追加全文件重扫；崩溃漂移只挪瘦身时机
 
     def append_state(self, snap: dict) -> None:
@@ -90,8 +94,9 @@ class Store:
         self._append_line(self._events, json.dumps(ev, ensure_ascii=False))
 
     def write_message(self, fm: dict, body: str) -> int:
-        mid = self._next_mid
-        self._next_mid += 1
+        with self._mid_lock:  # 配对原子（D3）：锁内读＋自增；文件写在锁外并发
+            mid = self._next_mid
+            self._next_mid += 1
         header = f"id: {mid}\n" + "".join(
             f"{k}: {fm[k]}\n" for k in sorted(fm)
         )

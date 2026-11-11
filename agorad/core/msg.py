@@ -37,7 +37,9 @@ class NotChainEdge(Exception):
 
 
 class Router:
-    """单写者路由：无锁无线程，httpd 串行调用（设计 §4.8 并发口径）。"""
+    """投递面三线程写者（httpd 串行面＋gate 门尾＋health 升级/修复，§4.8 演化：
+    消息号配给经 Store._mid_lock 串行——Req: F75 评审残留 D3）；内存集合沿
+    GIL 原子口径，无锁无线程。"""
 
     def __init__(self, store, state, oc, same_lineage=None, clock=None, mail=None):
         self._store = store
