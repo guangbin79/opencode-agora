@@ -64,13 +64,14 @@ class PeerBoard:
         return mid
 
     def board(self, snap, repo=None):
-        """读面：同仓在飞四字段＋最近 READ_N 条留言。repo=None＝全仓（root/
+        """读面：同仓在飞五字段（req_id＝F83 撞号改号双查面，无号行 None）
+        ＋最近 READ_N 条留言。repo=None＝全仓（root/
         dispatcher 诊断面）；worker 分区由 transport 经 partition() 先定。"""
         if repo:
             repo = os.path.normpath(repo)
         now = time.time()
         tasks = [{"tid": tid, "title": t.get("title", ""), "state": t["state"],
-                  "last_seen": t.get("last_seen")}
+                  "last_seen": t.get("last_seen"), "req_id": t.get("req_id")}
                  for tid, t in sorted(snap["tasks"].items())
                  if t["state"] not in _INFLIGHT_EXCL
                  and (repo is None or os.path.normpath(t.get("project_dir") or "")

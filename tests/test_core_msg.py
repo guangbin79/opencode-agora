@@ -487,6 +487,17 @@ class TestPeerBoard(unittest.TestCase):
         (raw,) = self.store.read_messages()
         self.assertEqual(raw["to"], "")  # 消息库全员有 to 不变量（check_mail 直取）
 
+    def test_board_projection_carries_req_id(self):  # Req: F83
+        """撞号改号双查面：在飞摘要投影 req_id——worker 唯一可读的在飞
+        查重面（F34 发放集不可见），改号前据此避让服务端已发放号。"""
+        self.state.set_fields("t1", req_id="F83")
+        r = self.pb.board(self.state.snapshot(), "/repoA")
+        self.assertEqual([(t["tid"], t.get("req_id")) for t in r["tasks"]],
+                         [("t1", "F83")])  # 已发放号在飞可见
+        r2 = self.pb.board(self.state.snapshot(), "/repoB")
+        self.assertEqual([(t["tid"], t.get("req_id")) for t in r2["tasks"]],
+                         [("t2", None)])  # 无号行缺省 None（键恒在）
+
     def test_partition_isolation(self):  # Req: F22
         self.pb.post("w1", "from A")
         r = self.pb.board(self.state.snapshot(), "/repoB")
