@@ -103,6 +103,88 @@ class TestCoreMsg(unittest.TestCase):
         self.assertEqual([x["id"] for x in self.r.check_mail("d1")], [mid])
         self.assertTrue(self.r.dedup_key(mid))  # 补拉即送达：不再重交
 
+    def test_check_mail_waits_for_inflight_inject(self):  # Req: F87
+        """消息已落库、在线注入进行中：check_mail 不得抢交同一消息。
+
+        旧实现 check_mail 先把 mid 标 delivered，阻塞注入完成后又视为在线
+        送达——同一消息双通道各交一次；inflight 语义下补拉让位在线注入。"""
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        orig_inject = self.oc.inject
+
+        def blocking_inject(sid, text):
+            entered.set()
+            release.wait(2.0)
+            return orig_inject(sid, text)
+
+        self.oc.inject = blocking_inject
+        mids = []
+        t = threading.Thread(
+            target=lambda: mids.append(
+                self.r.post("w1", ("up", "t1"), "process", "in-flight")))
+        t.start()
+        self.assertTrue(entered.wait(2.0))
+        self.assertEqual(self.r.check_mail("d1"), [])  # 在线注入持有交付权
+        release.set()
+        t.join()
+        self.assertEqual(len(self.oc.calls), 1)
+        self.assertEqual(self.r.check_mail("d1"), [])
+
+    def test_failed_inflight_inject_still_pullable(self):  # Req: F87
+        """inflight 注入失败必须释放交付权，下一次 check_mail 可补拉。"""
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def failing_inject(sid, text):
+            entered.set()
+            release.wait(2.0)
+            return False
+
+        self.oc.inject = failing_inject
+        mids = []
+        t = threading.Thread(
+            target=lambda: mids.append(
+                self.r.post("w1", ("up", "t1"), "done", "sha-fail")))
+        t.start()
+        self.assertTrue(entered.wait(2.0))
+        self.assertEqual(self.r.check_mail("d1"), [])
+        release.set()
+        t.join()
+        self.assertEqual([m["id"] for m in self.r.check_mail("d1")], mids)
+
+    def test_check_mail_waits_for_inflight_digest_flush(self):  # Req: F87
+        """digest 冲刷中的 note 不得同时被补拉——聚合本体只交付一次。"""
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        orig_silent = self.oc.inject_silent
+
+        def blocking_silent(sid, text):
+            entered.set()
+            release.wait(2.0)
+            return orig_silent(sid, text)
+
+        self.oc.inject_silent = blocking_silent
+        t = threading.Thread(target=lambda: [
+            self.r.post("w1", ("up", "t1"), "note", f"note {i}")
+            for i in range(5)  # 满 _DIGEST_N 即冲
+        ])
+        t.start()
+        self.assertTrue(entered.wait(2.0))
+        self.assertEqual(self.r.check_mail("d1"), [])  # 冲刷中让位聚合投递
+        release.set()
+        t.join()
+        self.assertEqual(len(self.oc.events), 1)
+        self.assertIn("5 条过程消息", self.oc.events[0][2])
+        self.assertEqual(self.r.check_mail("d1"), [])
+
     def test_offchain_post_raises(self):  # Req: F4
         n = len(self.store.read_messages())
         bad = [("w1", ("down", "t1")),      # 自发自收非边

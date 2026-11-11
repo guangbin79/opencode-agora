@@ -21,6 +21,7 @@ F63 终态邮件必达：终态迁移经注入 mail 缝外呼公共 send_email�
 正文＝会话行同源服务合成（零 worker 文本），(tid,60s) 窗吞 merged→closed
 门尾相邻双发（merged 崩窗滞留仍有一封）。
 """
+import threading
 import time
 
 _DIGEST_N = 5    # F42：阈值可调
@@ -39,15 +40,17 @@ class NotChainEdge(Exception):
 
 class Router:
     """投递面三线程写者（httpd 串行面＋gate 门尾＋health 升级/修复，§4.8 演化：
-    消息号配给经 Store._mid_lock 串行——Req: F75 评审残留 D3）；内存集合沿
-    GIL 原子口径，无锁无线程。"""
+    消息号配给经 Store._mid_lock 串行——Req: F75 评审残留 D3；交付状态经
+    _delivery_lock 串行，网络注入锁外——Req: F87）。"""
 
     def __init__(self, store, state, oc, same_lineage=None, clock=None, mail=None):
         self._store = store
         self._state = state
         self._oc = oc
         self._same_lineage = same_lineage  # F16 血统判定（core 禁兄弟 import，装配注入）
+        self._delivery_lock = threading.RLock()  # F87：落库/补拉/冲刷的复合状态串行
         self._delivered = set()
+        self._inflight = set()  # F87：在线注入持有交付权的 msg id（网络调用锁外）
         self._pending = {}  # F42：(to_sid, tid) -> [(mid, ts, body)]，内存态可丢
         self._notified = set()  # ag-acae3b 生命周期通知去重：(tid, to, detail)
         self._clock = clock or time.time  # 假时钟注入口（测试）
@@ -118,16 +121,23 @@ class Router:
     def _deliver(self, from_sid, to_sid, tid, kind, body,
                  silent=False, notify=False):
         self._sweep()  # F42：过龄待发先冲，保投递时序
-        mid = self._store.write_message(  # 铁则：先落库后注入
-            {"ts": time.time(), "task": tid, "kind": kind,
-             "from": from_sid, "to": to_sid}, body)
         if kind == "note" and to_sid == self._state.get(tid).get("dispatcher_sid"):
-            buf = self._pending.setdefault((to_sid, tid), [])
-            buf.append((mid, self._clock(), body))
-            if len(buf) >= _DIGEST_N:  # F42 a：满条数即冲
+            with self._delivery_lock:  # 落库＋入缓冲原子；未冲刷仍可提前补拉
+                mid = self._store.write_message(  # 铁则：先落库后注入
+                    {"ts": time.time(), "task": tid, "kind": kind,
+                     "from": from_sid, "to": to_sid}, body)
+                buf = self._pending.setdefault((to_sid, tid), [])
+                buf.append((mid, self._clock(), body))
+                flush_now = len(buf) >= _DIGEST_N
+            if flush_now:  # F42 a：满条数即冲；网络注入在锁外
                 self._flush(to_sid, tid)
             return mid
         self._flush(to_sid, tid)  # F42 a：关键消息先冲同目标 digest，本体保持实时
+        with self._delivery_lock:
+            mid = self._store.write_message(  # 铁则：先落库后注入
+                {"ts": time.time(), "task": tid, "kind": kind,
+                 "from": from_sid, "to": to_sid}, body)
+            self._inflight.add(mid)  # 可见即持交付权：check_mail 不抢交（F87）
         text = f"[agora] task {tid} {kind} from {from_sid}\n{body}"
         try:
             # 取属性入 try：oc 缺对应通道时同落兜底网（评审环 B 册）；notify 优先于
@@ -137,39 +147,50 @@ class Router:
             ok = inject(to_sid, text)
         except Exception:  # oc 异常（凭据轮换 401/网络故障）同失败口径：落库兜底——
             ok = False     # done 链路不得因投递面异常断裂（T7 e2e 实测：raise→门不排队）
-        if ok:
-            self._delivered.add(mid)  # 在线送达一次；失败留库待补拉
+        with self._delivery_lock:
+            self._inflight.discard(mid)
+            if ok:
+                self._delivered.add(mid)  # 在线送达一次；失败留库待补拉
         return mid
 
     def _sweep(self):
         """F42 a：最旧待发存龄 ≥_DIGEST_T 即冲（无后台线程，投递时惰性扫）。"""
         now = self._clock()
-        for key, buf in list(self._pending.items()):
-            if now - buf[0][1] >= _DIGEST_T:
-                self._flush(*key)
+        with self._delivery_lock:
+            due = [key for key, buf in self._pending.items()
+                   if now - buf[0][1] >= _DIGEST_T]
+        for key in due:
+            self._flush(*key)
 
     def _flush(self, to_sid, tid):
         """F42 b/c：同目标待发聚 digest 经 inject_silent 免通知投递；失败则
         本体留库待补拉，成功即标记已投（check_mail 不重交）。"""
-        buf = [(m, ts, b) for m, ts, b in self._pending.pop((to_sid, tid), ())
-               if m not in self._delivered]  # F46 H-2：缓冲窗口内补拉已交的 mid 对账剔除
-        if not buf:
-            return
-        lines = [f"[agora] {len(buf)} 条过程消息（{tid}）"]
-        lines += [" ".join(b.split())[:120] for _, _, b in buf]  # 每条一行 ≤120 字符
+        with self._delivery_lock:
+            buf = [(m, ts, b) for m, ts, b
+                   in self._pending.pop((to_sid, tid), ())
+                   if m not in self._delivered]  # F46 H-2：缓冲窗内已补拉的 mid 剔除
+            if not buf:
+                return
+            self._inflight.update(m for m, _, _ in buf)  # 冲刷期不补拉（F87）
+            lines = [f"[agora] {len(buf)} 条过程消息（{tid}）"]
+            lines += [" ".join(b.split())[:120] for _, _, b in buf]  # 每条一行 ≤120 字符
         try:  # 取属性入 try：oc 缺 inject_silent 时同落兜底网（评审环 B 册）
             ok = self._oc.inject_silent(to_sid, "\n".join(lines))
         except Exception:  # 同失败口径：不抛、不断链（T7 e2e 实测）
             ok = False
-        if ok:
-            self._delivered.update(m for m, _, _ in buf)
+        with self._delivery_lock:
+            for m, _, _ in buf:
+                self._inflight.discard(m)
+            if ok:
+                self._delivered.update(m for m, _, _ in buf)
 
     def dedup_key(self, msg_id: int) -> bool:
         """已投递过返回 True（重发不再投递）；否则登记并返回 False。"""
-        if msg_id in self._delivered:
-            return True
-        self._delivered.add(msg_id)
-        return False
+        with self._delivery_lock:
+            if msg_id in self._delivered:
+                return True
+            self._delivered.add(msg_id)
+            return False
 
     def replay_root_backlog(self, tid, to_sid):
         """F75 积压补交：to=='root'（错址窗口）的消息生成补交副本——原件一字
@@ -187,10 +208,12 @@ class Router:
             if (m.get("task") != tid or m.get("to") != "root"
                     or str(m["id"]) in done):
                 continue
-            mid = self._store.write_message(
-                {"ts": time.time(), "task": tid, "kind": m.get("kind"),
-                 "from": m.get("from"), "to": to_sid,
-                 "replay_of": m["id"]}, m.get("body", ""))
+            with self._delivery_lock:  # 副本可见即持交付权（F87）
+                mid = self._store.write_message(
+                    {"ts": time.time(), "task": tid, "kind": m.get("kind"),
+                     "from": m.get("from"), "to": to_sid,
+                     "replay_of": m["id"]}, m.get("body", ""))
+                self._inflight.add(mid)
             n += 1
             text = (f"[agora] task {tid} {m.get('kind')} from {m.get('from')}\n"
                     + m.get("body", ""))
@@ -203,19 +226,25 @@ class Router:
                 ok = inject(to_sid, text)
             except Exception:  # oc 异常同失败口径：留库补拉
                 ok = False
-            if ok:
-                self._delivered.add(mid)  # 在线送达一次；失败留库待补拉
+            with self._delivery_lock:
+                self._inflight.discard(mid)
+                if ok:
+                    self._delivered.add(mid)  # 在线送达一次；失败留库待补拉
         return n
 
     def check_mail(self, sid: str) -> list:
-        cursor = self._state.snapshot()["mail_read"].get(sid, 0.0)
-        got = [m for m in self._store.read_messages()
-               if (m["to"] == sid or (self._same_lineage is not None
-                                      and self._same_lineage(sid, m["to"])))
-               and m["id"] not in self._delivered and float(m["ts"]) > cursor]
-        self._state.touch_mail(sid)
-        self._delivered.update(m["id"] for m in got)  # 拉取即送达（无 ack）
-        return got
+        with self._delivery_lock:  # 过滤＋标记原子：inflight 消息让位在线注入
+            cursor = self._state.snapshot()["mail_read"].get(sid, 0.0)
+            got = [m for m in self._store.read_messages()
+                   if (m["to"] == sid or (self._same_lineage is not None
+                                          and self._same_lineage(sid, m["to"])))
+                   and m["id"] not in self._delivered
+                   and m["id"] not in self._inflight
+                   and float(m["ts"]) > cursor]
+            if got:  # 空拉不推游标：inflight 让位后失败注入仍可下次补拉（F87）
+                self._state.touch_mail(sid)
+                self._delivered.update(m["id"] for m in got)  # 拉取即送达（无 ack）
+            return got
 
     def _resolve(self, from_sid, to_edge) -> str:
         d, tid = to_edge
