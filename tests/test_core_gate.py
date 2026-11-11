@@ -318,13 +318,15 @@ class TestCoreGate(unittest.TestCase):
 class TestAcceptDone(TestCoreGate):
     def test_reject_zero_commit_done_with_noop_guidance(self):  # Req: F69
         """vacuous-done 拒收：env HEAD 已被目标支基线包含（零新增提交）→
-        按锚拒收同款机制弹回 worker，拒因指 no-op note 出口，状态零副作用。"""
+        按锚拒收同款机制弹回 worker，拒因指 no-op question 申报出口，状态零副作用。"""
         self.seed(tb="main")
         self.gx.contains_result = True  # 目标基线已含 HEAD＝零新增
         r = self.gate.accept_done("t1", "s-w1", SHA)
         self.assertIn("rejected:vacuous-done", r)
         self.assertIn("零提交 done 拒收", r)
         self.assertIn("no-op", r)
+        self.assertIn("post(kind=question", r)  # Req: F81
+        self.assertNotIn("post(kind=note)", r)  # Req: F81
         self.assertEqual(self.state.get("t1")["state"], "running")  # 拒收零副作用
         self.assertEqual(self.gx.contains_calls, [("/repo", SHA, "main")])
 
@@ -1865,7 +1867,7 @@ class TestGateStaleBaseline(TestCoreGate):
         self.gate = Gate(self.state, gx, self.router, self.oc,
                          lambda e: self.anchor, self.health, self.auth,
                          self.store, runner=self.runner)
-        # Req: F69 后受理点必拒「已落库＝零新增」的 done（活已被上游完成→note no-op）；
+        # Req: F69 后受理点必拒「已落库＝零新增」的 done（活已被上游完成→post(kind=question) 申报 no-op）；
         # 本测守护门体直通路径，仿崩溃恢复直入 run，不经受理门
         self.state.transition("t1", "done", commit=task, rebased_from=None)
         self.gate.run("t1")

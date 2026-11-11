@@ -198,8 +198,9 @@ class Gate:
         if vacuous and not self._vacuous_delivered(tid, t, commit):
             return self._deny_anchor(  # 真零提交（空集且无在案交付）＝锚拒同款弹回
                 tid, f"任务 {tid} 零提交 done 拒收：本任务相对目标分支无新增提交"
-                "——若无需改动或活已被上游完成，post(kind=note) 报 no-op，"
-                "由派发方取消归档；勿空回填 done", tag="vacuous-done")
+                "——若无需改动或活已被上游完成，post(kind=question, body=no-op "
+                "结论与证据) 申报——需派发方处置（cancel 归档/确认）；question "
+                "唤醒派发方、note 不唤醒勿用；勿空回填 done", tag="vacuous-done")
         if not a.get("clean"):
             return self._deny_anchor(
                 tid, f"任务 {tid} 合并前置失败：评审环未绿——修复 blocker/high "
