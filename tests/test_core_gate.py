@@ -63,6 +63,9 @@ class FakeGitx:
         self.ancestor_calls, self.ancestor_result = [], False  # ag-1ae0f1 空集判据 (a)
         self.rebase_result = "conflict"  # F32 缺省冲突：既有 non-ff 用例保持弹回口径
         self.rebase_calls = []
+        self.rebase_done = None  # ag-54bd98：重放翻页——integration 头在 rebase 前后取不同值
+        self.rebase_new_head = None  # 重放后 R；None＝空集 no-op（头==onto）
+        self.phantom_ff = False  # ag-54bd98 形态①注入：幂等 ff 零移动，交付从未落库
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
         self.push_calls, self.push_result = [], "ok"  # Req: ag-0d2daa
         self.push_tail = ""  # push 失败输出尾（审计/告警外带）
@@ -74,17 +77,26 @@ class FakeGitx:
 
     def rebase_onto(self, env_dir, integration):
         self.rebase_calls.append((env_dir, integration))
+        if self.rebase_result != "conflict":
+            self.rebase_done = integration  # 重放成功：integration 头翻页（时序）
         return self.rebase_result
 
     def ff_sha(self, target, sha, branch=None):
         self.ff_sha_calls.append((target, sha, branch))
+        if branch is not None and self.ff_sha_result == "ok":
+            self.contains_result = True  # ag-54bd98：R 级推进落地＝目标支含 R
         return self.ff_sha_result
 
     def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
         self.contains_calls.append((repo_dir, commit, branch))
         if self.contains_raise:
             raise RuntimeError("git merge-base --is-ancestor: fatal: bad object")
-        return self.contains_results.pop(0) if self.contains_results else self.contains_result
+        if self.contains_results:
+            hit = self.contains_results.pop(0)
+            if hit:
+                self.contains_result = True  # True 粘滞：人工推进后目标支持续含之
+            return hit
+        return self.contains_result
 
     def is_ancestor(self, repo_dir, base, commit):  # ag-1ae0f1 空集判据 (a)
         self.ancestor_calls.append((repo_dir, base, commit))
@@ -124,6 +136,10 @@ class FakeGitx:
             raise RuntimeError("git checkout issue/7: fatal: used by worktree")
         self.merge_calls.append((env_dir, target, branch))
         self.merged = self.merge_result == "ok"  # 拒并不落地（无 merge commit）
+        if branch is not None and self.merged and not self.phantom_ff:
+            # ag-54bd98：最终推进落地（试合并 branch=None）＝目标支已含交付；
+            # phantom_ff＝形态①注入——幂等 ff 零移动，交付从未落库
+            self.contains_result = True
         return self.merge_result
 
     def remove_env(self, env_dir):
@@ -141,6 +157,8 @@ class FakeGitx:
 
     def head(self, repo_dir, branch=None):
         self.head_calls.append((repo_dir, branch))
+        if self.rebase_done == repo_dir:  # ag-54bd98：重放后 R（None＝空集 no-op==onto）
+            return self.rebase_new_head or self.head_shas.get(repo_dir, self.head_sha)
         return self.head_shas.get(repo_dir, self.head_sha)
 
     def push(self, repo_dir, branch):  # Req: ag-0d2daa
@@ -927,8 +945,8 @@ class TestGateRun(TestCoreGate):
         （contains(E)=False → 重走门重新 rebase）。"""
         self.runner = FakeRunner((0, "pass"), (0, "pass"))
         self.mk_gate(merge="non-ff")
-        self.gx.rebase_result = "ok"  # rebase_onto 成功；R 经 integration head 呈现
-        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.gx.rebase_result = "ok"  # rebase_onto 成功；R 经重放翻页呈现
+        self.gx.rebase_new_head = R_SHA
         self.in_gate(streak=2)
         self.gate.run("t1")
         t = self.state.get("t1")
@@ -951,12 +969,77 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(merged["commit"], R_SHA)
         self.assertEqual(merged["rebased_from"], SHA)  # _succeed 从 state 读（裁定②）
 
+    def test_empty_rebase_noop_phantom_blocked_with_audit(self):  # Req: ag-54bd98 G1
+        """幻影形态②（ag-c3de0f/ag-e75d89）：交付落在自切分支、env boot 分支停在
+        起点——空集重放 R==onto 且原锚不在目标支：audit empty_rebase_noop＋
+        reopened，禁 set_fields(commit=R) 伪装推进。"""
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate(merge="non-ff")
+        self.gx.rebase_result = "ok"  # 空集重放成功：integration 头不动（R==onto）
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(t["fail_streak"], 2)  # 弹回计连败（3 连败拍人）
+        self.assertEqual(t["commit"], SHA)  # 落库保持受理值，未被 R 伪装推进
+        self.assertIsNone(t.get("rebased_from"))
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("empty_rebase_noop", names)
+        self.assertNotIn("rebased", names)
+        self.assertNotIn("merged", names)
+        self.assertEqual(self.gx.ff_sha_calls, [])  # 目标分支零移动
+        self.assertEqual(self.gx.removed, [])  # 环境保留：修正后 re-done
+        self.assertEqual(len(self.runner.calls), 1)  # 集成 verify 未跑
+        body = self.worker_msgs()[-1]["body"]
+        self.assertIn("env 分支相对目标无新增提交", body)
+        self.assertIn("boot 分支", body)
+        self.assertIn("post(done", body)
+
+    def test_ff_idempotent_phantom_blocked_before_merged(self):  # Req: ag-54bd98 G2
+        """幻影形态①（ag-40a1fa）：env boot 分支==目标 tip——merge --ff-only 幂等
+        ok 但零移动，落账 commit 从未进目标支：_succeed 前 contains 假 → audit
+        phantom_merge_blocked＋reopened，merged 不落账。"""
+        self.in_gate(streak=1)
+        self.gx.phantom_ff = True  # 两道 ff 幂等假成功（目标零移动）
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(t["fail_streak"], 2)
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("phantom_merge_blocked", names)
+        self.assertNotIn("merged", names)
+        self.assertEqual(self.gx.removed, [])  # 环境保留：修正后 re-done
+        body = self.worker_msgs()[-1]["body"]
+        self.assertIn("env 分支相对目标无新增提交", body)
+        self.assertIn("boot 分支", body)
+
+    def test_empty_rebase_with_anchor_contained_still_succeeds(self):  # Req: ag-54bd98 G1
+        """崩溃窗口不误伤：空集重放但原锚已 contained 于目标支（人工推进/崩溃
+        补终态窗口）——保持现行为：rebased 成对留痕＋ff_sha 推进 R＋merged。"""
+        self.runner = FakeRunner((0, "pass"), (0, "pass"))
+        self.mk_gate(merge="non-ff")
+        self.gx.rebase_result = "ok"
+        self.gx.contains_results = [False, False, True]  # 受理/门首 False，G1 探针 True
+        self.in_gate()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(t["commit"], "aaa111")  # R==onto 照常落账（现行为）
+        self.assertEqual(t["rebased_from"], SHA)
+        names = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("empty_rebase_noop", names)
+        rebased = next(e for e in self.store.read_events("t1")
+                       if e["event"] == "rebased")
+        self.assertEqual((rebased["from"], rebased["to"]), (SHA, "aaa111"))
+        self.assertEqual(self.gx.ff_sha_calls, [("/repo", "aaa111", "main")])
+        self.assertIn("merged", names)
+
     def test_rebased_integration_fail_reopens_counts_streak(self):  # Req: F32
         """rebase 后集成 verify 败：reopened 计连败，重放内容未过闸目标分支未动。"""
         self.runner = FakeRunner((0, "env pass"), (1, "R broke"))
         self.mk_gate(merge="non-ff")
         self.gx.rebase_result = "ok"
-        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.gx.rebase_new_head = R_SHA
         self.in_gate(streak=1)
         self.gate.run("t1")
         t = self.state.get("t1")
@@ -976,7 +1059,7 @@ class TestGateRun(TestCoreGate):
         self.runner = FakeRunner((0, "pass"), (0, "pass"))
         self.mk_gate(merge="non-ff")
         self.gx.rebase_result = "ok"
-        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.gx.rebase_new_head = R_SHA
         self.gx.ff_sha_result = "non-ff"  # 推进窗口目标支被人工推进至含 R
         self.gx.contains_results = [False, False, True]  # 受理探针 False、门首探针 False、守卫 True
         self.in_gate()
@@ -991,7 +1074,7 @@ class TestGateRun(TestCoreGate):
         self.mk_gate(merge="non-ff")
         self.gx.contains_results = [False]  # 门首探针：上轮 R 未推进
         self.gx.rebase_result = "ok"
-        self.gx.head_shas[f"{self.env}__gate"] = R2_SHA
+        self.gx.rebase_new_head = R2_SHA
         self.seed()
         self.state.transition("t1", "done", commit=R_SHA, rebased_from=SHA)  # 上轮崩溃残态
         self.gate.run("t1")  # 崩溃重排直入门体（不经 accept_done）
@@ -1085,7 +1168,8 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(t["state"], "closed")
         self.assertEqual(t["fail_streak"], 0)
         self.assertEqual(self.gx.contains_calls, [("/repo", SHA, None),
-                                                  ("/repo", SHA, None)])  # 受理＋门首各一探（探针先于实名解析：补终态优先）
+                                                  ("/repo", SHA, None),
+                                                  ("/repo", SHA, None)])  # 受理＋门首＋merged 前锚终检各一探（ag-54bd98 G2）
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.clean_calls, [])
@@ -1533,7 +1617,7 @@ class TestReopenDispatcherNotice(TestCoreGate):
         self.runner = FakeRunner((0, "pass"), (0, "pass"))
         self.mk_gate(merge="non-ff")
         self.gx.rebase_result = "ok"
-        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.gx.rebase_new_head = R_SHA
         self.gx.ff_sha_result = "non-ff"
         self.gx.contains_results = [False, False, False]  # 受理/门首/守卫均未含
         self.in_gate()
@@ -1545,7 +1629,7 @@ class TestReopenDispatcherNotice(TestCoreGate):
         self.runner = FakeRunner((0, "env pass"), (1, "R broke"))
         self.mk_gate(merge="non-ff")
         self.gx.rebase_result = "ok"
-        self.gx.head_shas[f"{self.env}__gate"] = R_SHA
+        self.gx.rebase_new_head = R_SHA
         self.in_gate()
         self.gate.run("t1")
         (m,) = self.notices()

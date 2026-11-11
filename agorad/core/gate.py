@@ -36,6 +36,11 @@ _GATE_PATTERNS = ("Makefile", "*.mk", "pyproject.toml", "setup.py", "setup.cfg",
                   "go.mod", "Cargo.toml", "tox.ini", "noxfile.py",
                   ".github/workflows/*")
 
+# ag-54bd98 幻影合并双守卫共用弹回文案：env boot 分支无交付可并（G1 空集重放/
+# G2 落账 commit 不在目标支），worker 确认交付在 boot 分支后重 post(done) 自愈
+_PHANTOM_BOUNCE = ("合并前置失败：env 分支相对目标无新增提交——确认交付提交在"
+                   " env boot 分支上后重新 post(done, commit)")
+
 
 # F32 门环境消毒：服务自身态三变量不随 env 泄入 verify 子进程链——test_install.sh
 # 类自测拉起的 daemon 经 main.py os.environ.get("AGORA_PORT","0") 硬绑服务在用端口即崩。
@@ -445,6 +450,14 @@ class Gate:
                 # E＝锚对齐的 env 提交：崩溃重排时留痕值优先于落库残值 R
                 e = t.get("rebased_from") or t.get("commit")
                 r = self._gitx.head(integration)
+                if r == before and not self._gitx.contains(target, e, branch):
+                    # ag-54bd98 G1 幻影形态②（ag-c3de0f/ag-e75d89）：空集重放
+                    # R==onto＝env boot 分支零交付——原锚（run() 起点快照）不在
+                    # 目标支即非崩溃窗口，禁以 set_fields(commit=R) 伪装推进。
+                    self._audit(tid, "empty_rebase_noop")
+                    self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
+                                       reason="空集 rebase 无交付")
+                    return
                 self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
                 self._audit(tid, "rebased", **{"from": e, "to": r})
             report = self._gitx.materialize_checkout(integration, target)  # Req: ag-0d2daa
@@ -510,6 +523,15 @@ class Gate:
     def _succeed(self, tid):
         """唯一成功出口：目标支已含任务 commit，补终态、审计与任务环境回收。"""
         t = self._state.get(tid)
+        if not self._gitx.contains(t["project_dir"], t.get("commit"),
+                                   t.get("target_branch")):
+            # ag-54bd98 G2 幻影形态①（ag-40a1fa）：ff 幂等假成功——merged 落账
+            # 的 commit 从未进目标支（门记 merged+closed 而交付静默丢失）。
+            # 锚一致性终检：merged ⇒ 目标支真含落账 commit，否则弹回自愈。
+            self._audit(tid, "phantom_merge_blocked")
+            self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
+                               reason="目标支不含落账 commit")
+            return
         self._state.fail_streak_reset(tid)  # 全绿清连败（R12）
         self._state.transition(tid, "merged", commit=t.get("commit"))
         # F32：rebased_from 从 state 读（裁定②）——崩溃补终态路径才有值可取

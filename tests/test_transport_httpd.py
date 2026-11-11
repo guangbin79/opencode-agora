@@ -43,6 +43,7 @@ class FakeGitx:
     def __init__(self, base):
         self.base = Path(base)
         self.removed, self.branch = [], None
+        self.landed = False  # ag-54bd98：最终推进落地后目标支含任务提交（G2 探针口径）
 
     def build_env(self, project_dir, tid, branch=None):
         self.branch = branch
@@ -77,6 +78,9 @@ class FakeGitx:
         pass
 
     def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
+        if self.landed:  # ag-54bd98：一次消费——最终推进落地恰由本门 merged 前终检
+            self.landed = False  # 读取即还原：不跨任务/跨门泄漏给受理探针
+            return True
         return False
 
     def ensure_clean(self, repo_dir, exempt=()):
@@ -93,6 +97,8 @@ class FakeGitx:
         shutil.rmtree(integration_dir, ignore_errors=True)
 
     def merge_ff(self, env_dir, target, branch=None):
+        if branch is not None:  # ag-54bd98：最终推进（试合并 branch=None）落地即含
+            self.landed = True
         return "ok"
 
     def head(self, repo_dir, branch=None):

@@ -95,6 +95,7 @@ agora-install
 
 - `done` 受理即检查锚（缺失/落后/未绿 → 拒收退回 worker），**合并前重验**（堵住"评审过又偷提交"的窗口；重验失败自动 reopened 回 worker 自愈，不再驻留）。零新增提交的 done 一并拒收——除非属已在目标支落库的有效交付（env HEAD 相对任务起点 base 有前进，或前次受理的 commit 已在目标支可达）；真零提交（HEAD 仍在起点 base）照拒——worker 以 note 报 no-op，由派发方取消归档。
 - 锚绿＋verify 绿 = 自动 ff-only 合并——任务支落后（non-ff）时门内自动 rebase 干净同步自愈，同步冲突才重开。
+- 幻影合并双守卫——目标支真含交付 commit 才落 merged：空集 rebase（env boot 分支无新增提交）与幂等 ff 假成功一律弹回重报，不再账面 merged 而交付静默丢失。
 - 没有 `.review-loop/` 目录？`done` 会被拒收并附补建指引——自动合并必须两道闸齐全。自治是挣来的，不是默认送的。
 
 任何评审器都行——OpenCodeReview、CodeRabbit、人工清单——agora 只认锚。最小评审器约 10 行：
