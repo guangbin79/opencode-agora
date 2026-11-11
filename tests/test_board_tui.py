@@ -20,7 +20,7 @@ from pathlib import Path
 import board_tui
 from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
                        detail_page, doctor_page, handle_key, load_board,
-                       rel_time, run, try_cancel)
+                       rel_time, run, try_cancel, try_nudge)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -39,7 +39,7 @@ def snap(**tasks):
 def model(rows=(), sel=0, **kw):
     m = {"rows": list(rows), "sel": sel, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "bucket": None,
-         "proj": False, "gexpanded": set()}
+         "proj": False, "gexpanded": set(), "prompt": False}
     m.update(kw)
     return m
 
@@ -258,6 +258,40 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual((handle_key(m, "d").op, m["view"]), ("doctor", "doctor"))
         self.assertEqual(handle_key(m, "r").op, "refresh")
         self.assertEqual(handle_key(m, "q").op, "quit")
+
+    def test_p_and_P_prompt_selected_task(self):  # Req: F73
+        """p 直发默认自检；P 进自定义输入，Enter 带 arg、Esc 清空取消。"""
+        m = model(self.ROWS, sel=1)
+        self.assertEqual(handle_key(m, "p"),
+                         Action("nudge", "t1", None))
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "p").op, "noop")
+
+        m = model(self.ROWS, sel=1)
+        self.assertEqual(handle_key(m, "P").op, "noop")  # 先武装输入，不发送
+        self.assertIs(m["prompt"], True)
+        self.assertEqual((m["input"], m["buf"]), ("", ""))
+        handle_key(m, "先")
+        handle_key(m, " ")
+        for c in "check":
+            handle_key(m, c)
+        a = handle_key(m, "\r")
+        self.assertEqual(a, Action("nudge", "t1", "先 check"))
+        self.assertIs(m["prompt"], False)
+        self.assertIsNone(m["input"])
+
+        m = model(self.ROWS, sel=1)
+        handle_key(m, "P")
+        handle_key(m, "x")
+        self.assertEqual(handle_key(m, "\x1b"), Action("noop", None, None))
+        self.assertIs(m["prompt"], False)
+        self.assertIsNone(m["input"])
+
+    def test_prompt_keys_ignored_off_task_or_fullscreen(self):  # Req: F73
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "P").op, "noop")
+        m = model(self.ROWS, sel=1, view="detail")
+        self.assertEqual(handle_key(m, "p").op, "noop")
+        self.assertEqual(handle_key(m, "P").op, "noop")
+        self.assertIs(m.get("prompt"), False)
 
     def test_x_needs_confirm_then_y_cancels(self):  # Req: F11/F10
         m = model(self.ROWS, sel=1)
@@ -619,6 +653,44 @@ class TestTryCancel(unittest.TestCase):
             bad = try_cancel(base, "tok", "t1")
             self.assertIn("cancel failed", bad)     # 取消失败≠离线
             self.assertNotIn("offline", bad)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+class _NudgeStub(http.server.BaseHTTPRequestHandler):
+    """task_nudge 契约桩：success/no_worker 形态直透状态栏。"""
+    result = {"nudged": True}
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        _NudgeStub.body = json.loads(self.rfile.read(n) or b"{}")
+        data = json.dumps(_NudgeStub.result).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class TestTryNudge(unittest.TestCase):
+    def test_nudge_status_uses_service_reason(self):  # Req: F73
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _NudgeStub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            self.assertEqual(try_nudge(base, "tok", "t1"),
+                             "prompt t1: sent")
+            self.assertEqual(_NudgeStub.body, {"task": "t1"})
+            self.assertEqual(try_nudge(base, "tok", "t1", "先 check"),
+                             "prompt t1: sent")
+            self.assertEqual(_NudgeStub.body,
+                             {"task": "t1", "body": "先 check"})
+            _NudgeStub.result = {"nudged": False, "reason": "no_worker"}
+            self.assertEqual(try_nudge(base, "tok", "t1"),
+                             "prompt t1: no_worker")
         finally:
             srv.shutdown()
             srv.server_close()

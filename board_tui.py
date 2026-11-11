@@ -6,7 +6,7 @@
 数据面＝agorad HTTP /board（五桶＋链＋逐任务明细）；root 牌自动读
 $AGORA_HOME/.agora/root.token，端口读 .agora/service.json；会话 tail 只读
 $XDG_DATA_HOME/opencode/opencode.db（sqlite ro，失败降级为提示行）。
-边界：无模式切换（less 同款）；x 取消须 y 确认行；:命令行不做。
+边界：无模式切换（less 同款）；p/P 手动 worker 提示；x 取消须 y 确认行；:命令行不做。
 """
 import curses
 import json
@@ -245,12 +245,18 @@ def handle_key(m, key):
     x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员） Z 全折全展 / 过滤（单行输入态）
     1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
     """
-    if m.get("input") is not None:            # 过滤单行输入态
+    if m.get("input") is not None:            # 过滤/提示单行输入态
         if key in ("\n", "\r", "KEY_ENTER"):
-            m["filter"], m["input"], m["buf"] = m["buf"], None, ""
+            prompt, text = bool(m.get("prompt")), m["buf"]
+            r = _sel_row(m)
+            m["prompt"], m["input"], m["buf"] = False, None, ""
+            if prompt:                         # F73：空文本交给服务端缺省自检
+                return (Action("nudge", task=r.tid, arg=text or None)
+                        if r and r.kind == "task" else Action("noop"))
+            m["filter"] = text
             return Action("apply")
         if key == "\x1b":
-            m["input"] = m["buf"] = None
+            m["prompt"], m["input"], m["buf"] = False, None, None
             return Action("noop")
         if key in ("\x7f", "\b", "KEY_BACKSPACE"):
             m["buf"] = m["buf"][:-1]
@@ -297,6 +303,15 @@ def handle_key(m, key):
     if key == "d":
         m["view"] = "doctor"
         return Action("doctor")
+    if key == "p":
+        if m.get("view") == "board" and r and r.kind == "task":
+            return Action("nudge", task=r.tid)  # F73：直发内置自检
+        return Action("noop")
+    if key == "P":
+        if m.get("view") == "board" and r and r.kind == "task":
+            m["prompt"], m["input"], m["buf"] = True, "", ""  # 只武装输入
+            return Action("noop")
+        return Action("noop")
     if key == "x":
         if m.get("view") == "board" and r and r.kind == "task":
             m["confirm"] = r.tid
@@ -389,6 +404,20 @@ def try_cancel(base, token, task):
         return f"cancel {task}: cancelled={r.get('cancelled')}"
     except Exception as e:
         return f"cancel failed: {e}"
+
+
+def try_nudge(base, token, task, body=None):
+    """task_nudge 一次并回状态文本：发送失败≠离线（离线只由轮询上报）。"""
+    payload = {"task": task}
+    if body is not None:
+        payload["body"] = body
+    try:
+        r = _call(base, token, "/task_nudge", payload)
+        if r.get("nudged"):
+            return f"prompt {task}: sent"
+        return f"prompt {task}: {r.get('reason', 'failed')}"
+    except Exception as e:
+        return f"prompt failed: {e}"
 
 
 def tail_session(sid, limit=40):
@@ -497,13 +526,14 @@ def draw_board(stdscr, m, status="", err=None):
         stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor"
-                   " | x cancel | 1-5 bucket | 0 proj",
+                   " | p/P prompt | x cancel | 1-5 bucket | 0 proj",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
                    f" r refresh | z/Z fold | q quit | / filter[{m['filter']}]",
                    w - 1, curses.A_DIM)
-    line = f"/{m['buf']}▌" if m.get("input") is not None else \
-           (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None)
+    line = (f"prompt {m['buf']}▌" if m.get("prompt") and m.get("input") is not None
+            else f"/{m['buf']}▌" if m.get("input") is not None else
+            (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None))
     if line:
         stdscr.addnstr(h - 1, 0, line, w - 1, curses.A_REVERSE)
     stdscr.refresh()
@@ -529,7 +559,7 @@ def run(stdscr, base, token):
     stdscr.timeout(int(interval * 1000))
     m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set(),
-         "bucket": None, "proj": False, "gexpanded": set(),
+         "bucket": None, "proj": False, "gexpanded": set(), "prompt": False,
          "tids": set(), "groups": set()}
     details, snap, events = {}, None, None
     status, err, page = "loading…", None, []
@@ -574,6 +604,10 @@ def run(stdscr, base, token):
             msg = try_cancel(base, token, a.task)
             poll()                                 # cancel 本就发 HTTP，顺势刷一帧
             status = msg                           # 保住取消回执不被轮询状态覆盖
+        elif a.op == "nudge":
+            msg = try_nudge(base, token, a.task, a.arg)
+            poll()                                 # 提示已发 HTTP，顺势刷一帧
+            status = msg
         elif a.op == "refresh":
             poll()                                 # r 手动刷：立即拉一帧
         elif a.op in ("apply", "fold"):        # 过滤回车/z 折叠：用缓存帧即时重建，零 HTTP

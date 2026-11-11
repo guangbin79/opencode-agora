@@ -54,6 +54,11 @@ _KIND_NOTE = {
                    "项目仓已亡则 cancel 归档",
 }
 
+# F70/F73 共用提示：单源防 board 手动面与 health 自动面漂移
+SELF_CHECK_PROMPT = ("核对任务目标、当前动作与程序状态。若正常，简述当前进展后"
+                     "继续；若异常或偏离目标，先安全停止当前动作，说明原因，"
+                     "再选择安全的恢复方式；不要机械重启。")
+
 
 def _subprocess_runner(cmd, input_text):
     """默认邮件外呼：正文走 stdin，30s 超时；非零退出/超时抛异常由调用方吞。"""
@@ -182,14 +187,7 @@ class Health:
                 self._stale_seen.add(tid)  # 拍到才记：escalate 失败下轮重试不丢报
                 wsid = tasks[tid].get("worker_sid")
                 if wsid:  # F70 自检提示：模型自行纠偏；注入败不重试不阻断拍人
-                    try:
-                        self._oc.inject(wsid, (
-                            f"[agora] 僵态自检（任务 {tid}）：核对任务目标、"
-                            "当前动作与程序状态。若正常，简述当前进展后继续；"
-                            "若异常或偏离目标，先安全停止当前动作，说明原因，"
-                            "再选择安全的恢复方式；不要机械重启。"))
-                    except Exception:
-                        pass
+                    self.nudge_worker(tid)
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
         self._stale_esc = {tid: v for tid, v in self._stale_esc.items()
@@ -200,6 +198,22 @@ class Health:
                                if tasks.get(tid, {}).get("state") in _ACTIVE
                                and tasks[tid].get("env_dir")
                                and not Path(tasks[tid]["env_dir"]).is_dir()}
+
+    def nudge_worker(self, tid, text=None):
+        """F70/F73 单一注入面：缺省＝自检，text＝board 派发方自定义提示。
+
+        不强制打断（prompt 由 opencode 排队/转向）；无 worker 或注入异常
+        返回 False，是否审计/报因归调用方。"""
+        wsid = self._state.get(tid).get("worker_sid")
+        if not wsid:
+            return False
+        body = (f"[agora] 僵态自检（任务 {tid}）：{SELF_CHECK_PROMPT}"
+                if not text else
+                f"[agora] dispatcher prompt（任务 {tid}）\n{text}")
+        try:
+            return bool(self._oc.inject(wsid, body))
+        except Exception:
+            return False
 
     def _stale_gap(self, count):
         """已连拍 count 次后的再拍退避窗（秒）：首档 1200s 逐档×4，封顶 24h。"""

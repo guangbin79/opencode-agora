@@ -64,7 +64,7 @@ class _Handler(BaseHTTPRequestHandler):
         sid = None
         try:
             name = self.path.strip("/").split("?")[0]
-            if name not in _TOOLS and name != "cred_for_sid":
+            if name not in _TOOLS and name not in ("cred_for_sid", "task_nudge"):
                 return self._json(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -85,6 +85,8 @@ class _Handler(BaseHTTPRequestHandler):
                     row = self.app.state.get(tid)
                 except KeyError:
                     return self._json(404, {"error": f"task {tid} 不存在"})
+            if name == "task_nudge":  # board 内部面：细授权不走通用 may 矩阵
+                return self._json(200, self._task_nudge(sid, role, body, row))
             if not self.app.auth.may(role, name, tid, row):
                 return self._deny(sid, role, name, tid)
             self.app.health.touch(sid)  # last_seen：每次工具调用即刷新
@@ -271,6 +273,37 @@ class _Handler(BaseHTTPRequestHandler):
             t = app.state.get(tid)
         edge = ("down", tid) if self.app.router.is_dispatcher(sid, t) else ("up", tid)
         return {"message": app.router.post(sid, edge, kind, str(body["body"]))}
+
+    def _task_nudge(self, sid, role, body, row):
+        """F73 board 手动提示面：root 任意任务；任务派发方限己任务链。
+
+        缺省/空白＝F70 同源自检；自定义加服务来源行（文本不落审计正文）。
+        无 worker/注入失败返回 200 结构化原因；实际尝试才落 worker_nudge 审计。"""
+        tid = body["task"]
+        if role != "root" and not self.app.router.is_dispatcher(sid, row):
+            raise Rejected(f"{sid}->{tid}: prompt 仅 root/任务派发方")
+        if not row.get("worker_sid"):
+            return {"nudged": False, "reason": "no_worker"}
+        text = body.get("body")
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            raise ValueError("prompt body 须为字符串")
+        text = text.strip()
+        if len(text) > 2000:
+            raise ValueError("prompt body 长度须≤2000 字符")
+        mode = "custom" if text else "default"
+        ok = self.app.health.nudge_worker(tid, text=text or None)
+        self.app.store.append_event(
+            {"ts": time.time(), "actor": sid, "event": "worker_nudge",
+             "task": tid,
+             "note": f"mode={mode} chars={len(text)} "
+                     f"delivered={str(ok).lower()}"})
+        if ok:
+            return {"nudged": True}
+        return {"nudged": False,
+                "reason": "no_worker" if not row.get("worker_sid")
+                          else "inject_failed"}
 
     def _cred_for_sid(self, body):
         """F25 修正推改拉面：插件 hook 缓存未命中按会话 sid 拉凭据。

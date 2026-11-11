@@ -241,6 +241,100 @@ class TestHttpSmoke(HttpdTest):
         self.assertTrue(r["ok"])
         self.assertTrue(r["enforce_on"])
 
+    def test_task_nudge_default_custom_no_worker_and_audit(self):  # Req: F73
+        """board 内部提示面：缺省＝F70 同源自检，自定义加来源行＋审计。"""
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        before = len(self.stub.sessions[wsid]["injects"])
+        st, r = call(self.port, "POST", "/task_nudge", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"nudged": True}))
+        text = self.stub.sessions[wsid]["injects"][before]
+        self.assertIn(f"[agora] 僵态自检（任务 {tid}）", text)
+        self.assertIn("核对任务目标", text)
+        ev = [e for e in self.app.store.read_events(tid)
+              if e["event"] == "worker_nudge"][-1]
+        self.assertEqual(ev["actor"], "main")
+        self.assertIn("mode=default", ev["note"])
+        self.assertIn("delivered=true", ev["note"])
+
+        st, r = call(self.port, "POST", "/task_nudge",
+                     {"task": tid, "body": "  先核对失败输出  "}, self.root)
+        self.assertEqual((st, r), (200, {"nudged": True}))
+        self.assertEqual(self.stub.sessions[wsid]["injects"][-1],
+                         f"[agora] dispatcher prompt（任务 {tid}）\n"
+                         "先核对失败输出")
+        ev = [e for e in self.app.store.read_events(tid)
+              if e["event"] == "worker_nudge"][-1]
+        self.assertIn("mode=custom", ev["note"])
+        self.assertIn("delivered=true", ev["note"])
+
+    def test_task_nudge_no_worker_never_injects(self):  # Req: F73
+        tid = self.create_task()
+        st, r = call(self.port, "POST", "/task_nudge", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"nudged": False,
+                                         "reason": "no_worker"}))
+        self.assertEqual(self.stub.sessions, {})
+        self.assertEqual([e for e in self.app.store.read_events(tid)
+                          if e["event"] == "worker_nudge"], [])
+
+    def test_task_nudge_authorizes_root_and_task_dispatcher(self):  # Req: F73
+        tid = self.create_task()  # 无头 root 任务：dispatcher_sid=main
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        before = len(self.stub.sessions[wsid]["injects"])
+        outsider = self.app.auth.issue("ses-other", "dispatcher")
+        st, r = call(self.port, "POST", "/task_nudge", {"task": tid}, outsider)
+        self.assertEqual(st, 403)
+        self.assertEqual(len(self.stub.sessions[wsid]["injects"]), before)
+        st, r = call(self.port, "POST", "/task_nudge", {"task": tid},
+                     self.app.auth.issue("w9", "worker"))
+        self.assertEqual(st, 403)
+        self.assertEqual(len(self.stub.sessions[wsid]["injects"]), before)
+        st, r = call(self.port, "POST", "/task_nudge", {"task": tid},
+                     self.root, sid="ses-A")
+        self.assertEqual((st, r), (200, {"nudged": True}))  # root 任意任务
+
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "own", "project_dir": "/repo"},
+                     self.root, sid="ses-A")
+        own = r["task"]
+        st, _ = call(self.port, "POST", "/task_update",
+                     {"task": own, "verify_cmd": "true"}, self.root,
+                     sid="ses-A")
+        self.assertEqual(st, 200)
+        st, _ = call(self.port, "POST", "/task_dispatch", {"task": own},
+                     self.root, sid="ses-A")
+        self.assertEqual(st, 200)
+        own_wsid = self.app.state.get(own)["worker_sid"]
+        dtok = self.app.auth.issue("ses-A", "dispatcher")
+        st, r = call(self.port, "POST", "/task_nudge", {"task": own}, dtok)
+        self.assertEqual((st, r), (200, {"nudged": True}))
+        self.assertIn("僵态自检", self.stub.sessions[own_wsid]["injects"][-1])
+
+    def test_task_nudge_validates_body_and_reports_inject_failure(self):  # Req: F73
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        before = len(self.stub.sessions[wsid]["injects"])
+        st, r = call(self.port, "POST", "/task_nudge",
+                     {"task": tid, "body": 123}, self.root)
+        self.assertEqual(st, 400)
+        self.assertIn("字符串", r["error"])
+        st, r = call(self.port, "POST", "/task_nudge",
+                     {"task": tid, "body": "x" * 2001}, self.root)
+        self.assertEqual(st, 400)
+        self.assertIn("2000", r["error"])
+        self.assertEqual(len(self.stub.sessions[wsid]["injects"]), before)
+
+        self.stub.fail_prompt = True
+        st, r = call(self.port, "POST", "/task_nudge", {"task": tid}, self.root)
+        self.assertEqual((st, r), (200, {"nudged": False,
+                                         "reason": "inject_failed"}))
+        ev = [e for e in self.app.store.read_events(tid)
+              if e["event"] == "worker_nudge"][-1]
+        self.assertIn("delivered=false", ev["note"])
+
     def test_missing_or_bad_token_401(self):  # Req: F1
         st, _ = call(self.port, "POST", "/board", {})
         self.assertEqual(st, 401)
