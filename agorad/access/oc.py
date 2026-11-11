@@ -14,6 +14,9 @@
 - inject_silent：POST /session/{sid}/synthetic {text,resume:false}→204 无体（免通知通道：
   只落转录不调度回合，桌面无「响应就绪」弹出；v2.2.0 binary schema 实证声明 204/400/401/404）；
   失败契约同 inject（400/404→False，其余 OcUnavailable 上抛）。
+- inject_notify：POST /session/{sid}/synthetic {text,resume:true}（ag-3016f1 勘误 gt-5bc312：
+  通知通道——落合成消息并调度回合＝弹消息通知、无选择框，idle 会话被唤醒；busy 会话
+  steer 捎带不打断）；失败契约同 inject。
 - alive/session：GET /session/{sid}→200 {data:{...}}＝活；404＝死（不抛）。
   session(sid) 回同一 data 体（含 time:{created,updated,idle,viewed} 毫秒 epoch），404→None。
 - last_message：GET /session/{sid}/message→{data:[...]}（2.2.2 实测：记录带 type=user/
@@ -123,8 +126,17 @@ class Oc:
     def inject_silent(self, sid: str, text: str) -> bool:
         """免通知注入（stalled 降噪 gt-5bc312）：synthetic 消息 resume=false——
         只落会话转录，不调度模型回合，桌面端无「响应就绪」弹出；失败契约同 inject。"""
+        return self._synthetic(sid, text, resume=False)
+
+    def inject_notify(self, sid: str, text: str) -> bool:
+        """通知注入（ag-3016f1 勘误 gt-5bc312）：synthetic 消息 resume=true——
+        落合成消息并调度回合（弹消息通知、无选择框），idle 会话被唤醒；
+        失败契约同 inject。"""
+        return self._synthetic(sid, text, resume=True)
+
+    def _synthetic(self, sid: str, text: str, resume: bool) -> bool:
         try:
-            self._post(f"/session/{sid}/synthetic", {"text": text, "resume": False})
+            self._post(f"/session/{sid}/synthetic", {"text": text, "resume": resume})
             return True
         except OcUnavailable as e:
             if e.status in (400, 404):

@@ -18,9 +18,9 @@ from agorad.access.store import Store
 from agorad.core import report
 from agorad.core.app import App
 from agorad.core.auth import Auth
-from agorad.core.health import (KIND_DISPATCHER_DEAD, KIND_GATEFILES,
-                                KIND_QUALITY, KIND_REINJECT, KIND_STALLED,
-                                Health, send_email)
+from agorad.core.health import (KIND_DISPATCHER_DEAD, KIND_ENV_GONE,
+                                KIND_GATEFILES, KIND_QUALITY, KIND_REINJECT,
+                                KIND_STALLED, Health, send_email)
 from agorad.core.msg import Router
 from agorad.core.state import State
 
@@ -32,8 +32,10 @@ class FakeOc:
         self.liveness = {}  # sid->bool；缺席＝死
         self.time_of = {}  # sid->{"updated":ms,"idle":ms}；缺席＝缺形状→不 busy
         self.sessions, self.injected = [], []
-        self.silent_injected = []  # 免通知通道（stalled 降噪）
+        self.silent_injected = []  # 免通知通道（note digest 面）
         self.silent_down = False  # True＝免通知通道不可达（契约 False）
+        self.notify_injected = []  # 通知通道（stalled/env-gone 升级，ag-3016f1）
+        self.notify_down = False  # True＝通知通道不可达（契约 False，留库补拉）
         self.inject_down = False  # F70：True＝prompt 注入不可达（自检提示失败面）
         self.inject_result = True  # F70：False＝真 Oc 400/404 契约（未注入返 False）
         self.inject_calls = []  # F70：注入尝试计数（含失败，观测不重试）
@@ -76,6 +78,12 @@ class FakeOc:
         if self.silent_down:
             return False  # 通道不可达：留库补拉
         self.silent_injected.append((sid, text))
+        return True
+
+    def inject_notify(self, sid, text):
+        if self.notify_down:
+            return False  # 通道不可达：留库补拉（同 silent 契约）
+        self.notify_injected.append((sid, text))
         return True
 
 
@@ -515,28 +523,40 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.store.read_events("t1")
                           if e["event"].startswith("email")], ["email_failed"])
 
-    # ---- stalled 免通知通道（gt-5bc312 降噪）：提醒不弹窗 ----
+    # ---- stalled/env-gone 通知通道（ag-3016f1 勘误 gt-5bc312）：弹消息通知、无选择框 ----
 
-    def test_stalled_silent_quiet_channel_without_injection(self):  # Req: F5
-        """stalled 拍人改走免通知通道：落库＋会话内静默提醒（synthetic，
-        不唤醒回合→桌面无「响应就绪」弹出）；审计行与邮件例外不受影响。"""
+    def test_stalled_escalate_goes_notify_channel_others_prompt(self):  # Req: F76
+        """stalled 拍人走通知通道（synthetic resume:true——落合成消息并调度回合：
+        弹消息通知、无选择框，idle dispatcher 被唤醒）；不走真实 prompt 也不走
+        silent（不调度回合）；审计行与邮件例外不受影响。"""
         self.seed("t1")
         self.health.escalate(KIND_STALLED, "t1")
-        self.assertEqual(self.oc.injected, [])  # 不走会话注入＝无桌面弹出
+        self.assertEqual(self.oc.injected, [])  # 真实 prompt 通道零调用
+        self.assertEqual(self.oc.silent_injected, [])  # silent（不唤醒）通道零调用
+        self.assertEqual(len(self.oc.notify_injected), 1)  # 通知通道恰一次
+        sid, text = self.oc.notify_injected[0]
+        self.assertEqual(sid, "main")  # 提醒仍达主会话
         body = self.main_msgs()[0]["body"]  # 消息照常落库
         self.assertIn("失控[stalled]", body)
-        self.assertEqual(len(self.oc.silent_injected), 1)  # 免通知通道恰一次
-        sid, text = self.oc.silent_injected[0]
-        self.assertEqual(sid, "main")  # 提醒仍达主会话
         self.assertIn(body, text)
         self.assertEqual([e["event"] for e in self.store.read_events("t1")
                           if e["event"] == "escalate"], ["escalate"])  # 审计行不变
         self.health.escalate(KIND_QUALITY, "t1")  # 其余 kind 注入语义不变（对照）
         self.assertEqual(len(self.oc.injected), 1)
+        self.assertEqual(len(self.oc.notify_injected), 1)  # 通知通道不增
 
-    def test_stalled_silent_channel_down_falls_back_to_pull(self):  # Req: F5
+    def test_env_gone_escalate_goes_notify_channel(self):  # Req: F76
+        """env-gone 同款走通知通道（F72 同款跟随 stalled 勘误）。"""
         self.seed("t1")
-        self.oc.silent_down = True
+        self.health.escalate(KIND_ENV_GONE, "t1")
+        self.assertEqual(len(self.oc.notify_injected), 1)
+        self.assertEqual(self.oc.notify_injected[0][0], "main")
+        self.assertEqual(self.oc.silent_injected, [])
+        self.assertEqual(self.oc.injected, [])
+
+    def test_stalled_notify_channel_down_falls_back_to_pull(self):  # Req: F5
+        self.seed("t1")
+        self.oc.notify_down = True
         self.health.escalate(KIND_STALLED, "t1")  # 通道不可达不抛
         self.assertEqual(self.oc.injected, [])
         pulled = self.router.check_mail("main")
@@ -725,6 +745,62 @@ class TestCoreHealth(unittest.TestCase):
         body = self.main_msgs()[0]["body"]
         self.assertIn("失控[stalled]", body)
         self.assertNotIn("草稿:", body)
+
+    # ---- ag-3016f1 证据包链向补证（ag-acc22e 死锁：卡点可能在 dispatcher 侧） ----
+
+    def escalate_body(self, tid="t1"):
+        return next(m["body"] for m in reversed(self.main_msgs())
+                    if m["kind"] == "escalate" and m["task"] == tid)
+
+    def test_stalled_evidence_last_chain_msg_worker_upstream_flagged(self):  # Req: F76
+        """末条链边消息系 worker 上行→标注「worker→dispatcher 未应答——卡点可能
+        在 dispatcher 侧」；证据在 escalate 自身落库前采集（不含本次升级行）。"""
+        self.seed("t1")
+        self.store.write_message({"ts": 1.0, "task": "t1", "kind": "note",
+                                  "from": "s-w1", "to": "main"}, "请裁定")
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertIn("last_chain_msg: worker→dispatcher 未应答——卡点可能在 dispatcher 侧",
+                      self.escalate_body())
+
+    def test_stalled_evidence_last_chain_msg_other_direction_plain(self):  # Req: F76
+        """非 worker 上行：标 from→to 原始方向；无链边消息整行省略（降级纪律）。"""
+        self.seed("t1")
+        self.store.write_message({"ts": 1.0, "task": "t1", "kind": "milestone",
+                                  "from": "main", "to": "s-w1"}, "加油")
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertIn("last_chain_msg: main→s-w1", self.escalate_body())
+        self.seed("t2", worker="s-w2")  # 无链边消息任务
+        self.health.escalate(KIND_STALLED, "t2")
+        self.assertNotIn("last_chain_msg", self.escalate_body("t2"))
+
+    def test_stalled_evidence_last_chain_msg_ignores_peer_rows(self):  # Req: F76（评审环 C 册）
+        """peer 留言（to=''，非链边）不入选末条链边消息——防 worker 同仓留言
+        被误标「worker→dispatcher 未应答」误导排查方向。"""
+        self.seed("t1")
+        self.store.write_message({"ts": 1.0, "task": "t1", "kind": "process",
+                                  "from": "main", "to": "s-w1"}, "派发")
+        self.store.write_message({"ts": 2.0, "task": "t1", "kind": "peer",
+                                  "repo": "/repo", "from": "s-w1", "to": ""},
+                                 "同仓留言")
+        self.health.escalate(KIND_STALLED, "t1")
+        self.assertIn("last_chain_msg: main→s-w1", self.escalate_body())
+
+    def test_stalled_evidence_store_failure_never_blocks(self):  # Req: F76（评审环 B 册）
+        """消息面读取异常（目录级 IO 故障）：链向行整行省略、拍人照常——
+        证据永不阻塞拍人（F59 纪律同款）。"""
+        self.seed("t1")
+
+        def boom():
+            raise OSError("scandir EIO")
+
+        orig = self.store.read_messages
+        self.store.read_messages = boom
+        try:
+            self.health.escalate(KIND_STALLED, "t1")  # 不抛
+        finally:
+            self.store.read_messages = orig
+        self.assertIn("失控[stalled]", self.escalate_body())
+        self.assertNotIn("last_chain_msg", self.escalate_body())
 
     # ---- escalate：正文合成＋不可信段＋四类达主会话 ----
 

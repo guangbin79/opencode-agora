@@ -35,6 +35,16 @@ class TestAccessOc(unittest.TestCase):
         # inject 契约同归 False（失败留库待补拉），cancel/通知链不因之 400。
         self.assertFalse(self.oc.inject("main", "hello"))
 
+    def test_inject_notify_synthetic_resume_true(self):  # Req: F76
+        """notify 通道（gt-5bc312 勘误）＝synthetic resume:true——落合成消息并调度
+        回合（弹消息通知、无选择框）；死会话/非 ses 形同 inject 契约归 False。"""
+        sid = self.oc.create("/e", "B")
+        self.assertTrue(self.oc.inject_notify(sid, "wake up"))
+        self.assertEqual(self.stub.sessions[sid]["synthetics"], [("wake up", True)])
+        self.stub.kill(sid)
+        self.assertFalse(self.oc.inject_notify(sid, "again"))  # 死会话 404→False
+        self.assertFalse(self.oc.inject_notify("main", "x"))  # 非 ses 形 400→False
+
     def test_alive_unknown_sid_false(self):  # Req: F5
         self.assertFalse(self.oc.alive("no-such-sid"))
 

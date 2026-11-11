@@ -3,7 +3,8 @@
 形状对账自真 opencode v2.1.4（T5 探针 tests/e2e/oc_probe.ts，/tmp/opencode/oc-probe.json）：
 - 全路径挂 /api 前缀；POST /session {}→{data:{id}}（多余字段忽略）；move 绑目录→204；
 - prompt {text}→{data:{delivery:"steer"}}，busy 排队按序（stub 恒收）；未知/已删 sid→404
-  SessionNotFoundError；GET /session/{sid}→{data:{id,location,time:{created,updated,idle}}}
+  SessionNotFoundError；synthetic {text,resume}→204（ag-3016f1：记 (text,resume) 于
+  sessions[sid]["synthetics"]，404/400 判定同 prompt）；GET /session/{sid}→{data:{id,location,time:{created,updated,idle}}}
   （F28：sessions[sid]["busy"]=True ⇒ updated>idle＝回合进行中）；GET /session/active→{data:{}}
   （idle 不在 map）；GET /info→{version,...}（真服务无 /health）；
   GET /session/{sid}/message→{data:[...]}（F52 消息面：sessions[sid]["messages"] 脚本化，空缺省 []）；
@@ -114,6 +115,19 @@ class StubOpencode:
                         s["directory"] = req.get("directory", s["directory"])
                         self.send_response(204)  # 204 无体（对齐真服务）
                         self.end_headers()
+                    elif len(parts) == 3 and parts[0] == "session" and parts[2] == "synthetic":
+                        # ag-3016f1：真 v2.2.6 端点——synthetic 落消息，resume 决定是否调度回合；
+                        # 记录 (text, resume) 供 notify/silent 两通道形状断言（204 无体对齐真服务）
+                        s = stub.sessions.get(parts[1])
+                        if s:
+                            s.setdefault("synthetics", []).append(
+                                (req.get("text", ""), bool(req.get("resume"))))
+                            self.send_response(204)
+                            self.end_headers()
+                        elif not parts[1].startswith("ses_"):
+                            self._json(400, {"error": "Bad Request"})
+                        else:
+                            self._json(404, self._not_found(parts[1]))
                     elif len(parts) == 3 and parts[0] == "session" and parts[2] == "prompt":
                         s = stub.sessions.get(parts[1])
                         if s and stub.fail_prompt:  # F55：prompt 400 拨杆（坏 model 串面），不记录

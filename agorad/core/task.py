@@ -624,6 +624,8 @@ class TaskService:
                 "task_create/task_dispatch/task_cancel(仅限己建子任务)/sleep\n"
                 "不可用(403): board / doctor / enforce / task_update；task_cancel 他任务亦拒；"
                 "验收命令（verify_cmd/task_update）全局 worker 角色永拒\n"
+                "kind 纪律: 需派发方裁定/答复/决策→post(kind=question)（唤醒通道）；"
+                "单向过程留痕→note（静默 digest，不唤醒对方）\n"
                 + nested
                 + "等待: Code Mode 无 setTimeout——用 sleep(seconds) 本地休眠后重试，勿轮询烧推理轮\n"
                 "开工: 进 env 后首个动作 post(kind=note, body=开工＋一句话计划)——知会派发方（状态即转 running）\n"

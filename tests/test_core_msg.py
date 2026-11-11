@@ -26,6 +26,10 @@ class FakeOc:
         self.events.append(("silent", sid, text))
         return self.online
 
+    def inject_notify(self, sid, text):
+        self.events.append(("notify", sid, text))
+        return self.online
+
 
 class TestCoreMsg(unittest.TestCase):
     def setUp(self):
@@ -553,6 +557,22 @@ class TestF75Replay(TestCoreMsg):
         self.assertEqual((copy["kind"], copy["from"], copy["to"], copy["body"]),
                          ("question", "w1", "d1", "q-body"))
         self.assertGreater(float(copy["ts"]), 1.0)  # ts 取当前：越过既有游标
+
+    def test_online_replay_escalate_goes_notify(self):  # Req: F76
+        """escalate 错址补交同步走通知通道（synthetic resume:true 唤醒派发方）；
+        note 仍走 silent 免弹窗；失败仍留库补拉（离线口径不变）。"""
+        self.root_msg("escalate", "e-body")
+        self.root_msg("note", "n-body")
+        self.assertEqual(self.r.replay_root_backlog("t1", "d1"), 2)
+        kinds = {k for k, _, _ in self.oc.events}
+        self.assertEqual(kinds, {"notify", "silent"})  # 分级面：escalate→notify、note→silent
+        notify = [t for k, _, t in self.oc.events if k == "notify"]
+        self.assertIn("e-body", notify[0])
+        self.oc.online = False
+        self.root_msg("escalate", "later")
+        self.r.replay_root_backlog("t1", "d1")  # 通道败：留库
+        got = self.r.check_mail("d1")
+        self.assertIn("later", [m["body"] for m in got])
 
     def test_offline_replay_pulled_by_check_mail(self):  # Req: F75③
         self.oc.online = False

@@ -29,7 +29,8 @@ _DIGEST_T = 120  # F42：阈值可调
 _TERMINAL_MAIL = {"merged", "closed", "blocked", "cancelled"}  # F63 邮件终态集
 _MAIL_WINDOW = 60  # F63：窗去重秒数——只吞 merged→closed 门尾相邻对（见下）
 
-_SILENT_REPLAY = frozenset({"note", "escalate"})  # F75 补交分级：silent 免弹窗面
+_SILENT_REPLAY = frozenset({"note"})  # F75 补交分级：silent 免弹窗面
+_NOTIFY_REPLAY = frozenset({"escalate"})  # ag-3016f1：escalate 补交走通知通道（唤醒）
 
 
 class NotChainEdge(Exception):
@@ -62,9 +63,10 @@ class Router:
                     and self._same_lineage(sid, d)))
 
     def post(self, from_sid, to_edge: tuple, kind: str, body: str,
-             silent: bool = False) -> int:
+             silent: bool = False, notify: bool = False) -> int:
         to_sid = self._resolve(from_sid, to_edge)
-        return self._deliver(from_sid, to_sid, to_edge[1], kind, body, silent)
+        return self._deliver(from_sid, to_sid, to_edge[1], kind, body,
+                             silent, notify)
 
     def notify_dispatcher(self, tid, kind, body):
         """服务侧结果回传：子任务尚无 worker 链边时也能通知其父 dispatcher。"""
@@ -113,7 +115,8 @@ class Router:
         except Exception:  # 同 _deliver 注入口径：投递面异常不抛、不断链
             return None
 
-    def _deliver(self, from_sid, to_sid, tid, kind, body, silent=False):
+    def _deliver(self, from_sid, to_sid, tid, kind, body,
+                 silent=False, notify=False):
         self._sweep()  # F42：过龄待发先冲，保投递时序
         mid = self._store.write_message(  # 铁则：先落库后注入
             {"ts": time.time(), "task": tid, "kind": kind,
@@ -127,8 +130,11 @@ class Router:
         self._flush(to_sid, tid)  # F42 a：关键消息先冲同目标 digest，本体保持实时
         text = f"[agora] task {tid} {kind} from {from_sid}\n{body}"
         try:
-            # 取属性入 try：oc 缺 inject_silent 时同落兜底网（评审环 B 册）
-            ok = (self._oc.inject_silent if silent else self._oc.inject)(to_sid, text)
+            # 取属性入 try：oc 缺对应通道时同落兜底网（评审环 B 册）；notify 优先于
+            # silent（ag-3016f1 通知通道＝synthetic resume:true，二者互斥不叠加）
+            inject = (self._oc.inject_notify if notify
+                      else self._oc.inject_silent if silent else self._oc.inject)
+            ok = inject(to_sid, text)
         except Exception:  # oc 异常（凭据轮换 401/网络故障）同失败口径：落库兜底——
             ok = False     # done 链路不得因投递面异常断裂（T7 e2e 实测：raise→门不排队）
         if ok:
@@ -170,8 +176,9 @@ class Router:
         不改；副本 to=修复后真实派发者、task/kind/from/body 原样、新增
         replay_of=<原消息id> 幂等锚（重启/重复扫描按锚判已补交，绝不重复生成）；
         ts 取当前保证越过派发者既有 check_mail 游标。分级投递同既有面：
-        question/verify/done 等走真实 prompt 唤醒，note/escalate 走 silent 免
-        弹窗；注入失败副本留库由 check_mail 补拉。只恢复通信，不替派发者做
+        question/verify/done 等走真实 prompt 唤醒，note 走 silent 免弹窗、
+        escalate 走 notify 通知通道（ag-3016f1 同主通道口径）；注入失败副本
+        留库由 check_mail 补拉。只恢复通信，不替派发者做
         业务决策。返回补交数。"""
         msgs = self._store.read_messages()
         done = {m.get("replay_of") for m in msgs}
@@ -187,9 +194,12 @@ class Router:
             n += 1
             text = (f"[agora] task {tid} {m.get('kind')} from {m.get('from')}\n"
                     + m.get("body", ""))
-            try:  # 取属性入 try：oc 缺 inject_silent 时同落兜底网（_flush 口径）
-                inject = (self._oc.inject_silent
-                          if m.get("kind") in _SILENT_REPLAY else self._oc.inject)
+            try:  # 取属性入 try：oc 缺对应通道时同落兜底网（_flush 口径）
+                inject = (self._oc.inject_notify
+                          if m.get("kind") in _NOTIFY_REPLAY
+                          else self._oc.inject_silent
+                          if m.get("kind") in _SILENT_REPLAY
+                          else self._oc.inject)
                 ok = inject(to_sid, text)
             except Exception:  # oc 异常同失败口径：留库补拉
                 ok = False

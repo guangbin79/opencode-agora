@@ -16,7 +16,9 @@ ag-724152 /tmp 清理事故）：每丢失周期一次、持续丢失不拍 stal
 恢复在盘回常规 stalled 边沿，终态出账。升级正文由服务权威合成；任务/worker 供给文本以
 "不可信原文"段携带（拍平换行，防伪造服务行）。escalate 沿 dispatcher_sid
 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）经 router post——
-落库先行，注入即视为拍到（stalled 例外：synthetic 免通知通道，不弹窗）；
+落库先行，注入即视为拍到（stalled/env-gone 例外：synthetic notify 通道
+resume:true——落消息并调度回合＝弹消息通知、无选择框，ag-3016f1 勘误
+gt-5bc312 原降噪裁定只免选择框不免通知）；
 escalate 同时落 events.jsonl 审计行（F8）。
 core 只 import stdlib，依赖全注入。
 """
@@ -308,6 +310,20 @@ class Health:
         ev["fail_streak"] = t.get("fail_streak", 0)
         if note:
             ev["last_msg"] = note  # F52 摘要原样并入，不重复取
+        # ag-3016f1 链向补证（ag-acc22e 死锁）：末条链边消息方向——worker 上行
+        # 未应答时卡点可能在 dispatcher 侧；取不到整行省略（降级纪律同既有）
+        try:
+            # to 空＝peer 留言（非链边）不入选（评审环 C 册：防误标 worker→dispatcher）
+            last = next(m for m in reversed(self._store.read_messages())
+                        if m.get("task") == tid and m.get("to"))
+            frm = last.get("from")
+            ev["last_chain_msg"] = (
+                "worker→dispatcher 未应答——卡点可能在 dispatcher 侧"
+                if frm and frm == t.get("worker_sid")
+                else f"{frm or '-'}→{last.get('to') or '-'}")
+        except Exception:
+            # 无链边消息（StopIteration）／消息面读故障：整行省略不阻塞拍人（评审环 B 册）
+            pass
         lines = [f"{k}: {' '.join(str(v).split())}" for k, v in ev.items()]
         draft = None
         if self._draft_writer:
@@ -322,11 +338,12 @@ class Health:
     def escalate(self, kind, tid, raw=None, streak=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
-        stalled/env-gone 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户
-        裁定；F72 env-gone 同款），其余 kind 照常会话注入；stalled 边沿附末次
-        活动摘要（F52，失败降级）＋证据包小节与草稿页路径（F59，降级纪律：
-        证据永不阻塞拍人；env-gone 正文自足不给）。
-        streak＝同任务连续升级计数（退避节奏见 _stale_scan），正文随带。"""
+        stalled/env-gone 走通知通道（synthetic resume:true——落合成消息并调度
+        回合：弹消息通知、无选择框，idle dispatcher 被唤醒；gt-5bc312 勘误
+        ag-3016f1，原裁定只免选择框；F72 env-gone 同款），其余 kind 照常真实
+        会话注入；stalled 边沿附末次活动摘要（F52，失败降级）＋证据包小节
+        与草稿页路径（F59，降级纪律：证据永不阻塞拍人；env-gone 正文自足
+        不给）。streak＝同任务连续升级计数（退避节奏见 _stale_scan），正文随带。"""
         t = self._state.get(tid)
         body = (f"失控[{kind}] 任务{tid}：{_KIND_NOTE[kind]}；"
                 f"状态 {t['state']}，worker={t.get('worker_sid') or '-'}，"
@@ -354,7 +371,7 @@ class Health:
                                   "event": "escalate", "task": tid, "kind": kind})
         quiet = kind in (KIND_STALLED, KIND_ENV_GONE)
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
-                          silent=quiet)  # stalled/env-gone 免通知通道：不弹窗（gt-5bc312；F72 同款）
+                          notify=quiet)  # stalled/env-gone 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72 同款）
         if quiet:  # 僵态类邮件例外（§6 决策记录）：stalled 与 env-gone（F72 同款）
             send_email(self._store, tid, body, runner=self._runner)
 
