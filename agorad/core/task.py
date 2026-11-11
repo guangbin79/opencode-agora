@@ -171,6 +171,7 @@ class TaskService:
         sid, _ = self._gate(dispatcher_token, "task_dispatch", tid, t,
                             owner=t.get("dispatcher_sid"))
         sid = actor_sid or sid  # ag-f80309：派发归属同建单按对齐调用 sid 记
+        owner = self._route_owner(t, sid)  # F75：CLI 无 sid 派发防归属错址
         stale_note = None
         if t["state"] not in ("todo", "blocked"):
             if t["state"] == "running":  # ag-d1d8c1：stalled 的 running 可重派
@@ -275,7 +276,7 @@ class TaskService:
                                    "stalled 可重派；仅 todo/blocked）")
         self._revoke_worker(t.get("worker_sid"))  # 重派废旧牌（卫兵后置：rebind 不落空）
         self._state.transition(tid, "dispatched", worker_sid=wsid, env_dir=env,
-                               dispatcher_sid=sid, env_base=env_base)
+                               dispatcher_sid=owner, env_base=env_base)
         note = {"note": stale_note} if stale_note else {}  # stalled 重派审计证据
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": EV_DISPATCHED, "task": tid,
@@ -287,8 +288,20 @@ class TaskService:
         except Exception:  # oc 抖动同死会话口径：走落库兜底
             ok = False
         if not ok:  # 直投失败落库兜底：worker check_mail 补拉（§4.8 行先行后消息）
-            self._router.post(sid, ("down", tid), "credential", text)
+            self._router.post(owner, ("down", tid), "credential", text)
         return token
+
+    @staticmethod
+    def _route_owner(t, sid):
+        """F75 派发归属守卫：root 经无 X-Agora-Sid 的 CLI 派发（sid=='root'）时，
+        顶层任务归属行用 root_sid 保留真实建单会话——worker 上行（question/
+        verify/note/done）可达；审计 actor 仍记实际调用者 root，不伪称真实会话
+        发令。嵌套任务链边＝父 worker（root_sid 非父）照旧 sid；真 headless
+        （root_sid=='root' 或缺席）维持 daemon 归属。"""
+        rs = t.get("root_sid")
+        if sid == "root" and t.get("chain_depth", 1) == 1 and rs and rs != "root":
+            return rs
+        return sid
 
     def _worker_parent(self, tid, sid, role):
         """F37 worker 建单作用域（全局角色判定）：验收录回＋仓与合并策略强制继承。

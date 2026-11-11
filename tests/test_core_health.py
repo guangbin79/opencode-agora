@@ -1006,5 +1006,110 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(self.state.get("t1")["last_seen"], 123.0)
 
 
+class TestF75RepairScan(TestCoreHealth):
+    """Req: F75 存量错址修复：active 顶层 dispatcher=='root'＋root_sid 真实会话
+    →归属回写＋审计＋积压补交；幂等；边界（headless/嵌套/终态/缺 root_sid）零动。"""
+
+    def seed_row(self, tid, state="dispatched", root_sid="d1", depth=1):
+        self.state.add(tid, {
+            "title": tid, "goal": "g", "project_dir": "/repo", "env_dir": None,
+            "root_sid": root_sid,
+            "verify": {"cmd": "true", "state": "registered",
+                       "registered_by": "root", "registered_at": 1.0},
+            "state": state, "dispatcher_sid": "root", "worker_sid": "w1",
+            "chain_depth": depth, "fail_streak": 0, "created": 0.0,
+            "updated": 0.0})
+        return tid
+
+    def test_scan_repairs_owner_and_replays_backlog(self):  # Req: F75②
+        tid = self.seed_row("t-broken")
+        self.router.post("w1", ("up", tid), "question", "q-body")
+        self.router.post("w1", ("up", tid), "verify", "v-body")
+        self.router.post("w1", ("up", tid), "note", "n-body")
+        self.assertEqual(self.health.repair_dispatcher_routes(), 1)
+        t = self.state.get(tid)
+        self.assertEqual(t["dispatcher_sid"], "d1")  # 归属回写真实派发者
+        self.assertEqual(t["root_sid"], "d1")  # 血统池不动
+        ev = [e for e in self.store.read_events(tid)
+              if e["event"] == "dispatcher_route_repaired"]
+        self.assertEqual(len(ev), 1)
+        self.assertIn("from=root", ev[0]["note"])
+        self.assertIn("to=d1", ev[0]["note"])
+        inj = [text for sid, text in self.oc.injected if sid == "d1"]
+        self.assertTrue(any("q-body" in x for x in inj))  # question 真实 prompt
+        self.assertTrue(any("v-body" in x for x in inj))  # verify 真实 prompt
+        self.assertTrue(any("n-body" in x for sid, x in self.oc.silent_injected
+                            if sid == "d1"))  # note silent 免弹窗
+        orig = [m for m in self.store.read_messages() if m["id"] == 1]
+        self.assertEqual(orig[0]["to"], "root")  # 原件一字不改
+
+    def test_scan_idempotent(self):  # Req: F75④
+        tid = self.seed_row("t-broken")
+        self.router.post("w1", ("up", tid), "question", "q")
+        self.health.repair_dispatcher_routes()
+        n_msgs = len(self.store.read_messages())
+        self.assertEqual(self.health.repair_dispatcher_routes(), 0)
+        self.assertEqual(len(self.store.read_messages()), n_msgs)  # 零重复补交
+        self.assertEqual(len([e for e in self.store.read_events(tid)
+                              if e["event"] == "dispatcher_route_repaired"]), 1)
+
+    def test_scan_skips_boundaries(self):  # Req: F75⑤
+        self.seed_row("t-head", root_sid="root")  # 真 headless：daemon 归属
+        self.seed_row("t-nest", depth=2)  # 嵌套：链边归父 worker，不猜
+        self.seed_row("t-term", state="merged")  # 终态不回溯
+        self.state.add("t-nors", {  # root_sid 缺席存量行
+            "title": "t-nors", "goal": "g", "project_dir": "/repo",
+            "env_dir": None,
+            "verify": {"cmd": "true", "state": "registered",
+                       "registered_by": "root", "registered_at": 1.0},
+            "state": "dispatched", "dispatcher_sid": "root", "worker_sid": "w1",
+            "chain_depth": 1, "fail_streak": 0, "created": 0.0, "updated": 0.0})
+        for tid in ("t-head", "t-nest", "t-term"):
+            self.router.post("w1", ("up", tid), "question", "q")
+        self.assertEqual(self.health.repair_dispatcher_routes(), 0)
+        for tid in ("t-head", "t-nest", "t-term", "t-nors"):
+            self.assertEqual(self.state.get(tid)["dispatcher_sid"], "root")
+        self.assertFalse([m for m in self.store.read_messages()
+                          if "replay_of" in m])  # 零补交
+
+    def test_scan_covers_window_messages(self):  # Req: F75②（评审环：扫描窗内滞留再扫）
+        tid = self.seed_row("t-broken")
+        orig_set = self.state.set_fields
+
+        def racing_post(tid_, **fields):  # 模拟首扫后、回写前落库的 to=root 上行
+            if fields.get("dispatcher_sid"):
+                self.router.post("w1", ("up", tid), "question", "window-q")
+            return orig_set(tid_, **fields)
+
+        self.state.set_fields = racing_post
+        self.assertEqual(self.health.repair_dispatcher_routes(), 1)
+        self.assertTrue(any(m.get("to") == "d1" and "window-q" in m["body"]
+                            for m in self.store.read_messages()))  # 窗内消息本轮即补
+
+    def test_scan_isolates_per_task_failure(self):  # Req: F75（单任务修复败不废扫描）
+        self.seed_row("t-a")
+        self.seed_row("t-b")
+        orig = Router.replay_root_backlog
+
+        def flaky(self_, t_, to_sid):
+            if t_ == "t-a":
+                raise OSError("disk full")  # 首补交即写败：行不得修（下轮重试）
+            return orig(self_, t_, to_sid)
+
+        Router.replay_root_backlog = flaky
+        try:
+            self.assertEqual(self.health.repair_dispatcher_routes(), 1)  # t-b 照修
+        finally:
+            Router.replay_root_backlog = orig
+        self.assertEqual(self.state.get("t-a")["dispatcher_sid"], "root")
+        self.assertEqual(self.state.get("t-b")["dispatcher_sid"], "d1")
+
+    def test_tick_carries_repair_scan(self):  # Req: F75②（tick 每轮顺带扫）
+        tid = self.seed_row("t-broken")
+        self.router.post("w1", ("up", tid), "question", "q")
+        self.health.tick()
+        self.assertEqual(self.state.get(tid)["dispatcher_sid"], "d1")
+
+
 if __name__ == "__main__":
     unittest.main()

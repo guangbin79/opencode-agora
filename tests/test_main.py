@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agorad.access.store import Store
 from agorad.main import assemble, audit_root_poison, env_config, issue_root, \
     load_env_file, main, migrate_root_poison, quick_limits_from_env, \
     verify_ceiling_from_env, verify_timeout_from_env
@@ -303,6 +304,65 @@ class TestBoot(unittest.TestCase):
                 any(l.startswith("AGORA_ROOT_TOKEN: ") for l in lines), lines)
             sj = json.loads((tmp / ".agora" / "service.json").read_text())
             self.assertIn("port", sj)
+        finally:
+            if p and p.poll() is None:
+                p.terminate()
+                p.wait(timeout=10)
+            if p:
+                p.stdout.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestStartupRouteRepair(unittest.TestCase):
+    """Req: F75 启动即修：预种子错址行＋to:root 积压，真进程拉起（oc 不可达）
+    在首个 health tick 前完成归属回写与补交副本落库。"""
+
+    def test_boot_repairs_misrouted_route(self):  # Req: F75
+        tmp = Path(tempfile.mkdtemp())
+        p = None
+        try:
+            store = Store(tmp)
+            store.append_state({"version": 1, "tasks": {
+                "t-broken": {"title": "t", "goal": "g", "project_dir": "/repo",
+                             "env_dir": None, "root_sid": "ses-d1",
+                             "verify": {"cmd": "true", "state": "registered",
+                                        "registered_by": "root",
+                                        "registered_at": 1.0},
+                             "state": "dispatched", "dispatcher_sid": "root",
+                             "worker_sid": "w1", "chain_depth": 1,
+                             "fail_streak": 0, "created": 0.0, "updated": 0.0}},
+                "mail_read": {}})
+            q = store.write_message({"ts": 1.0, "task": "t-broken",
+                                     "kind": "question", "from": "w1",
+                                     "to": "root"}, "q-body")
+            env = dict(os.environ, AGORA_HOME=str(tmp),
+                       AGORA_OC_URL="http://127.0.0.1:9", AGORA_PORT="0")
+            p = subprocess.Popen([sys.executable, "agorad/main.py"], cwd=str(ROOT),
+                                 env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True)
+            lines, deadline = [], time.time() + 20
+            while time.time() < deadline and p.poll() is None:
+                r, _, _ = select.select([p.stdout], [], [], 1.0)
+                if not r:
+                    continue
+                line = p.stdout.readline()
+                if not line:
+                    break
+                lines.append(line)
+                if "agorad ready" in line:
+                    break
+            self.assertTrue(any("agorad ready" in l for l in lines), lines)
+            after = Store(tmp)
+            row = after.load_state()["tasks"]["t-broken"]
+            self.assertEqual(row["dispatcher_sid"], "ses-d1")  # 启动即修，不等 tick
+            self.assertTrue(any(e["event"] == "dispatcher_route_repaired"
+                                for e in after.read_events("t-broken")))
+            msgs = after.read_messages()
+            orig = next(m for m in msgs if m["id"] == q)
+            self.assertEqual(orig["to"], "root")  # 原件一字不改
+            copies = [m for m in msgs if m.get("replay_of") == str(q)]
+            self.assertEqual(len(copies), 1)  # oc 不可达→副本留库恰一份
+            self.assertEqual(copies[0]["to"], "ses-d1")
         finally:
             if p and p.poll() is None:
                 p.terminate()

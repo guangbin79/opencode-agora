@@ -29,6 +29,8 @@ _DIGEST_T = 120  # F42：阈值可调
 _TERMINAL_MAIL = {"merged", "closed", "blocked", "cancelled"}  # F63 邮件终态集
 _MAIL_WINDOW = 60  # F63：窗去重秒数——只吞 merged→closed 门尾相邻对（见下）
 
+_SILENT_REPLAY = frozenset({"note", "escalate"})  # F75 补交分级：silent 免弹窗面
+
 
 class NotChainEdge(Exception):
     """寻址非链边：方向非法/任务缺席/对方未登记/from_sid 非任务另一方。"""
@@ -160,6 +162,38 @@ class Router:
             return True
         self._delivered.add(msg_id)
         return False
+
+    def replay_root_backlog(self, tid, to_sid):
+        """F75 积压补交：to=='root'（错址窗口）的消息生成补交副本——原件一字
+        不改；副本 to=修复后真实派发者、task/kind/from/body 原样、新增
+        replay_of=<原消息id> 幂等锚（重启/重复扫描按锚判已补交，绝不重复生成）；
+        ts 取当前保证越过派发者既有 check_mail 游标。分级投递同既有面：
+        question/verify/done 等走真实 prompt 唤醒，note/escalate 走 silent 免
+        弹窗；注入失败副本留库由 check_mail 补拉。只恢复通信，不替派发者做
+        业务决策。返回补交数。"""
+        msgs = self._store.read_messages()
+        done = {m.get("replay_of") for m in msgs}
+        n = 0
+        for m in msgs:
+            if (m.get("task") != tid or m.get("to") != "root"
+                    or str(m["id"]) in done):
+                continue
+            mid = self._store.write_message(
+                {"ts": time.time(), "task": tid, "kind": m.get("kind"),
+                 "from": m.get("from"), "to": to_sid,
+                 "replay_of": m["id"]}, m.get("body", ""))
+            n += 1
+            text = (f"[agora] task {tid} {m.get('kind')} from {m.get('from')}\n"
+                    + m.get("body", ""))
+            try:  # 取属性入 try：oc 缺 inject_silent 时同落兜底网（_flush 口径）
+                inject = (self._oc.inject_silent
+                          if m.get("kind") in _SILENT_REPLAY else self._oc.inject)
+                ok = inject(to_sid, text)
+            except Exception:  # oc 异常同失败口径：留库补拉
+                ok = False
+            if ok:
+                self._delivered.add(mid)  # 在线送达一次；失败留库待补拉
+        return n
 
     def check_mail(self, sid: str) -> list:
         cursor = self._state.snapshot()["mail_read"].get(sid, 0.0)

@@ -1427,5 +1427,42 @@ class TestQuickTask(TestCoreTask):
         self.assertFalse(t["quick"])
 
 
+class TestF75RouteGuard(TestCoreTask):
+    """Req: F75 派发归属守卫：root 经无 X-Agora-Sid 的 CLI 派发（sid=='root'）
+    不覆写真实建单会话的归属行；审计 actor 仍记实际调用者；嵌套/真 headless 边界。"""
+
+    def setUp(self):
+        super().setUp()
+        # CLI 错址形态＝daemon 常量身份 sid=='root'（ag-588eb8 起 root 牌唯一归属）
+        self.daemon = self.auth.issue("root", "root")
+
+    def test_cli_root_dispatch_keeps_real_owner(self):  # Req: F75①
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", actor_sid="ses-real")
+        self.svc.dispatch(tid, self.daemon)  # CLI 形态：无 actor_sid → sid=='root'
+        t = self.state.get(tid)
+        self.assertEqual(t["dispatcher_sid"], "ses-real")  # 归属保留真实建单会话
+        self.assertEqual(t["root_sid"], "ses-real")  # 血统池不动
+        ev = [e for e in self.events() if e["event"] == "dispatched"]
+        self.assertEqual(ev[-1]["actor"], "root")  # 审计记实际调用者，不伪称
+
+    def test_headless_root_task_keeps_daemon_owner(self):  # Req: F75①
+        tid = self.svc.create("g", "/repo", None, self.daemon, verify_cmd="true")
+        self.svc.dispatch(tid, self.daemon)  # 真 headless：root_sid=='root'
+        self.assertEqual(self.state.get(tid)["dispatcher_sid"], "root")
+
+    def test_nested_cli_dispatch_not_guarded(self):  # Req: F75①
+        # 嵌套链边＝父 worker（root_sid 非父）：守卫只保顶层，嵌套照旧行为
+        self.state.add("t-kid", {
+            "title": "t-kid", "goal": "g", "project_dir": "/repo",
+            "env_dir": None, "root_sid": "ses-real",
+            "verify": {"cmd": "true", "state": "registered",
+                       "registered_by": "w1", "registered_at": 1.0},
+            "state": "blocked", "dispatcher_sid": "w1", "worker_sid": "s-old",
+            "chain_depth": 2, "fail_streak": 0, "created": 0.0, "updated": 0.0})
+        self.svc.dispatch("t-kid", self.daemon)
+        self.assertEqual(self.state.get("t-kid")["dispatcher_sid"], "root")
+
+
 if __name__ == "__main__":
     unittest.main()

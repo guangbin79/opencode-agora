@@ -526,5 +526,52 @@ class TestPeerBoard(unittest.TestCase):
                          [("t1", "/repoA", mid)])
 
 
+class TestF75Replay(TestCoreMsg):
+    """Req: F75 积压补交：to=='root' 错址窗口消息生成副本（replay_of 锚幂等）、
+    原件一字不改、kind 分级投递、失败留库补拉、跨 Router 重建不重复。"""
+
+    def root_msg(self, kind, body, task="t1", mfrom="w1", to="root"):
+        return self.store.write_message(
+            {"ts": 1.0, "task": task, "kind": kind, "from": mfrom, "to": to}, body)
+
+    def test_online_replay_split_by_kind(self):  # Req: F75②
+        q = self.root_msg("question", "q-body")
+        self.root_msg("note", "n-body")
+        self.root_msg("verify", "v-body")
+        self.root_msg("question", "direct", to="d1")  # 非错址行不补交
+        self.assertEqual(self.r.replay_root_backlog("t1", "d1"), 3)
+        injects = [(s, t) for k, s, t in self.oc.events if k == "inject"]
+        self.assertEqual([s for s, _ in injects], ["d1", "d1"])  # question/verify 真实 prompt
+        self.assertIn("q-body", injects[0][1])
+        self.assertIn("v-body", injects[1][1])
+        silents = [(s, t) for k, s, t in self.oc.events if k == "silent"]
+        self.assertEqual([s for s, _ in silents], ["d1"])  # note 走 silent 免弹窗
+        self.assertIn("n-body", silents[0][1])
+        msgs = {m["id"]: m for m in self.store.read_messages()}
+        self.assertEqual(msgs[q]["to"], "root")  # 原件一字不改
+        copy = next(m for m in msgs.values() if m.get("replay_of") == str(q))
+        self.assertEqual((copy["kind"], copy["from"], copy["to"], copy["body"]),
+                         ("question", "w1", "d1", "q-body"))
+        self.assertGreater(float(copy["ts"]), 1.0)  # ts 取当前：越过既有游标
+
+    def test_offline_replay_pulled_by_check_mail(self):  # Req: F75③
+        self.oc.online = False
+        q = self.root_msg("question", "later")
+        self.r.replay_root_backlog("t1", "d1")  # 注入失败留库
+        got = self.r.check_mail("d1")
+        self.assertEqual([(m["replay_of"], m["body"]) for m in got],
+                         [(str(q), "later")])  # 副本可被真实派发者补拉
+        orig = next(m for m in self.store.read_messages() if m["id"] == q)
+        self.assertEqual(orig["to"], "root")  # 原件保留 to:root
+
+    def test_replay_idempotent_across_router_rebuild(self):  # Req: F75④
+        self.root_msg("note", "once")
+        self.assertEqual(self.r.replay_root_backlog("t1", "d1"), 1)
+        n = len(self.store.read_messages())
+        self.r = Router(self.store, self.state, self.oc)  # 服务重启形态
+        self.assertEqual(self.r.replay_root_backlog("t1", "d1"), 0)
+        self.assertEqual(len(self.store.read_messages()), n)  # 绝不重复生成
+
+
 if __name__ == "__main__":
     unittest.main()

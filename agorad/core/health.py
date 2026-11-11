@@ -120,8 +120,9 @@ class Health:
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
 
     def tick(self):
-        """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵拍人＋F70 worker
-        自检提示，不处置。"""
+        """F75 错址修复扫描先行（启动＋每轮双触发），再探每个活动任务的直接
+        下跳：死→自愈/上报；边沿判僵拍人＋F70 worker 自检提示，不处置。"""
+        self.repair_dispatcher_routes()
         tasks = self._state.snapshot()["tasks"]
         oc_down = False
         busy = set()  # updated>idle＝回合进行中：僵态本轮免判（doctor 口径减 busy 免决）
@@ -198,6 +199,37 @@ class Health:
                                if tasks.get(tid, {}).get("state") in _ACTIVE
                                and tasks[tid].get("env_dir")
                                and not Path(tasks[tid]["env_dir"]).is_dir()}
+
+    def repair_dispatcher_routes(self):
+        """F75 存量错址修复：active 顶层任务 dispatcher_sid=='root' 且 root_sid
+        为真实会话（CLI 无 sid 派发覆写所致）→ 归属行回写 root_sid＋
+        dispatcher_route_repaired 审计（含 from/to 与成因）＋积压补交
+        （router.replay_root_backlog）。幂等：修后行不再匹配、补交按 replay_of
+        锚去重；嵌套（链边归父 worker）、终态、root_sid 缺席或 =='root'（真
+        headless）一律不动——不按 main_sid/最近活跃会话猜归属，防多窗口抢绑。
+        返回修复数。"""
+        n = 0
+        for tid, t in self._state.snapshot()["tasks"].items():
+            rs = t.get("root_sid")
+            if (t["state"] in _ACTIVE and t.get("chain_depth", 1) == 1
+                    and t.get("dispatcher_sid") == "root" and rs and rs != "root"):
+                try:
+                    # 先补交后回写（评审 B 册 D1）：replay 中途写败→行未修→下轮
+                    # 仍匹配重试（replay_of 锚防重复副本）；先修后补会孤儿剩余积压
+                    self._router.replay_root_backlog(tid, rs)
+                    self._state.set_fields(tid, dispatcher_sid=rs)
+                    self._store.append_event(
+                        {"ts": time.time(), "actor": "health",
+                         "event": "dispatcher_route_repaired", "task": tid,
+                         "note": f"from=root to={rs} "
+                                 "cause=cli_dispatch_without_sid"})
+                    # 回写记账后再扫一次（评审环：首扫含阻塞 inject，窗口可达
+                    # 秒级，窗内落库的 to=root 上行此轮即补——锚幂等不产重复副本）
+                    self._router.replay_root_backlog(tid, rs)
+                except Exception:  # 单任务修复面败不废整轮 tick：下轮重试，探活照跑
+                    continue
+                n += 1
+        return n
 
     def nudge_worker(self, tid, text=None):
         """F70/F73 单一注入面：缺省＝自检，text＝board 派发方自定义提示。
