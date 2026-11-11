@@ -39,7 +39,8 @@ def snap(**tasks):
 def model(rows=(), sel=0, **kw):
     m = {"rows": list(rows), "sel": sel, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "bucket": None,
-         "proj": False, "gexpanded": set(), "prompt": False}
+         "proj": False, "gexpanded": set(), "prompt": False,
+         "prompt_task": None}
     m.update(kw)
     return m
 
@@ -270,6 +271,7 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual(handle_key(m, "P").op, "noop")  # 先武装输入，不发送
         self.assertIs(m["prompt"], True)
         self.assertEqual((m["input"], m["buf"]), ("", ""))
+        self.assertEqual(m["prompt_task"], "t1")
         handle_key(m, "先")
         handle_key(m, " ")
         for c in "check":
@@ -278,6 +280,7 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual(a, Action("nudge", "t1", "先 check"))
         self.assertIs(m["prompt"], False)
         self.assertIsNone(m["input"])
+        self.assertIsNone(m["prompt_task"])
 
         m = model(self.ROWS, sel=1)
         handle_key(m, "P")
@@ -285,6 +288,32 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual(handle_key(m, "\x1b"), Action("noop", None, None))
         self.assertIs(m["prompt"], False)
         self.assertIsNone(m["input"])
+        self.assertIsNone(m["prompt_task"])
+
+    def test_prompt_input_locks_target_across_reflow(self):  # Req: F73
+        """P 时锁定目标任务：行序重排/选中漂移不换目标；目标消失则取消。"""
+        m = model(self.ROWS, sel=1)
+        handle_key(m, "P")
+        for c in "check":
+            handle_key(m, c)
+        m["rows"] = [Row("bucket", title="在飞 1", domain="bucket"),
+                     Row("task", "t2", 0, "running", "二", "ses-8", "2m",
+                         "", "fly"),
+                     Row("task", "t1", 0, "blocked", "目标", "ses-9", "3m",
+                         "", "blocked")]
+        m["sel"] = 1
+        a = handle_key(m, "\r")
+        self.assertEqual(a, Action("nudge", "t1", "check"))
+
+        m = model(self.ROWS, sel=1)
+        handle_key(m, "P")
+        for c in "check":
+            handle_key(m, c)
+        m["rows"] = [Row("bucket", title="在飞 0", domain="bucket")]
+        m["sel"] = 0
+        self.assertEqual(handle_key(m, "\r").op, "noop")
+        self.assertIs(m["prompt"], False)
+        self.assertIsNone(m["prompt_task"])
 
     def test_prompt_keys_ignored_off_task_or_fullscreen(self):  # Req: F73
         self.assertEqual(handle_key(model(self.ROWS, sel=0), "P").op, "noop")

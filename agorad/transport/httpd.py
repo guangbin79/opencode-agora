@@ -301,9 +301,7 @@ class _Handler(BaseHTTPRequestHandler):
                      f"delivered={str(ok).lower()}"})
         if ok:
             return {"nudged": True}
-        return {"nudged": False,
-                "reason": "no_worker" if not row.get("worker_sid")
-                          else "inject_failed"}
+        return {"nudged": False, "reason": "inject_failed"}
 
     def _cred_for_sid(self, body):
         """F25 修正推改拉面：插件 hook 缓存未命中按会话 sid 拉凭据。

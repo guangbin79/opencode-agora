@@ -242,21 +242,25 @@ def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
     键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
-    x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员） Z 全折全展 / 过滤（单行输入态）
-    1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
+    p 自检 P 自定义提示（任务锁定） x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员）
+    Z 全折全展 / 过滤（单行输入态） 1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤/提示单行输入态
         if key in ("\n", "\r", "KEY_ENTER"):
             prompt, text = bool(m.get("prompt")), m["buf"]
-            r = _sel_row(m)
+            target = m.get("prompt_task")
             m["prompt"], m["input"], m["buf"] = False, None, ""
-            if prompt:                         # F73：空文本交给服务端缺省自检
-                return (Action("nudge", task=r.tid, arg=text or None)
-                        if r and r.kind == "task" else Action("noop"))
+            m["prompt_task"] = None
+            if prompt:                         # F73：锁定 P 时目标任务；消失即取消
+                exists = any(x.kind == "task" and x.tid == target
+                             for x in (m.get("rows") or []))
+                return (Action("nudge", task=target, arg=text or None)
+                        if target and exists else Action("noop"))
             m["filter"] = text
             return Action("apply")
         if key == "\x1b":
             m["prompt"], m["input"], m["buf"] = False, None, None
+            m["prompt_task"] = None
             return Action("noop")
         if key in ("\x7f", "\b", "KEY_BACKSPACE"):
             m["buf"] = m["buf"][:-1]
@@ -309,7 +313,8 @@ def handle_key(m, key):
         return Action("noop")
     if key == "P":
         if m.get("view") == "board" and r and r.kind == "task":
-            m["prompt"], m["input"], m["buf"] = True, "", ""  # 只武装输入
+            m["prompt"], m["input"], m["buf"] = True, "", ""
+            m["prompt_task"] = r.tid  # 锁定武装目标任务，输入期 reflow 不换人
             return Action("noop")
         return Action("noop")
     if key == "x":
@@ -560,7 +565,7 @@ def run(stdscr, base, token):
     m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set(),
          "bucket": None, "proj": False, "gexpanded": set(), "prompt": False,
-         "tids": set(), "groups": set()}
+         "prompt_task": None, "tids": set(), "groups": set()}
     details, snap, events = {}, None, None
     status, err, page = "loading…", None, []
 
