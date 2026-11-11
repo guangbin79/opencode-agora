@@ -25,8 +25,16 @@ def ok_runner(cwd, cmd, timeout=None, ceiling=None):
 
 
 class FakeGitx:
+    def __init__(self):
+        self.ondisk = set()  # Req: F71 在盘模型——build_env 成功即记为存在
+
     def build_env(self, project_dir, tid, branch=None):
-        return f"/envs/{tid}"
+        env = f"/envs/{tid}"
+        self.ondisk.add(env)
+        return env
+
+    def env_on_disk(self, env_dir):  # Req: F71
+        return env_dir in self.ondisk
 
     def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
         return "b" * 40

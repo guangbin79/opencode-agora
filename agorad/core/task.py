@@ -220,8 +220,13 @@ class TaskService:
                              f"after: 前任务 {after} 未成功或由 dispatcher 有意跳过（B7）")
         env = t.get("env_dir")
         env_base = t.get("env_base")
-        if env is None:
-            env = self._gitx.build_env(t["project_dir"], tid, t.get("target_branch"))
+        # Req: F71 记录 env 不在盘（/tmp 清理/误删，ag-724152）＝无 env，重派全新建路自愈
+        new_env = not self._gitx.env_on_disk(env)
+        if new_env:
+            try:
+                env = self._gitx.build_env(t["project_dir"], tid, t.get("target_branch"))
+            except Exception as e:  # 项目仓已亡等＝清晰拒因（ag-724152 曾以 move 400 撞 can_spawn 形态）
+                self._reject(tid, sid, f"env_build: {e}")
             env_base = self._gitx.head(env)  # ag-1ae0f1：env 起点 base——done 空集判据 (a) 比较锚
             try:
                 report = self._gitx.materialize_checkout(
@@ -246,7 +251,7 @@ class TaskService:
                                     title=f"{tid}: {t.get('title', tid)}",
                                     model=t.get("model"))  # F55：boot prompt 逐回合携
         except Exception as e:  # can_spawn 名册：会话创建失败即熔断（不 import access 异常）
-            if not t.get("env_dir"):
+            if new_env:  # Req: F71 本轮新建/重建 env 归本轮——失败回收不留孤儿（在盘既有 env 不动）
                 self._gitx.remove_env(env)
             self._reject(tid, sid, f"can_spawn: {e}")
         token = self._auth.issue(wsid, "worker")
@@ -254,7 +259,7 @@ class TaskService:
             cred_file = self._store.write_credential(tid, token)  # F43：牌落盘 0600（迁移前：败则零账面残局）
         except Exception as e:  # 落盘败＝派发零副作用回滚（新牌即废、新建 env 回收），不交无凭据残局
             self._revoke_worker(wsid)
-            if not t.get("env_dir"):
+            if new_env:  # Req: F71 同 can_spawn 口径——只回收本轮新建/重建的 env
                 self._gitx.remove_env(env)
             self._reject(tid, sid, f"credential_write: {e}")
         fresh = self._state.get(tid)

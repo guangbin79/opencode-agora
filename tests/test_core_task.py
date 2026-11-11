@@ -25,6 +25,7 @@ from agorad.core.task import Rejected, TaskService
 class FakeGitx:
     def __init__(self):
         self.built, self.removed, self.branches, self.checked = [], [], [], []
+        self.ondisk = set()  # Req: F71 在盘模型——build_env 成功即记为存在
 
     def check_branch(self, repo_dir, branch):
         if branch == "bad..name":
@@ -35,7 +36,14 @@ class FakeGitx:
         env = f"/envs/{tid}"
         self.built.append(env)
         self.branches.append(branch)
+        self.ondisk.add(env)
         return env
+
+    def vanish(self, env_dir):  # Req: F71 模拟 /tmp 系统清理（ag-724152）
+        self.ondisk.discard(env_dir)
+
+    def env_on_disk(self, env_dir):  # Req: F71
+        return env_dir in self.ondisk
 
     def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
         return "b" * 40
@@ -96,6 +104,8 @@ class TestCoreTask(unittest.TestCase):
     # ---- 夹具 ----
 
     def seed(self, tid, state="running", disp="disp1", worker=None, depth=1, env=None):
+        if env:
+            self.gitx.ondisk.add(env)  # Req: F71 直 seed 的 env＝在盘（既有复用语义零变化）
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
                              "env_dir": env,
                              "verify": {"cmd": "", "state": "pending",
@@ -176,6 +186,50 @@ class TestFuses(TestCoreTask):
         self.svc.dispatch("t9", self.root)
         self.assertEqual(getattr(self.gitx, "mats", []) , [])  # 复用 env 不重置 worker 现场
         self.assertEqual(self.gitx.built, [])
+
+    def test_redispatch_missing_env_rebuilds_self_heal(self):  # Req: F71
+        """ag-724152：记录 env 被 /tmp 清理后重派——视同无 env 全新建路自愈。"""
+        self.seed("t9", state="blocked", env="/envs/old", disp="main")
+        self.gitx.vanish("/envs/old")
+        self.svc.dispatch("t9", self.root)
+        self.assertEqual(self.gitx.built, ["/envs/t9"])  # build_env 再次被调（新路径不撞旧记录）
+        row = self.state.get("t9")
+        self.assertEqual(row["state"], "dispatched")
+        self.assertEqual(row["env_dir"], "/envs/t9")  # transition 记新 env_dir
+        self.assertEqual(row["env_base"], "b" * 40)  # env_base 重取 head
+        self.assertEqual(self.gitx.mats, [("/envs/t9", "/repo")])  # 物化照旧
+
+    def test_redispatch_rebuilt_env_reclaimed_on_spawn_failure(self):  # Req: F71
+        """本轮重建 env 归本轮——can_spawn 失败回收新 env 不留孤儿。"""
+        self.seed("t9", state="blocked", env="/envs/old", disp="main")
+        self.gitx.vanish("/envs/old")
+        self.oc.fail_create = True
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch("t9", self.root)
+        self.assertIn("can_spawn", str(cm.exception))
+        self.assertEqual(self.gitx.removed, ["/envs/t9"])  # 回收的是本轮新建 env
+        self.assertEqual(self.state.get("t9")["state"], "blocked")  # 拒绝零副作用
+
+    def test_redispatch_on_disk_env_spawn_failure_keeps_env(self):  # Req: F71
+        """env 仍在盘的既有重派失败照旧不动 env（清理卫兵只管本轮新建）。"""
+        self.seed("t9", state="blocked", env="/envs/old", disp="main")
+        self.oc.fail_create = True
+        with self.assertRaises(Rejected):
+            self.svc.dispatch("t9", self.root)
+        self.assertEqual(self.gitx.built, [])
+        self.assertEqual(self.gitx.removed, [])
+
+    def test_dispatch_env_build_failure_rejects_cleanly(self):  # Req: F71
+        """build_env 自身失败（项目仓已亡）＝清晰拒因，不 500 不撞 can_spawn 形态。"""
+        def boom(project_dir, tid, branch=None):
+            raise RuntimeError("fatal: '/repo' does not exist")
+        self.gitx.build_env = boom
+        tid = self.dispatchable()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("env_build", str(cm.exception))
+        self.assertNotIn("move: HTTP 400", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["state"], "todo")  # 拒绝零副作用
 
     def test_b7_after_not_terminal_rejected_then_passes(self):  # Req: F3
         a = self.dispatchable("A")

@@ -70,6 +70,9 @@ class FakeGitx:
         self.removed.append(env_dir)
         shutil.rmtree(env_dir, ignore_errors=True)
 
+    def env_on_disk(self, env_dir):  # Req: F71 真目录假件＝isdir 即真相
+        return bool(env_dir) and Path(env_dir).is_dir()
+
     def check_branch(self, repo_dir, branch):
         pass
 

@@ -54,6 +54,10 @@ class Gitx:
                   + ([f"refs/heads/{branch}"] if branch else []), cwd=repo)
         return str(env)
 
+    def env_on_disk(self, env_dir: str) -> bool:  # Req: F71
+        """记录 env 是否仍在盘（dispatch 重派自愈判据；空值＝无 env 视不在盘）。"""
+        return bool(env_dir) and Path(env_dir).is_dir()
+
     def build_integration(self, target_dir: str, integration_dir: str,
                           branch: str = None) -> str:
         """在目标分支当前 HEAD 建 detached 集成环境，供试合并与集成 verify。
