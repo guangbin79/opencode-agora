@@ -4,6 +4,7 @@
 （不可变，头部 key: value 行＋空行＋正文）、events.jsonl（审计）、
 易失件（service.json 等，可覆写非账本）。
 """
+import copy
 import fcntl
 import json
 import os
@@ -29,6 +30,10 @@ class Store:
         self._mid_lock = threading.Lock()
         self._task_lines = None  # 懒播种的账本行数（flock 单写者安全）：免每次追加全文件重扫；崩溃漂移只挪瘦身时机
         self._ephemeral_lock = threading.Lock()  # 同名 tmp/replace 全区间串行（F86）
+        self._messages_cache = None  # F92 惰性加载；None＝未载，[] 也合法
+        self._messages_lock = threading.Lock()
+        self._events_cache = None
+        self._events_lock = threading.Lock()
 
     def append_state(self, snap: dict) -> None:
         if self._task_lines is None:  # 播种在追加前：计磁盘实有行，此后内存自增不重扫
@@ -92,7 +97,11 @@ class Store:
         os.replace(tmp, self._tasks)
 
     def append_event(self, ev: dict) -> None:
-        self._append_line(self._events, json.dumps(ev, ensure_ascii=False))
+        line = json.dumps(ev, ensure_ascii=False)
+        with self._events_lock:  # F92：写盘与缓存发布同临界区，读者不见半态
+            self._append_line(self._events, line)
+            if self._events_cache is not None:
+                self._events_cache.append(copy.deepcopy(ev))
 
     def write_message(self, fm: dict, body: str) -> int:
         with self._mid_lock:  # 配对原子（D3）：锁内读＋自增；文件写在锁外并发
@@ -102,11 +111,17 @@ class Store:
             f"{k}: {fm[k]}\n" for k in sorted(fm)
         )
         path = self._messages / f"{mid:08d}.md"  # 补零保证文件名字典序＝msg-id 数值序
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("x", encoding="utf-8") as f:  # "x"＝已存在即拒，id 不可变
-            f.write(f"{header}\n{body}")
-            f.flush()
-            os.fsync(f.fileno())
+        # 缓存形状对齐磁盘解析面：frontmatter 值一律 str，仅 id 转 int（F92）
+        record = {k: str(v) for k, v in fm.items()}
+        record.update(id=mid, body=body)
+        with self._messages_lock:  # F92：写盘与缓存发布同临界区
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("x", encoding="utf-8") as f:  # "x"＝已存在即拒，id 不可变
+                f.write(f"{header}\n{body}")
+                f.flush()
+                os.fsync(f.fileno())
+            if self._messages_cache is not None:
+                self._messages_cache.append(copy.deepcopy(record))
         return mid
 
     def scan_max_msg_id(self) -> int:
@@ -114,11 +129,8 @@ class Store:
             return 0
         return max((int(p.stem) for p in self._messages.glob("*.md")), default=0)
 
-    def read_messages(self) -> list[dict]:
-        """全库消息按 msg-id 升序（补零文件名序＝id 序）；frontmatter 键＋id(int)＋body。
-
-        门中崩溃撕裂件（坏头/断尾/空文件）跳过——同 load_state 断尾容错口径。
-        """
+    def _load_messages_from_disk(self) -> list[dict]:
+        """全库消息按 msg-id 升序（补零文件名序＝id 序）；撕裂件跳过。"""
         out = []
         for p in sorted(self._messages.glob("*.md")):
             try:
@@ -131,8 +143,16 @@ class Store:
             out.append(fm)
         return out
 
-    def read_events(self, tid=None) -> list[dict]:
-        """events.jsonl 全量（tid 给定则按 task 过滤）按行序；断尾行丢弃同 load_state。"""
+    def read_messages(self) -> list[dict]:
+        """全库消息（frontmatter 键＋id(int)＋body）；热读走内存一层拷贝（F92）。"""
+        with self._messages_lock:
+            if self._messages_cache is None:
+                self._messages_cache = self._load_messages_from_disk()
+            # 一层 dict 拷贝：消息字段全是标量，足以保持“每次新对象”且免 deepcopy 热读税
+            return [dict(m) for m in self._messages_cache]
+
+    def _load_events_from_disk(self) -> list[dict]:
+        """events.jsonl 全量按行序；断尾行丢弃同 load_state。"""
         out = []
         if not self._events.exists():
             return out
@@ -142,9 +162,17 @@ class Store:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                if tid is None or ev.get("task") == tid:
-                    out.append(ev)
+                out.append(ev)
         return out
+
+    def read_events(self, tid=None) -> list[dict]:
+        """events.jsonl 全量（tid 给定则按 task 过滤）；热读走内存一层拷贝（F92）。"""
+        with self._events_lock:
+            if self._events_cache is None:
+                self._events_cache = self._load_events_from_disk()
+            got = self._events_cache
+            return [dict(e) for e in got
+                    if tid is None or e.get("task") == tid]
 
     def write_ephemeral(self, name: str, data: dict) -> None:
         with self._ephemeral_lock:  # tmp 名按目标派生：并发同名写共享 tmp 必撕裂（F86）

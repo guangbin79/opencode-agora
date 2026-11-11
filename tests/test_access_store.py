@@ -187,6 +187,94 @@ class TestAccessStore(unittest.TestCase):
         self.assertEqual([e["e"] for e in self.st.read_events()], [1, 2])
         self.assertEqual([e["e"] for e in self.st.read_events("t1")], [1])
 
+    def test_warm_reads_do_not_touch_disk_paths(self):  # Req: F92
+        """消息/事件首载后走内存缓存：热读再触盘即违反缓存语义。"""
+        mid = self.st.write_message({"task": "t1"}, "warm")
+        self.st.append_event({"e": 1, "task": "t1"})
+        warm_messages = self.st.read_messages()
+        warm_events = self.st.read_events()
+
+        class BlockedPath:
+            def glob(self, *args, **kwargs):
+                raise AssertionError("messages loader touched disk after warm read")
+
+            def open(self, *args, **kwargs):
+                raise AssertionError("events loader touched disk after warm read")
+
+        real_messages, real_events = self.st._messages, self.st._events
+        self.st._messages = self.st._events = BlockedPath()
+        try:
+            self.assertEqual(self.st.read_messages(), warm_messages)
+            self.assertEqual(self.st.read_events(), warm_events)
+        finally:
+            self.st._messages, self.st._events = real_messages, real_events
+        self.assertEqual(warm_messages[0]["id"], mid)
+
+    def test_read_cache_append_visibility_and_copy_isolation(self):  # Req: F92
+        """append 后恰见一次；调用方改写返回值不污染缓存/后续读。"""
+        first = self.st.write_message({"task": "t1"}, "one")
+        self.st.append_event({"e": 1, "task": "t1"})
+        got = self.st.read_messages()
+        got[0]["body"] = "poisoned"
+        evs = self.st.read_events()
+        evs[0]["e"] = "poisoned"
+        self.assertEqual(self.st.read_messages()[0]["body"], "one")
+        self.assertEqual(self.st.read_events()[0]["e"], 1)
+
+        second = self.st.write_message({"task": "t1"}, "two")
+        self.st.append_event({"e": 2, "task": "t1"})
+        msgs = self.st.read_messages()
+        self.assertEqual([m["id"] for m in msgs if m["id"] == second],
+                         [second])  # 恰见一次
+        self.assertEqual([e["e"] for e in self.st.read_events()], [1, 2])
+        fresh = Store(self.tmp)
+        self.assertEqual([m["id"] for m in fresh.read_messages()],
+                         [first, second])  # 重载与缓存内容一致
+        self.assertEqual([e["e"] for e in fresh.read_events()], [1, 2])
+
+    def test_read_cache_concurrent_append_and_read(self):  # Req: F92
+        """首载/append/读并发：无异常、无重复、无漏新行。"""
+        import threading
+
+        barrier = threading.Barrier(4, timeout=5)
+        errors = []
+
+        def reader():
+            try:
+                barrier.wait()
+                for _ in range(50):
+                    self.st.read_messages()
+                    self.st.read_events()
+            except Exception as e:
+                errors.append(repr(e))
+
+        def message_writer():
+            try:
+                barrier.wait()
+                for i in range(25):
+                    self.st.write_message({"task": "t1"}, f"m{i}")
+            except Exception as e:
+                errors.append(repr(e))
+
+        def event_writer():
+            try:
+                barrier.wait()
+                for i in range(25):
+                    self.st.append_event({"e": i, "task": "t1"})
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=reader) for _ in range(2)]
+        threads += [threading.Thread(target=message_writer),
+                    threading.Thread(target=event_writer)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.st.read_messages()), 25)
+        self.assertEqual(len(self.st.read_events()), 25)
+
     def test_concurrent_same_name_ephemeral_writes_are_atomic(self):  # Req: F86
         """同名 ephemeral 并发写不得共享 tmp 互相截断/替换失败。
 

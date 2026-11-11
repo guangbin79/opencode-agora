@@ -517,3 +517,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：State 构造统一过 `_normalize_snapshot`：仅接受 version=1；校验 state∈LEGAL、verify 为 dict 且 cmd 为字符串、chain_depth 正整数、fail_streak 非负整数，坏行带 tid＋字段 ValueError。缺 verify 补完整 pending 形状，另补 chain_depth=1、fail_streak=0、quick=False、verify_pending=False、model=None、deliverable=None，root_sid 缺席回退 dispatcher_sid。只修内存视图，不回写账本，不要求最小测试夹具补无关字段。
 **落点**：agorad/core/state.py（_normalize_snapshot＋构造入口）、tests/test_core_state.py（旧行缺省可迁移、六坏行矩阵）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F91 锚）——旧实现缺 verify KeyError、六坏行零 ValueError；新实现 `python3 -m pytest tests/test_core_state.py tests/test_core_recover.py tests/test_main.py -q` 59 passed＋24 subtests，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F92 Store 消息/事件读缓存——热读零触盘（2026-11-12，用户目标「稳定性、性能」）
+**现状**：read_messages 每次扫描并解析全部消息文件，read_events 每次解析全部 JSONL；check_mail、repo_board、board full_view、健康证据反复复用这些全量读，长期账本下单线程 HTTP 的读成本随历史线性增长。
+**裁定**：Store 增加消息/事件各自惰性缓存与锁；首载走 `_load_messages_from_disk/_load_events_from_disk`，append 在写盘成功同临界区发布缓存。读取返回一层 dict 拷贝（现行记录值均为标量，保持旧“每次新对象”语义，避免 deepcopy 反向拖慢全量事件读）；消息缓存形状对齐磁盘解析面（frontmatter 字符串＋id=int）。磁盘格式、公开签名、消息 id 配给与断尾容错不变。
+**落点**：agorad/access/store.py（缓存/锁/loader/append 发布）、tests/test_access_store.py（热读零触盘、append 可见恰一次、返回值隔离、并发读写、重载一致）、tests/bench_scale.py（固定规模可重复基准）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F92 锚）——旧实现热读触盘 AssertionError；新实现 `python3 -m pytest tests/test_access_store.py tests/test_core_msg.py tests/test_core_report.py -q` 112 passed。同机基准（200 任务/1000 消息/5000 事件/20 读，单次、仅前后对照）：read_messages 0.0134306→0.0001012s、read_events 0.0089930→0.0004708s、board_full_view 0.0118536→0.0052162s、check_mail 0.0154026→0.0024450s；缓存后仍是内存全量遍历＋拷贝，非索引查询。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
