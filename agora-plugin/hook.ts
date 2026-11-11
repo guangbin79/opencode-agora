@@ -102,9 +102,12 @@ export function readishGated(tool: string, targetPath: string): boolean {
   return READISH_TOOLS.has(tool) && under(join(agoraHome(), "state"), fold(targetPath));
 }
 
-/** wrong-door 拒因＋副本换算（尽力而为）：envDir basename 形如 {repo}__wt-* →
- * 主仓根＝envDir 父目录/{repo}；cwd 落主仓内则附副本对应路径，推导不出退化为仅列两侧实值。 */
-export function wrongDoorHint(envDir: string, cwd: string): string {
+/** wrong-door 拒因＋副本换算：写入要求 cwd 与 target 同在任务 env——target 越界
+ * 优先点名 target；否则按 envDir basename 形如 {repo}__wt-* 推导 cwd 对应副本路径。 */
+export function wrongDoorHint(envDir: string, cwd: string, targetPath?: string): string {
+  if (targetPath && under(envDir, cwd) && !under(envDir, targetPath)) {
+    return `被拦：写入目标 ${targetPath} 在任务 env ${envDir} 外——请在副本内编辑。`;
+  }
   const m = basename(envDir).match(/^(.+)__wt-/);
   const mainRoot = m ? join(dirname(envDir), m[1]) : null;
   const conv =
@@ -148,7 +151,8 @@ export function shouldBlock(
     if (gateDirInScope(target, cwd, cred?.envDir)) return null;
     return GATE_SCOPE_HINT;
   }
-  if (cred?.token && cred.envDir && under(cred.envDir, cwd)) return null;
+  if (cred?.token && cred.envDir && under(cred.envDir, cwd)
+      && under(cred.envDir, target)) return null;
   // 拒因分流：缓存命中 root 牌＝防御位（生产不入缓存）维持 DISPATCH_HINT；无凭据按拉取
   // 判据路由（F27 收殓残留 finding，裁定 A 镜像）——404（not_worker）＝主会话直改→
   // DISPATCH_HINT（「静待重注入」对主会话是死路，正确指引是派任务）；200 命中已填缓存
@@ -159,7 +163,7 @@ export function shouldBlock(
     if (pull === "not_worker") return DISPATCH_HINT; // F27 裁定 A 镜像：救活写面死条文路由
     return NO_CRED_HINT;
   }
-  return wrongDoorHint(cred.envDir, cwd);
+  return wrongDoorHint(cred.envDir, cwd, target);
 }
 
 /** 原生 question 三分支之 a（ag-4f03df，ag-f51f40 事故）：worker 凭据（含半条缓存——

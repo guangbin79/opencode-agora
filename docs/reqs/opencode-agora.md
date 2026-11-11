@@ -469,3 +469,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **现状**：F34 发放面查重只护服务端串行建单；worker rebase 撞号让渡改号时按 main 台账（docs/reqs 现存最大号）手工挑下一空号，看不见服务端已发放且在飞的同号任务——同日 F79、F81 两起同根因撞号。worker 唯一可读的在飞查重面 repo_board 在飞摘要不投影 req_id，双查无从做起。
 **落点**：agorad/core/peer.py（board() 在飞任务摘要投影补 req_id 字段，无号行缺省 None）、agorad/core/task.py（_boot 非 quick 形态补「改号」纪律行：撞号让渡改号前必查 repo_board 在飞 req_id，空号判定以「main 台账＋repo_board 在飞」双查为准；查不了或不确定→post(kind=question) 交派发方裁定，勿自行拍号）、tests/test_core_msg.py（TestPeerBoard 投影 req_id 断言）、tests/test_core_task.py（TestVerifyGate BOOT 双查指引断言）、docs/reqs/opencode-agora.md（本条）。不动 task_update/task_create 号源逻辑与权限面（「改号走服务」重机制另案）、gate/health、既有撞号判例条目。
 **验收**：两用例先红后绿（Req: F83 锚）——repo_board 摘要含 req_id（已发放号可见＋无号行 None 键恒在）、BOOT 文案含改号双查指引（必查 repo_board 在飞 req_id／「main 台账＋repo_board 在飞」双查为准／勿自行拍号）；`python3 -m pytest tests/ -q` 全绿＋`grep -q '### F83 ' docs/reqs/opencode-agora.md`。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F84 写闸目标越界——worker cwd 与 target 同在 env 才放行（2026-11-12，用户目标「稳定性、性能」）
+**现状**：shouldBlock 的 worker 放行腿只校验 cwd∈cred.envDir，未校验写入目标——worker 位于合法 env 时可用原生 edit/write 直写主仓或另一仓；既有测试甚至把跨仓目标放行钉成绿测。这不属于已接受的 raw bash 绕闸面，而是原生写闸自身漏约束。
+**裁定**：放行不变量收紧为「cwd 与写入目标都在当前任务 env 内」，缺一即拒；wrong-door 拒因区分「写入目标越界」与「工作目录在外」，目标越界时点名实际 target，不再谎称 cwd 在外；F38 门记录目录作用域判定仍先于本腿，跨 env/跨仓门记录照旧 GATE_SCOPE_HINT。不做：不扩 bash 拦截面、不改凭据缓存/pull/附牌路径、不动读引导。
+**落点**：agora-plugin/hook.ts（wrongDoorHint 可选 targetPath＋shouldBlock 放行腿）、agora-plugin/hook.test.ts（cwd 合法 target 主仓/他仓两形态拒、cwd/target 同在 env 放行、既有 BOOT/半条缓存自愈用例目标改 env 内）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F84 锚）——新增越界用例在旧实现下 2 fail（返回 null）；新实现 `cd agora-plugin && bun test hook.test.ts` 42/42、`cd agora-plugin && bun test` 97/97 全绿。部署注记：插件载荷是 install 拷贝，merged 后须重跑 ./install.sh 才生效。

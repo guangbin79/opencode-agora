@@ -20,6 +20,7 @@ import { default as entry, setEnforce } from "./index";
 let root: string; // 非豁免夹具根（/tmp 下但不在 /tmp/opencode 内）
 let repo: string; // git 仓夹具（.git 目录桩）
 let plain: string; // 非 git 目录夹具
+let repo2: string; // 另一 git 仓夹具——worker cwd 合法但 target 越界的第二形态
 let envDir: string; // worker 任务环境夹具
 let home: string; // $AGORA_HOME 夹具
 let tmpRepo: string; // /tmp/opencode 下带 .git 的目录——临时豁免压过 git 判定
@@ -34,13 +35,15 @@ beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "agora-hook-"));
   repo = join(root, "repo");
   plain = join(root, "plain");
+  repo2 = join(root, "repo2");
   envDir = join(root, "env-wt");
   home = join(root, "plaza");
   // F38：envDir 带 .git——env 腿（cred.envDir/仓根）判定需 env 具仓形态，非 B3 豁免误绿
-  for (const d of [join(repo, ".git"), plain, join(envDir, ".git"), join(home, "state", "messages"), join(home, "wiki"), join(home, ".agora")]) {
+  for (const d of [join(repo, ".git"), plain, join(repo2, ".git"), join(envDir, ".git"), join(home, "state", "messages"), join(home, "wiki"), join(home, ".agora")]) {
     mkdirSync(d, { recursive: true });
   }
   writeFileSync(join(repo, "a.md"), "x");
+  writeFileSync(join(repo2, "b.md"), "x");
   writeFileSync(join(home, "events.jsonl"), "");
   writeFileSync(join(home, "state", "tasks.jsonl"), "");
   writeFileSync(join(home, "state", "messages", "00000001.md"), "x");
@@ -112,9 +115,9 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("write", join(repo, ".req-gate", "x.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
     expect(shouldBlock("write", join(repo, ".review-loop", "e.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
     expect(shouldBlock("edit", join(repo, ".omo", "x.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
-    // 路径中段命中（src/.omo）跨 env 同拒；非门目录跨仓不归本约束（既有面不动）
+    // 路径中段命中（src/.omo）跨 env 同拒；非门目录跨仓走写入目标越界拒（不再放行）
     expect(shouldBlock("write", join(repo, "src", ".omo", "y.md"), envDir, worker, true)).toBe(GATE_SCOPE_HINT);
-    expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toBeNull();
+    expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toContain("写入目标");
   });
 
   test("F47 GATE_SCOPE_HINT 文案列全四目录（含 .superpowers）", () => {
@@ -135,9 +138,11 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("edit", join(plain, "link.md"), plain, null, true)).toBe(NO_CRED_HINT);
   });
 
-  test("持活动凭据 cwd∈env→放行；cwd∉env→拒因 wrong-door（实值退化形态）", () => {
-    // Req: F1
-    expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toBeNull();
+  test("持活动凭据 cwd/target 同在 env→放行；target 越界或 cwd∉env→拒因 wrong-door", () => {
+    // Req: F1/F84——放行必须同时约束 cwd 与写入目标，缺一即越界
+    expect(shouldBlock("edit", join(envDir, "a.md"), envDir, worker, true)).toBeNull();
+    expect(shouldBlock("edit", join(repo, "a.md"), envDir, worker, true)).toContain("写入目标");
+    expect(shouldBlock("write", join(repo2, "b.md"), envDir, worker, true)).toContain("写入目标");
     expect(shouldBlock("edit", join(repo, "a.md"), plain, worker, true)).toBe(wrongDoorHint(envDir, plain));
     // 退化形态：envDir 不符 {repo}__wt-* 命名约定→仅列两侧实值，无换算
     expect(wrongDoorHint(envDir, plain)).toContain(plain);
@@ -210,7 +215,7 @@ describe("shouldBlock 判定链", () => {
     expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "not_worker")).toBe(DISPATCH_HINT); // 主会话直改：正确指引＝派任务
     expect(shouldBlock("edit", join(repo, "a.md"), plain, null, true, "not_worker")).toBe(DISPATCH_HINT); // edit 同面
     // 拉取 200 命中：worker 牌已填缓存，走既有 env 判定（零漂移）
-    expect(shouldBlock("write", join(repo, "a.md"), envDir, worker, true, "ok")).toBeNull();
+    expect(shouldBlock("write", join(envDir, "a.md"), envDir, worker, true, "ok")).toBeNull();
     expect(shouldBlock("edit", join(repo, "a.md"), plain, worker, true, "ok")).toBe(wrongDoorHint(envDir, plain));
     // 不可达/节流/缺省：未知身份 fail-closed，不给主会话指引
     expect(shouldBlock("write", join(repo, "a.md"), plain, null, true, "unreachable")).toBe(NO_CRED_HINT);
@@ -330,7 +335,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     await hooks["session.prompt"]({ sessionID: "s-boot", prompt: { text: "[agora] credential t-b\ntoken: tok-b" } });
     setEnforce(true);
     try {
-      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot", input: { filePath: join(repo, "a.md") } });
+      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot", input: { filePath: join(envDir, "a.md") } });
     } finally {
       setEnforce(false);
     }
@@ -345,7 +350,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     await hooks["session.prompt"]({ sessionID: "s-boot-t", prompt: { text: "[agora] credential t-f24\ntoken: tok-f24" } });
     setEnforce(true);
     try {
-      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot-t", input: { filePath: join(repo, "a.md") } });
+      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot-t", input: { filePath: join(envDir, "a.md") } });
     } finally {
       setEnforce(false);
     }
@@ -361,7 +366,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
     await hooks["session.prompt"]({ sessionID: "s-boot-a", prompt: { text: "[agora] credential t-f29\ntoken: tok-f29" } });
     setEnforce(true);
     try {
-      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot-a", input: { filePath: join(repo, "a.md") } });
+      await hooks["tool.execute.before"]({ tool: "write", sessionID: "s-boot-a", input: { filePath: join(envDir, "a.md") } });
     } finally {
       setEnforce(false);
     }
@@ -496,7 +501,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       // 2.2.0 病灶回归锚（派发方增强②）：本用例全程不发 session.prompt——即
       // 「prompt 钩子未填充但 tool 钩子在触发」形态，拉取自愈须独立于推送通道成立。
       // 未命中→拉取命中→填缓存→cwd∈env 放行（s-boot* 前缀＝wire 桩回任务 env cwd）
-      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-w", input: { filePath: join(repo, "a.md") } });
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-pull-w", input: { filePath: join(envDir, "a.md") } });
       expect(getCredential("s-boot-pull-w")?.token).toBe("tok-pull");
       // 404 未命中→主会话路由 DISPATCH_HINT（F27 收殓，不是 NO_CRED_HINT 死路文案）；
       // 同 sid 立即重试→节流窗内不再拉
@@ -552,7 +557,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       // 会话创建期注入与插件加载竞态的产物（ag-fed303 开工即撞形态）
       cacheCredential({ token: "", sid: "s-boot-half", role: "worker", tid: "t-half", envDir });
       // 写判定路径触发拉取→同调用放行（cwd∈env）
-      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-half", input: { filePath: join(repo, "a.md") } });
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-half", input: { filePath: join(envDir, "a.md") } });
       expect(getCredential("s-boot-half")?.token).toBe("tok-half"); // 拉取补全缓存
       expect(pulls).toEqual(["s-boot-half"]);
       // 404 形态：半条缓存＋服务侧无在飞绑定→写面仍走 DISPATCH_HINT 主会话路由（不回归）
@@ -607,7 +612,7 @@ describe("index 插件入口（T5 实证：{id, setup(ctx)}＋tool/session hook�
       // 后至命中（ag-442743 探针实证：裸 NO_CRED_HINT＋零 cred_pull 审计行）
       cacheCredential({ token: "tok-half-inv", sid: "s-boot-half-inv", role: "worker", tid: "t-half" });
       // 写判定路径触发拉取→env 位补全→同调用放行（cwd∈env）
-      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-half-inv", input: { filePath: join(repo, "a.md") } });
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s-boot-half-inv", input: { filePath: join(envDir, "a.md") } });
       expect(getCredential("s-boot-half-inv")?.envDir).toBe(envDir);
       expect(pulls).toEqual(["s-boot-half-inv"]);
       // 404 形态：无在飞绑定→拉取分流后仍拒，路由 DISPATCH_HINT（非 NO_CRED_HINT 死路文案）
