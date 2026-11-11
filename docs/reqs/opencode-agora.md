@@ -475,3 +475,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：放行不变量收紧为「cwd 与写入目标都在当前任务 env 内」，缺一即拒；wrong-door 拒因区分「写入目标越界」与「工作目录在外」，目标越界时点名实际 target，不再谎称 cwd 在外；F38 门记录目录作用域判定仍先于本腿，跨 env/跨仓门记录照旧 GATE_SCOPE_HINT。不做：不扩 bash 拦截面、不改凭据缓存/pull/附牌路径、不动读引导。
 **落点**：agora-plugin/hook.ts（wrongDoorHint 可选 targetPath＋shouldBlock 放行腿）、agora-plugin/hook.test.ts（cwd 合法 target 主仓/他仓两形态拒、cwd/target 同在 env 放行、既有 BOOT/半条缓存自愈用例目标改 env 内）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F84 锚）——新增越界用例在旧实现下 2 fail（返回 null）；新实现 `cd agora-plugin && bun test hook.test.ts` 42/42、`cd agora-plugin && bun test` 97/97 全绿。部署注记：插件载荷是 install 拷贝，merged 后须重跑 ./install.sh 才生效。
+
+### F85 task_dispatch 公共响应去密——不回传 worker token（2026-11-12，用户目标「稳定性、性能」）
+**现状**：F43 已把注入/落库文本改为凭据文件指针，但 `/task_dispatch` HTTP/MCP 成功响应仍包含 worker token 本体；嵌套派发时子 worker 牌直接进入父 worker 工具结果与模型转录，旧秘密泄漏面仍开放，且既有测试把该响应形状钉成绿测。
+**裁定**：公共成功体收敛为 `{"task": <tid>}`；`TaskService.dispatch()` 内部返回值、凭据文件写入、BOOT/credential 指针注入、离线落库与 `/cred_for_sid` 拉取面全部不动。测试需要 worker 牌时经 `state.get(tid)["worker_sid"]`＋`auth.token_for(wsid)` 获取，不再从公共响应读取。
+**落点**：agorad/transport/httpd.py（task_dispatch 出口）、tests/test_mcp_shell.py（响应形状/序列化无 token）、tests/test_transport_httpd.py（dispatch_task helper 与嵌套 child 牌获取）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F85 锚）——新断言在旧实现下 MCP/HTTP 响应不等且含 token（48 fail 批量暴露）；新实现 `python3 -m pytest tests/test_mcp_shell.py tests/test_transport_httpd.py tests/test_agora_wait.py -q` 179 passed＋8 subtests，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。

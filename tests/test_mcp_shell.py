@@ -224,8 +224,8 @@ class TestPassthrough(McpShellTest):
                                        "verify_cmd": "true"})
         r = self.call_tool("task_dispatch", {"_token": self.root, "task": tid})
         payload = self.result_of(r)
-        self.assertEqual(payload["task"], tid)
-        self.assertTrue(payload["token"])  # worker 凭据回传
+        self.assertEqual(payload, {"task": tid})
+        self.assertNotIn("token", json.dumps(payload))  # 公共响应不带凭据
 
     def test_board_and_doctor_pass_through(self):  # Req: F3
         self.assertIn("buckets", self.result_of(

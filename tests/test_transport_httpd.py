@@ -213,7 +213,10 @@ class HttpdTest(unittest.TestCase):
         st, r = call(self.port, "POST", "/task_dispatch", {"task": tid},
                      self.root)
         self.assertEqual(st, 200)
-        return r["token"]
+        self.assertEqual(r, {"task": tid})  # 公共响应不回传 worker token
+        self.assertNotIn("token", r)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        return self.app.auth.token_for(wsid)
 
 
 class TestHttpSmoke(HttpdTest):
@@ -719,7 +722,9 @@ class TestNestedDispatchLoop(HttpdTest):
         st, r = call(self.port, "POST", "/task_dispatch",
                      {"task": child}, parent_token)
         self.assertEqual(st, 200)
-        child_token = r["token"]
+        self.assertEqual(r, {"task": child})
+        child_token = self.app.auth.token_for(
+            self.app.state.get(child)["worker_sid"])
 
         st, r = call(self.port, "POST", "/post",
                      {"task": parent, "kind": "done", "body": SHA}, parent_token)

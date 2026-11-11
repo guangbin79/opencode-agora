@@ -154,8 +154,9 @@ class _Handler(BaseHTTPRequestHandler):
                                             quick=qk, deliverable=dl,
                                             actor_sid=sid)}  # ag-f80309：归属记真实调用 sid
         if name == "task_dispatch":
-            return {"task": body["task"],
-                    "token": app.task.dispatch(body["task"], token, actor_sid=sid)}
+            # 公共响应不带 worker 牌：凭据只经文件指针注入/拉取面（F43/F85）
+            app.task.dispatch(body["task"], token, actor_sid=sid)
+            return {"task": body["task"]}
         if name == "task_update":
             vc = body["verify_cmd"]
             if not isinstance(vc, str):  # 同 create 口径：非串 400 报因，不落 500
