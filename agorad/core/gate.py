@@ -10,7 +10,7 @@ verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-
 默认 runner 以独立进程组执行命令，双顶（F36）：软顶到点提醒派发方一次不杀继续
 跑，硬顶（缺省 4×软顶）到点杀全组返回 124；rc=124 分类路由派发方（不计 worker
 连败、任务驻留 done），避免单个挂死验证永久堵住串行门。命令自身死（rc=126/127，
-或 rc=2＋输出含 No such file or directory，F80/F82）同款驻留分类——escalate
+或 rc=2＋输出含 No such file or directory，F81/F82）同款驻留分类——escalate
 通知通道拍派发方，不弹回 worker 自愈。
 崩溃重排先探测目标支是否
 已含任务 commit：已含说明上轮最终推进已完成，只补 merged/closed 终态，不重验后
