@@ -11,7 +11,9 @@ stalled 升级＋worker prompt 自检一次（不强制打断，失败不重试�
 （email.json opt-in）；离开候选集复位，oc 不可达轮次
 免判；同任务重复升级（复位后再僵再拍）间隔×4 指数退避、封顶 24h，正文带
 连续升级计数（ag-0f537d 降噪，ag-4628f9 宿主排队忙/闲抖动误报实证）；
-"僵"的处置仍归人工。升级正文由服务权威合成；任务/worker 供给文本以
+"僵"的处置仍归人工。env 已物理消失的候选改拍一次性 env-gone（F72，
+ag-724152 /tmp 清理事故）：每丢失周期一次、持续丢失不拍 stalled 不注自检，
+恢复在盘回常规 stalled 边沿，终态出账。升级正文由服务权威合成；任务/worker 供给文本以
 "不可信原文"段携带（拍平换行，防伪造服务行）。escalate 沿 dispatcher_sid
 上行至根任务（根 dispatcher＝主会话 sid，R25-A 活绑定）经 router post——
 落库先行，注入即视为拍到（stalled 例外：synthetic 免通知通道，不弹窗）；
@@ -30,6 +32,7 @@ KIND_GATEFILES = "gatefiles"
 KIND_REINJECT = "reinject-fail"
 KIND_DISPATCHER_DEAD = "dispatcher-dead"
 KIND_STALLED = "stalled"
+KIND_ENV_GONE = "env-gone"
 
 _UNTRUSTED = "---- 不可信原文 ----"
 _RAW_MAX = 500
@@ -47,6 +50,8 @@ _KIND_NOTE = {
     KIND_REINJECT: "下级会话死亡且重注入失败",
     KIND_DISPATCHER_DEAD: "派发方会话死亡，其在飞子链失管",
     KIND_STALLED: "在飞超 20min 无活动（僵态候选），请人工关注",
+    KIND_ENV_GONE: "任务环境已不在盘——项目仓仍在则重派可重建 env（F71），"
+                   "项目仓已亡则 cancel 归档",
 }
 
 
@@ -107,6 +112,7 @@ class Health:
         self._draft_writer = draft_writer
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
+        self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
 
     def tick(self):
         """探每个活动任务的直接下跳：死→自愈/上报；边沿判僵拍人＋F70 worker
@@ -150,6 +156,9 @@ class Health:
         退避窗内边沿不拍不记（下轮到期重试，拍到才记不丢报）。
         拍人后向 worker 注入一次 prompt 自检提示（F70）：模型自行纠偏，不强制
         打断/取消/重派；注入失败同轮不重试、不阻断拍人。
+        env 在册不在盘的候选改拍一次性 env-gone（F72，ag-724152）：每丢失周期
+        只拍一次；持续丢失不拍 stalled、不注入自检（env 已失无从自纠）；
+        恢复在盘回常规 stalled 边沿；终态出账。
         """
         if self._stale_candidates is None:
             return
@@ -158,6 +167,12 @@ class Health:
                 if tid not in busy]
         now = time.time()
         for tid, _ in cand:
+            env_dir = tasks[tid].get("env_dir")
+            if env_dir and not Path(env_dir).is_dir():  # F72 在盘判定（勿用 env_activity：0.0 分不清缺失与不活跃）
+                if tid not in self._env_gone_seen:  # 每个丢失周期只拍一次
+                    self.escalate(KIND_ENV_GONE, tid)
+                    self._env_gone_seen.add(tid)  # 拍到才记（同 _stale_seen 语义）
+                continue
             if tid not in self._stale_seen:  # 边沿：在候选集而不在记忆集
                 n, last = self._stale_esc.get(tid, (0, 0.0))
                 if now - last < self._stale_gap(n):
@@ -179,6 +194,12 @@ class Health:
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
         self._stale_esc = {tid: v for tid, v in self._stale_esc.items()
                            if tasks.get(tid, {}).get("state") in _ACTIVE}
+        # F72 出账：env 回到在盘或任务终态/除籍即结束丢失周期（下周期可再拍）；
+        # 经任务全集判在失——busy 轮离开候选集不误出账（防忙闲抖动重拍）
+        self._env_gone_seen = {tid for tid in self._env_gone_seen
+                               if tasks.get(tid, {}).get("state") in _ACTIVE
+                               and tasks[tid].get("env_dir")
+                               and not Path(tasks[tid]["env_dir"]).is_dir()}
 
     def _stale_gap(self, count):
         """已连拍 count 次后的再拍退避窗（秒）：首档 1200s 逐档×4，封顶 24h。"""
@@ -254,9 +275,10 @@ class Health:
     def escalate(self, kind, tid, raw=None, streak=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
-        stalled 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户裁定），
-        其余 kind 照常会话注入；stalled 边沿附末次活动摘要（F52，失败降级）
-        ＋证据包小节与草稿页路径（F59，降级纪律：证据永不阻塞拍人）。
+        stalled/env-gone 走免通知通道（synthetic，落转录不弹窗，gt-5bc312 用户
+        裁定；F72 env-gone 同款），其余 kind 照常会话注入；stalled 边沿附末次
+        活动摘要（F52，失败降级）＋证据包小节与草稿页路径（F59，降级纪律：
+        证据永不阻塞拍人；env-gone 正文自足不给）。
         streak＝同任务连续升级计数（退避节奏见 _stale_scan），正文随带。"""
         t = self._state.get(tid)
         body = (f"失控[{kind}] 任务{tid}：{_KIND_NOTE[kind]}；"
@@ -283,9 +305,10 @@ class Health:
         rt = self._state.get(root)
         self._store.append_event({"ts": time.time(), "actor": "health",
                                   "event": "escalate", "task": tid, "kind": kind})
+        quiet = kind in (KIND_STALLED, KIND_ENV_GONE)
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
-                          silent=(kind == KIND_STALLED))  # stalled 免通知通道：不弹窗（gt-5bc312）
-        if kind == KIND_STALLED:  # 僵态邮件例外（§6 决策记录）：仅此 kind 外呼
+                          silent=quiet)  # stalled/env-gone 免通知通道：不弹窗（gt-5bc312；F72 同款）
+        if quiet:  # 僵态类邮件例外（§6 决策记录）：stalled 与 env-gone（F72 同款）
             send_email(self._store, tid, body, runner=self._runner)
 
     def _root(self, tid):

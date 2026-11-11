@@ -110,8 +110,11 @@ class TestCoreHealth(unittest.TestCase):
     # ---- 夹具 ----
 
     def seed(self, tid, state="running", disp="main", worker="s-w1"):
+        env = self.tmp / "envs" / tid
+        env.mkdir(parents=True, exist_ok=True)
+        os.utime(env, (0.0, 0.0))  # 真实目录表达在盘（F72）；mtime 钉旧免虚增活性（F15 walk 含根）
         self.state.add(tid, {"title": tid, "goal": "g", "project_dir": "/repo",
-                             "env_dir": f"/envs/{tid}",
+                             "env_dir": str(env),
                              "verify": {"cmd": "pytest -q", "state": "registered",
                                         "registered_by": disp, "registered_at": 1.0},
                              "state": state, "dispatcher_sid": disp,
@@ -350,6 +353,69 @@ class TestCoreHealth(unittest.TestCase):
         self.health.tick()  # 同轮 False 不重试
         self.assertEqual(len(self.oc.inject_calls), 1)
         self.assertEqual(len(self.main_msgs()), 1)
+
+    # ---- env 丢失一次性 env-gone（F72：ag-724152 /tmp 清理事故）----
+
+    def _lose_env(self, tid):  # 真实目录表达消失（在盘判定勿用 env_activity）
+        shutil.rmtree(self.tmp / "envs" / tid)
+
+    def test_env_gone_escalates_once_no_stalled_no_nudge(self):  # Req: F72
+        """①env 在册不在盘的 running 候选：恰好一次 env-gone、零 stalled、零自检。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self._lose_env("t1")
+        self.health.tick()
+        bodies = [m["body"] for m in self.main_msgs()]
+        self.assertEqual(sum("失控[env-gone]" in b for b in bodies), 1)
+        self.assertEqual(sum("失控[stalled]" in b for b in bodies), 0)
+        self.assertIn("不在盘", bodies[0])  # _KIND_NOTE 处置指引进正文
+        self.assertEqual(self.oc.inject_calls, [])  # F70 自检不注入：env 已失无从自纠
+
+    def test_env_gone_repeat_ticks_do_not_reescalate(self):  # Req: F72
+        """②持续丢失期间后续 tick 不再升级（ag-724152 十四次重拍事故收口）。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self._lose_env("t1")
+        for _ in range(3):
+            self.health.tick()
+        self.assertEqual(len(self.main_msgs()), 1)
+        self.assertIn("t1", self.health._env_gone_seen)
+
+    def test_env_gone_restored_resumes_stalled_edge(self):  # Req: F72
+        """③env 恢复在盘（重派重建）→回常规 stalled 边沿；再失＝新周期可再拍。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self._lose_env("t1")
+        self.health.tick()
+        env = self.tmp / "envs" / "t1"
+        env.mkdir()  # 恢复在盘（空目录钉旧 mtime：仍候选、不虚增活性）
+        os.utime(env, (0.0, 0.0))
+        self.health.tick()
+        self.assertEqual(sum("失控[stalled]" in m["body"]
+                             for m in self.main_msgs()), 1)
+        self.assertNotIn("t1", self.health._env_gone_seen)  # 周期出账
+        self._lose_env("t1")
+        self.health.tick()  # 新丢失周期：env-gone 可再拍（旧周期 1＋新周期 1）
+        self.assertEqual(sum("失控[env-gone]" in m["body"]
+                             for m in self.main_msgs()), 2)
+        self.assertEqual(sum("失控[stalled]" in m["body"]
+                             for m in self.main_msgs()), 1)  # 再失期间不重拍 stalled
+
+    def test_env_gone_memory_pruned_on_terminal(self):  # Req: F72
+        """④任务终态→丢失周期记忆出账（与 _stale_esc 终态清理同款）。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self._lose_env("t1")
+        self.health.tick()
+        self.assertIn("t1", self.health._env_gone_seen)
+        self.state.transition("t1", "done")  # 迁移矩阵：running→done→merged 两跳
+        self.state.transition("t1", "merged")  # 终态（_ACTIVE 外）→出账
+        self.health.tick()
+        self.assertNotIn("t1", self.health._env_gone_seen)
 
     def test_stale_skips_fresh_and_terminal(self):  # Req: F5
         self.seed("t1")
