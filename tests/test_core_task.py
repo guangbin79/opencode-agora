@@ -339,6 +339,47 @@ class TestQuotaPools(TestCoreTask):
         self.assertIn("quota[main]", str(cm.exception))
         self.assertEqual(self.state.get(seventh)["state"], "todo")
 
+    def test_repo_alias_normalizes_and_feeds_quick_history(self):  # Req: F90
+        """尾斜杠/符号链接是同一仓身份：任务行、quick 历史共用规范键。"""
+        import os
+
+        repo = self.tmp / "repo-alias"
+        repo.mkdir()
+        link = self.tmp / "repo-link"
+        os.symlink(repo, link)
+        canonical = str(repo)
+        for i in range(2):  # quick 判定证据：同仓 merged 非 quick×2
+            self.seed(f"h{i}", state="merged", disp="main")
+            self.state.set_fields(f"h{i}", project_dir=canonical, commit="c" * 40,
+                                  verify={"cmd": "true", "state": "registered",
+                                          "registered_by": "main",
+                                          "registered_at": 1.0, "timeout": None})
+        tid = self.svc.create("quick alias", canonical + "/", None,
+                              self.root, quick=True)
+        self.assertEqual(self.state.get(tid)["project_dir"], canonical)
+        self.assertEqual(self.state.get(tid)["verify"]["cmd"], "true")
+        tid_link = self.svc.create("quick link", str(link), None,
+                                   self.root, verify_cmd="true")
+        self.assertEqual(self.state.get(tid_link)["project_dir"], canonical)
+
+    def test_worker_equivalent_repo_alias_inherits_parent(self):  # Req: F90
+        import os
+
+        repo = self.tmp / "repo-worker"
+        repo.mkdir()
+        link = self.tmp / "repo-worker-link"
+        os.symlink(repo, link)
+        parent = self.svc.create("parent", str(repo), None, self.root,
+                                 verify_cmd="true")
+        wtok = self.svc.dispatch(parent, self.root)
+        child = self.svc.create("child", str(link) + "/", None, wtok)
+        self.assertEqual(self.state.get(child)["project_dir"], str(repo))
+        other = self.tmp / "repo-other"
+        other.mkdir()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("bad", str(other), None, wtok)
+        self.assertIn("强制继承父任务仓", str(cm.exception))
+
 
 class TestNestedDispatch(TestCoreTask):
     def test_worker_creates_dispatches_and_cancels_own_child(self):

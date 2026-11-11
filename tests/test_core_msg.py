@@ -588,6 +588,32 @@ class TestPeerBoard(unittest.TestCase):
         r_all = self.pb.board(self.state.snapshot())  # root/dispatcher 诊断＝全仓
         self.assertEqual(sorted(t["tid"] for t in r_all["tasks"]), ["t1", "t2"])
 
+    def test_repo_alias_same_partition_both_directions(self):  # Req: F90
+        """符号链接/实路径是同一 peer 分区：写入与读取双向都命中。"""
+        import os
+
+        repo = self.tmp / "repo-peer"
+        repo.mkdir()
+        link = self.tmp / "repo-peer-link"
+        os.symlink(repo, link)
+        self.state.add("ta", {"state": "running", "fail_streak": 0,
+                              "title": "A", "project_dir": str(repo),
+                              "created": 0.0, "updated": 0.0,
+                              "dispatcher_sid": "da", "worker_sid": "wa"})
+        self.state.add("tb", {"state": "running", "fail_streak": 0,
+                              "title": "B", "project_dir": str(link),
+                              "created": 0.0, "updated": 0.0,
+                              "dispatcher_sid": "db", "worker_sid": "wb"})
+        self.pb.post("wa", "from canonical")
+        self.pb.post("wb", "from alias")
+        r = self.pb.board(self.state.snapshot(), str(repo))
+        self.assertEqual(sorted(t["tid"] for t in r["tasks"]), ["ta", "tb"])
+        self.assertEqual([m["body"] for m in r["messages"]],
+                         ["from alias", "from canonical"])
+        r_link = self.pb.board(self.state.snapshot(), str(link))
+        self.assertEqual([m["body"] for m in r_link["messages"]],
+                         ["from alias", "from canonical"])
+
     def test_length_cap_500(self):  # Req: F22 护栏 a
         self.pb.post("w1", "x" * 600)
         (m,) = [x for x in self.store.read_messages() if x["kind"] == "peer"]

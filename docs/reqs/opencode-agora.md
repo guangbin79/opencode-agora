@@ -505,3 +505,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：MCP task_create schema 增加 deliverable（string，enum 仅 out_of_band）。HTTP 边界按端点声明字符串字段并统一 `_string_field` 校验：坏类型一律 400 且报因含字段名；`task` 非串在行查找前拒绝；缺失必填仍走 KeyError→400，空串语义仍归域服务。移除 post/wiki 写入口的静默 `str()` 强转。
 **落点**：agora_mcp.py（schema）、agorad/transport/httpd.py（_STRING_FIELDS＋_string_field＋入口校验）、tests/test_mcp_shell.py（schema/透传）、tests/test_transport_httpd.py（坏类型矩阵、task 前置校验、空串语义）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F89 锚）——旧实现 schema KeyError、goal=123→500、task list→500 共 3 fail；新实现 `python3 -m pytest tests/test_mcp_shell.py tests/test_transport_httpd.py -q` 135 passed，全量 pytest 另行绿。部署注记：本条改 agorad/MCP 载荷，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F90 仓库身份 realpath 归一——路径别名不裂仓（2026-11-12，用户目标「稳定性、性能」）
+**现状**：task_create 原样保存 project_dir；quick 历史按字符串精确相等，peer 只做 normpath——同一仓的尾斜杠/符号链接路径会被当成不同仓：quick 证据判不足、worker 等价路径被拒、peer 分区裂开。
+**裁定**：TaskService 新增 `_repo_key(path)=str(Path(path).resolve())`，建单入账、worker 父仓比较、quick 历史比较共用；peer 分区与存量 peer 消息 repo 用 `os.path.realpath` 同口径比较。响应字段结构不变，值归一为规范仓根；跨仓仍拒，不做历史账本重写。
+**落点**：agorad/core/task.py（_repo_key＋create/_history_cmd）、agorad/core/peer.py（分区键＋存量消息比较）、tests/test_core_task.py（别名入账/quick 历史/worker 继承）、tests/test_core_msg.py（peer 双向同分区）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F90 锚）——旧实现 quick 证据不足、worker 等价路径拒、peer 任务漏显共 3 fail；新实现 `python3 -m pytest tests/test_core_task.py tests/test_core_msg.py -q` 192 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。

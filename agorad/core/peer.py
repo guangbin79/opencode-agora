@@ -23,6 +23,11 @@ class Rejected(Exception):
     """peer 域拒绝（写权限/软限/无作者任务）——报因在消息。"""
 
 
+def _repo_key(path: str) -> str:
+    """F90 分区键：realpath 归一尾斜杠/符号链接（存量消息 repo 同口径）。"""
+    return os.path.realpath(path)
+
+
 def _own_task(snap, sid):
     """调用者作者任务 (tid, row)：worker_sid==sid，活动态优先（终态后读面仍可用）。"""
     hit = [(tid, t) for tid, t in snap["tasks"].items()
@@ -43,14 +48,14 @@ class PeerBoard:
         _tid, t = _own_task(self._state.snapshot(), sid)
         if t is None:
             raise Rejected(f"repo_board: {sid} 无 worker 任务行（分区不可定）")
-        return os.path.normpath(t["project_dir"])
+        return _repo_key(t["project_dir"])
 
     def post(self, sid, body):
         """写面：作者任务锁 tid，软限内超长截断落库＋审计。返回 msg id。"""
         tid, t = _own_task(self._state.snapshot(), sid)
         if t is None:
             raise Rejected(f"peer 留言: {sid} 无 worker 任务行（作者不可定）")
-        repo = os.path.normpath(t["project_dir"])
+        repo = _repo_key(t["project_dir"])
         peers = [m for m in self._store.read_messages()
                  if m.get("kind") == "peer" and m.get("task") == tid]
         if len(peers) >= SOFT_LIMIT:
@@ -68,17 +73,18 @@ class PeerBoard:
         ＋最近 READ_N 条留言。repo=None＝全仓（root/
         dispatcher 诊断面）；worker 分区由 transport 经 partition() 先定。"""
         if repo:
-            repo = os.path.normpath(repo)
+            repo = _repo_key(repo)
         now = time.time()
         tasks = [{"tid": tid, "title": t.get("title", ""), "state": t["state"],
                   "last_seen": t.get("last_seen"), "req_id": t.get("req_id")}
                  for tid, t in sorted(snap["tasks"].items())
                  if t["state"] not in _INFLIGHT_EXCL
-                 and (repo is None or os.path.normpath(t.get("project_dir") or "")
-                      == repo)]
+                 and (repo is None
+                       or _repo_key(t.get("project_dir") or "") == repo)]
         peers = [m for m in self._store.read_messages()
                  if m.get("kind") == "peer"
-                 and (repo is None or m.get("repo") == repo)][-READ_N:]
+                 and (repo is None
+                      or _repo_key(m.get("repo") or "") == repo)][-READ_N:]
         msgs = []
         for m in reversed(peers):  # 最新在前
             author = snap["tasks"].get(m.get("task"))

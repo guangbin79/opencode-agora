@@ -57,6 +57,11 @@ class TaskService:
         self._store, self._router, self._pages = store, router, pages
         self._stale_candidates = stale_candidates  # ag-d1d8c1：僵态口径单一事实源
 
+    @staticmethod
+    def _repo_key(path: str) -> str:
+        """F90 仓库身份键：绝对 realpath——尾斜杠/符号链接别名归一。"""
+        return str(pathlib.Path(path).resolve())
+
     # ---- F2 建任务 ----
 
     def create(self, goal, project_dir, after, actor_token, title=None,
@@ -67,6 +72,8 @@ class TaskService:
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
+        if project_dir is not None:
+            project_dir = self._repo_key(project_dir)  # F90：入账/比较前归一别名
         if role == "worker":  # F37 作用域：验收写面/豁免旗拒＋仓/合并策略强制继承
             if verify_cmd is not None:
                 self._reject(tid, sid, "worker 不得登记验收命令——主会话派发方或 root "
@@ -577,7 +584,8 @@ class TaskService:
         counts = {}
         for t in self._state.snapshot()["tasks"].values():
             if (t["state"] in ("merged", "closed") and t.get("commit")
-                    and not t.get("quick") and t["project_dir"] == project_dir
+                    and not t.get("quick")
+                    and self._repo_key(t["project_dir"]) == project_dir
                     and isinstance(t["verify"]["cmd"], str)
                     and t["verify"]["cmd"].strip()):
                 cmd = t["verify"]["cmd"].strip()  # 空白变体同键计票
