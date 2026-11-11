@@ -19,6 +19,7 @@
 - **门记录豁免作用域约束**（F38，2026-11-01）：basename 级豁免（.omo/.req-gate/.review-loop）须配作用域腿——写目标 ∈ 当前 env（cred.envDir）或当前仓根才豁免，跨 env/跨仓一律拒；「路径含字样即放行」类豁免是投毒面，放宽只认工作区＋精确路径授权
 - **quick 微任务车道**（F65/F67）：task_create(quick=true) 建单原子登记——验收按账本历史动态判定（同仓 merged 非 quick 的 verify.cmd 唯一最高频且 ≥2 次；证据不足即拒并报候选，quick 行不计证据；自带 verify_cmd 即拒）；合并门前量 merge-base 累计 diff，超 AGORA_QUICK_MAX_FILES/LINES（缺省 3/30）按 verify 红既有路径退回（复用 verify-failed＋3-strike 零新状态）；BOOT 减配砍嵌套/协作/沉淀三行；非 quick 任务零变化
 - **零提交 done 拒收**（F69；ag-1ae0f1 空集放行）：done 受理点校验 merge-base --is-ancestor 目标基线（含 origin，ag-49312d 口径）——空集不再自动拒收：env HEAD 相对起点 base 有前进（dispatch 落账 env_base）或前次受理 commit 在目标支可达即放行；真零提交按锚拒收同款弹回 worker；no-op 出口＝worker post(note) 报告＋派发方 cancel 归档；不新增「驻留 done」出口（F36 护栏）
+- **CLI 派发错址自愈**（F75）：无头派发以 root_sid 记真建单人；health 启动/tick 修 active 顶层错址；to=root 积压 replay_of 幂等补交；真 headless/嵌套/终态不动
 
 ## 关键模式
 
