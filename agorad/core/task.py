@@ -129,7 +129,6 @@ class TaskService:
             self._req_check(tid, sid, project_dir, req_id)
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
-        tid = self._new_tid()
         now = time.time()
         verify = {"cmd": "", "state": "pending", "registered_by": None,
                   "registered_at": None, "timeout": timeout}
@@ -196,8 +195,8 @@ class TaskService:
         if t["chain_depth"] >= _MAX_DEPTH:  # （F41 兜底）
             self._reject(tid, sid, f"chain_depth>={_MAX_DEPTH}")
         pool = t.get("root_sid") or t["dispatcher_sid"]  # F45 池标识：存量行 fallback 归 dispatcher
-        active = sum(1 for x in self._state.snapshot()["tasks"].values()
-                     if x["state"] in _ACTIVE
+        active = sum(1 for x_id, x in self._state.snapshot()["tasks"].items()
+                     if x_id != tid and x["state"] in _ACTIVE  # F88：重派自身非新增
                      and (x.get("root_sid") or x["dispatcher_sid"]) == pool)
         if active >= _QUOTA:
             self._reject(tid, sid, f"quota[{pool}]: 活动任务 {active}>={_QUOTA}")

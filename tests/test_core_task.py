@@ -323,6 +323,22 @@ class TestQuotaPools(TestCoreTask):
             self.svc.dispatch(tid, disp)
         self.assertIn("quota[disp9]", str(cm.exception))  # 按 dispatcher_sid 归池不炸
 
+    def test_full_pool_redispatch_blocked_excludes_self(self):  # Req: F88
+        """满池重派既有任务不新增负载：目标自身不计入新增配额。"""
+        for i in range(6):
+            self.seed(f"b{i}", state="blocked" if i == 0 else "running",
+                      disp="main", worker=f"w{i}", env=f"/envs/b{i}")
+        self.state.set_fields("b0", verify={
+            "cmd": "true", "state": "registered",
+            "registered_by": "main", "registered_at": 1.0, "timeout": None})
+        self.svc.dispatch("b0", self.root)  # 旧口径：active=6 含自身必拒
+        self.assertEqual(self.state.get("b0")["state"], "dispatched")
+        seventh = self.dispatchable()
+        with self.assertRaises(Rejected) as cm:  # 全新第七单仍拒
+            self.svc.dispatch(seventh, self.root)
+        self.assertIn("quota[main]", str(cm.exception))
+        self.assertEqual(self.state.get(seventh)["state"], "todo")
+
 
 class TestNestedDispatch(TestCoreTask):
     def test_worker_creates_dispatches_and_cancels_own_child(self):
@@ -1220,6 +1236,19 @@ class TestStalledRedispatch(TestCoreTask):
                 if e["event"] == "dispatched"][-1].get("note", "")
         self.assertIn("stalled_redispatch", note)  # 审计事件
         self.assertIn("last_seen_age_s", note)  # 证据字段
+
+    def test_full_pool_redispatch_stalled_running_excludes_self(self):  # Req: F88
+        """stalled running 是既有任务重派：满池不得把自身算作新增负载。"""
+        for i in range(6):
+            self.seed(f"r{i}", state="running", disp="main",
+                      worker=f"w{i}", env=f"/envs/r{i}")
+        self.oc.detail["w0"] = {"time": {"updated": 0, "idle": 0,
+                                         "created": 0.0}}  # 活、不 busy、非年轻
+        self.state.set_fields("r0", verify={
+            "cmd": "true", "state": "registered",
+            "registered_by": "main", "registered_at": 1.0, "timeout": None})
+        self.svc.dispatch("r0", self.root)
+        self.assertEqual(self.state.get("r0")["state"], "dispatched")
 
     def test_fresh_running_redispatch_rejected(self):  # Req: ag-d1d8c1
         tid, _, _ = self.running_pair(last_seen_ago=0)

@@ -493,3 +493,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：Router 增加交付锁与短生命周期 `_inflight` 集：立即注入消息和 digest 冲刷批次在“可被 check_mail 看见”前原子登记 inflight，网络注入在锁外；成功转 delivered，失败释放交付权留库。仍在 `_pending` 未冲刷的 note 不标 inflight，保留提前补拉能力。check_mail 的过滤＋标记原子化，且只有非空拉取才推进游标。F75 root backlog 副本同样遵守 inflight 语义；State 锁内不反向等待 Router 锁。
 **落点**：agorad/core/msg.py（交付锁＋inflight＋check_mail 游标语义）、tests/test_core_msg.py（立即注入、失败补拉、digest 冲刷三交错）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F87 锚）——旧实现三交错用例重复交付/抢交（6 fail 含继承复跑）；新实现 `python3 -m pytest tests/test_core_msg.py tests/test_core_health.py -q` 216 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F88 满池重派不计自身——blocked/stalled 恢复不被配额锁死（2026-11-12，用户目标「稳定性、性能」）
+**现状**：dispatch 配额把目标任务自身也计入活动数。root_sid 池满 6 时，第六个任务一旦 blocked 或 running 僵态可重派，会因「活动任务 6>=6」被拒；重派不新增负载，却被配额锁死，只能先取消其他任务。
+**裁定**：配额计数排除当前 tid（todo 目标本就不在活动集，语义不变）——既有 blocked/stalled running 重派满池可成功且活动数仍为 6，全新第七单照旧拒绝。顺带删除 create() 中第二次 `_new_tid()`，首次生成的 tid 贯穿校验、审计与落行。
+**落点**：agorad/core/task.py（quota 计数谓词＋重复 tid 生成）、tests/test_core_task.py（满池 blocked 重派＋全新第七单对照、满池 stalled running 重派）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F88 锚）——两满池重派用例旧实现均 `quota[main]` FAIL；新实现 `python3 -m pytest tests/test_core_task.py -q` 125 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
