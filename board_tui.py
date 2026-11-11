@@ -531,10 +531,10 @@ def draw_board(stdscr, m, status="", err=None):
         stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
     stdscr.addnstr(h - 3, 0,
                    " j/k move | g/G jump | Enter/l detail | L tail | d doctor"
-                   " | p/P prompt | x cancel | 1-5 bucket | 0 proj",
+                   " | p/P prompt | x cancel | r refresh | z/Z fold | q quit",
                    w - 1, curses.A_DIM)
     stdscr.addnstr(h - 2, 0,
-                   f" r refresh | z/Z fold | q quit | / filter[{m['filter']}]",
+                   f" 1-5 bucket | 0 proj | / filter[{m['filter']}]",
                    w - 1, curses.A_DIM)
     line = (f"prompt {m['buf']}▌" if m.get("prompt") and m.get("input") is not None
             else f"/{m['buf']}▌" if m.get("input") is not None else
