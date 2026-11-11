@@ -774,13 +774,26 @@ class TestVerifyGate(TestCoreTask):
         self.assertIn("全局 worker 角色永拒", boot)  # F37 验收录回文案
         self.assertIn("缺省继承父任务", boot)  # F37 继承语义文案
 
-    def test_boot_carries_post_kind_discipline(self):  # Req: F76
-        """ag-acc22e 死锁防线：BOOT 明示 kind 选择纪律——需裁定/答复/决策走
-        question（唤醒通道），单向留痕走 note（静默 digest，不唤醒对方）。"""
+    def test_boot_carries_post_kind_discipline(self):  # Req: F76/F78
+        """ag-acc22e 死锁防线：BOOT 明示 kind 选择纪律——凡需要派发方回应
+        （裁定、答复、处置、确认、no-op 申报）一律 question（唤醒通道），
+        此类消息绝不可用 note（静默，无人会应答）。"""
         self.dispatched_pair()
         boot = self.oc.sessions[-1][2]
-        self.assertIn("需派发方裁定/答复/决策→post(kind=question)（唤醒通道）", boot)
-        self.assertIn("单向过程留痕→note（静默 digest，不唤醒对方）", boot)
+        self.assertIn("凡需要派发方回应——裁定、答复、处置、确认、no-op 申报——"
+                      "一律 post(kind=question)（唤醒通道，会把对方叫醒）", boot)
+        self.assertIn("仅用于开工知会、进度汇报、结论与沉淀记录", boot)
+
+    def test_boot_noop_report_must_wake_dispatcher(self):  # Req: F78
+        """ag-c25768 判例：「等派发方处置」绝不能走静默 note——禁令措辞说死，
+        no-op 申报通道必须是 question，旧矛盾条款零残留。"""
+        self.dispatched_pair()
+        boot = self.oc.sessions[-1][2]
+        self.assertIn("此类消息绝不可用 note", boot)  # 禁令措辞
+        self.assertIn("no-op 申报——", boot)  # 申报列入 question 触发清单
+        self.assertIn("post(kind=question, body=no-op 结论与证据)", boot)
+        self.assertIn("申报通道必须是 question", boot)
+        self.assertNotIn("post(kind=note) 报 no-op", boot)  # 旧句零残留
 
     def test_multiline_title_flattened_on_create(self):  # Req: F46 B-1
         tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",

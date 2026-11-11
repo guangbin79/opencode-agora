@@ -609,7 +609,7 @@ class TaskService:
         else:
             contract = ("contract: 只在 env 内工作；结论经 post(done) 回填，"
                         "body=完整 commit sha，结论文本走 note")
-            done = ("done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=note) 报 no-op 等派发方处置；结论文本另发 post(kind=note)")
+            done = ("done: 每次提交后须重跑评审环使 .review-loop/.last-reviewed 锚追上 HEAD，然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=question, body=no-op 结论与证据) 申报——需派发方处置（cancel 归档/确认），补充细节可另发 note，但申报通道必须是 question；结论文本另发 post(kind=note)")
         nested = "" if quick else (
             "嵌套: task_create(缺省继承父任务 project_dir 与验证配置；project_dir/"
             "target_branch/verify_cmd 显式传入即拒)→dispatch 子任务；done 仅子 worker 申报，closed/blocked/cancelled "
@@ -624,8 +624,10 @@ class TaskService:
                 "task_create/task_dispatch/task_cancel(仅限己建子任务)/sleep\n"
                 "不可用(403): board / doctor / enforce / task_update；task_cancel 他任务亦拒；"
                 "验收命令（verify_cmd/task_update）全局 worker 角色永拒\n"
-                "kind 纪律: 需派发方裁定/答复/决策→post(kind=question)（唤醒通道）；"
-                "单向过程留痕→note（静默 digest，不唤醒对方）\n"
+                "kind 纪律: 凡需要派发方回应——裁定、答复、处置、确认、no-op 申报——"
+                "一律 post(kind=question)（唤醒通道，会把对方叫醒）；此类消息绝不可用 note："
+                "note 是静默单向留痕（不唤醒对方、无人会应答），仅用于开工知会、进度汇报、"
+                "结论与沉淀记录\n"
                 + nested
                 + "等待: Code Mode 无 setTimeout——用 sleep(seconds) 本地休眠后重试，勿轮询烧推理轮\n"
                 "开工: 进 env 后首个动作 post(kind=note, body=开工＋一句话计划)——知会派发方（状态即转 running）\n"
