@@ -1488,6 +1488,41 @@ class TestReqIdPassthrough(HttpdTest):
         self.assertEqual(st, 400)  # 非串 400 报因（同 verify_cmd 口径）
 
 
+class TestStringParamContract(HttpdTest):
+    """F89：公共字符串面坏类型一律 400，不 500、不落 str(dict) repr。"""
+
+    def test_bad_string_fields_reject_400(self):  # Req: F89
+        tid = self.create_task()
+        cases = [
+            ("/task_create", {"goal": 123, "project_dir": "/repo"}),
+            ("/task_create", {"goal": "g", "project_dir": ["repo"]}),
+            ("/task_update", {"task": tid, "verify_cmd": 456}),
+            ("/post", {"task": tid, "kind": "note", "body": {"x": 1}}),
+            ("/wiki_read", {"path": 789}),
+            ("/wiki_write", {"path": "notes/x.md", "text": {"evil": 1}}),
+            ("/repo_board", {"repo": {"evil": 1}}),
+        ]
+        for path, body in cases:
+            st, r = call(self.port, "POST", path, body, self.root)
+            self.assertEqual(st, 400, f"{path}: {r}")
+            self.assertIn("须为字符串", r["error"])
+        self.assertFalse((self.app.store.home / "wiki" / "notes" / "x.md")
+                         .exists())  # 不落 Python dict repr
+
+    def test_bad_task_id_rejected_before_row_lookup(self):  # Req: F89
+        st, r = call(self.port, "POST", "/task_update",
+                      {"task": ["not-a-string"], "verify_cmd": "true"}, self.root)
+        self.assertEqual(st, 400)
+        self.assertIn("task 须为字符串", r["error"])
+
+    def test_empty_string_semantics_still_domain_owned(self):  # Req: F89
+        tid = self.create_task()
+        st, r = call(self.port, "POST", "/task_update",
+                      {"task": tid, "verify_cmd": ""}, self.root)
+        self.assertEqual(st, 403)  # 类型通过；空命令语义仍归域服务拒
+        self.assertIn("verify 命令为空", r["error"])
+
+
 class TestQuickMicro(HttpdTest):
     """F67 quick 微任务全链：端点布尔校验/透传＋账本历史判定原子登记＋BOOT 减配。"""
 

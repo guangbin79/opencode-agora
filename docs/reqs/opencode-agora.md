@@ -499,3 +499,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：配额计数排除当前 tid（todo 目标本就不在活动集，语义不变）——既有 blocked/stalled running 重派满池可成功且活动数仍为 6，全新第七单照旧拒绝。顺带删除 create() 中第二次 `_new_tid()`，首次生成的 tid 贯穿校验、审计与落行。
 **落点**：agorad/core/task.py（quota 计数谓词＋重复 tid 生成）、tests/test_core_task.py（满池 blocked 重派＋全新第七单对照、满池 stalled running 重派）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F88 锚）——两满池重派用例旧实现均 `quota[main]` FAIL；新实现 `python3 -m pytest tests/test_core_task.py -q` 125 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F89 接口字符串契约单点化——MCP deliverable＋HTTP 坏类型 400（2026-11-12，用户目标「稳定性、性能」）
+**现状**：HTTP 端 task_create 已支持 `deliverable=out_of_band`，但 MCP tools/list 无该字段，公共契约不可发现；字符串类型校验散落在少数参数上，`goal=123` 直接 500，`wiki_write(text={})` 会把 Python dict repr 写入 wiki，`repo_board(repo={})` 也在 peer 分区 500。
+**裁定**：MCP task_create schema 增加 deliverable（string，enum 仅 out_of_band）。HTTP 边界按端点声明字符串字段并统一 `_string_field` 校验：坏类型一律 400 且报因含字段名；`task` 非串在行查找前拒绝；缺失必填仍走 KeyError→400，空串语义仍归域服务。移除 post/wiki 写入口的静默 `str()` 强转。
+**落点**：agora_mcp.py（schema）、agorad/transport/httpd.py（_STRING_FIELDS＋_string_field＋入口校验）、tests/test_mcp_shell.py（schema/透传）、tests/test_transport_httpd.py（坏类型矩阵、task 前置校验、空串语义）、docs/reqs/opencode-agora.md（本条）。
+**验收**：先红后绿（Req: F89 锚）——旧实现 schema KeyError、goal=123→500、task list→500 共 3 fail；新实现 `python3 -m pytest tests/test_mcp_shell.py tests/test_transport_httpd.py -q` 135 passed，全量 pytest 另行绿。部署注记：本条改 agorad/MCP 载荷，merged 后须重跑 ./install.sh 并重启服务才生效。

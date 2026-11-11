@@ -44,6 +44,9 @@ _TOOLS = [
                                            "（worker 建单不可自旗——缺省继承父任务配置）"},
          "quick": {"type": "boolean",
                    "description": "quick 微任务——验收按账本历史动态判定，超包络合并门退回"},
+         "deliverable": {"type": "string", "enum": ["out_of_band"],
+                          "description": "review-only 交付契约：零提交豁免，"
+                                         "done body=交付物引用（路径/链接/结论）"},
          "timeout": {"type": "integer",
                      "description": "任务级 verify 预算（正整数秒；缺省＝服务"
                                     " AGORA_VERIFY_TIMEOUT；写权限与 verify_cmd 同权"

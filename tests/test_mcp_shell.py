@@ -173,6 +173,18 @@ class TestSchemaContract(McpShellTest):
         self.assertIn("前驱任务 id", desc)
         self.assertIn("B7", desc)
 
+    def test_task_create_deliverable_enum_and_passthrough(self):  # Req: F89
+        schema = {t["name"]: t for t in
+                  self.rpc("tools/list")["result"]["tools"]}
+        prop = schema["task_create"]["inputSchema"]["properties"]["deliverable"]
+        self.assertEqual((prop["type"], prop["enum"]),
+                         ("string", ["out_of_band"]))
+        r = self.call_tool("task_create", {"_token": self.root, "goal": "评审-only",
+                                           "project_dir": "/repo",
+                                           "deliverable": "out_of_band"})
+        tid = self.result_of(r)["task"]
+        self.assertEqual(self.app.state.get(tid)["deliverable"], "out_of_band")
+
     def test_task_timeout_schema_described(self):  # Req: F51
         schema = {t["name"]: t for t in
                   self.rpc("tools/list")["result"]["tools"]}

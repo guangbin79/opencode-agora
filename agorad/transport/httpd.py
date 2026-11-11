@@ -34,6 +34,35 @@ _DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/wiki_
                         "（建单缺省继承父任务配置）——需登记 verify→post(kind=verify) 提案"}
 
 
+# F89 公共字符串面：坏类型在 HTTP 边界 400（缺必填仍走 KeyError→400）
+_STRING_FIELDS = {
+    "task_create": ("goal", "project_dir", "after", "target_branch",
+                    "verify_cmd", "req_id", "model", "title", "deliverable"),
+    "task_dispatch": ("task",),
+    "task_update": ("task", "verify_cmd"),
+    "task_cancel": ("task",),
+    "post": ("task", "kind", "body"),
+    "board": ("task", "view"),
+    "repo_board": ("repo",),
+    "wiki_read": ("path",),
+    "wiki_write": ("path", "text"),
+    "task_nudge": ("task", "body"),
+    "task_alarm": ("task",),
+}
+
+
+def _string_field(value, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} 须为字符串")
+    return value
+
+
+def _validate_strings(name, body):
+    for field in _STRING_FIELDS.get(name, ()):
+        if field in body:
+            _string_field(body[field], field)
+
+
 class _Handler(BaseHTTPRequestHandler):
     app = None    # make_server 经子类属性注入
     gate_q = None
@@ -80,6 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(401, {"error": "无牌或牌无效"})
             sid, role = ident
             sid = self._bind_caller(sid, role)  # 改绑后行取新 sid：开工/归属按牌面一致判定
+            _validate_strings(name, body)  # task 非串先于行查找；其余坏类型不达域服务
             tid = body.get("task")
             row = None
             if tid is not None:
@@ -134,12 +164,6 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("verify_pending 须为布尔")
             if not isinstance(qk, bool):  # 同豁免旗口径
                 raise ValueError("quick 须为布尔")
-            if vc is not None and not isinstance(vc, str):  # 非串 500 裸奔→400 报因
-                raise ValueError("verify_cmd 须为字符串")
-            if rq is not None and not isinstance(rq, str):  # 同 verify_cmd 口径
-                raise ValueError("req_id 须为字符串")
-            if md is not None and not isinstance(md, str):  # 同 verify_cmd 口径
-                raise ValueError("model 须为字符串")
             if to is not None and (isinstance(to, bool)
                                     or not isinstance(to, int)):  # 同 verify_cmd 口径
                 raise ValueError("timeout 须为正整数秒")
@@ -159,8 +183,6 @@ class _Handler(BaseHTTPRequestHandler):
             return {"task": body["task"]}
         if name == "task_update":
             vc = body["verify_cmd"]
-            if not isinstance(vc, str):  # 同 create 口径：非串 400 报因，不落 500
-                raise ValueError("verify_cmd 须为字符串")
             to = body.get("timeout")  # F51：预算同权可改
             if to is not None and (isinstance(to, bool)
                                    or not isinstance(to, int)):  # 同 create 口径
@@ -207,7 +229,7 @@ class _Handler(BaseHTTPRequestHandler):
                 raise Rejected("wiki/tasks/ 前缀拒写（服务独占）")
             p = self._wiki(rel)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(str(body["text"]), encoding="utf-8")
+            p.write_text(body["text"], encoding="utf-8")
             return {"ok": True}
         if name == "enforce":  # may() 已滤非 root；开/关审计在 Auth
             on = body["on"]
@@ -259,7 +281,7 @@ class _Handler(BaseHTTPRequestHandler):
         if kind == "peer":  # F22 写面：无任务目标，作者＝调用者任务；仅 worker 牌
             if role != "worker":
                 raise PeerRejected("peer 留言仅 worker 牌可写")
-            return {"message": app.peer.post(sid, str(body["body"]))}
+            return {"message": app.peer.post(sid, body["body"])}
         tid = body["task"]
         if kind not in _POST_KINDS:  # F13 客户端 kind 白名单；内部直调 Router 不经此路
             raise ValueError(f"kind 须为 {'/'.join(_POST_KINDS)} 之一（收到 {kind!r}）")
@@ -267,7 +289,7 @@ class _Handler(BaseHTTPRequestHandler):
         if kind == "done":  # F7 入口：六拒同步应答，受理绿才落库并入门
             if t.get("worker_sid") != sid:
                 raise NotChainEdge(f"{sid}->{tid}: done 仅任务 worker")
-            r = app.gate.accept_done(tid, sid, str(body["body"]).strip())
+            r = app.gate.accept_done(tid, sid, body["body"].strip())
             if r != "accepted":
                 return {"result": r}
             app.router.post(sid, ("up", tid), "done", str(body["body"]))
@@ -277,7 +299,7 @@ class _Handler(BaseHTTPRequestHandler):
             app.bind_dispatcher(role, sid, t)  # F21：root 持牌＋登记号死→改绑后放行
             t = app.state.get(tid)
         edge = ("down", tid) if self.app.router.is_dispatcher(sid, t) else ("up", tid)
-        return {"message": app.router.post(sid, edge, kind, str(body["body"]))}
+        return {"message": app.router.post(sid, edge, kind, body["body"])}
 
     def _task_nudge(self, sid, role, body, row):
         """F73 board 手动提示面：root 任意任务；任务派发方限己任务链。
