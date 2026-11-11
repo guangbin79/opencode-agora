@@ -5,7 +5,8 @@
  * F33 门记录目录（.omo/.req-gate，插件侧新增——门记录写本身即被闸死锁面）、
  * 读引导（state 账本经工具面，events/wiki 开放，主会话例外）、主会话对仓写入同拦。
  */
-import { existsSync, realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Cred, PullReason } from "./cred";
@@ -18,6 +19,8 @@ export const READ_HINT =
   "被拦：tasks.jsonl 与 messages/ 属账本面，请走工具面（board/check_mail）；events.jsonl 与 wiki 可直接读。主会话不受此限。";
 export const GATE_SCOPE_HINT =
   "被拦：门记录目录（.omo/.req-gate/.review-loop/.superpowers）写入仅限当前任务 env 或当前仓根——跨 env/跨仓目标不豁免（F38 W-1）。";
+export const QUESTION_HINT =
+  "被拦：worker 会话禁用原生 question——需裁决/问人请改走 post(kind=question) 发派发方（唤醒通道），发完即结束回合，勿挂回合等人。";
 
 const TMP_ROOT = "/tmp/opencode"; // B3 设计定值
 const GATE_RECORD_DIRS = new Set([".omo", ".req-gate", ".review-loop", ".superpowers"]); // F33：门记录目录（新旧同收；.review-loop=评审环证据 1224fbd；.superpowers=SDD 账本/workspace 面，2026-11-02 实测误伤面）
@@ -157,4 +160,58 @@ export function shouldBlock(
     return NO_CRED_HINT;
   }
   return wrongDoorHint(cred.envDir, cwd);
+}
+
+/** 原生 question 三分支之 a（ag-4f03df，ag-f51f40 事故）：worker 凭据（含半条缓存——
+ * BOOT 已登记即 worker 身份）→拒并引导 post(kind=question)；dispatcher/root/无凭据→放行
+ * （b 分支邮件联动与 c 分支零行为由 index 接线分流）。 */
+export function questionGate(cred: Cred | undefined | null): string | null {
+  return cred?.role === "worker" ? QUESTION_HINT : null;
+}
+
+/** 邮件外呼缝：默认真 subprocess（30s 超时同 health.send_email 口径），测试注入 fake runner。 */
+export type MailRunner = (cmd: string[], inputText: string) => Promise<void>;
+let mailRunner: MailRunner | null = null;
+export function setMailRunner(r: MailRunner | null): void {
+  mailRunner = r;
+}
+
+const MAIL_TIMEOUT_MS = 30_000;
+const MAIL_SUMMARY_MAX = 400; // 问题摘要拍平截断上限（与超时同处声明，单点对齐策略）
+
+const defaultRunner: MailRunner = (cmd, text) =>
+  new Promise((resolve, reject) => {
+    const p = spawn(cmd[0], cmd.slice(1), { stdio: ["pipe", "ignore", "ignore"] });
+    const timer = setTimeout(() => p.kill("SIGKILL"), MAIL_TIMEOUT_MS);
+    p.on("error", (e) => { clearTimeout(timer); reject(e); });
+    p.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`mail command exit ${code}`));
+    });
+    p.stdin.on("error", () => {}); // EPIPE 等：成败口径已由 close 收口
+    p.stdin.end(text);
+  });
+
+/** 分支 b 主会话邮件联动（ag-4f03df）：读与 agorad 同一份 $AGORA_HOME/.agora/email.json
+ * （{to, command}），问题摘要（sid/tid＋问题文本 JSON 拍平截断——F49 同款行界压平，恰一行
+ * 正文防伪造邮件结构）经 stdin 交 command。缺配置静默跳过、外呼失败吞异常（尽力而为，
+ * 不阻塞弹框）；本函数永不 reject。 */
+export async function mailQuestion(sid: string, tid: string | undefined, input: unknown): Promise<void> {
+  try {
+    const cfg = JSON.parse(
+      readFileSync(join(agoraHome(), ".agora", "email.json"), "utf8"),
+    ) as { to?: string; command?: string };
+    if (!cfg.to || !cfg.command) return;
+    // shortcut: command 按空白切分（shlex 引号形态不入支持面——opt-in 自配场景）
+    const flat = (JSON.stringify(input ?? {}) ?? "")
+      .replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, " ")
+      .slice(0, MAIL_SUMMARY_MAX);
+    await (mailRunner ?? defaultRunner)(
+      cfg.command.trim().split(/\s+/),
+      `[opencode] question 待裁决（主会话弹框）\nsid: ${sid}\ntid: ${tid ?? "-"}\n${flat}`,
+    );
+  } catch {
+    // 未配置/外呼失败＝尽力而为：绝不影响弹框
+  }
 }

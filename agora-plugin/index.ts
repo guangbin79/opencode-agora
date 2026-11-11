@@ -14,7 +14,9 @@ import {
   AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
 } from "./lift";
 import { isDormant } from "./scope";
-import { enforceRelevant, fold, isWriteTool, NO_CRED_HINT, readishGated, shouldBlock } from "./hook";
+import {
+  enforceRelevant, fold, isWriteTool, mailQuestion, NO_CRED_HINT, questionGate, readishGated, shouldBlock,
+} from "./hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -73,6 +75,16 @@ export default {
     // 旧运行时无 shell 命名空间→可选挂载静默跳过。
     ctx.shell?.hook("create.before", (event) => onShellCreate(event));
     ctx.tool.hook("execute.before", async (event) => {
+      // ag-4f03df 原生 question 三分支（ag-f51f40 事故：headless worker 弹框无人应答僵死）：
+      // worker 凭据→拒并引导 post(kind=question)（发完即结束回合）；dispatcher/root→放行＋
+      // 邮件外呼联动；无凭据→零新行为。本面只读凭据缓存——先于休眠/enforce/lift，零 HTTP 零会话读。
+      if (event.tool === "question") {
+        const qCred = getCredential(event.sessionID);
+        const qHint = questionGate(qCred);
+        if (qHint) throw new Error(qHint);
+        if (qCred) void mailQuestion(event.sessionID, qCred.tid, event.input); // 不 await：弹框不等外呼
+        return;
+      }
       // R29：休眠分支短路在 lift/pullEnforce/attach/readGuide 之前——休眠仓零 HTTP 零文件读（除名册缓存）。
       const isAgora = /^agora_/.test(event.tool);
       let cwd = process.cwd();

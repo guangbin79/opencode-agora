@@ -774,7 +774,7 @@ class TestVerifyGate(TestCoreTask):
         self.assertIn("全局 worker 角色永拒", boot)  # F37 验收录回文案
         self.assertIn("缺省继承父任务", boot)  # F37 继承语义文案
 
-    def test_boot_carries_post_kind_discipline(self):  # Req: F76/F78
+    def test_boot_carries_post_kind_discipline(self):  # Req: F76/F78/ag-4f03df
         """ag-acc22e 死锁防线：BOOT 明示 kind 选择纪律——凡需要派发方回应
         （裁定、答复、处置、确认、no-op 申报）一律 question（唤醒通道），
         此类消息绝不可用 note（静默，无人会应答）。"""
@@ -783,6 +783,8 @@ class TestVerifyGate(TestCoreTask):
         self.assertIn("凡需要派发方回应——裁定、答复、处置、确认、no-op 申报——"
                       "一律 post(kind=question)（唤醒通道，会把对方叫醒）", boot)
         self.assertIn("仅用于开工知会、进度汇报、结论与沉淀记录", boot)
+        self.assertIn("发完即结束回合", boot)  # ag-4f03df：问人即 post(question) 后即收回合，勿挂弹框等人
+        self.assertIn("原生 question 对 worker 已禁", boot)
 
     def test_boot_noop_report_must_wake_dispatcher(self):  # Req: F78
         """ag-c25768 判例：「等派发方处置」绝不能走静默 note——禁令措辞说死，

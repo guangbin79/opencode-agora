@@ -1515,6 +1515,7 @@ class TestQuickMicro(HttpdTest):
         boot = self.stub.sessions[self.app.state.get(tid)["worker_sid"]]["injects"][0]
         for line in ("嵌套:", "协作:", "沉淀:"):
             self.assertNotIn(line, boot)  # F65 减配三行
+        self.assertNotIn("发完即结束回合", boot)  # ag-4f03df：question 纪律行不入 quick 减配
         self.assertIn("开工:", boot)  # 其余行逐字不动
         self.assertIn("done:", boot)
 
