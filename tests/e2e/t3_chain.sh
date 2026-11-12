@@ -299,15 +299,17 @@ def wait_idle(sid, after_ms, timeout=120):
         time.sleep(1)
     return False
 
-def wait_not_busy(sid, timeout=120):
+def wait_not_busy(sid, timeout=240):
     """等会话服务态真空闲（time.updated<=time.idle，F28 同款）。
 
     仅看 idle 部件会撞自发续作：首个 idle 后模型可再启新回合，prompt 仍排队，
-    把模型回合时长误记为注入时延。"""
+    把模型回合时长误记为注入时延。计时前置须 fail-closed：time 形状缺席不判空闲。"""
     dl = time.time() + timeout
     while time.time() < dl:
         tm = (api(f"/session/{sid}").get("data") or {}).get("time") or {}
-        if (tm.get("updated") or 0) <= (tm.get("idle") or 0):
+        updated, idle = tm.get("updated"), tm.get("idle")
+        if (updated is not None and idle is not None
+                and updated <= idle):
             return True
         time.sleep(1)
     return False
@@ -509,9 +511,8 @@ tidA, wtokA, envA, wsidA = dispatch(
     "Create a file named merged.md containing exactly one line: s2-marker. Commit it with git.",
     "repoA")
 wait_idle(wsidA, time.time() * 1000)
-if not wait_not_busy(wsidA):
-    check(False, "S3 前置 worker 会话空闲（服务态 updated<=idle） # Req: F4")
-    raise SystemExit(1)
+ready = wait_not_busy(wsidA)
+check(ready, "S3 前置 worker 会话空闲（服务态 updated<=idle） # Req: F4")
 
 qbody = f"s3-q-{STAMP} what is the marker"
 t0 = time.time() * 1000
@@ -526,7 +527,8 @@ while time.time() * 1000 - t0 < 30000:
     if hit:
         break
     time.sleep(0.2)
-check(hit and elapsed <= 5.0, f"S3 问题在线注入实测 {elapsed:.2f}s ≤5s # Req: F4")
+check(hit and ready and elapsed <= 5.0,
+      f"S3 问题在线注入实测 {elapsed:.2f}s ≤5s # Req: F4")
 
 # worker 应答走服务面（与 MCP agora_post 同端点同牌语义）。注：opencode v2.1.4 的 MCP
 # spawn 间歇缺失（run8 在场成功、run10/11 全会话无 agora 工具——排障志#9），链边/留库/
