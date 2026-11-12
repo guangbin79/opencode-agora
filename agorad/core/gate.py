@@ -95,6 +95,42 @@ def _roster_gate_patterns(roster):
     return out
 
 
+def _auto_ignore_patterns(records):  # Req: F97
+    """全脏面皆「根级未跟踪隐藏目录」（`?? .dir/` 整目录形态）→返回目录名册
+    条目；任一条不匹配（跟踪改动/非隐藏/根级散文件/嵌套新文件）→None 不豁免。
+    目录判定吃 porcelain 的尾 `/`：git 对未跟踪目录整目录折叠正是该形态。"""
+    out = []
+    for rec in records:
+        if not rec.startswith("?? "):
+            return None
+        path = rec[3:]
+        base = path[:-1] if path.endswith("/") else ""
+        if (not base or "/" in base or not base.startswith(".")
+                or base in (".", "..")
+                or any(ord(c) < 32 or c == "\x7f" for c in base)
+                or any(c in "\\*?[]\ufffd" for c in base)):
+            return None  # 控制字符写劈名册行、glob 元字符/替换符入册即活模式
+                         # （`.*`→全仓未跟踪面致盲、`.tmp*`→过配漏配），不自动豁免
+        if base + "/" not in out:
+            out.append(base + "/")
+    return out or None
+
+
+def _append_roster(path, patterns):  # Req: F97
+    """中央名册幂等追加：字节面比对防重、既有文本无尾换行先补防粘连
+    （apply_ignore_roster 同款纪律）；缺文件＝新建，父目录缺＝建。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = p.read_bytes() if p.exists() else b""
+    have = set(data.splitlines())
+    missing = [e for e in patterns if e.encode("utf-8") not in have]
+    if not missing:
+        return
+    if data and not data.endswith(b"\n"):
+        data += b"\n"
+    p.write_bytes(data + "\n".join(missing).encode("utf-8") + b"\n")
+
+
 def _cmd_dead(rc, out):
     """Req: F82 命令死判定单点（三运行点共用）：rc∈{126,127}（shell 自身退出码
     语义）或 rc==2 且输出含 ENOENT 文案（ag-c49b21 原始形态：命令在、文件参数
@@ -346,6 +382,25 @@ class Gate:
         self._audit(tid, "done_rejected", note=tag)
         return f"rejected:{tag}: {msg}"
 
+    def _ensure_clean_auto(self, tid, target, exempt, auto_ignored,
+                           roster=None):  # Req: F97
+        """ensure_clean＋根级未跟踪隐藏目录自动豁免：全脏面皆可豁免→追加中央
+        名册、幂等写 exclude、同轮重试一次；混合脏面原样上抛（不部分豁免）。
+        roster 原位并入自动条目——F35 纪律：入册路径必须进闸体检测面。"""
+        try:
+            self._gitx.ensure_clean(target, exempt)
+        except RuntimeError as e:
+            patterns = _auto_ignore_patterns(getattr(e, "records", ()))
+            if not patterns or not self._roster_path:
+                raise
+            _append_roster(self._roster_path, patterns)
+            self._gitx.apply_ignore_roster(target, patterns)
+            self._audit(tid, "auto_ignore", note=" ".join(patterns))
+            auto_ignored.extend(patterns)
+            if roster is not None:
+                roster.extend(p for p in patterns if p not in roster)
+            self._gitx.ensure_clean(target, exempt)
+
     # ---- 门体（后台线程体） ----
 
     def run(self, tid):
@@ -369,6 +424,7 @@ class Gate:
         else:  # F51：注入 runner 经 kwargs 观察生效预算（硬顶＝4×生效值单测缝）
             runner = lambda env, cmd: self._runner(env, cmd, timeout=budget,
                                                    ceiling=ceiling)
+        auto_ignored = []  # Req: F97 本轮自动豁免清单（merged 通知外带）
         self._state.set_fields(tid, in_gate=True, gate_env=integration)
         try:  # F54 门启动拍：两通道各自尽力而为（同 notify_transition 口径），一侧败不压另一侧
             self._post(tid, "已入验证门：verify 运行中——绿/败另有消息")
@@ -484,7 +540,8 @@ class Gate:
                 # ag-f5aa4d 数据层豁免：声明（仓根 clean-ignore ∪ 部署 env）传入硬闸，
                 # 跟踪中的数据层心跳不再制造结构性脏（两处检查共用同一份豁免面）。
                 exempt = self._gitx.clean_ignore(target, self._clean_ignore_env)
-                self._gitx.ensure_clean(target, exempt)  # 主检出写前硬闸：用户未提交/未跟踪工作一律不碰
+                self._ensure_clean_auto(tid, target, exempt, auto_ignored,
+                                        roster)  # 主检出写前硬闸＋F97 自动豁免
                 if explicit:  # 显式支才采分支位（缺省支实名解析不扩还原面）
                     origin = origin or self._gitx.symref(target)
                     self._state.set_fields(tid, gate_origin_branch=origin)
@@ -556,7 +613,8 @@ class Gate:
                 # F32 真非 ff：门内 detached rebase 干净自愈（env 分支与锚不动），
                 # 同步冲突才弹回（不计连败）；环境病如实上抛走门内 except。
                 if self._gitx.rebase_onto(env, integration) == "conflict":
-                    self._non_ff(tid, branch, before, conflict=True)
+                    self._non_ff(tid, branch, before, conflict=True,
+                                 auto_ignored=auto_ignored)
                     return
                 # E＝锚对齐的 env 提交：崩溃重排时留痕值优先于落库残值 R
                 e = t.get("rebased_from") or t.get("commit")
@@ -594,10 +652,18 @@ class Gate:
                                    reason=where)
                 return
             # 集成验证可能耗时较长，最终推进前复查，关闭“开始干净、结束时变脏”窗口。
-            self._gitx.ensure_clean(target, exempt)
+            auto_before = len(auto_ignored)
+            self._ensure_clean_auto(tid, target, exempt, auto_ignored,
+                                   roster)
+            if len(auto_ignored) != auto_before:  # 终检才入册：二次进闸体检测面
+                if self.gate_files_touched(tid, list(_GATE_PATTERNS)
+                                           + _roster_gate_patterns(roster),
+                                           branch=branch):
+                    self._health.escalate(KIND_GATEFILES, tid)
             if r is not None:  # 重放推进：sha 级 ff（env 分支仍在 E，不可再作合并源）
                 if self._gitx.ff_sha(target, r, branch) != "ok":
-                    self._non_ff(tid, branch, self._gitx.head(target, branch))
+                    self._non_ff(tid, branch, self._gitx.head(target, branch),
+                                 auto_ignored=auto_ignored)
                     return
             else:
                 if t.get("rebased_from"):
@@ -606,9 +672,10 @@ class Gate:
                     self._state.set_fields(tid, commit=self._gitx.head(env),
                                            rebased_from=None)
                 if self._gitx.merge_ff(env, target, branch) != "ok":
-                    self._non_ff(tid, branch, self._gitx.head(target, branch))
+                    self._non_ff(tid, branch, self._gitx.head(target, branch),
+                                 auto_ignored=auto_ignored)
                     return
-            self._succeed(tid)
+            self._succeed(tid, auto_ignored)
         except Exception as e:  # 门内崩（checkout 拒/分支失/脏工作区）：转 reopened 通知
             if self._state.get(tid)["state"] == "done":
                 self._state.transition(tid, "reopened")
@@ -1100,7 +1167,7 @@ class Gate:
                     except Exception:
                         pass
 
-    def _succeed(self, tid):
+    def _succeed(self, tid, auto_ignored=()):
         """唯一成功出口：目标支已含任务 commit，补终态、审计与任务环境回收。"""
         t = self._state.get(tid)
         if not self._gitx.contains(t["project_dir"], t.get("commit"),
@@ -1117,9 +1184,12 @@ class Gate:
         # F32：rebased_from 从 state 读（裁定②）——崩溃补终态路径才有值可取
         extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
         self._audit(tid, "merged", commit=t.get("commit"), **extra)
+        detail = (f"@{(t.get('commit') or '')[:7]}——沉淀: "
+                  "聚本任务 note/task page 走 knowledge ingest")  # Req: F60
+        if auto_ignored:  # Req: F97：完成通知告知自动忽略清单
+            detail += (f"——自动忽略根级未跟踪隐藏目录: {' '.join(auto_ignored)}")
         self._router.notify_transition(  # ag-acae3b：merged 实时直达 dispatcher
-            tid, "merged",
-            f"@{(t.get('commit') or '')[:7]}——沉淀: 聚本任务 note/task page 走 knowledge ingest")  # Req: F60
+            tid, "merged", detail)
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
@@ -1191,12 +1261,12 @@ class Gate:
         except Exception as e:
             self._audit(tid, "task_branch_delete_failed", note=str(e)[:200])
 
-    def _non_ff(self, tid, branch, before, conflict=False):
+    def _non_ff(self, tid, branch, before, conflict=False, auto_ignored=()):
         """F32 同步冲突或最终推进窄竞态遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""
         t = self._state.get(tid)
         # 窄竞态守卫：试合并/推进窗口内 commit 已被人工推进目标支，则补终态成功，绝不重开
         if self._gitx.contains(t["project_dir"], t.get("commit"), branch):
-            self._succeed(tid)
+            self._succeed(tid, auto_ignored)
             return
         self._state.transition(tid, "reopened")
         self._audit(tid, "reopened")

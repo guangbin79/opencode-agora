@@ -30,6 +30,14 @@ R_SHA = "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1"  # F32 重放后提交（R）
 R2_SHA = "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1b2"  # 崩溃重排再 rebase 的新 sha（R′）
 
 
+class FakeDirtyWorktree(RuntimeError):
+    """F97 测试注入：携带 porcelain 脏面 records（生产 DirtyWorktree 同形）。"""
+
+    def __init__(self, records):
+        super().__init__("目标仓工作区不干净——请先提交、stash 或清理后重新 post(done, commit)")
+        self.records = list(records)
+
+
 class FakeOc:
     def __init__(self):
         self.injected = []
@@ -73,6 +81,7 @@ class FakeGitx:
         self.roster_calls = []  # F35 apply_ignore_roster 调用（repo_dir, patterns）
         self.events = []  # F35 公共事件序：apply/ensure_clean 各推一格
         self.contains_result, self.dirty = False, False
+        self.dirty_errors = []  # F97 逐次脏面注入：空则回退 dirty 布尔
         self.contains_raise = False  # F69 谓词病注入（fail-open 放行面）
         self.contains_results = []  # 逐次覆盖队列：空则回退 contains_result
         self.ancestor_calls, self.ancestor_result = [], False  # ag-1ae0f1 空集判据 (a)
@@ -141,6 +150,10 @@ class FakeGitx:
         self.clean_calls.append(repo_dir)
         self.exempt_calls.append(list(exempt))
         self.events.append("clean")
+        if self.dirty_errors:
+            err = self.dirty_errors.pop(0)
+            if err is not None:  # None＝本路过（构造“只在终检脏”的队列）
+                raise err
         if self.dirty:
             raise RuntimeError("目标仓工作区不干净")
 
@@ -1820,6 +1833,114 @@ class TestGateIgnoreRoster(TestCoreGate):
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
         self.assertEqual(self.gx.roster_calls, [])  # 空名册＝现状全净
+
+
+class TestGateAutoIgnoreRoster(TestCoreGate):
+    """F97 根级未跟踪隐藏目录自动入名册：全脏面皆可豁免→同轮重试继续合并。"""
+
+    def test_all_hidden_untracked_root_dirs_auto_rostered_and_merged(self):  # Req: F97
+        """全脏面＝根级未跟踪隐藏目录（`?? .dir/` 整目录形态）→追加中央名册、
+        幂等写 exclude、同轮重试干净检查并照常 merged；完成通知带自动忽略清单。"""
+        roster = self.tmp / "ignore.roster"
+        roster.write_text(".req-gate/")  # 无尾换行：追加不得粘连
+        self.mk_gate(roster_path=str(roster))
+        self.in_gate()
+        self.gx.dirty_errors = [
+            FakeDirtyWorktree(["?? .superpowers/", "?? .vscode/"])]
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(roster.read_text().splitlines(),
+                         [".req-gate/", ".superpowers/", ".vscode/"])
+        self.assertEqual(self.gx.roster_calls,
+                         [("/repo", [".req-gate/"]),
+                          ("/repo", [".superpowers/", ".vscode/"])])
+        self.assertEqual(self.gx.events,
+                         ["apply", "clean", "apply", "clean", "clean"])
+        patterns = self.gx.gate_calls[-1][1]  # F35 纪律：自动入册同样并入闸体检测面
+        self.assertIn(".superpowers", patterns)
+        self.assertIn(".superpowers/*", patterns)
+        self.assertIn(".vscode", patterns)
+        self.assertIn(".vscode/*", patterns)
+        events = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("auto_ignore", events)
+        self.assertTrue(any("自动忽略根级未跟踪隐藏目录" in m["body"]
+                            and ".superpowers/" in m["body"]
+                            and ".vscode/" in m["body"]
+                            for m in self.store.read_messages()
+                            if m["to"] == "disp1"))
+
+    def test_mixed_or_non_hidden_dirt_stays_reopened(self):  # Req: F97
+        """混合脏面（隐藏目录＋已跟踪改动/根级未跟踪文件/嵌套新文件）不部分
+        豁免：名册零追加、零重试，照旧 reopened 弹回。"""
+        roster = self.tmp / "ignore.roster"
+        roster.write_text(".req-gate/\n")
+        self.mk_gate(roster_path=str(roster))
+        self.in_gate(streak=1)
+        self.gx.dirty_errors = [FakeDirtyWorktree(
+            ["?? .superpowers/", " M src.py", "?? .env", "?? .github/new"])]
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.assertEqual(roster.read_text().splitlines(), [".req-gate/"])
+        self.assertEqual(self.gx.roster_calls, [("/repo", [".req-gate/"])])
+        self.assertEqual(self.gx.clean_calls, ["/repo"])
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")].count(
+            "auto_ignore"), 0)
+        self.assertFalse(any("自动忽略" in m["body"]
+                             for m in self.store.read_messages()))
+
+    def test_final_stage_auto_ignore_reenters_gatefile_detection(self):  # Req: F97
+        """隐藏目录在首检后、终检前才冒出：自动入册后必须二次进闸体检测面
+        （F35 纪律不因入册时点晚而失守）。"""
+        roster = self.tmp / "ignore.roster"
+        roster.write_text(".req-gate/\n")
+        self.mk_gate(roster_path=str(roster))
+        self.in_gate()
+        self.gx.dirty_errors = [None, FakeDirtyWorktree(["?? .vscode/"])]
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(len(self.gx.gate_calls), 2)  # 首检前＋终检自动入册后
+        patterns = self.gx.gate_calls[-1][1]
+        self.assertIn(".vscode", patterns)
+        self.assertIn(".vscode/*", patterns)
+
+    def test_nonff_narrow_race_success_carries_auto_ignore_note(self):  # Req: F97
+        """non-ff 窄竞态守卫转成功同样带自动忽略清单——完成通知不因成功出口
+        分叉而丢告知。"""
+        self.mk_gate()
+        self.in_gate()
+        self.gx.contains_result = True
+        self.gate._non_ff("t1", "main", "before", auto_ignored=[".vscode/"])
+        self.assertEqual(self.state.get("t1")["state"], "merged")  # closed 归 run() 门尾
+        self.assertTrue(any("自动忽略根级未跟踪隐藏目录" in m["body"]
+                            and ".vscode/" in m["body"]
+                            for m in self.store.read_messages()
+                            if m["to"] == "disp1"))
+
+    def test_control_char_hidden_name_stays_reopened(self):  # Req: F97
+        """目录名含控制字符（如换行）不自动豁免：名册一行一条，换行会把一条
+        写劈成多条、可能豁免非隐藏路径。"""
+        roster = self.tmp / "ignore.roster"
+        roster.write_text(".req-gate/\n")
+        self.mk_gate(roster_path=str(roster))
+        self.in_gate(streak=1)
+        self.gx.dirty_errors = [FakeDirtyWorktree(["?? .bad\nx/"])]
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.assertEqual(roster.read_text().splitlines(), [".req-gate/"])
+        self.assertEqual(self.gx.clean_calls, ["/repo"])
+
+    def test_glob_metachar_hidden_name_stays_reopened(self):  # Req: F97
+        """目录名含 gitignore glob 元字符不自动豁免：`.*`/`.tmp*` 等原样入册
+        即活模式（全仓未跟踪面致盲或过配），与控制字符同款保守拒绝。"""
+        roster = self.tmp / "ignore.roster"
+        roster.write_text(".req-gate/\n")
+        self.mk_gate(roster_path=str(roster))
+        self.in_gate(streak=1)
+        self.gx.dirty_errors = [FakeDirtyWorktree(["?? .*/", "?? .tmp*old/"])]
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.assertEqual(roster.read_text().splitlines(), [".req-gate/"])
+        self.assertEqual(self.gx.clean_calls, ["/repo"])
 
 
 class TestGateCleanIgnore(TestCoreGate):

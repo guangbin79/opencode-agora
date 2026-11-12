@@ -25,6 +25,16 @@ _RMT_WAIT = 0.5
 _PUSH_TIMEOUT = 300
 
 
+class DirtyWorktree(RuntimeError):
+    """Req: F97 ensure_clean 拒绝时携带 porcelain 脏面原始记录（-z 解析后），
+    门侧自动忽略判定不重跑 status、不吃异常文案。"""
+
+    def __init__(self, records):
+        super().__init__("目标仓工作区不干净——请先提交、stash 或清理后重新"
+                         " post(done, commit)")
+        self.records = list(records)
+
+
 class Gitx:
     _SHA40 = re.compile(r"[0-9a-fA-F]{40}")
 
@@ -167,8 +177,7 @@ class Gitx:
             if not any(path == b or path.startswith(b + "/") for b in bases):
                 dirty.append(rec)
         if dirty:
-            raise RuntimeError(
-                "目标仓工作区不干净——请先提交、stash 或清理后重新 post(done, commit)")
+            raise DirtyWorktree(dirty)
 
     def clean_ignore(self, repo_dir: str, env_value: str = "") -> list[str]:
         """clean-ignore 声明解析（ag-f5aa4d）：仓根 .agora/clean-ignore（一行一条，

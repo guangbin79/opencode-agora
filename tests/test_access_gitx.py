@@ -320,6 +320,16 @@ class TestAccessGitx(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.gx.ensure_clean(str(self.repo))
 
+    def test_ensure_clean_exposes_dirty_records_for_auto_ignore(self):  # Req: F97
+        """脏面以 porcelain 原始记录随异常携带（`?? .dir/` 整目录形态）——
+        门侧自动忽略判定不吃异常文案、不重跑 status。"""
+        (self.repo / ".superpowers").mkdir()
+        (self.repo / ".superpowers" / "progress.md").write_text("sdd")
+        with self.assertRaises(RuntimeError) as cm:
+            self.gx.ensure_clean(str(self.repo))
+        self.assertEqual(getattr(cm.exception, "records", None),
+                         ["?? .superpowers/"])
+
     def test_ensure_clean_exempt_prefix_passes_declared_paths(self):  # Req: ag-f5aa4d
         """clean-ignore 数据层豁免：仓根锚定目录前缀语义（`data/`＝本体＋子树）；
         跟踪/未跟踪在豁免路径→放行，不在→拒；`data` 不误放 `database/`（非子串）。"""
