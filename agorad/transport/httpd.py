@@ -37,7 +37,8 @@ _DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/wiki_
 # F89 公共字符串面：坏类型在 HTTP 边界 400（缺必填仍走 KeyError→400）
 _STRING_FIELDS = {
     "task_create": ("goal", "project_dir", "after", "target_branch",
-                    "verify_cmd", "req_id", "model", "title", "deliverable"),
+                    "verify_cmd", "req_id", "model", "title", "deliverable",
+                    "client_key"),  # Req: F95
     "task_dispatch": ("task",),
     "task_update": ("task", "verify_cmd"),
     "task_cancel": ("task",),
@@ -160,6 +161,7 @@ class _Handler(BaseHTTPRequestHandler):
             md = body.get("model")  # F55：任务级 worker 模型
             qk = body.get("quick", False)  # F65：quick 微任务旗
             dl = body.get("deliverable")  # ag-af96bb②：review-only 交付契约（值白名单归 task 域）
+            ck = body.get("client_key")  # Req: F95 幂等建单键（域校验归 task 域）
             if not isinstance(vp, bool):  # "false" 字符串得 True——豁免旗语义反转拒收
                 raise ValueError("verify_pending 须为布尔")
             if not isinstance(qk, bool):  # 同豁免旗口径
@@ -176,6 +178,7 @@ class _Handler(BaseHTTPRequestHandler):
                                             verify_cmd=vc, verify_pending=vp,
                                             req_id=rq, timeout=to, model=md,
                                             quick=qk, deliverable=dl,
+                                            client_key=ck,  # Req: F95
                                             actor_sid=sid)}  # ag-f80309：归属记真实调用 sid
         if name == "task_dispatch":
             # 公共响应不带 worker 牌：凭据只经文件指针注入/拉取面（F43/F85）

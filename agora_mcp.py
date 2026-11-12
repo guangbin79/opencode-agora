@@ -64,7 +64,15 @@ _TOOLS = [
                     "description": "req 编号领取（如 F34）：服务端查重发放，重复/在案号拒"
                                    "（报因含已发任务指针）——服务端分配＝权威号源，worker 从"
                                    "任务页取号；不阻止绕过（先例约束）"},
-         "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
+         "client_key": {"type": "string",
+                         "description": "幂等建单键（网络重试安全）：同键同载荷"
+                                        "（goal/project_dir/target_branch/"
+                                        "deliverable/model/verify_cmd）重试返回"
+                                        "原任务不重复建单；载荷不同或键属他池"
+                                        "即拒（冲突报因点名 client_key）；"
+                                        "非空≤200字符无控制字符；缺省不幂等；"
+                                        "worker 子任务不继承"},  # Req: F95
+          "title": {"type": "string", "description": "简短任务描述（缺省截取 goal 首句 40 字）"}},
          "required": ["goal"]}},
     {"name": "task_dispatch", "description": "worker 专属嵌套派发（插件附牌限嵌套/链深）；"
                                              "dispatcher/root 走 CLI agora dispatch"

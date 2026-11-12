@@ -1659,5 +1659,99 @@ class TestF75RouteGuard(TestCoreTask):
         self.assertEqual(self.state.get("t-kid")["dispatcher_sid"], "root")
 
 
+class TestF95ClientKeyIdempotency(TestCoreTask):
+    """Req: F95 client_key 幂等建单——同键同载荷重试返回原任务零重复账面；
+    载荷冲突/坏键/他池复用拒；title 差异不打断幂等；worker 子单不继承。"""
+
+    def test_duplicate_identical_create_returns_same_tid_single_event(self):  # Req: F95
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                              client_key="issue-42")
+        self.assertEqual(
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                            client_key="issue-42"),
+            tid)  # 同键同载荷＝返回原任务
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 1)  # 不加第二行
+        evs = self.events()
+        self.assertEqual(
+            len([e for e in evs if e["event"] == "task_created"]), 1)
+        self.assertEqual(
+            len([e for e in evs if e["event"] == "verify_registered"]), 1)
+
+    def test_project_dir_alias_is_same_payload(self):  # Req: F95（F90 归一入比较）
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                              client_key="k")
+        self.assertEqual(
+            self.svc.create("g", "/repo/", None, self.root, verify_cmd="true",
+                            client_key="k"),
+            tid)  # 尾斜杠别名＝同仓同载荷（project_dir 归一后比较）
+
+    def test_payload_conflict_rejected_no_mutation(self):  # Req: F95
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                              client_key="k")
+        for kwargs in ({"goal": "g2"}, {"verify_cmd": "other"}):
+            with self.subTest(**kwargs):
+                base = {"goal": "g", "verify_cmd": "true"}
+                base.update(kwargs)
+                with self.assertRaises(Rejected) as cm:
+                    self.svc.create(base["goal"], "/repo", None, self.root,
+                                    verify_cmd=base["verify_cmd"],
+                                    client_key="k")
+                self.assertIn("client_key", str(cm.exception))
+                self.assertIn("载荷", str(cm.exception))
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 1)  # 状态零变化
+        self.assertEqual(self.state.get(tid)["goal"], "g")
+
+    def test_title_only_difference_remains_idempotent(self):  # Req: F95
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                              client_key="k", title="一")
+        self.assertEqual(
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                            client_key="k", title="二"),
+            tid)  # title 不在载荷元组：差异不打断幂等
+
+    def test_malformed_keys_rejected(self):  # Req: F95
+        for bad in ("", "a" * 201, "k\x00x", "k\nx", 123):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Rejected) as cm:
+                    self.svc.create("g", "/repo", None, self.root,
+                                    verify_cmd="true", client_key=bad)
+                self.assertIn("client_key", str(cm.exception))
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 0)  # 零建单
+
+    def test_worker_child_defaults_none_and_explicit_key_idempotent(self):  # Req: F95
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true")
+        wtok = self.svc.dispatch(parent, self.root)
+        child = self.svc.create("child", None, None, wtok)
+        self.assertIsNone(self.state.get(child)["client_key"])  # 缺省不继承
+        kid = self.svc.create("child", None, None, wtok, client_key="wk1")
+        self.assertEqual(
+            self.svc.create("child", None, None, wtok, client_key="wk1"),
+            kid)  # worker 显式键同规则幂等（重试者＝原建单 worker）
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 3)
+
+    def test_worker_explicit_key_does_not_weaken_f37(self):  # Req: F95
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true")
+        wtok = self.svc.dispatch(parent, self.root)
+        with self.assertRaises(Rejected):  # 带键不豁免：verify_cmd 写面照拒
+            self.svc.create("child", None, None, wtok, verify_cmd="true",
+                            client_key="wk2")
+
+    def test_untrusted_pool_key_reuse_rejected_root_allowed(self):  # Req: F95
+        disp_a = self.auth.issue("dA", "dispatcher")
+        tid = self.svc.create("g", "/repo", None, disp_a, verify_cmd="true",
+                              client_key="k")
+        disp_b = self.auth.issue("dB", "dispatcher")
+        with self.assertRaises(Rejected) as cm:  # 他池同键同载荷＝键冲突拒
+            self.svc.create("g", "/repo", None, disp_b, verify_cmd="true",
+                            client_key="k")
+        self.assertIn("client_key", str(cm.exception))
+        self.assertEqual(
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                            client_key="k"),
+            tid)  # root 不受池约束（信任边界＝root 或同 root_sid/dispatcher 谱系）
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,7 +75,7 @@ class TaskService:
     def create(self, goal, project_dir, after, actor_token, title=None,
                target_branch=None, verify_cmd=None, verify_pending=False,
                req_id=None, timeout=None, model=None, quick=False,
-               deliverable=None, actor_sid=None):
+               deliverable=None, client_key=None, actor_sid=None):
         sid, role = self._gate(actor_token, "task_create", None, None)
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
@@ -135,6 +135,12 @@ class TaskService:
             # ag-af96bb② 白名单 fail-fast；Req: F94 扩 external_branch（报因两名全点名）
             self._reject(tid, sid, f"deliverable 仅支持 out_of_band/external_branch"
                                    f"（收到 {deliverable!r}）")
+        if client_key is not None:  # Req: F95 幂等键坏值 fail-fast（None＝不幂等）
+            if (not isinstance(client_key, str) or not client_key
+                    or len(client_key) > 200
+                    or not client_key.isprintable()):
+                self._reject(tid, sid, f"client_key 须为非空字符串（≤200 字符、"
+                                       f"无控制字符；收到 {client_key!r}）")
         if after is not None:
             try:
                 self._state.get(after)
@@ -181,12 +187,35 @@ class TaskService:
             delivery = self._new_delivery(
                 "external_branch" if deliverable == "external_branch"
                 else "managed", target_branch)
+        if client_key is not None:  # Req: F95 幂等扫描：入账前查同键既有行
+            hit = next(((x_id, x) for x_id, x
+                        in self._state.snapshot()["tasks"].items()
+                        if x.get("client_key") == client_key), None)
+            if hit is not None:
+                x_id, x = hit
+                if ((x["goal"], self._repo_key(x["project_dir"]),
+                     x["target_branch"], x.get("deliverable"), x.get("model"),
+                     x["verify"]["cmd"])
+                        != (goal, project_dir, target_branch, deliverable,
+                            model, verify["cmd"])):
+                    self._reject(tid, sid, f"client_key {client_key!r} 已用"
+                                           f"（任务 {x_id}）且载荷不同——同键"
+                                           "载荷须逐字段一致")
+                if role != "root" and sid not in (x.get("root_sid"),
+                                                  x["dispatcher_sid"]):
+                    # 信任边界：仅 root 或既记任务 root_sid/dispatcher 谱系可
+                    # 领回原任务——他池同键同载荷也拒（键空间不跨池共享）
+                    self._reject(tid, sid, f"client_key {client_key!r} 已属"
+                                           f"任务 {x_id}——非其派发谱系调用方"
+                                           "不得复用（key conflict）")
+                return x_id  # 幂等命中：零新行/零事件/零页面，返回原任务
         head = (title or goal.splitlines()[0][:40]) if (title or goal) else tid
         self._state.add(tid, {
             "title": " ".join(str(head).split()),  # F46 B-1：压平 title（boot 开场按行解析；goal 合法多行不动）
             "goal": goal, "project_dir": project_dir, "target_branch": target_branch,
             "req_id": req_id, "model": model,  # model 恒在键，None 缺省（F55）
             "deliverable": deliverable,  # ag-af96bb②：恒在键，None＝普通合并任务
+            "client_key": client_key,  # Req: F95 恒在键，None＝不幂等
             "delivery": delivery,  # Req: F94 恒在键，out_of_band/旧行＝None
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),

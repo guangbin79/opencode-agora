@@ -195,6 +195,19 @@ class TestSchemaContract(McpShellTest):
         self.assertEqual(t["delivery"]["mode"], "external_branch")  # 投影随建单入行
         self.assertEqual(t["target_branch"], "main")  # MCP→HTTP→task 建单钉支全链
 
+    def test_task_create_client_key_schema_and_passthrough(self):  # Req: F95
+        schema = {t["name"]: t for t in
+                  self.rpc("tools/list")["result"]["tools"]}
+        prop = schema["task_create"]["inputSchema"]["properties"]["client_key"]
+        self.assertEqual(prop["type"], "string")
+        self.assertIn("幂等", prop["description"])  # 幂等语义入 schema
+        self.assertIn("冲突", prop["description"])  # 载荷冲突行为入 schema
+        args = {"_token": self.root, "goal": "重试建单", "project_dir": "/repo",
+                "verify_cmd": "true", "client_key": "issue-1"}
+        tid = self.result_of(self.call_tool("task_create", args))["task"]
+        again = self.result_of(self.call_tool("task_create", args))["task"]
+        self.assertEqual(again, tid)  # MCP→HTTP→task 全链幂等
+
     def test_task_timeout_schema_described(self):  # Req: F51
         schema = {t["name"]: t for t in
                   self.rpc("tools/list")["result"]["tools"]}

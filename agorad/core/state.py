@@ -114,6 +114,7 @@ class State:
             r.setdefault("model", None)
             r.setdefault("deliverable", None)
             r.setdefault("delivery", None)  # Req: F94 旧行无投影＝None（仅内存，不回写）
+            r.setdefault("client_key", None)  # Req: F95 旧行无幂等键＝None（仅内存，不回写）
             if "root_sid" not in r:
                 r["root_sid"] = r.get("dispatcher_sid")
             out[tid] = r

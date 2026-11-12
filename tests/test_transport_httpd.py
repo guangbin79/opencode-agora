@@ -1504,6 +1504,8 @@ class TestStringParamContract(HttpdTest):
         cases = [
             ("/task_create", {"goal": 123, "project_dir": "/repo"}),
             ("/task_create", {"goal": "g", "project_dir": ["repo"]}),
+            ("/task_create", {"goal": "g", "project_dir": "/repo",
+                              "client_key": 123}),  # Req: F95
             ("/task_update", {"task": tid, "verify_cmd": 456}),
             ("/post", {"task": tid, "kind": "note", "body": {"x": 1}}),
             ("/wiki_read", {"path": 789}),
@@ -1595,6 +1597,33 @@ class TestQuickMicro(HttpdTest):
                      self.root)
         self.assertEqual(st, 400)
         self.assertIn("quick", r["error"])
+
+
+class TestF95ClientKeyHttp(HttpdTest):
+    """Req: F95 HTTP 面幂等建单：同键重试同任务零重复事件；冲突 403 点名 client_key。"""
+
+    def test_http_retry_returns_same_task_single_created_event(self):  # Req: F95
+        body = {"goal": "g", "project_dir": "/repo", "verify_cmd": "true",
+                "client_key": "issue-agent-7"}
+        st, r = call(self.port, "POST", "/task_create", body, self.root)
+        self.assertEqual(st, 200)
+        st2, r2 = call(self.port, "POST", "/task_create", body, self.root)
+        self.assertEqual(st2, 200)
+        self.assertEqual(r2["task"], r["task"])  # 重试领回原任务
+        created = [e for e in self.app.store.read_events()
+                   if e["event"] == "task_created"]
+        self.assertEqual(len(created), 1)  # 事件恰一次
+        self.assertEqual(self.app.state.get(r["task"])["client_key"],
+                         "issue-agent-7")  # 键随行持久化
+
+    def test_http_conflict_403_names_client_key(self):  # Req: F95
+        self.create_task({"goal": "g", "project_dir": "/repo",
+                          "verify_cmd": "true", "client_key": "k"})
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "different", "project_dir": "/repo",
+                      "verify_cmd": "true", "client_key": "k"}, self.root)
+        self.assertEqual(st, 403)
+        self.assertIn("client_key", r["error"])
 
 
 if __name__ == "__main__":
