@@ -365,17 +365,44 @@ class TestAccessGitx(unittest.TestCase):
 
     def test_clean_ignore_union_file_and_env(self):  # Req: ag-f5aa4d
         """声明两层并集：仓根 .agora/clean-ignore ∪ env（逗号分隔），文件在前
-        env 在后保序去重；# 注释/空行丢；缺声明文件→仅 env 生效；双缺＝无豁免。"""
+        env 在后保序去重；# 注释/空行丢；缺声明文件→仅 env 生效；双缺＝仅
+        .agora/ 自豁免（ag-0f60fd）。"""
         d = self.repo / ".agora"
         d.mkdir()
         (d / "clean-ignore").write_text("# 注释\n\n.agent-experiences/\n.dup/\n")
         self.assertEqual(self.gx.clean_ignore(str(self.repo), ".dup/, data"),
-                         [".agent-experiences/", ".dup/", "data"])
+                         [".agora/", ".agent-experiences/", ".dup/", "data"])
         (d / "clean-ignore").unlink()
         d.rmdir()
         self.assertEqual(self.gx.clean_ignore(str(self.repo), "data/, x"),
-                         ["data/", "x"])  # 缺声明文件＝仅 env 生效
-        self.assertEqual(self.gx.clean_ignore(str(self.repo), ""), [])  # 双缺＝无豁免
+                         [".agora/", "data/", "x"])  # 缺声明文件＝自豁免＋env
+        self.assertEqual(self.gx.clean_ignore(str(self.repo), ""),
+                         [".agora/"])  # 双缺＝仅自豁免
+
+    def test_ensure_clean_self_exempts_roster_dir(self):  # Req: ag-0f60fd
+        """roster 自豁免（ag-0f60fd 三连弹回实证）：仓根 .agora/clean-ignore
+        自身未跟踪时，声明条目与名册自家目录 .agora/ 一起免计——ensure_clean
+        放行。"""
+        d = self.repo / ".agora"
+        d.mkdir()
+        (d / "clean-ignore").write_text(".superpowers/\n")
+        (self.repo / ".superpowers").mkdir()
+        (self.repo / ".superpowers" / "x").write_text("v")
+        self.gx.ensure_clean(str(self.repo),
+                             self.gx.clean_ignore(str(self.repo), ""))
+
+    def test_clean_ignore_self_exemption_independent_of_declaration(self):  # Req: ag-0f60fd
+        """契约②：roster 仅注释/空行（声明面空）——.agora/ 仍免计（自豁免恒在，
+        与声明内容无关）；其他未跟踪路径照旧计脏触发 RuntimeError。"""
+        d = self.repo / ".agora"
+        d.mkdir()
+        (d / "clean-ignore").write_text("# 仅注释\n\n")
+        exempt = self.gx.clean_ignore(str(self.repo), "")
+        self.assertEqual(exempt, [".agora/"])
+        self.gx.ensure_clean(str(self.repo), exempt)  # 未跟踪 .agora/ 免计
+        (self.repo / "local.note").write_text("dirty")
+        with self.assertRaises(RuntimeError):
+            self.gx.ensure_clean(str(self.repo), exempt)
 
     def test_target_branch_start_and_merge(self):  # Req: gt-132747
         self._git(["checkout", "-b", "issue/7"], cwd=self.repo)

@@ -174,7 +174,9 @@ class Gitx:
         """clean-ignore 声明解析（ag-f5aa4d）：仓根 .agora/clean-ignore（一行一条，
         # 注释/空行丢弃）∪ 部署 env AGORA_CLEAN_IGNORE（逗号分隔，调用点透传），
         文件在前 env 在后，保序去重。缺文件/不可读/非 UTF-8＝空声明（F35 名册
-        解析同款容错）；两层皆缺＝无豁免＝全净口径不变。"""
+        解析同款容错）。.agora/ 自身无条件免计（ag-0f60fd 自豁免）：声明文件
+        落在名册自家目录，其存在不得把 .agora/ 变成未跟踪脏面；两层皆缺＝
+        仅剩该自豁免，其余全净口径不变。"""
         try:
             lines = (Path(repo_dir) / ".agora" / "clean-ignore").read_text(
                 encoding="utf-8").splitlines()
@@ -183,7 +185,7 @@ class Gitx:
         entries = [ln.strip() for ln in lines
                    if ln.strip() and not ln.strip().startswith("#")]
         entries += [p.strip() for p in env_value.split(",") if p.strip()]
-        return list(dict.fromkeys(entries))  # 保序去重
+        return list(dict.fromkeys([".agora/", *entries]))  # 自豁免恒在＋保序去重
 
     def apply_ignore_roster(self, repo_dir: str, patterns) -> None:  # Req: F35
         """F35：名册幂等写入 info/exclude——空名册零动作（不建文件）；
