@@ -362,6 +362,25 @@ class TestQuotaPools(TestCoreTask):
                                    self.root, verify_cmd="true")
         self.assertEqual(self.state.get(tid_link)["project_dir"], canonical)
 
+    def test_worker_legacy_parent_repo_alias_inherits_canonical(self):  # Req: F90
+        import os
+
+        repo = self.tmp / "repo-legacy"
+        repo.mkdir()
+        raw = str(repo) + "/"
+        self.state.add("legacy", {
+            "state": "running", "goal": "g", "project_dir": raw,
+            "target_branch": None,
+            "verify": {"cmd": "true", "state": "registered",
+                       "registered_by": "main", "registered_at": 1.0,
+                       "timeout": None},
+            "dispatcher_sid": "main", "worker_sid": "w-legacy",
+            "chain_depth": 1, "fail_streak": 0,
+            "created": 0.0, "updated": 0.0})
+        wtok = self.auth.issue("w-legacy", "worker")
+        child = self.svc.create("child", raw, None, wtok)
+        self.assertEqual(self.state.get(child)["project_dir"], str(repo))
+
     def test_worker_equivalent_repo_alias_inherits_parent(self):  # Req: F90
         import os
 

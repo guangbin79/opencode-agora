@@ -490,7 +490,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ### F87 消息交付 inflight 语义——在线注入与 check_mail 不重复不丢失（2026-11-12，用户目标「稳定性、性能」）
 **现状**：`_delivered` 按“GIL 原子”注释使用，但 check_mail 的读取/过滤/标记是复合操作：消息已落库、在线注入尚未返回时，check_mail 可先把 mid 标已投并返回，注入成功后又视为在线送达——同一消息双通道重复交付；且空拉也推进 mail_read 游标，在线注入失败后该消息被游标跳过，可能永久不可补拉。note digest 冲刷同样可与补拉交错重复。
-**裁定**：Router 增加交付锁与短生命周期 `_inflight` 集：立即注入消息和 digest 冲刷批次在“可被 check_mail 看见”前原子登记 inflight，网络注入在锁外；成功转 delivered，失败释放交付权留库。仍在 `_pending` 未冲刷的 note 不标 inflight，保留提前补拉能力。check_mail 的过滤＋标记原子化，且只有非空拉取才推进游标。F75 root backlog 副本同样遵守 inflight 语义；State 锁内不反向等待 Router 锁。
+**裁定**：Router 增加交付锁与短生命周期 `_inflight` 集：立即注入消息和 digest 冲刷批次在“可被 check_mail 看见”前原子登记 inflight，网络注入在锁外；成功转 delivered，失败释放交付权留库。仍在 `_pending` 未冲刷的 note 不标 inflight，保留提前补拉能力。check_mail 的过滤＋标记原子化，且只有非空拉取才推进游标；游标推进到本次实取消息最大 ts（非 wall clock），并行 inflight 注入失败后不被跳过。F75 root backlog 副本同样遵守 inflight 语义；State 锁内不反向等待 Router 锁。
 **落点**：agorad/core/msg.py（交付锁＋inflight＋check_mail 游标语义）、tests/test_core_msg.py（立即注入、失败补拉、digest 冲刷三交错）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F87 锚）——旧实现三交错用例重复交付/抢交（6 fail 含继承复跑）；新实现 `python3 -m pytest tests/test_core_msg.py tests/test_core_health.py -q` 216 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
 
@@ -508,7 +508,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ### F90 仓库身份 realpath 归一——路径别名不裂仓（2026-11-12，用户目标「稳定性、性能」）
 **现状**：task_create 原样保存 project_dir；quick 历史按字符串精确相等，peer 只做 normpath——同一仓的尾斜杠/符号链接路径会被当成不同仓：quick 证据判不足、worker 等价路径被拒、peer 分区裂开。
-**裁定**：TaskService 新增 `_repo_key(path)=str(Path(path).resolve())`，建单入账、worker 父仓比较、quick 历史比较共用；peer 分区与存量 peer 消息 repo 用 `os.path.realpath` 同口径比较。响应字段结构不变，值归一为规范仓根；跨仓仍拒，不做历史账本重写。
+**裁定**：TaskService 新增 `_repo_key(path)=str(Path(path).resolve())`，建单入账、worker 父仓比较、quick 历史比较共用；worker 对 legacy 父行的 raw 路径同样先归一再比较/继承。peer 分区与存量 peer 消息 repo 用 `os.path.realpath` 同口径比较。响应字段结构不变，值归一为规范仓根；跨仓仍拒，不做历史账本重写。
 **落点**：agorad/core/task.py（_repo_key＋create/_history_cmd）、agorad/core/peer.py（分区键＋存量消息比较）、tests/test_core_task.py（别名入账/quick 历史/worker 继承）、tests/test_core_msg.py（peer 双向同分区）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F90 锚）——旧实现 quick 证据不足、worker 等价路径拒、peer 任务漏显共 3 fail；新实现 `python3 -m pytest tests/test_core_task.py tests/test_core_msg.py -q` 192 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
 
@@ -520,7 +520,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ### F92 Store 消息/事件读缓存——热读零触盘（2026-11-12，用户目标「稳定性、性能」）
 **现状**：read_messages 每次扫描并解析全部消息文件，read_events 每次解析全部 JSONL；check_mail、repo_board、board full_view、健康证据反复复用这些全量读，长期账本下单线程 HTTP 的读成本随历史线性增长。
-**裁定**：Store 增加消息/事件各自惰性缓存与锁；首载走 `_load_messages_from_disk/_load_events_from_disk`，append 在写盘成功同临界区发布缓存。读取返回一层 dict 拷贝（现行记录值均为标量，保持旧“每次新对象”语义，避免 deepcopy 反向拖慢全量事件读）；消息缓存形状对齐磁盘解析面（frontmatter 字符串＋id=int）。磁盘格式、公开签名、消息 id 配给与断尾容错不变。
+**裁定**：Store 增加消息/事件各自惰性缓存与锁；首载走 `_load_messages_from_disk/_load_events_from_disk`，append 在写盘成功同临界区发布缓存；消息缓存发布后按 id 排序，防 mid 配给与跨锁发布交错造成晚号先行。读取返回一层 dict 拷贝（现行记录值均为标量，保持旧“每次新对象”语义，避免 deepcopy 反向拖慢全量事件读）；消息缓存形状对齐磁盘解析面（frontmatter 字符串＋id=int）。磁盘格式、公开签名、消息 id 配给与断尾容错不变。
 **落点**：agorad/access/store.py（缓存/锁/loader/append 发布）、tests/test_access_store.py（热读零触盘、append 可见恰一次、返回值隔离、并发读写、重载一致）、tests/bench_scale.py（固定规模可重复基准）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F92 锚）——旧实现热读触盘 AssertionError；新实现 `python3 -m pytest tests/test_access_store.py tests/test_core_msg.py tests/test_core_report.py -q` 112 passed。同机基准（200 任务/1000 消息/5000 事件/20 读，单次、仅前后对照）：read_messages 0.0134306→0.0001012s、read_events 0.0089930→0.0004708s、board_full_view 0.0118536→0.0052162s、check_mail 0.0154026→0.0024450s；缓存后仍是内存全量遍历＋拷贝，非索引查询。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
 

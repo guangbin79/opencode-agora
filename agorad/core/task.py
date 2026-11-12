@@ -99,11 +99,12 @@ class TaskService:
             if deliverable is not None:  # ag-af96bb②：契约面派发方持有，同 model 口径
                 self._reject(tid, sid, "worker 不得指定 deliverable（review-only"
                                        " 标记）——缺省继承父任务", ev=EV_DENIED)
-            if project_dir is not None and project_dir != parent["project_dir"]:
+            parent_repo = self._repo_key(parent["project_dir"])
+            if project_dir is not None and project_dir != parent_repo:
                 self._reject(tid, sid, f"worker 建单 project_dir 强制继承父任务仓"
-                                       f"（{parent['project_dir']}），指定他径拒",
+                                       f"（{parent_repo}），指定他径拒",
                              ev=EV_DENIED)
-            project_dir = parent["project_dir"]
+            project_dir = parent_repo  # F90：legacy 父行别名也归一后再入账
             target_branch = parent["target_branch"]
             model = parent.get("model")  # F55：缺省继承父任务
             deliverable = parent.get("deliverable")  # ag-af96bb②：缺省继承父任务

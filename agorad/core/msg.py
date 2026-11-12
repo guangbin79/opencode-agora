@@ -241,8 +241,9 @@ class Router:
                    and m["id"] not in self._delivered
                    and m["id"] not in self._inflight
                    and float(m["ts"]) > cursor]
-            if got:  # 空拉不推游标：inflight 让位后失败注入仍可下次补拉（F87）
-                self._state.touch_mail(sid)
+            if got:  # 游标只推到本次实取消息：并行 inflight 失败后不被跳过（F87）
+                self._state.touch_mail(
+                    sid, max(float(m["ts"]) for m in got))
                 self._delivered.update(m["id"] for m in got)  # 拉取即送达（无 ack）
             return got
 

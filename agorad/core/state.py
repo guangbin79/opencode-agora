@@ -152,9 +152,12 @@ class State:
         with self._lock:
             return self._snap()
 
-    def touch_mail(self, sid):
+    def touch_mail(self, sid, ts=None):
+        """推进 mail_read 游标；缺省 now，显式 ts 只前进不回退（F87 评审 Important）。"""
         with self._lock:
-            self._mail_read[sid] = time.time()
+            mark = time.time() if ts is None else ts
+            if mark > self._mail_read.get(sid, 0.0):
+                self._mail_read[sid] = mark
 
     def touch_seen(self, tid):
         """last_seen 心跳只进内存（gt-a18ef6 写放大根因修复）：O(调用数) 全量

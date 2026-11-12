@@ -133,6 +133,35 @@ class TestCoreMsg(unittest.TestCase):
         self.assertEqual(len(self.oc.calls), 1)
         self.assertEqual(self.r.check_mail("d1"), [])
 
+    def test_failed_inflight_with_parallel_pull_does_not_strand(self):  # Req: F87
+        """非空补拉不得把游标推过并行 inflight 消息：其注入失败后仍须可补拉。"""
+        import threading
+
+        self.state.add("t2", {"state": "running", "fail_streak": 0,
+                              "title": "B", "created": 0.0, "updated": 0.0,
+                              "dispatcher_sid": "d1", "worker_sid": "w1"})
+        pending_note = self.r.post("w1", ("up", "t2"), "note", "pending note")
+        entered = threading.Event()
+        release = threading.Event()
+        inflight_ids = []
+
+        def failing_inject(sid, text):
+            entered.set()
+            release.wait(2.0)
+            return False
+
+        self.oc.inject = failing_inject
+        t = threading.Thread(target=lambda: inflight_ids.append(
+            self.r.post("w1", ("up", "t1"), "process", "must not strand")))
+        t.start()
+        self.assertTrue(entered.wait(2.0))
+        got = self.r.check_mail("d1")  # 取到 pending note；X 仍 inflight
+        self.assertEqual([m["id"] for m in got], [pending_note])
+        release.set()
+        t.join()
+        self.assertEqual([m["id"] for m in self.r.check_mail("d1")],
+                         inflight_ids)  # 旧实现：游标已跳过 X
+
     def test_failed_inflight_inject_still_pullable(self):  # Req: F87
         """inflight 注入失败必须释放交付权，下一次 check_mail 可补拉。"""
         import threading

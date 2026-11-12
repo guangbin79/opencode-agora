@@ -232,6 +232,54 @@ class TestAccessStore(unittest.TestCase):
                          [first, second])  # 重载与缓存内容一致
         self.assertEqual([e["e"] for e in fresh.read_events()], [1, 2])
 
+    def test_read_cache_preserves_id_order_when_appends_race(self):  # Req: F92
+        """mid 配给与缓存发布分属两锁：晚号先发布时缓存仍必须按 id 升序。"""
+        import threading
+        from unittest.mock import patch
+
+        class PermissiveLock:  # 强制两写者同时进入发布段，钉出跨锁调度序
+            def __enter__(self):
+                pass
+
+            def __exit__(self, *exc):
+                return False
+
+        first_at_open = threading.Event()
+        second_done = threading.Event()
+        real_open = Path.open
+
+        def controlled_open(self, *args, **kwargs):
+            if self.name == "00000001.md":
+                first_at_open.set()
+                if not second_done.wait(2.0):
+                    raise AssertionError("second append never completed")
+            return real_open(self, *args, **kwargs)
+
+        real_lock = self.st._messages_lock
+        self.st.read_messages()  # 先暖缓存：race 只考察 append 发布序，不混入首载排序
+        self.st._messages_lock = PermissiveLock()
+        errs = []
+
+        def write(body):
+            try:
+                self.st.write_message({"task": "t1"}, body)
+            except Exception as e:
+                errs.append(repr(e))
+
+        t1 = threading.Thread(target=write, args=("first",))
+        t2 = threading.Thread(target=write, args=("second",))
+        with patch.object(Path, "open", controlled_open):
+            t1.start()
+            self.assertTrue(first_at_open.wait(2.0))
+            t2.start()
+            t2.join()
+            second_done.set()
+            t1.join()
+        self.st._messages_lock = real_lock
+        self.assertEqual(errs, [])
+        ids = [m["id"] for m in self.st.read_messages()]
+        self.assertEqual(ids, sorted(ids))  # 旧实现出现 [2, 1]
+
     def test_read_cache_concurrent_append_and_read(self):  # Req: F92
         """首载/append/读并发：无异常、无重复、无漏新行。"""
         import threading

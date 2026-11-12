@@ -122,6 +122,8 @@ class Store:
                 os.fsync(f.fileno())
             if self._messages_cache is not None:
                 self._messages_cache.append(copy.deepcopy(record))
+                # mid 配给与发布分属两锁：晚号先发布时保 id 升序（F92 评审 Important）
+                self._messages_cache.sort(key=lambda m: m["id"])
         return mid
 
     def scan_max_msg_id(self) -> int:
