@@ -11,6 +11,9 @@
 - 记录 F84-F93 写闸双路径、凭据/消息并发、账本热读缓存与 e2e 裸拉 MCP 的 HOME 沙箱坑位
 - Types: Decision/Bug/Strategy
 ## [2026-11-12] ingest | knowledge-index
+- 记录 F97 根级未跟踪隐藏目录自动豁免边界与名册/clean-ignore 通道分工
+- Types: Decision
+## [2026-11-12] ingest | knowledge-index
 - Added F99 verify command hygiene gate to architecture decisions.
 - Types: Decision
 ## [2026-11-13] ingest | knowledge-index

@@ -23,6 +23,7 @@
 - **写闸双路径不变量**（F84）：worker 原生 edit/write 放行须 cwd 与写入目标同在任务 env；仅 cwd 合法而 target 越界必拒，拒因点名 target
 - **凭据与消息并发不变量**（F85-F87）：task_dispatch 公共响应不带 token；Auth 修改＋ephemeral 落盘同临界区；在线注入用 inflight 持交付权，check_mail 游标受本收件最老 inflight ts 下界约束
 - **账本热读缓存**（F92）：消息/事件惰性缓存，append 写盘成功后同锁发布；消息按 id 保序，读取一层 dict 拷贝隔离调用方；热读零触盘但仍非索引查询
+- **根级未跟踪隐藏目录自动豁免**（F97）：ensure_clean 脏面全为根级未跟踪隐藏整目录（`?? .dir/`）→追加中央 ignore.roster→重写 info/exclude→同轮重试继续合并；混合脏面零部分豁免照旧弹回；首检/终检入册都并入 F35 闸体检测面，merged 通知带清单＋auto_ignore 审计；控制字符目录名不自动豁免（名册一行一条）
 - **verify 命令卫生闸**（F99，2026-11-12，ag-df192c 假红）：verify 命令在登记面（task_create/update_verify）过纯静态检查（shlex 词法＋realpath 归一，不执行）——ABSOLUTE_CD 与主仓内绝对路径（PROJECT_PATH）阻断、HOME 全局状态目录（GLOBAL_STATE）仅告警；引号字面量放行（grep 模式不误杀）、shlex 无法解析静默放行（fail-open）；venv/.venv/node_modules/site-packages 按路径段豁免（env 内自带副本）；quick 历史候选先滤 blocking 再计票；doctor verify_hygiene_findings 只读审计非终态任务（存量命令照跑，靠审计可见）；检查器经 main.assemble 构造注入（core 禁兄弟 import）
 - **交付权威分治**（F98/F100/F101/F102，2026-11-13）：交付权威按仓形态三分——origin 在位＝远端权威（远端 tip 定基、仓级锁内 ff-only 发布、至多 3 次总尝试、干净 non-ff 重取基重排重验、败走 delivery failed/blocked 非质量口径不弹回不计连败）；无 origin＝本地钉死支 CAS ff-only 权威（脏/占用目标=终局失败 local_target_dirty/busy，绝不伪装 pending）；external_branch＝外部派发方权威（awaiting_external 驻留＋task_deliver 确认 delivered/non_ff/failed，过期 handoff commit 拒绝零改写）。本地主检出全程零接触：远端落地后 sync_local_target 尽力同步（pending 不清洗、绝不回滚远端交付）。多实例同仓安全＝F96 实例属主 env 命名＋仓级交付锁串行终推＋精确路径 worktree 注销（禁 F96 前后新旧实例混写同仓）；端到端证明＝tests/e2e/multi_instance_delivery.py（双真实实例九场景：锁串行线性/远端终裁/non-ff 预算/冲突终局/WIP pending/CAS 与脏目标/external 全链/换基过期拒/实例属主清理）
 
