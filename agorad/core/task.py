@@ -16,6 +16,10 @@ import time
 
 _MAX_DEPTH = 3
 _QUOTA = 6  # F41：Graicunas/ICS 跨度锚定
+# Req: F98 派发面远端定基短预算：dispatch 在单线程 HTTP 串行面同步 fetch，死/
+# 黑洞 origin 不得停摆全服务（accept_done 探针 fetch_timeout=5 同口径；门体交付
+# 面仍走 _PUSH_TIMEOUT 全预算——verify/push 本就有分钟级网络面先例）
+_REMOTE_BASE_TIMEOUT = 5
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _AFTER_OK = {"merged", "closed", "cancelled"}  # cancelled 还须非 dependency_failed；派发处终审
 _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged 不逆转历史）
@@ -291,13 +295,42 @@ class TaskService:
             if predecessor["state"] not in _AFTER_OK or failed_cancel:
                 self._reject(tid, sid,
                              f"after: 前任务 {after} 未成功或由 dispatcher 有意跳过（B7）")
+        # Req: F98 重派开新交付轮：交付终局残值随重派重置（mode/target_branch
+        # 身份字段不动）——防残留 failed 令后续质量类 3 连败 blocked 被报表
+        # 误分「失败」桶＋明细带陈旧 error（评审 D3）
+        if (t.get("delivery") or {}).get("status") == "failed":
+            self._state.set_fields(tid, delivery=dict(
+                t["delivery"], status="pending", error=None, attempt=0,
+                commit=None, base=None, local_status="pending"))
         env = t.get("env_dir")
         env_base = t.get("env_base")
         # Req: F71 记录 env 不在盘（/tmp 清理/误删，ag-724152）＝无 env，重派全新建路自愈
         new_env = not self._gitx.env_on_disk(env)
         if new_env:
+            # Req: F98 managed 远端权威定基：origin 在位即取远端 tip 建 env，
+            # fetch 失败拒派报 remote_base——绝不回退本地支（远端才是交付权威）。
+            # has_origin/fetch 同入守卫（评审 D1）：仓亡（FileNotFoundError）与
+            # 网络病一律清晰拒因＋审计（env_build 同口径），短预算防死 origin
+            # 停摆串行门（评审 D4）
+            base_sha = None
             try:
-                env = self._gitx.build_env(t["project_dir"], tid, t.get("target_branch"))
+                d = t.get("delivery") or {}
+                if (d.get("mode") == "managed"
+                        and t.get("target_branch") is not None
+                        and self._gitx.has_origin(t["project_dir"])):
+                    base_sha = self._gitx.fetch_origin_branch(
+                        t["project_dir"], t["target_branch"],
+                        timeout=_REMOTE_BASE_TIMEOUT)
+            except Exception as e:
+                self._reject(tid, sid, f"remote_base: {e}")
+            try:
+                if base_sha is not None:
+                    env = self._gitx.build_env_at(
+                        t["project_dir"], tid, t["target_branch"],
+                        base_sha=base_sha)
+                else:
+                    env = self._gitx.build_env(t["project_dir"], tid,
+                                               t.get("target_branch"))
             except Exception as e:  # 项目仓已亡等＝清晰拒因（ag-724152 曾以 move 400 撞 can_spawn 形态）
                 self._reject(tid, sid, f"env_build: {e}")
             env_base = self._gitx.head(env)  # ag-1ae0f1：env 起点 base——done 空集判据 (a) 比较锚

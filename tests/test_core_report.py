@@ -37,6 +37,23 @@ class TestReport(unittest.TestCase):
         self.assertEqual(b["已取消"], ["t8"])
         self.assertEqual(b["失败"], [])  # v2 无独立失败终态：verify_failed 归在飞
 
+    def test_buckets_delivery_failed_blocked_split(self):  # Req: F98
+        """blocked 分桶：交付败（delivery.status=failed）归失败桶，其余 blocked
+        （质量类）留阻塞桶；在飞行不受 delivery 投影影响。"""
+        s = snap(
+            t1=row("blocked"),
+            t2=dict(row("blocked"), delivery={
+                "mode": "managed", "status": "failed",
+                "error": "rebase_conflict"}),
+            t3=dict(row("running"), delivery={
+                "mode": "managed", "status": "failed"}),
+            t4=dict(row("blocked"), delivery={
+                "mode": "managed", "status": "pending"}))
+        b = buckets(s)
+        self.assertEqual(b["失败"], ["t2"])
+        self.assertEqual(b["阻塞"], ["t1", "t4"])
+        self.assertEqual(b["在飞"], ["t3"])
+
     def test_chain_view_two_levels(self):  # Req: F10
         s = snap(t1=row(disp="d1", worker="w1"), t2=row(disp="w1", worker="w2"),
                  t3=row(disp="w2", worker="w3"), tx=row(disp="other"))
@@ -176,6 +193,20 @@ class TestReport(unittest.TestCase):
         self.assertEqual(_model_stats({}, [{"ts": 1.0, "actor": "x",
                                             "event": "verify_failed",
                                             "task": "tx"}]), {})
+
+    def test_detail_carries_delivery_error(self):  # Req: F98
+        """交付失败机器可读 error 经任务明细可见（全字段行自然携带投影）。"""
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            s = snap(t1=dict(row("blocked"), delivery={
+                "mode": "managed", "status": "failed",
+                "error": "rebase_conflict", "attempt": 1}))
+            d = detail(s, st, "t1")
+            self.assertEqual(d["task"]["delivery"]["error"], "rebase_conflict")
+            self.assertEqual(d["task"]["delivery"]["status"], "failed")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_detail_row_events_done_body(self):  # Req: F10
         tmp = Path(tempfile.mkdtemp())

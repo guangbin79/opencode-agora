@@ -39,6 +39,9 @@ class FakeGitx:
     def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
         return "b" * 40
 
+    def has_origin(self, repo_dir):  # Req: F98 本地仓模型（push 亦 none）——dispatch 走本地定基
+        return False
+
     def remove_env(self, env_dir):
         pass
 

@@ -1208,5 +1208,179 @@ class TestGateBaseline(unittest.TestCase):
         self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL
 
 
+class TestRemoteDelivery(unittest.TestCase):
+    """Req: F98 managed 远端原语：fetch_origin_branch/has_origin/push_commit/
+    remote_contains/sync_local_target（真 git＋bare origin 夹具）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "proj"
+        self.origin = self.tmp / "origin.git"
+        self.repo.mkdir()
+        self._git(["init", "-b", "main"], cwd=self.repo)
+        self._git(["config", "user.email", "t@t"], cwd=self.repo)
+        self._git(["config", "user.name", "t"], cwd=self.repo)
+        self._commit(self.repo, {"src.py": "v1"}, "init")
+        self._git(["init", "--bare", "-b", "main", str(self.origin)])
+        self._git(["remote", "add", "origin", str(self.origin)], cwd=self.repo)
+        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
+        self.gx = Gitx()
+        self.base = self._head(self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _git(args, cwd=None, check=True):
+        r = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None,
+                           capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def _commit(self, cwd, files, msg):
+        for name, content in files.items():
+            path = Path(cwd) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self._git(["add", "-A"], cwd=cwd)
+        self._git(["commit", "-m", msg], cwd=cwd)
+        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+    def _head(self, cwd):
+        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+    def _origin_tip(self):
+        return self._git(["rev-parse", "main"], cwd=self.origin).stdout.strip()
+
+    def _peer_advance(self, files, msg, name="peer"):
+        """第三方 clone 经 origin 推进一格，返回新远端 tip。"""
+        peer = self.tmp / name
+        self._git(["clone", "-q", str(self.origin), str(peer)])
+        self._git(["config", "user.email", "t@t"], cwd=peer)
+        self._git(["config", "user.name", "t"], cwd=peer)
+        sha = self._commit(peer, files, msg)
+        self._git(["push", "-q", "origin", "main"], cwd=peer)
+        return sha
+
+    def _detached_commit(self, name, files, msg, startpoint="main"):
+        """detached worktree 内造本地提交（不动 main 检出面），返回 sha。"""
+        wt = self.tmp / name
+        self._git(["worktree", "add", "--detach", "-q", str(wt), startpoint],
+                  cwd=self.repo)
+        return self._commit(wt, files, msg)
+
+    def test_has_origin(self):  # Req: F98
+        self.assertTrue(self.gx.has_origin(str(self.repo)))
+        lone = self.tmp / "lone"
+        lone.mkdir()
+        self._git(["init", "-b", "main"], cwd=lone)
+        self.assertFalse(self.gx.has_origin(str(lone)))
+
+    def test_fetch_origin_branch_returns_exact_remote_tip(self):  # Req: F98
+        tip = self._peer_advance({"other.txt": "x"}, "peer advance")
+        self.assertEqual(self.gx.fetch_origin_branch(str(self.repo), "main"), tip)
+        self.assertEqual(self._git(  # 远端跟踪引用同步刷新到同一 tip
+            ["rev-parse", "refs/remotes/origin/main"], cwd=self.repo
+        ).stdout.strip(), tip)
+        self.assertEqual(self._head(self.repo), self.base)  # 本地支不动
+
+    def test_fetch_origin_branch_timeout_passthrough(self):  # Req: F98
+        """评审 D4：短预算经 fetch_origin_branch 透传至 _net（派发面防死 origin
+        停摆串行门）；缺省 None＝_PUSH_TIMEOUT 全预算（门体交付面）。"""
+        seen = []
+        orig = type(self.gx)._net
+
+        def fake_net(args, cwd, timeout=None):
+            seen.append(timeout)
+            return orig(args, cwd, timeout)
+
+        self.gx._net = fake_net
+        self.gx.fetch_origin_branch(str(self.repo), "main", timeout=5)
+        self.gx.fetch_origin_branch(str(self.repo), "main")
+        self.assertEqual(seen, [5, None])
+
+    def test_fetch_failure_raises(self):  # Req: F98
+        with self.assertRaises(RuntimeError):
+            self.gx.fetch_origin_branch(str(self.repo), "ghost")
+        self._git(["remote", "set-url", "origin", str(self.tmp / "dead.git")],
+                  cwd=self.repo)
+        with self.assertRaises(RuntimeError):
+            self.gx.fetch_origin_branch(str(self.repo), "main")
+
+    def test_push_commit_ff_ok(self):  # Req: F98
+        sha = self._detached_commit("wt-a", {"src.py": "v2"}, "task")
+        r, tail = self.gx.push_commit(str(self.repo), sha, "main")
+        self.assertEqual((r, tail), ("ok", ""))
+        self.assertEqual(self._origin_tip(), sha)
+
+    def test_push_commit_non_ff_keeps_remote(self):  # Req: F98
+        tip = self._peer_advance({"other.txt": "x"}, "peer advance")
+        r, tail = self.gx.push_commit(str(self.repo), self.base, "main")
+        self.assertEqual(r, "non-ff")
+        self.assertTrue(tail)
+        self.assertEqual(self._origin_tip(), tip)  # 拒绝不改远端
+
+    def test_push_commit_failed_and_none(self):  # Req: F98
+        self._git(["remote", "set-url", "origin", str(self.tmp / "dead.git")],
+                  cwd=self.repo)
+        r, tail = self.gx.push_commit(str(self.repo), self.base, "main")
+        self.assertEqual(r, "failed")
+        self.assertTrue(tail)
+        lone = self.tmp / "lone"
+        lone.mkdir()
+        self._git(["init", "-b", "main"], cwd=lone)
+        self._git(["config", "user.email", "t@t"], cwd=lone)
+        self._git(["config", "user.name", "t"], cwd=lone)
+        self._git(["commit", "--allow-empty", "-m", "init"], cwd=lone)
+        self.assertEqual(
+            self.gx.push_commit(str(lone), self._head(lone), "main"), ("none", ""))
+
+    def test_remote_contains_ancestry(self):  # Req: F98
+        tip = self._peer_advance({"other.txt": "x"}, "peer advance")
+        self._git(["fetch", "-q", "origin"], cwd=self.repo)
+        self.assertTrue(self.gx.remote_contains(str(self.repo), "main", self.base))
+        local = self._detached_commit("wt-b", {"src.py": "v2"}, "unpushed",
+                                      startpoint=tip)
+        self.assertFalse(self.gx.remote_contains(str(self.repo), "main", local))
+        self._git(["push", "-q", "origin", f"{local}:main"], cwd=self.repo)
+        self.assertTrue(self.gx.remote_contains(str(self.repo), "main", local))
+
+    def test_sync_local_target_guards(self):  # Req: F98
+        sha = self._detached_commit("wt-c", {"src.py": "v2"}, "task")
+        self._git(["checkout", "-q", "--detach"], cwd=self.repo)  # main 无人检出
+        self.assertEqual(
+            self.gx.sync_local_target(str(self.repo), "main", sha, self.base),
+            "synced")
+        self.assertEqual(self._git(  # 本地支已 ff 到交付 sha
+            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha)
+        # 检出面守卫：main 被检出（主检出切回 main）＝不碰用户工作树
+        self._git(["checkout", "-q", "main"], cwd=self.repo)
+        sha2 = self._detached_commit("wt-d", {"src.py": "v3"}, "next")
+        self.assertEqual(
+            self.gx.sync_local_target(str(self.repo), "main", sha2, sha),
+            "pending")
+        self.assertEqual(self._git(
+            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha)
+        # CAS 守卫：expected_old 与现值不符（ref 已被他人移动）
+        self._git(["checkout", "-q", "--detach"], cwd=self.repo)
+        self._git(["update-ref", "refs/heads/main", sha2], cwd=self.repo)
+        self.assertEqual(
+            self.gx.sync_local_target(str(self.repo), "main", sha, self.base),
+            "pending")
+        self.assertEqual(self._git(
+            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha2)
+        # ff 守卫：本地支已含 sha 之外的分叉提交（CAS 对、非 ff）
+        self.assertEqual(
+            self.gx.sync_local_target(str(self.repo), "main", sha, sha2),
+            "pending")
+        self.assertEqual(self._git(
+            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha2)
+        # 缺支守卫：本地无该分支＝pending
+        self.assertEqual(
+            self.gx.sync_local_target(str(self.repo), "ghost", sha, None),
+            "pending")
+
+
 if __name__ == "__main__":
     unittest.main()

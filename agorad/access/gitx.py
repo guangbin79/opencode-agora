@@ -415,17 +415,20 @@ class Gitx:
         return status, out
 
     @staticmethod
-    def _net(args, cwd):
+    def _net(args, cwd, timeout=None):
         """网络面 git 原语（ag-0f60fd ls-remote/删除 push）：start_new_session＋
         超时 killpg 全组（push 同款 F38 纪律——ssh/传输孙进程不孤儿泄漏）。返回
         (rc, stdout, stderr) 三元——ls-remote tip 解析只吃 stdout（评审 R1：stderr
-        传输噪声如 ssh 首连告警不得混进 fields[0]）；超时 rc=124 带 stderr 文案。"""
+        传输噪声如 ssh 首连告警不得混进 fields[0]）；超时 rc=124 带 stderr 文案。
+        timeout＝调用面短预算（None＝_PUSH_TIMEOUT 全预算；同步受理面防死 origin
+        停摆，baseline fetch_timeout 同口径）。"""
         proc = subprocess.Popen(["git", *args], cwd=str(cwd),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace",
                                 start_new_session=True)
+        tmo = timeout or _PUSH_TIMEOUT
         try:
-            out, err = proc.communicate(timeout=_PUSH_TIMEOUT)
+            out, err = proc.communicate(timeout=tmo)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -437,7 +440,7 @@ class Gitx:
                 for pipe in (proc.stdout, proc.stderr):
                     if pipe:
                         pipe.close()
-            return 124, "", f"git {' '.join(args[:2])} 超时（>{_PUSH_TIMEOUT}s）"
+            return 124, "", f"git {' '.join(args[:2])} 超时（>{tmo:g}s）"
         return proc.returncode, (out or ""), (err or "")
 
     def delete_branch(self, repo_dir: str, branch: str,
@@ -487,6 +490,94 @@ class Gitx:
         status = "non-ff" if ("non-fast-forward" in out
                               or "fetch first" in out) else "failed"
         return status, out
+
+    def has_origin(self, repo_dir: str) -> bool:  # Req: F98
+        """origin remote 在位性（managed 远端优先交付的门槛判据）。"""
+        return self._git(["remote", "get-url", "origin"],
+                         cwd=repo_dir, check=False).returncode == 0
+
+    def fetch_origin_branch(self, repo_dir: str, branch: str,
+                            timeout: float = None) -> str:  # Req: F98
+        """真 fetch origin 支进远端跟踪引用，返回精确 40 位 tip SHA；失败如实抛。
+
+        显式 +refspec 强制刷新 refs/remotes/origin/<branch>（不依赖仓配 fetch
+        refspec 在位，远端回退也同步）；无该远端支/网络病＝RuntimeError，
+        绝不静默回退本地支（调用方按交付失败处置）。timeout＝同步受理面
+        （dispatch）短预算——缺省＝_PUSH_TIMEOUT 全预算（门体交付面）；短预算
+        超时与网络病同抛，语义不变。"""
+        rc, out, err = self._net(
+            ["fetch", "origin",
+             f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], repo_dir,
+            timeout=timeout)
+        if rc != 0:
+            raise RuntimeError(
+                f"git fetch origin {branch}: "
+                + " ".join(x for x in (err.strip(), out.strip()) if x))
+        sha = self._git(["rev-parse", f"refs/remotes/origin/{branch}"],
+                        cwd=repo_dir).stdout.strip().lower()
+        if not self._SHA40.fullmatch(sha):
+            raise RuntimeError(
+                f"git fetch origin {branch}: tip 非 40 位 SHA（{sha!r}）")
+        return sha
+
+    def push_commit(self, repo_dir: str, sha: str,
+                    branch: str) -> tuple[str, str]:  # Req: F98
+        """sha 级 ff-only 推送：恰推 <full-sha>:refs/heads/<branch>，绝不 force。
+
+        分类同 push：ok（含 already up-to-date）/non-ff（他写者已推进）/
+        failed（含超时与网络病）；无 origin＝none。返回 (status, tail)——
+        failed 后调用方先 remote_contains 对账（推成对账不可得不重推）。"""
+        if not self.has_origin(repo_dir):
+            return "none", ""
+        rc, out, err = self._net(["push", "origin", f"{sha}:refs/heads/{branch}"],
+                                 repo_dir)
+        if rc == 0:
+            return "ok", ""
+        tail = " ".join(x for x in (err.strip(), out.strip()) if x)
+        status = "non-ff" if ("non-fast-forward" in tail
+                              or "fetch first" in tail) else "failed"
+        return status, tail
+
+    def remote_contains(self, repo_dir: str, branch: str,
+                        commit: str) -> bool:  # Req: F98
+        """刷新远端后判 commit 是否 origin/<branch> tip 的祖先（含相等）。
+
+        交付权威判据：push 超时/网络败后的对账与崩溃窗口补终态都走此面；
+        fetch 失败如实抛——调用方按「对账不可得」处理，不猜。"""
+        tip = self.fetch_origin_branch(repo_dir, branch)
+        r = self._git(["merge-base", "--is-ancestor", commit, tip],
+                      cwd=repo_dir, check=False)
+        if r.returncode == 0:
+            return True
+        if r.returncode == 1:
+            return False
+        raise RuntimeError(
+            f"git merge-base --is-ancestor {commit} {tip}: {r.stderr.strip()}")
+
+    def sync_local_target(self, repo_dir: str, branch: str, sha: str,
+                          expected_old) -> str:  # Req: F98
+        """远端权威落地后的本地目标支尽力同步：仅当支未被任何 worktree 检出、
+        expected_old 仍匹配（CAS）且 sha 构成 fast-forward 才原子推进本地 ref；
+        任一守卫不过＝pending，不碰用户工作（脏/分叉本地不是交付失败，绝不清洗）。
+        expected_old=None＝本地无锚（缺支/未知）恒 pending。"""
+        if expected_old is None:
+            return "pending"
+        cur = self._git(["rev-parse", "--verify", "--quiet",
+                         f"refs/heads/{branch}"], cwd=repo_dir, check=False)
+        if cur.returncode != 0 or cur.stdout.strip().lower() != expected_old.lower():
+            return "pending"  # 缺支/CAS 不符：本地已被他人移动
+        out = self._git(["worktree", "list", "--porcelain"],
+                        cwd=repo_dir).stdout
+        for line in out.splitlines():
+            if line.strip() == f"branch refs/heads/{branch}":
+                return "pending"  # 检出面守卫：推进被检出 ref 会撕裂工作树
+        anc = self._git(["merge-base", "--is-ancestor", expected_old, sha],
+                        cwd=repo_dir, check=False)
+        if anc.returncode != 0:
+            return "pending"  # 分叉/环境病一律不碰（同步是尽力而为面）
+        r = self._git(["update-ref", f"refs/heads/{branch}", sha, expected_old],
+                      cwd=repo_dir, check=False)
+        return "synced" if r.returncode == 0 else "pending"  # CAS 原子收口
 
     def rebase_onto(self, env_dir: str, integration: str) -> str:
         """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交

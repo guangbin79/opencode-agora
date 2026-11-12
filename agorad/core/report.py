@@ -3,8 +3,9 @@
 snap/store 进来、dict/list/str 出去，零状态零副作用（store 仅读原语）。
 五桶机械口径：已合并=merged+closed（closed 是合并后唯一后继）；在飞=其余
 非终态全部（含 todo 未派、done 待并；verify_failed/reopened 是续修态归在飞）；
-失败=空集保留位——v2 状态集无独立"失败"终态（质量败走 verify_failed 续修，
-3 连败自动 blocked 归阻塞桶）；阻塞=blocked；已取消=cancelled。
+失败=blocked 且 delivery.status=="failed"（Req: F98 交付终局——rebase 冲突/
+重试耗尽/推送败，处置权在派发方）；阻塞=其余 blocked（质量类 3 连败）；
+已取消=cancelled。
 """
 import html
 import os
@@ -45,14 +46,18 @@ def _stale_baseline(t):
 
 
 def buckets(snap):
-    """五桶汇总：桶名→任务 id 列表（失败桶恒空，口径见模块 docstring）。"""
+    """五桶汇总：桶名→任务 id 列表（失败＝交付终局败，口径见模块 docstring）。"""
     out = {"已合并": [], "在飞": [], "失败": [], "阻塞": [], "已取消": []}
     for tid, t in sorted(snap["tasks"].items()):
         s = t["state"]
         if s in _MERGED:
             out["已合并"].append(tid)
         elif s == "blocked":
-            out["阻塞"].append(tid)
+            # Req: F98 交付败（delivery.status=failed）归失败桶；其余 blocked
+            # （质量类 3 连败）留阻塞桶
+            d = t.get("delivery") or {}
+            (out["失败"] if d.get("status") == "failed"
+             else out["阻塞"]).append(tid)
         elif s == "cancelled":
             out["已取消"].append(tid)
         else:

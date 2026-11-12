@@ -11,7 +11,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import agorad.core.gate as gate_mod
 from agorad.access.gitx import Gitx
 from agorad.access.oc import OcUnavailable
 from agorad.access.pages import write_task_page
@@ -39,6 +41,19 @@ class FakeOc:
 
     def messages(self, sid):
         return self.msgs
+
+
+class FakeDeliveryLock:  # Req: F98
+    def __init__(self):
+        self.busy = False
+        self.acquires, self.releases = 0, 0
+
+    def acquire(self, blocking=False):
+        self.acquires += 1
+        return not self.busy
+
+    def release(self):
+        self.releases += 1
 
 
 class FakeGitx:
@@ -76,6 +91,16 @@ class FakeGitx:
         self.materialize_result = ""  # 缺省零依赖物＝空报告
         self.diff_stats_result = (0, 0, "")  # F65 quick 包络读数注入
         self.diff_stats_calls = []
+        # Req: F98 managed origin-first 注入面
+        self.has_origin_result = False
+        self.fetch_calls, self.fetch_result = [], "d" * 40
+        self.fetch_results, self.fetch_raise = [], False
+        self.build_at_calls = []
+        self.push_commit_calls, self.push_commit_results = [], []
+        self.remote_contains_calls, self.remote_contains_result = [], False
+        self.remote_contains_results = []
+        self.sync_calls, self.sync_result = [], "pending"
+        self.lock_calls, self.lock = [], FakeDeliveryLock()
 
     def rebase_onto(self, env_dir, integration):
         self.rebase_calls.append((env_dir, integration))
@@ -181,6 +206,45 @@ class FakeGitx:
     def diff_stats(self, env_dir, branch=None):  # Req: F65
         self.diff_stats_calls.append((env_dir, branch))
         return self.diff_stats_result
+
+    def has_origin(self, repo_dir):  # Req: F98
+        return self.has_origin_result
+
+    def fetch_origin_branch(self, repo_dir, branch, timeout=None):  # Req: F98
+        self.fetch_calls.append((repo_dir, branch))
+        if self.fetch_raise:
+            raise RuntimeError(f"git fetch origin {branch}: network down")
+        if self.fetch_results:
+            r = self.fetch_results.pop(0)
+            if isinstance(r, Exception):  # 按次注入网络病（锁内重读抛等）
+                raise r
+            return r
+        return self.fetch_result
+
+    def build_integration_at(self, target_dir, integration_dir, base_sha=None):  # Req: F98
+        self.build_at_calls.append((target_dir, integration_dir, base_sha))
+        self.rebase_done = None  # 新 detached 基建：integration 头翻页复位（重试轮新基）
+        return integration_dir
+
+    def push_commit(self, repo_dir, sha, branch):  # Req: F98
+        self.push_commit_calls.append((repo_dir, sha, branch))
+        if self.push_commit_results:
+            return self.push_commit_results.pop(0)
+        return "ok", ""
+
+    def remote_contains(self, repo_dir, branch, commit):  # Req: F98
+        self.remote_contains_calls.append((repo_dir, branch, commit))
+        if self.remote_contains_results:
+            return self.remote_contains_results.pop(0)
+        return self.remote_contains_result
+
+    def sync_local_target(self, repo_dir, branch, sha, expected_old):  # Req: F98
+        self.sync_calls.append((repo_dir, branch, sha, expected_old))
+        return self.sync_result
+
+    def delivery_lock(self, repo_dir):  # Req: F96
+        self.lock_calls.append(repo_dir)
+        return self.lock
 
 
 class FakeHealth:
@@ -2126,6 +2190,210 @@ class TestQuickEnvelope(TestCoreGate):
         self.in_gate(quick=True)
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
+
+
+BASE_SHA = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9"  # Req: F98 远端基线
+TIP_SHA = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"  # Req: F98 他写者推进后远端 tip
+MANAGED_DELIVERY = {"mode": "managed", "status": "pending", "commit": None,
+                    "base": None, "target_branch": "main", "attempt": 0,
+                    "local_status": "pending", "error": None}
+
+
+class TestManagedDelivery(TestCoreGate):
+    """Req: F98 managed origin-first 交付：远端基集成/锁内 ff 推送/3 次总预算/
+    交付终局契约（legacy delivery=None 与 out_of_band 走原门，另有既有用例回归）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.integration = str(self.env) + "__gate"
+
+    def seed_managed(self, streak=0):
+        self.seed(tb="main", streak=streak)
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.gx.has_origin_result = True
+
+    def in_gate_managed(self, streak=0):
+        self.seed_managed(streak=streak)
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+
+    def delivery(self):
+        return self.state.get("t1")["delivery"]
+
+    def test_managed_ff_direct_delivery(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.fetch_result = BASE_SHA
+        self.gx.head_shas[self.integration] = SHA  # ff 直通：integration 头＝env 头
+        self.gx.remote_contains_results = [False, True]  # 入口探针未落远端；推送后复核含
+        self.gx.sync_result = "synced"
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"],
+                          d["local_status"], d["error"]),
+                         ("delivered", SHA, BASE_SHA, 1, "synced", None))
+        self.assertEqual(self.gx.build_at_calls,
+                         [("/repo", self.integration, BASE_SHA)])
+        self.assertEqual(self.gx.push_commit_calls, [("/repo", SHA, "main")])
+        self.assertEqual(self.gx.sync_calls, [("/repo", "main", SHA, "aaa111")])
+        self.assertEqual(self.gx.removed, [str(self.env)])  # env 回收
+        self.assertEqual(self.gx.clean_calls, [])  # 不碰主检出干净面
+        self.assertEqual(self.gx.checkouts, [])  # 不做换支还原
+        self.assertEqual([c[0] for c in self.runner.calls],
+                         [str(self.env), self.integration])  # 双 verify 不减
+
+    def test_managed_remote_race_rebases_and_reverifies(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "sha"
+        self.gx.rebase_new_head = R_SHA
+        self.gx.fetch_results = [BASE_SHA, TIP_SHA,  # ①基线＋锁内重读（他写者推进）
+                                 TIP_SHA, TIP_SHA]   # ②重取基线＋锁内复核
+        self.gx.remote_contains_results = [False, True]  # 入口探针未落；推送后复核含
+        self.runner.results = [(0, "p")] * 3  # env verify＋两轮集成 verify
+        self.gx.sync_result = "synced"
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(t["commit"], R_SHA)  # 账面 commit＝重排后 sha
+        d = self.delivery()
+        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
+                         ("delivered", R_SHA, TIP_SHA, 2))
+        self.assertEqual([c[2] for c in self.gx.build_at_calls],
+                         [BASE_SHA, TIP_SHA])  # 每次尝试整链重建（基＝当轮远端 tip）
+        self.assertEqual(self.gx.push_commit_calls, [("/repo", R_SHA, "main")])
+        self.assertEqual(len(self.runner.calls), 3)  # 集成 verify 重跑在重排结果上
+        self.assertIn("rebased",
+                      [e["event"] for e in self.store.read_events("t1")])
+
+    def test_managed_rebase_conflict_blocks_without_reopen(self):  # Req: F98
+        self.in_gate_managed(streak=2)  # 连败 2 在案：交付失败不得推到 3
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "conflict"
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(t["fail_streak"], 2)  # 非质量败不计连败
+        d = self.delivery()
+        self.assertEqual((d["status"], d["error"]),
+                         ("failed", "rebase_conflict"))
+        self.assertEqual(self.gx.push_commit_calls, [])  # 远端零推送
+        self.assertEqual(self.gx.removed, [])  # blocked 留 env 现场
+        self.assertEqual(self.gx.sync_calls, [])
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("reopened", evs)  # 不弹回 worker
+        self.assertIn("delivery_failed", evs)
+        self.assertEqual(  # worker 零续修指引（门入口知会除外）
+            [m for m in self.worker_msgs() if "重新 post(done" in m["body"]], [])
+
+    def test_managed_nonff_exhausts_three_attempts(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.push_commit_results = [("non-ff", "fetch first")] * 3
+        self.runner.results = [(0, "p")] * 4  # env＋三轮集成 verify
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["error"], d["attempt"]),
+                         ("failed", "retry_exhausted", 3))
+        self.assertEqual(len(self.gx.push_commit_calls), 3)  # 恰 3 次总尝试
+
+    def test_managed_rebased_verify_fail_reopens_not_push_failed(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "sha"
+        self.gx.rebase_new_head = R_SHA
+        self.runner.results = [(0, "p"), (1, "boom")]
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(t["fail_streak"], 1)  # 质量败照计连败
+        self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
+                         ("pending", None))  # 非交付终局
+        self.assertEqual(self.gx.push_commit_calls, [])  # 未验证不推送
+        self.assertTrue(any("rebase 后集成 verify 失败" in m["body"]
+                            for m in self.worker_msgs()))
+
+    def test_managed_push_timeout_reconciles_as_delivered(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.head_shas[self.integration] = SHA
+        self.gx.push_commit_results = [("failed", "push 超时（>300s）")]
+        self.gx.remote_contains_results = [False, True]  # 入口探针未落；对账已含
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["commit"]), ("delivered", SHA))
+        self.assertEqual(len(self.gx.push_commit_calls), 1)  # 对账归零不重推
+
+    def test_managed_delivered_dirty_local_pending(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.head_shas[self.integration] = SHA
+        self.gx.remote_contains_results = [False, True]  # 入口探针未落；推送后复核含
+        self.gx.sync_result = "pending"  # 本地脏/分叉：同步守卫不过
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["local_status"]),
+                         ("delivered", "pending"))
+        self.assertEqual(self.gx.clean_calls, [])  # 绝不清洗本地 WIP
+        self.assertEqual(self.gx.sync_calls, [("/repo", "main", SHA, "aaa111")])
+
+    def test_managed_lock_wait_bounded_times_out(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.lock.busy = True
+        self.runner.results = [(0, "p")] * 4
+        started = time.monotonic()
+        with mock.patch.object(gate_mod, "_LOCK_WAIT", 0.15):
+            self.gate.run("t1")
+        self.assertLess(time.monotonic() - started, 30)  # 有界等待不挂死
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["error"]),
+                         ("failed", "retry_exhausted"))
+        self.assertEqual(self.gx.push_commit_calls, [])  # 未得锁零推送
+        self.assertEqual(len(self.gx.build_at_calls), 3)  # 每次尝试整链重走
+        self.assertGreaterEqual(self.gx.lock.acquires, 3)
+
+    def test_managed_crash_window_remote_contains_finishes(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.remote_contains_result = True  # 崩溃窗口：推送已落远端
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["commit"]), ("delivered", SHA))
+        self.assertEqual(self.gx.push_commit_calls, [])  # 不重推
+        self.assertEqual(self.gx.build_at_calls, [])  # 不重验
+        self.assertEqual(len(self.runner.calls), 0)
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 补终态照回收
+
+    def test_managed_fetch_failure_blocks_delivery(self):  # Req: F98
+        self.in_gate_managed()
+        self.gx.fetch_raise = True
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(self.delivery()["error"], "fetch_failed")
+        self.assertEqual(self.gx.push_commit_calls, [])
+
+    def test_managed_lock_fetch_failure_is_delivery_terminal(self):  # Req: F98
+        """评审 D2：锁内重读远端 fetch 败＝交付终局 fetch_failed（循环顶同口径
+        blocked），绝不走门内异常 reopened 弹回 worker；锁随 finally 释放。"""
+        self.in_gate_managed()
+        self.gx.fetch_results = [
+            BASE_SHA, RuntimeError("git fetch origin main: could not read"
+                                   " from remote repository")]
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(self.delivery()["error"], "fetch_failed")
+        self.assertEqual(self.gx.push_commit_calls, [])  # 未推送
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("reopened", evs)  # 不弹回 worker
+        self.assertEqual(self.gx.lock.releases, self.gx.lock.acquires)  # 锁必释放
 
 
 if __name__ == "__main__":
