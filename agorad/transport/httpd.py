@@ -20,6 +20,7 @@ from agorad.core.msg import NotChainEdge
 from agorad.core.peer import Rejected as PeerRejected
 from agorad.core.state import EV_RUNNING, InvalidTransition
 from agorad.core.task import Rejected
+from agorad.core.verify_hygiene import find_verify_hygiene_issues
 
 _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel",
                     "post", "check_mail", "board", "doctor", "repo_board",
@@ -217,7 +218,9 @@ class _Handler(BaseHTTPRequestHandler):
                 models = app.oc.models()
             except Exception:
                 models = None
-            return report.doctor_view(app.state.snapshot(), app.store.home, models=models)
+            return report.doctor_view(app.state.snapshot(), app.store.home,
+                                      models=models,
+                                      verify_hygiene=find_verify_hygiene_issues)  # F99 审计接线（core 禁兄弟 import，transport 注入）
         if name == "repo_board":  # F22：worker 按己任务仓分区；root/dispatcher 可传 repo 诊断
             snap = app.state.snapshot()
             repo = (app.peer.partition(sid) if role == "worker"

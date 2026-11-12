@@ -249,7 +249,32 @@ def stale_candidates(snap, now, base=None):
     return cand
 
 
-def doctor_view(snap, store_home, now=None, models=None):
+# F99 卫生审计扫描态：非终态全集（blocked 已拍人但 verify 仍可能再跑，照扫；
+# 终态 merged/closed/cancelled 不扫）
+_VERIFY_HYGIENE_STATES = frozenset(
+    {"todo", "dispatched", "running", "done", "verify_failed", "reopened",
+     "blocked"})
+
+
+def _verify_hygiene_findings(tasks, verify_hygiene):
+    """F99 非终态 verify 命令卫生审计：复用注入的 verify_hygiene 单一规则
+    （core 禁兄弟 import，同 TaskService 构造注入），只读命令文本不改账面；
+    finding 前挂 tid/state，按 tid 稳定排序；未注入检查器返空不误报。"""
+    if verify_hygiene is None:
+        return []
+    out = []
+    for tid in sorted(tasks):
+        t = tasks[tid]
+        cmd = (t.get("verify") or {}).get("cmd") or ""
+        project = t.get("project_dir")
+        if t["state"] not in _VERIFY_HYGIENE_STATES or not cmd or not project:
+            continue
+        out.extend({"tid": tid, "state": t["state"], **f}
+                   for f in verify_hygiene(cmd, project))
+    return out
+
+
+def doctor_view(snap, store_home, now=None, models=None, verify_hygiene=None):
     """账本侧事实：任务年龄/最后活动排行＋僵态候选＋env_dir 在盘性（盘上孤儿扫描属②期）。
 
     排行活性基线（F15）：age_rank/last_seen_rank 同取 _stale_baseline（与
@@ -257,6 +282,8 @@ def doctor_view(snap, store_home, now=None, models=None):
     僵态候选（F5）：同 stale_candidates 口径，纯显示，处置归上级判断。
     候选模型清单（F56）：models 非 None 时回体加 models＋models_note；
     oc 不可达由调用方降级传 None＝键缺席（core 勿 import access，oc 调用归 transport）。
+    F99 verify_hygiene_findings：非终态任务 verify 命令静态卫生审计（只读），
+    检查器由调用方注入（core 禁兄弟 import），未注入＝空发现。
     """
     now = time.time() if now is None else now
     home, tasks = Path(store_home), snap["tasks"]
@@ -274,7 +301,9 @@ def doctor_view(snap, store_home, now=None, models=None):
     out = {"age_rank": [[tid, now - base[tid]] for tid in ranked],
             "last_seen_rank": [[tid, base[tid]] for tid in ranked],
             "stale_candidates": cand,
-            "env": env}
+            "env": env,
+            "verify_hygiene_findings": _verify_hygiene_findings(
+                tasks, verify_hygiene)}
     if models is not None:
         out["models"] = models
         out["models_note"] = _MODELS_NOTE

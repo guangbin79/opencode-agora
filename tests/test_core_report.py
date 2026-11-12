@@ -11,6 +11,7 @@ from agorad.core.report import (_env_activity, _model_stats, buckets,
                                 chain_view, classify, detail, doctor_view,
                                 forest_view, full_view, stale_candidates,
                                 view_html)
+from agorad.core.verify_hygiene import find_verify_hygiene_issues
 
 
 def row(state="running", disp="d1", worker="w1", created=0.0, last_seen=None,
@@ -322,6 +323,55 @@ class TestReport(unittest.TestCase):
                              [["t2", 500.0], ["t3", 999.0], ["t1", 2900.0]])
             self.assertEqual(v["stale_candidates"],
                              [["t2", 500.0], ["t3", 999.0]])  # env 在写的 t1 不进候选
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_doctor_view_verify_hygiene_findings(self):  # Req: F99
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            proj = tmp / "repo"
+            proj.mkdir()
+            bad = "cd /tmp && pytest -q"
+            rows = {
+                "t1": dict(row("running"), project_dir=str(proj),
+                           verify={"cmd": bad, "state": "registered"}),
+                "t2": dict(row("closed"), project_dir=str(proj),
+                           verify={"cmd": bad, "state": "registered"}),
+                "t3": dict(row("dispatched"), project_dir=str(proj),
+                           verify={"cmd": "python3 -m pytest tests/ -q",
+                                   "state": "registered"}),
+                "t4": dict(row("done"), project_dir=str(proj),
+                           verify={"cmd": "cp x ~/.config/agora.conf",
+                                   "state": "registered"}),
+                "t5": dict(row("blocked"), project_dir=str(proj),
+                           verify={"cmd": bad, "state": "registered"}),
+                "t6": dict(row("merged"), project_dir=str(proj),
+                           verify={"cmd": bad, "state": "registered"}),
+            }
+            v = doctor_view(snap(**rows), tmp, now=1600.0, models=["m"],
+                            verify_hygiene=find_verify_hygiene_issues)
+            f = v["verify_hygiene_findings"]
+            # 非终态坏命令在列（含 blocked）；closed/merged 不扫；合法命令零 finding
+            self.assertEqual(
+                [(x["tid"], x["state"], x["code"], x["fragment"], x["blocking"])
+                 for x in f],
+                [("t1", "running", "ABSOLUTE_CD", "/tmp", True),
+                 ("t4", "done", "GLOBAL_STATE", "~/.config/agora.conf", False),
+                 ("t5", "blocked", "ABSOLUTE_CD", "/tmp", True)])
+            self.assertEqual(sorted(f[0]),
+                             ["blocking", "code", "fragment", "hint",
+                              "state", "tid"])  # 固定六键
+            self.assertTrue(all(x["hint"] for x in f))
+            # 只读审计：既有字段与无 verify 行的基线完全一致
+            base = doctor_view(snap(**{k: {kk: vv for kk, vv in r.items()
+                                           if kk != "verify"}
+                                      for k, r in rows.items()}),
+                               tmp, now=1600.0, models=["m"])
+            for k in ("age_rank", "last_seen_rank", "stale_candidates",
+                      "env", "models", "models_note"):
+                self.assertEqual(v[k], base[k])
+            self.assertEqual(base["verify_hygiene_findings"],
+                             [])  # 未注入检查器：空发现不误报（core 禁兄弟 import）
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
