@@ -75,7 +75,7 @@ Two capabilities this control plane buys in practice:
 
 ```text
 Human ──▶ Main session (skills: agora-dispatch / agora-ops)
-              │  MCP (13 tools)
+              │  MCP (14 tools)
               ▼
          agorad — Python stdlib service on localhost
          state authority · verify gate · auto-merge · message routing

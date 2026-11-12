@@ -413,5 +413,49 @@ class TestReport(unittest.TestCase):
             self.assertIn(w, html)
 
 
+    def test_full_view_exposes_external_delivery_projection(self):  # Req: F101
+        """board full 视图投影 delivery 面（mode/status/commit/base/attempt/
+        local_status/error）——外部任务观测不逐任务 N+1。"""
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            ext = row("done", disp="d1")
+            ext["delivery"] = {"mode": "external_branch",
+                               "status": "awaiting_external",
+                               "commit": "c" * 40, "base": "b" * 40,
+                               "target_branch": "issue/7-fix", "attempt": 2,
+                               "local_status": "not_required", "error": None}
+            v = full_view(snap(t1=ext, t2=row("running")), st)
+            self.assertEqual(v["tasks"]["t1"]["delivery"], ext["delivery"])
+            self.assertNotIn("delivery", v["tasks"]["t2"])  # 缺键行不投影
+            self.assertEqual(v["buckets"]["在飞"], ["t1", "t2"])  # awaiting 仍在飞
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_detail_exposes_awaiting_external_fields(self):  # Req: F101
+        """任务明细可见外部 handoff 全量投影（awaiting_external 不误判 merged）。"""
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            s = snap(t1=dict(row("done"), delivery={
+                "mode": "external_branch", "status": "awaiting_external",
+                "commit": "c" * 40, "base": "b" * 40, "attempt": 1,
+                "local_status": "not_required", "error": None}))
+            d = detail(s, st, "t1")
+            self.assertEqual(d["task"]["state"], "done")  # 非 merged
+            self.assertEqual(d["task"]["delivery"]["status"],
+                             "awaiting_external")
+            self.assertEqual(d["task"]["delivery"]["attempt"], 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_buckets_external_failed_stays_failure_bucket(self):  # Req: F101
+        """external 交付终局败（blocked＋delivery.status=failed）沿用 F98 失败桶。"""
+        s = snap(t1=dict(row("blocked"), delivery={
+            "mode": "external_branch", "status": "failed",
+            "error": "retry_exhausted"}))
+        self.assertEqual(buckets(s)["失败"], ["t1"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2713,5 +2713,194 @@ class TestDeliveryRecovery(TestCoreGate):
         self.assertEqual(self.state.get("t2")["state"], "blocked")  # 后续照常
 
 
+EXTERNAL_DELIVERY = {"mode": "external_branch", "status": "pending",
+                     "commit": None, "base": None, "target_branch": "main",
+                     "attempt": 0, "local_status": "pending", "error": None}
+
+
+class TestExternalHandoff(TestCoreGate):
+    """Req: F101 external_branch 外部交付：门内绿 handoff 驻留 awaiting_external
+    （不合目标支/不推 origin/不回收 env）——确认经 task_deliver（task 域另有用例）。
+    legacy delivery=None/out_of_band/managed 行为零变化（既有用例回归）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.integration = str(self.env) + "__gate"
+        self.gx.local_sha_result = LOCAL_BASE
+
+    def seed_external(self, streak=0):
+        self.seed(tb="main", streak=streak)
+        self.state.set_fields("t1", delivery=dict(EXTERNAL_DELIVERY))
+
+    def in_gate_external(self, streak=0):
+        self.seed_external(streak=streak)
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+
+    def delivery(self):
+        return self.state.get("t1")["delivery"]
+
+    def test_external_green_handoff_awaits_without_merge_push_reclaim(self):  # Req: F101
+        self.in_gate_external()
+        self.gx.head_shas[self.integration] = SHA  # ff 直通：integration 头＝env 头
+        self.gx.has_origin_result = True  # origin 在位也不得 fetch/push
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留 done——不合并不 closed
+        self.assertFalse(t["in_gate"])
+        d = self.delivery()
+        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"],
+                          d["local_status"], d["error"]),
+                         ("awaiting_external", SHA, LOCAL_BASE, 1,
+                          "not_required", None))
+        self.assertEqual(self.gx.build_at_calls,
+                         [("/repo", self.integration, LOCAL_BASE)])  # 钉死支 tip 定基
+        self.assertEqual(self.gx.fetch_calls, [])  # 零 fetch：外部派发方持有远端
+        self.assertEqual(self.gx.push_commit_calls, [])  # 零远端推送
+        self.assertEqual(self.gx.push_calls, [])  # 亦不推本地目标支
+        self.assertEqual(self.gx.advance_calls, [])  # 本地目标支零推进
+        self.assertEqual(self.gx.checkouts, [])  # 不换支不合入
+        self.assertEqual(self.gx.clean_calls, [])  # 主检出零接触
+        self.assertEqual(self.gx.removed, [])  # env 保留待外部确认
+        self.assertEqual(self.gx.sync_calls, [])
+        self.assertEqual([c[0] for c in self.runner.calls],
+                         [str(self.env), self.integration])  # 任务/集成双 verify
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("awaiting_external", evs)
+        self.assertNotIn("merged", evs)
+        # 派发方通知带齐四要素：commit/target branch/base SHA/attempt
+        disp = [m for m in self.store.read_messages() if m["to"] == "disp1"]
+        self.assertTrue(any("awaiting_external" in m["body"] and SHA in m["body"]
+                            and "main" in m["body"] and LOCAL_BASE in m["body"]
+                            and "attempt=1" in m["body"] for m in disp))
+
+    def test_external_rebase_conflict_terminal_blocked(self):  # Req: F101
+        self.in_gate_external(streak=2)  # 连败 2 在案：交付失败不得推到 3
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "conflict"
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(t["fail_streak"], 2)  # 非质量败不计连败
+        self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
+                         ("failed", "rebase_conflict"))
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("reopened", evs)  # 不弹回 worker
+        self.assertEqual(self.gx.removed, [])  # 留 env 现场
+
+    def test_external_rebased_verify_fail_reopens_quality(self):  # Req: F101
+        self.in_gate_external()
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "sha"
+        self.gx.rebase_new_head = R_SHA
+        self.runner.results = [(0, "p"), (1, "boom")]
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")  # 质量口径照旧
+        self.assertEqual(t["fail_streak"], 1)
+        self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
+                         ("pending", None))  # 非交付终局
+        self.assertTrue(any("rebase 后集成 verify 失败" in m["body"]
+                            for m in self.worker_msgs()))
+
+    def test_external_missing_target_branch_terminal_local_base(self):  # Req: F101
+        self.in_gate_external()
+        self.gx.local_sha_raise = True  # 建单后被删/解析失败
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "blocked")
+        self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
+                         ("failed", "local_base"))
+
+    def test_external_rerun_on_awaiting_is_noop(self):  # Req: F101
+        """启动/恢复保持：done+awaiting_external 重排（重启 done 残留恰一次）直通
+        ——不重跑 handoff、不发明结果、不过期等待、env/凭据不动。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="awaiting_external", commit=SHA,
+            base=LOCAL_BASE, attempt=1))
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 原地驻留
+        self.assertEqual(self.runner.calls, [])  # 零重验
+        self.assertEqual(self.gx.build_at_calls, [])
+        self.assertEqual(self.gx.removed, [])  # env 保留
+        self.assertEqual(self.delivery()["status"], "awaiting_external")
+
+    def test_external_failed_residue_completes_blocked_never_retries(self):  # Req: F101
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="failed", error="rebase_conflict",
+            attempt=1))
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "blocked")  # 补迁移
+        self.assertEqual(self.gx.build_at_calls, [])  # 绝不自动重试
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("delivery_failed_recovery", evs)
+
+    def test_external_nonff_requeue_reverifies_at_supplied_base(self):  # Req: F101
+        """task_deliver(non_ff) 重排队（task 域用例）：门体按外部确认基重排重验，
+        绿即换新 handoff commit 并沿用轮转尝试号——不取本地 tip。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "sha"
+        self.gx.rebase_new_head = R_SHA
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 二次 handoff 仍驻留
+        d = self.delivery()
+        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
+                         ("awaiting_external", R_SHA, TIP_SHA, 2))
+        self.assertEqual(t["commit"], R_SHA)  # 账面随重排换新
+        self.assertEqual([c[2] for c in self.gx.build_at_calls], [TIP_SHA])
+        self.assertEqual(self.gx.local_sha_calls, [])  # 基线来自外部确认
+
+    def test_external_delivered_crash_window_closes(self):  # Req: F101
+        """崩窗收敛：task_deliver(delivered) 已落账而 merged 未达——重排补迁移与
+        回收，finally 门尾照常结算 merged→closed（不发明新结果、零重验）。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="delivered", commit=SHA,
+            local_status="not_required", attempt=1))
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(self.runner.calls, [])  # 零重验
+        self.assertEqual(self.gx.removed, [str(self.env)])  # 回收补齐
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("merged", evs)
+        self.assertIn("closed", evs)
+
+    def test_external_unresolvable_supplied_base_terminal(self):  # Req: F101
+        """评审 R1：外部基本地不可解析（未 fetch/外部改写历史）＝交付面终局
+        failed/blocked——绝不走门内异常 reopened 弹回 worker。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
+        self.gx.build_integration_at = lambda t, i, base_sha=None: (
+            (_ for _ in ()).throw(RuntimeError(f"invalid reference: {base_sha}")))
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
+                         ("failed", "external_base"))
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("reopened", evs)
+
+    def test_external_handoff_post_failure_keeps_awaiting(self):  # Req: F101
+        """评审 R1：_post 通知面病不逆转驻留——state 仍 done，裸抛会被门内
+        except 误判门体异常而 reopened。"""
+        self.in_gate_external()
+        self.gx.head_shas[self.integration] = SHA
+
+        def boom(*a, **k):
+            raise RuntimeError("router down")
+        self.router.post = boom
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留不被逆转
+        self.assertEqual(self.delivery()["status"], "awaiting_external")
+
+
 if __name__ == "__main__":
     unittest.main()

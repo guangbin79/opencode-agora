@@ -3,7 +3,7 @@
 
 独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
 stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
-13 工具（12 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
+14 工具（13 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
 X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 `$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
 错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
@@ -95,6 +95,28 @@ _TOOLS = [
          "force": {"type": "boolean",
                    "description": "强杀旗：true＝无视忙碌闸照常取消（审计注明 forced）"}},
          "required": ["task"]}},
+    {"name": "task_deliver", "description": "external_branch 外部交付确认（任务派发方/root；"
+                                            "仅 done＋delivery.status=awaiting_external 可确认；"
+                                            "worker/他派发方拒）——agora 不持外部远端凭据，"
+                                            "交付权威在外部派发方",
+     "inputSchema": {"type": "object", "properties": {
+         "task": _TID,
+         "outcome": {"type": "string",
+                     "enum": ["delivered", "non_ff", "failed"],
+                     "description": "delivered=外部已交付（merged/closed 收口＋env 回收）；"
+                                    "non_ff=外部远端已前进（携 base 重排重验换新 handoff "
+                                    "commit，≤3 次总尝试，第 4 次终局 retry_exhausted）；"
+                                    "failed=外部交付失败（blocked 终局，error 机器可读）"},
+         "commit": {"type": "string",
+                    "description": "最新 awaiting_external delivery.commit（纯 40 位十六进制"
+                                   "完整 sha；stale/late 确认拒绝且零状态改写）"},
+         "base": {"type": "string",
+                  "description": "non_ff 必携：外部派发方 fetch 实际远端后的 tip 完整 "
+                                 "40 位 sha——handoff 按此基重排重验"},
+         "reason": {"type": "string",
+                    "description": "delivered＝外部证据留痕（入 delivery.reason）；"
+                                   "failed＝机器可读错误（空则 external_delivery_failed）"}},
+         "required": ["task", "outcome", "commit"]}},
     {"name": "post", "description": "链边发消息（方向服务按角色定）",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string",

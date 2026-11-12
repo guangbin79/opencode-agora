@@ -2009,5 +2009,255 @@ class TestDispatchLocalBase(TestCoreTask):
         self.assertEqual(self.gitx.built, ["/envs/t-legacy"])
 
 
+SHA_40 = "a1b2c3d4e5f6a7b8c9d0e1f2a3b2c3d4e5f6a9b0"  # Req: F101 handoff commit
+BASE_40 = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9"  # Req: F101 handoff 基线
+TIP_40 = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"  # Req: F101 外部新基
+
+
+class TestF101ExternalDispatch(TestCoreTask):
+    """Req: F101 external_branch 派发定基：本地钉死支 tip 权威（外部派发方持有
+    远端交付权——不 fetch 不 push，origin 在位不改变定基面）；缺支/缺钉死支
+    拒派报 local_base，绝不回退仓默认支。"""
+
+    def seed_external(self, tid="t-x", branch="issue/7-fix", state="todo"):
+        self.seed(tid, state=state, disp="main")
+        fields = {"delivery": {"mode": "external_branch", "status": "pending",
+                               "commit": None, "base": None,
+                               "target_branch": branch, "attempt": 0,
+                               "local_status": "pending", "error": None},
+                  "deliverable": "external_branch"}
+        if branch is not None:
+            fields["target_branch"] = branch
+        self.state.set_fields(tid, **fields)
+        return tid
+
+    def test_external_dispatch_bases_on_pinned_local_tip(self):  # Req: F101
+        tid = self.seed_external()
+        self.svc.dispatch(tid, self.root)
+        self.assertEqual(self.gitx.local_shas, [("/repo", "issue/7-fix")])
+        self.assertEqual(self.gitx.built_at,
+                         [("/repo", tid, "issue/7-fix", "c" * 40)])
+        self.assertEqual(self.gitx.fetched, [])  # 零 fetch（即便后续接 origin）
+        t = self.state.get(tid)
+        self.assertEqual(t["env_base"], "b" * 40)  # head(env) 记录起点
+        self.assertEqual(t["state"], "dispatched")
+
+    def test_external_never_fetches_even_with_origin(self):  # Req: F101
+        self.gitx.origin = True  # origin 在位也不得改变定基面
+        tid = self.seed_external()
+        self.svc.dispatch(tid, self.root)
+        self.assertEqual(self.gitx.fetched, [])  # 不 fetch：远端权在外部派发方
+        self.assertEqual(self.gitx.local_shas, [("/repo", "issue/7-fix")])
+
+    def test_external_missing_branch_rejects_without_default_fallback(self):  # Req: F101
+        self.gitx.local_sha_raise = True
+        tid = self.seed_external()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("local_base", str(cm.exception))
+        self.assertIn("issue/7-fix", str(cm.exception))  # 报因点名钉死支
+        self.assertEqual(self.gitx.built, [])  # 零回退默认支
+        self.assertEqual(self.gitx.built_at, [])
+        self.assertEqual(self.state.get(tid)["state"], "todo")
+
+    def test_external_unpinned_branch_rejects(self):  # Req: F101
+        tid = self.seed_external(branch=None)
+        with self.assertRaises(Rejected) as cm:
+            self.svc.dispatch(tid, self.root)
+        self.assertIn("local_base", str(cm.exception))
+        self.assertIn("target_branch", str(cm.exception))
+        self.assertEqual(self.gitx.local_shas, [])
+        self.assertEqual(self.state.get(tid)["state"], "todo")
+
+
+class TestTaskDeliver(TestCoreTask):
+    """Req: F101 task_deliver 确认协议：delivered/non_ff/failed 三态、stale 拒、
+    尝试预算、鉴权（dispatcher 归属/root；worker 与他 dispatcher 拒）。"""
+
+    def seed_awaiting(self, tid="t1", status="awaiting_external",
+                      commit=SHA_40, base=BASE_40, attempt=1,
+                      mode="external_branch", state="done", env="/envs/t1",
+                      worker=None):
+        self.seed(tid, state=state, disp="disp1", env=env, worker=worker)
+        self.state.set_fields(tid, target_branch="issue/7-fix", commit=commit,
+                              delivery={"mode": mode, "status": status,
+                                        "commit": commit, "base": base,
+                                        "target_branch": "issue/7-fix",
+                                        "attempt": attempt,
+                                        "local_status": "not_required",
+                                        "error": None})
+        return tid
+
+    def events_of(self, tid):
+        return [e for e in self.events() if e.get("task") == tid]
+
+    def test_delivered_closes_and_reclaims(self):  # Req: F101
+        tid = self.seed_awaiting()
+        self.store.write_credential(tid, "tok-x")
+        disp = self.auth.issue("disp1", "dispatcher")
+        r = self.svc.deliver(tid, disp, "delivered", SHA_40,
+                             reason="外部已合入 MR!9")
+        self.assertEqual(r, {"ok": True, "outcome": "delivered"})
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "closed")  # done→merged→closed 全链
+        d = t["delivery"]
+        self.assertEqual((d["status"], d["local_status"], d["error"],
+                          d["attempt"], d["commit"]),
+                         ("delivered", "not_required", None, 1, SHA_40))
+        self.assertEqual(d.get("reason"), "外部已合入 MR!9")  # 证据留痕
+        self.assertEqual(self.gitx.removed, ["/envs/t1"])  # env 回收
+        self.assertFalse((self.store.home / "credentials"
+                          / f"{tid}.token").exists())  # 凭据同回收
+        evs = [e["event"] for e in self.events_of(tid)]
+        self.assertIn("merged", evs)
+        self.assertIn("closed", evs)
+        self.assertTrue(any(m["kind"] == "result" and "closed" in m["body"]
+                            for m in self.store.read_messages()
+                            if m["to"] == "disp1"))
+
+    def test_failed_blocks_with_machine_error_and_keeps_env(self):  # Req: F101
+        tid = self.seed_awaiting()
+        r = self.svc.deliver(tid, self.root, "failed", SHA_40,
+                             reason="ci_rejected")
+        self.assertEqual(r["outcome"], "failed")
+        self.assertEqual(r["error"], "ci_rejected")
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "blocked")  # done→blocked 交付失败边
+        self.assertEqual((t["delivery"]["status"], t["delivery"]["error"]),
+                         ("failed", "ci_rejected"))
+        self.assertEqual(self.gitx.removed, [])  # blocked 留 env 现场
+        evs = [e["event"] for e in self.events_of(tid)]
+        self.assertNotIn("reopened", evs)  # 不弹回 worker
+        self.assertNotIn("verify_failed", evs)
+
+    def test_failed_empty_reason_maps_default_error(self):  # Req: F101
+        tid = self.seed_awaiting()
+        self.svc.deliver(tid, self.root, "failed", SHA_40)
+        self.assertEqual(self.state.get(tid)["delivery"]["error"],
+                         "external_delivery_failed")
+
+    def test_non_ff_requeues_with_supplied_base_and_attempt(self):  # Req: F101
+        tid = self.seed_awaiting()
+        r = self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=TIP_40)
+        self.assertTrue(r["requeued"])
+        self.assertEqual(r["attempt"], 2)
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "done")  # 仍驻留待门体重跑 handoff
+        d = t["delivery"]
+        self.assertEqual((d["status"], d["base"], d["attempt"], d["error"]),
+                         ("pending", TIP_40, 2, None))
+
+    def test_non_ff_fourth_attempt_retry_exhausted(self):  # Req: F101
+        tid = self.seed_awaiting(attempt=3)  # 3 次总尝试已用尽
+        r = self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=TIP_40)
+        self.assertFalse(r.get("requeued"))
+        self.assertEqual(r["error"], "retry_exhausted")
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual((t["delivery"]["status"], t["delivery"]["error"]),
+                         ("failed", "retry_exhausted"))
+
+    def test_non_ff_requires_full_hex_base(self):  # Req: F101
+        tid = self.seed_awaiting()
+        for bad in (None, "abc123", TIP_40[:39], TIP_40 + "0"):
+            with self.assertRaises(Rejected) as cm:
+                self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=bad)
+            self.assertIn("base", str(cm.exception))
+        self.assertEqual(self.state.get(tid)["delivery"]["status"],
+                         "awaiting_external")  # 拒收零状态改写
+
+    def test_stale_commit_rejected_without_mutation(self):  # Req: F101
+        tid = self.seed_awaiting()
+        stale = "f" * 40
+        for outcome in ("delivered", "non_ff", "failed"):
+            with self.assertRaises(Rejected) as cm:
+                self.svc.deliver(tid, self.root, outcome, stale,
+                                 base=TIP_40)
+            self.assertIn("过期", str(cm.exception))
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "done")  # 零状态改写
+        self.assertEqual(t["delivery"]["status"], "awaiting_external")
+
+    def test_bad_outcome_and_commit_rejected(self):  # Req: F101
+        tid = self.seed_awaiting()
+        with self.assertRaises(Rejected) as cm:
+            self.svc.deliver(tid, self.root, "ok", SHA_40)
+        self.assertIn("outcome", str(cm.exception))
+        for bad in ("abc123", SHA_40[:39], SHA_40.upper() + "0", ""):
+            with self.assertRaises(Rejected) as cm:
+                self.svc.deliver(tid, self.root, "delivered", bad)
+            self.assertIn("commit", str(cm.exception))
+
+    def test_delivered_notify_failure_still_settles_closed(self):  # Req: F101
+        """评审 R1：merged 落账后通知面病——gate_tail 恒结算 closed，任务不搁浅
+        在 merged（try/finally 保底，gate.run finally-_tail 口径）。"""
+        tid = self.seed_awaiting()
+
+        def boom(*a, **k):
+            raise RuntimeError("oc down")
+        self.router.notify_transition = boom
+        r = self.svc.deliver(tid, self.root, "delivered", SHA_40)
+        self.assertEqual(r["outcome"], "delivered")
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "closed")  # 保底结算不缺席
+        self.assertEqual(t["delivery"]["status"], "delivered")
+        evs = [e["event"] for e in self.events_of(tid)]
+        self.assertIn("merged", evs)
+        self.assertIn("closed", evs)
+        self.assertIn("deliver_tail_failed", evs)  # 尾部病留痕可观测
+        self.assertEqual(self.gitx.removed, ["/envs/t1"])  # 回收照常
+
+    def test_wrong_mode_or_state_rejected(self):  # Req: F101
+        tid = self.seed_awaiting(mode="managed")  # 非 external_branch
+        with self.assertRaises(Rejected) as cm:
+            self.svc.deliver(tid, self.root, "delivered", SHA_40)
+        self.assertIn("external_branch", str(cm.exception))
+        self.seed_awaiting("t2", state="running")  # 非 done
+        with self.assertRaises(Rejected) as cm:
+            self.svc.deliver("t2", self.root, "delivered", SHA_40)
+        self.assertIn("running", str(cm.exception))
+        self.seed_awaiting("t3", status="pending")  # 非 awaiting（门内重验中）
+        with self.assertRaises(Rejected) as cm:
+            self.svc.deliver("t3", self.root, "delivered", SHA_40)
+        self.assertIn("pending", str(cm.exception))
+
+    def test_unauthorized_worker_and_foreign_dispatcher_denied(self):  # Req: F101
+        tid = self.seed_awaiting()
+        wt = self.auth.issue("s-w9", "worker")
+        other = self.auth.issue("disp9", "dispatcher")  # 非本任务派发方
+        for tok in (wt, other):
+            with self.assertRaises(Rejected) as cm:
+                self.svc.deliver(tid, tok, "delivered", SHA_40)
+            self.assertIn("task_deliver", str(cm.exception))
+        evs = [e for e in self.events_of(tid)
+               if e["event"] == "auth_denied"]
+        self.assertEqual([e.get("tool") for e in evs],
+                         ["task_deliver", "task_deliver"])
+        self.assertEqual(self.state.get(tid)["delivery"]["status"],
+                         "awaiting_external")  # 拒绝零改写
+
+    def test_cancel_awaiting_external_settles_directly(self):  # Req: F101
+        tid = self.seed_awaiting(worker="s-w1")
+        self.store.write_credential(tid, "tok-x")
+        self.svc.cancel(tid, self.root)
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "cancelled")  # 直结：无 pending_cancel 等待
+        self.assertNotIn("pending_cancel", t)
+        self.assertEqual(self.gitx.removed, ["/envs/t1"])  # env 即回收
+        self.assertFalse((self.store.home / "credentials"
+                          / f"{tid}.token").exists())
+        self.assertTrue(any(m["kind"] == "cancel"
+                            for m in self.store.read_messages()))
+
+    def test_cancel_in_gate_awaiting_queues_to_tail(self):  # Req: F101
+        tid = self.seed_awaiting(worker="s-w1")
+        self.state.set_fields(tid, in_gate=True)  # 集成重验进行中
+        self.svc.cancel(tid, self.root)
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "done")  # 门内：排队待门尾消费
+        self.assertTrue(t.get("pending_cancel"))
+        self.assertEqual(self.gitx.removed, [])  # env 待门尾
+
+
 if __name__ == "__main__":
     unittest.main()

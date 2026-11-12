@@ -63,6 +63,21 @@ class TestBuildRows(unittest.TestCase):
         st = {r.tid: r.state for r in task_rows(build_rows(s, [], now=NOW))}
         self.assertEqual(st, {"t1": "done", "t2": "done·验证中"})
 
+    def test_awaiting_external_shows_handoff_not_merged(self):  # Req: F101
+        """external handoff 驻留态独立显示＋commit/base 可见——不误判 merged
+        （着色域仍在飞）。"""
+        d = {"mode": "external_branch", "status": "awaiting_external",
+             "commit": "a1b2c3d4e5", "base": "9f8e7d6c5b", "attempt": 2}
+        s = snap(t1=trow("done"), t2=dict(trow("done"), delivery=d))
+        rows = {r.tid: r for r in task_rows(build_rows(s, [], now=NOW))}
+        self.assertEqual(rows["t1"].state, "done")
+        self.assertEqual(rows["t2"].state, "done·待外部")
+        self.assertEqual(rows["t2"].note, "@a1b2c3d←9f8e7d6#2")  # handoff 事实列
+        self.assertEqual(rows["t2"].domain, "fly")  # 不按 merged 着色
+        text = _row_text(rows["t2"])
+        self.assertIn("done·待外部", text)
+        self.assertIn("@a1b2c3d←9f8e7d6#2", text)
+
     def test_five_bucket_rows(self):  # Req: F10
         s = snap(t1=trow("merged"), t2=trow("closed"), t3=trow("verify_failed"),
                  t4=trow("reopened"), t5=trow("dispatched"), t6=trow("done"),

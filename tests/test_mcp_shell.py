@@ -58,6 +58,9 @@ class FakeGitx:
     def symref(self, repo_dir):
         return "main"
 
+    def check_branch(self, repo_dir, branch):  # Req: F101 外支建单信任边界
+        pass
+
     def push(self, repo_dir, branch):
         return "none", ""
 
@@ -135,7 +138,7 @@ class TestHandshakeAndList(McpShellTest):
 
     def test_tools_list_exactly_11_matching_httpd_routes(self):  # Req: F2
         names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(len(names), 13)  # 12 服务端 + 1 壳层本地 sleep（F64 改名不减数）
+        self.assertEqual(len(names), 14)  # 13 服务端 + 1 壳层本地 sleep（Req: F101 增 task_deliver）
         self.assertEqual(set(names) - {"sleep"}, set(_TOOLS))  # 服务端五族与 httpd 同集；sleep＝壳层本地
         for t in self.rpc("tools/list")["result"]["tools"]:
             self.assertTrue(t.get("description"))
@@ -343,6 +346,93 @@ class TestUrlDiscovery(McpShellTest):
         os.environ["AGORAD_URL"] = "http://127.0.0.1:1"  # 必连拒＝不可达档
         r = self.call_tool("doctor", {"_token": self.root})
         self.assertEqual(r["error"]["code"], -32000)
+
+
+class TestTaskDeliverMcp(McpShellTest):
+    """Req: F101 task_deliver MCP 面：schema 契约＋delivered/non_ff/失败全链透传。"""
+
+    SHA_40 = "a1b2c3d4e5f6a7b8c9d0e1f2a3b2c3d4e5f6a9b0"
+
+    def schema_of(self):
+        return {t["name"]: t for t in
+                self.rpc("tools/list")["result"]["tools"]}
+
+    def seed_awaiting(self, tid, commit=None):
+        st = self.app.state
+        st.transition(tid, "dispatched")
+        st.transition(tid, "running")
+        st.transition(tid, "done", commit=commit or self.SHA_40)
+        st.set_fields(tid, target_branch="issue/7-fix",
+                      delivery={"mode": "external_branch",
+                                "status": "awaiting_external",
+                                "commit": commit or self.SHA_40,
+                                "base": "b" * 40,
+                                "target_branch": "issue/7-fix",
+                                "attempt": 1,
+                                "local_status": "not_required",
+                                "error": None})
+
+    def test_task_deliver_schema_contract(self):  # Req: F101
+        td = self.schema_of()["task_deliver"]["inputSchema"]
+        self.assertEqual(td["properties"]["outcome"]["enum"],
+                         ["delivered", "non_ff", "failed"])
+        self.assertEqual(td["required"], ["task", "outcome", "commit"])
+        self.assertIn("40 位", td["properties"]["commit"]["description"])
+        self.assertIn("non_ff", td["properties"]["base"]["description"])
+        desc = self.schema_of()["task_deliver"]["description"]
+        self.assertIn("awaiting_external", desc)
+
+    def test_delivered_passthrough_closes(self):  # Req: F101
+        tid = self.result_of(self.call_tool(
+            "task_create", {"_token": self.root, "goal": "外支",
+                            "project_dir": "/repo", "verify_cmd": "true",
+                            "deliverable": "external_branch",
+                            "target_branch": "issue/7-fix"}))["task"]
+        self.seed_awaiting(tid)
+        r = self.call_tool("task_deliver",
+                           {"_token": self.root, "task": tid,
+                            "outcome": "delivered",
+                            "commit": self.SHA_40})
+        self.assertEqual(self.result_of(r),
+                         {"ok": True, "outcome": "delivered"})
+        t = self.app.state.get(tid)
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(t["delivery"]["status"], "delivered")
+
+    def test_non_ff_passthrough_requeued_flag(self):  # Req: F101
+        tid = self.result_of(self.call_tool(
+            "task_create", {"_token": self.root, "goal": "外支2",
+                            "project_dir": "/repo", "verify_cmd": "true",
+                            "deliverable": "external_branch",
+                            "target_branch": "issue/7-fix"}))["task"]
+        self.seed_awaiting(tid)
+        r = self.call_tool("task_deliver",
+                           {"_token": self.root, "task": tid,
+                            "outcome": "non_ff", "commit": self.SHA_40,
+                            "base": "d" * 40})
+        out = self.result_of(r)
+        self.assertEqual((out["ok"], out["outcome"], out["requeued"]),
+                         (True, "non_ff", True))
+        d = self.app.state.get(tid)["delivery"]
+        self.assertEqual((d["status"], d["base"], d["attempt"]),
+                         ("pending", "d" * 40, 2))
+
+    def test_worker_denied_and_stale_rejected(self):  # Req: F101
+        tid = self.result_of(self.call_tool(
+            "task_create", {"_token": self.root, "goal": "外支3",
+                            "project_dir": "/repo", "verify_cmd": "true",
+                            "deliverable": "external_branch",
+                            "target_branch": "issue/7-fix"}))["task"]
+        self.seed_awaiting(tid)
+        r = self.call_tool("task_deliver",
+                           {"_token": "junk", "task": tid,
+                            "outcome": "delivered", "commit": self.SHA_40})
+        self.assertEqual(r["error"]["code"], agora_mcp.ERROR_CODES[401])
+        r = self.call_tool("task_deliver",
+                           {"_token": self.root, "task": tid,
+                            "outcome": "delivered", "commit": "e" * 40})
+        self.assertEqual(r["error"]["code"], agora_mcp.ERROR_CODES[403])
+        self.assertIn("过期", r["error"]["message"])
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ agora-install
 
 ```text
 人 ──▶ 主会话（skills: agora-dispatch / agora-ops）
-           │  MCP（13 工具）
+           │  MCP（14 工具）
            ▼
       agorad — localhost 上的 Python stdlib 服务
       状态权威 · verify 门 · 自动合并 · 消息路由 · 崩溃恢复 · 审计

@@ -161,12 +161,24 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
 
     def _emit(out, tid):
         t = tasks[tid]
-        # F54 验证中间态列上可见；过滤/桶/着色仍用原始 state，口径不动
-        state = ("done·验证中" if t["state"] == "done" and t.get("in_gate")
-                 else t["state"])
+        # F54 验证中间态列上可见；过滤/桶/着色仍用原始 state，口径不动。
+        # Req: F101 awaiting_external 驻留态独立显示＋handoff commit/base 入
+        # note 列（不误判 merged——着色域仍按原始 state 归在飞）。
+        state, handoff = t["state"], ""
+        if state == "done" and t.get("in_gate"):
+            state = "done·验证中"
+        elif state == "done" and (t.get("delivery") or {}).get(
+                "status") == "awaiting_external":
+            d = t.get("delivery") or {}
+            state = "done·待外部"
+            handoff = "".join(filter(None, [
+                f"@{(d.get('commit') or '')[:7]}" if d.get("commit") else "",
+                f"←{(d.get('base') or '')[:7]}" if d.get("base") else "",
+                f"#{d.get('attempt')}" if d.get("attempt") else ""]))
+        note = " ".join(esc.get(tid, [])) or handoff  # 升级标记优先，无则 handoff 事实
         out.append(Row("task", tid, depth[tid], state, t.get("title", ""),
                        t.get("worker_sid"), rel_time(t.get("last_seen"), now),
-                       " ".join(esc.get(tid, [])), _domain(t["state"]),
+                       note, _domain(t["state"]),
                        Path(t["project_dir"]).name if t.get("project_dir")
                        else ""))
         for kind in esc.get(tid, []):
@@ -517,10 +529,12 @@ def _color(domain):
 
 
 def _row_text(r):
-    """任务/事件行文本：列全部定宽，last_seen 宽度浮动不漂移 repo 列。"""
+    """任务/事件行文本：列全部定宽，last_seen 宽度浮动不漂移 repo 列。
+    note（Req: F101 awaiting_external 的 handoff 事实）仅任务行渲染。"""
     return (f"{'  ' * r.depth}{r.tid}: {_pad(r.title or '', 32)}"
             f"     {_pad(r.state, 13)} {_pad(r.last_seen or '-', 5)}"
-            + (f"  {r.repo}" if r.repo else ""))
+            + (f"  {r.repo}" if r.repo else "")
+            + (f"  {r.note}" if r.kind == "task" and r.note else ""))
 
 
 def draw_board(stdscr, m, status="", err=None):

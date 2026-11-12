@@ -315,9 +315,21 @@ class TaskService:
             # Req: F100 no-origin 本地权威定基：缺 origin 解析钉死本地目标支
             # tip（local_branch_sha 精确 SHA）建 env——缺支/malformed 拒派报
             # local_base 点名钉死支，绝不回退仓默认支。
+            # Req: F101 external_branch 定基：本地钉死支 tip 权威（外部派发方
+            # 持有远端交付权——不 fetch 不 push，origin 在位不改变定基面）；
+            # 缺钉死支/缺支拒派报 local_base，绝不回退仓默认支。
             base_sha = None
             d = t.get("delivery") or {}
-            if d.get("mode") == "managed" and t.get("target_branch") is not None:
+            if d.get("mode") == "external_branch":
+                if t.get("target_branch") is None:
+                    self._reject(tid, sid, "local_base: external_branch 须钉死"
+                                           " target_branch（显式指定后重派）")
+                try:
+                    base_sha = self._gitx.local_branch_sha(
+                        t["project_dir"], t["target_branch"])
+                except Exception as e:
+                    self._reject(tid, sid, f"local_base: {e}")
+            elif d.get("mode") == "managed" and t.get("target_branch") is not None:
                 try:
                     origin = self._gitx.has_origin(t["project_dir"])
                 except Exception as e:  # 仓亡等：归远端面口径（F98 评审 D1）
@@ -628,6 +640,145 @@ class TaskService:
                                   f"[agora] verify 已登记: {cmd}")
             except Exception:
                 pass  # worker 不活则留库补拉（消息先落库铁则）
+
+    # ---- Req: F101 外部交付确认（task_deliver：dispatcher 归属/root 专用） ----
+
+    _DELIVER_ERRORS = ("external_delivery_failed",)  # 空理由缺省错误名
+
+    @staticmethod
+    def _hex40(v):
+        """40 位小写十六进制归一；不合格返回 None（调用方报因）。"""
+        c = str(v or "").lower()
+        return c if len(c) == 40 and all(
+            ch in "0123456789abcdef" for ch in c) else None
+
+    def deliver(self, tid, actor_token, outcome, commit, base=None,
+                reason="", actor_sid=None):  # Req: F101
+        """external_branch 交付确认（HTTP+MCP 面）：仅 done＋awaiting_external
+        可确认；commit 必须等于在案 handoff commit（stale/late 拒、零状态改写）。
+
+        delivered＝信任外部派发方权威确认（agora 不持外部凭据）：落 delivered＋
+        local_status=not_required→done→merged→closed 全链＋凭据/env 回收。
+        failed＝机器可读 error（空理由映射 external_delivery_failed）→done→blocked
+        交付失败边（失败桶/不 reopen/不自动重派）。
+        non_ff＝携外部实际 tip（40-hex base）轮转 attempt 重排队：base 持久化、
+        响应 requeued=True 由 transport 投门队列按新基重排重验；3 次总尝试后
+        第 4 次即 failed/retry_exhausted 终局。
+        """
+        t = self._state.get(tid)
+        sid, _ = self._gate(actor_token, "task_deliver", tid, t,
+                            owner=t.get("dispatcher_sid"))
+        sid = actor_sid or sid
+        if outcome not in ("delivered", "non_ff", "failed"):
+            self._reject(tid, sid, f"outcome 须为 delivered/non_ff/failed"
+                                   f"（收到 {outcome!r}）")
+        c = self._hex40(commit)
+        if c is None:
+            self._reject(tid, sid, f"commit 须为纯 40 位十六进制完整 sha"
+                                   f"（收到 {str(commit)[:20]!r}）")
+        d = t.get("delivery") or {}
+        if d.get("mode") != "external_branch":
+            self._reject(tid, sid, f"任务 {tid} 非 external_branch 交付模式"
+                                   f"（{d.get('mode')!r}）——task_deliver 仅受理"
+                                   "外部交付确认")
+        if t["state"] != "done" or d.get("status") != "awaiting_external":
+            self._reject(tid, sid, f"任务 {tid} 当前 {t['state']}/"
+                                   f"{d.get('status')}——仅 done＋"
+                                   "awaiting_external 可确认交付")
+        if c != d.get("commit"):
+            self._reject(tid, sid, f"过期 commit：在案 handoff "
+                                   f"{str(d.get('commit'))[:12]}，收到 {c[:12]}"
+                                   "——stale/late 确认拒绝，状态零改写")
+        if outcome == "delivered":
+            return self._deliver_ack_delivered(tid, sid, d, c, reason)
+        if outcome == "failed":
+            return self._deliver_ack_failed(
+                tid, sid, d, str(reason or "").strip() or
+                self._DELIVER_ERRORS[0], reason)
+        b = self._hex40(base) if base is not None else None
+        if base is None:
+            self._reject(tid, sid, "non_ff 须携带 base——外部远端实际 tip 的"
+                                   "完整 40 位 sha（外部派发方 fetch 后供给）")
+        if b is None:
+            self._reject(tid, sid, f"base 须为纯 40 位十六进制完整 sha"
+                                   f"（收到 {str(base)[:20]!r}）")
+        if d.get("attempt", 0) >= 3:  # 第 4 次总尝试＝预算耗尽终局
+            return self._deliver_ack_failed(
+                tid, sid, d, "retry_exhausted",
+                "3 次总尝试内外侧持续 non-ff")
+        nd = dict(d, status="pending", base=b, commit=None, error=None,
+                  attempt=d.get("attempt", 0) + 1)
+        self._state.set_fields(tid, delivery=nd)
+        self._store.append_event({"ts": time.time(), "actor": sid,
+                                  "event": "delivery_requeued", "task": tid,
+                                  "base": b, "attempt": nd["attempt"]})
+        return {"ok": True, "outcome": "non_ff", "requeued": True,
+                "attempt": nd["attempt"]}
+
+    def _deliver_ack_delivered(self, tid, sid, d, commit, reason):  # Req: F101
+        """delivered 终局：投影→merged→closed 全链＋凭据/env 回收＋通知尾
+        （口径对齐 gate._finish_local_delivered／门尾结算）。"""
+        t = self._state.get(tid)
+        nd = dict(d, status="delivered", local_status="not_required",
+                  error=None, reason=(str(reason or "").strip() or None))
+        if nd["reason"] is None:
+            nd.pop("reason")
+        self._state.fail_streak_reset(tid)
+        self._state.set_fields(tid, delivery=nd)
+        self._state.transition(tid, "merged", commit=commit)
+        try:  # 评审 R1：merged 已落账后任一步抛/kill——gate_tail 恒结算 closed
+            # （except+finally 保底，口径对齐 gate.run 的 finally-_tail）
+            self._store.append_event({"ts": time.time(), "actor": sid,
+                                      "event": "merged", "task": tid,
+                                      "commit": commit,
+                                      "note": "external_delivered"})
+            self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
+            if t.get("env_dir"):
+                try:
+                    self._gitx.remove_env(t["env_dir"])
+                except Exception as e:  # 回收败不逆转终局：留痕人工清理
+                    self._store.append_event(
+                        {"ts": time.time(), "actor": sid, "task": tid,
+                         "event": "reclaim_failed", "note": str(e)[:200]})
+            self._router.notify_transition(  # 回收之后：通知病不再拦截回收
+                tid, "merged",
+                body=f"@{commit[:7]} external delivered——外部派发方确认交付"
+                     f"（local=not_required）")
+        except Exception as e:  # 通知/审计面病不拦 closed 结算（终态权威在状态机）
+            self._store.append_event(
+                {"ts": time.time(), "actor": sid, "task": tid,
+                 "event": "deliver_tail_failed",
+                 "note": str(e)[:200]})
+        finally:
+            row = self._state.gate_tail(tid)  # merged→closed（pending-cancel 原子结算）
+            if row["state"] == "closed":
+                self._store.append_event({"ts": time.time(), "actor": sid,
+                                          "event": "closed", "task": tid})
+                try:
+                    self._router.notify_transition(
+                        tid, "closed",
+                        body=f"任务 {tid} 已 closed；commit={commit}")
+                except Exception:  # 通知面尽力而为（F54 口径）
+                    pass
+        return {"ok": True, "outcome": "delivered"}
+
+    def _deliver_ack_failed(self, tid, sid, d, error, reason):  # Req: F101
+        """failed 终局：机器可读 error＋done→blocked 交付失败边（失败桶语义
+        沿用 F98）；不 reopen/不自动重派，env 留现场处置权在派发方。"""
+        self._state.set_fields(tid, delivery=dict(d, status="failed",
+                                                  error=error))
+        self._state.transition(tid, "blocked")
+        self._store.append_event({"ts": time.time(), "actor": sid,
+                                  "event": "delivery_failed", "task": tid,
+                                  "error": error, "note": str(reason)[:200]})
+        try:
+            self._router.notify_transition(
+                tid, "blocked",
+                body=f"任务 {tid} 外部交付失败（{error}）——已 blocked"
+                     "（非质量问题）；核对外部远端后重派或取消")
+        except Exception:  # 通知面尽力而为（F54 口径）——不逆转终局
+            pass
+        return {"ok": True, "outcome": "failed", "error": error}
 
     # ---- 内部 ----
 

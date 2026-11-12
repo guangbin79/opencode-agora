@@ -12,6 +12,11 @@ managed 任务（Req: F98，delivery.mode=managed＋origin 在位）改走远端
 任务（Req: F100）走本地权威交付（_deliver_managed_local）：本地钉死支 tip 定基
 ＋锁内 advance_local_target CAS ff-only 推进，脏/占用目标＝交付终局失败；
 启动恢复面 recover_managed 收敛崩溃残留（failed 防重试、权威已含补终态）。
+external_branch 任务（Req: F101，外部开发分支交付）走 _deliver_external：本地
+钉死支 tip（或 task_deliver(non_ff) 携带的外部基）定基集成→rebase→集成 verify，
+绿即驻留 done＋delivery.status=awaiting_external——不合目标支、不推 origin、
+不回收 env/凭据，交付确认权在外部派发方（task_deliver：delivered 收口
+merged/closed、non_ff 换基重排重验≤3 次总尝试、failed 终局 blocked）。
 
 默认 runner 以独立进程组执行命令，双顶（F36）：软顶到点提醒派发方一次不杀继续
 跑，硬顶（缺省 4×软顶）到点杀全组返回 124；rc=124 分类路由派发方（不计 worker
@@ -402,8 +407,28 @@ class Gate:
             # （_deliver_managed_local）。legacy delivery=None 行保持本地门不变
             delivery = t.get("delivery") or {}
             managed = delivery.get("mode") == "managed" and branch is not None
+            external = delivery.get("mode") == "external_branch"  # Req: F101
             remote_first = managed and self._gitx.has_origin(target)
-            if managed and delivery.get("status") == "failed":
+            if external and delivery.get("status") == "awaiting_external":
+                # Req: F101 外部确认驻留：done+awaiting_external 重排（重启 done
+                # 残留恰一次）直通——不重跑 handoff、不发明结果、不过期等待
+                return
+            if external and delivery.get("status") == "delivered" \
+                    and t["state"] == "done":
+                # Req: F101 崩窗收敛：task_deliver(delivered) 已落账而 merged 未
+                # 达——补迁移与回收，门尾（finally _tail）照常结算 merged→closed
+                self._state.fail_streak_reset(tid)
+                self._state.transition(tid, "merged", commit=t.get("commit"))
+                self._audit(tid, "merged", commit=t.get("commit"),
+                            note="external_delivered_recovery")
+                self._router.notify_transition(
+                    tid, "merged",
+                    f"@{(t.get('commit') or '')[:7]} external delivered"
+                    "（崩窗补终态）")
+                self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
+                self._gitx.remove_env(t["env_dir"])
+                return
+            if (managed or external) and delivery.get("status") == "failed":
                 # Req: F100 崩窗收敛：failed 已落账而 blocked 迁移未达——补迁移，
                 # 绝不自动重试交付（重试唯经派发方显式重派重置投影）
                 if t["state"] == "done":
@@ -430,6 +455,8 @@ class Gate:
                             tid, branch, t["commit"], None,
                             delivery.get("attempt", 0))
                     return
+            elif external:
+                pass  # Req: F101 外部权威在派发方（task_deliver）——无本地/远端 landed 补终态探针
             elif self._gitx.contains(target, t["commit"], branch):
                 # kill 落在“目标已推进、merged 未落库”窗口：任务提交已在目标支即只补终态，
                 # 绝不重跑集成 verify 后把已合法合并的任务假 reopened，更不需要 reset --hard。
@@ -453,7 +480,7 @@ class Gate:
             roster = _roster_from_file(self._roster_path) if self._roster_path else []
             if roster:
                 self._gitx.apply_ignore_roster(target, roster)
-            if not managed:  # Req: F98 managed 不写主检出：干净硬闸/分支位记录零接触
+            if not (managed or external):  # Req: F98/F101 交付协议任务不写主检出：干净硬闸/分支位记录零接触
                 # ag-f5aa4d 数据层豁免：声明（仓根 clean-ignore ∪ 部署 env）传入硬闸，
                 # 跟踪中的数据层心跳不再制造结构性脏（两处检查共用同一份豁免面）。
                 exempt = self._gitx.clean_ignore(target, self._clean_ignore_env)
@@ -516,6 +543,10 @@ class Gate:
                     self._deliver_managed_local(tid, branch, env, integration,
                                                 target, runner, cmd, budget,
                                                 ceiling)
+                return
+            if external:  # Req: F101 外部交付：绿即驻留 awaiting_external 等确认
+                self._deliver_external(tid, branch, env, integration,
+                                       target, runner, cmd, budget, ceiling)
                 return
             # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
             self._gitx.build_integration(target, integration, branch)
@@ -885,6 +916,105 @@ class Gate:
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{sha}——本地目标支已交付，环境已回收")
+
+    def _deliver_external(self, tid, branch, env, integration, target,
+                          runner, cmd, budget=None, ceiling=None):  # Req: F101
+        """external_branch 外部交付 handoff：钉死本地支 tip（或 non_ff 重排队
+        携带的外部确认基）定基集成→ff/rebase→集成 verify→绿即驻留
+        awaiting_external——不合目标支、不推 origin、不回收 env/凭据（外部
+        派发方持有远端交付权，确认经 task_deliver）。rebase 内容冲突即终局
+        failed/blocked（F98 口径：不弹回 worker、不计连败）；重排成功但集成
+        verify 败保持质量 reopened 语义；超时/命令死分类路由同款。"""
+        t = self._state.get(tid)
+        d = t.get("delivery") or {}
+        attempt = d.get("attempt") or 1  # non_ff 重排队已带尝试号；首跑＝1
+        base = d.get("base")  # non_ff 重排队的外部基；None＝本地钉死支 tip
+        if base is None:
+            if branch is None:
+                self._delivery_fail(tid, attempt, "local_base",
+                                    "target_branch 未钉死——external_branch"
+                                    "不回退仓默认支")
+                return
+            try:
+                base = self._gitx.local_branch_sha(target, branch)
+            except RuntimeError as e:
+                self._delivery_fail(tid, attempt, "local_base", str(e))
+                return
+        try:  # 评审 R1：外部基由派发方供给——本地不可解析（未 fetch/外部改写
+            # 历史）＝交付面终局，不走门内异常 reopened 弹回 worker（F98 D2 口径）
+            self._gitx.build_integration_at(target, integration, base_sha=base)
+        except (RuntimeError, ValueError) as e:
+            self._delivery_fail(tid, attempt, "external_base", str(e))
+            return
+        before = self._gitx.head(integration)
+        r = None  # R＝重放后交付 sha（None＝ff 直通）
+        if self._gitx.merge_ff(env, integration) != "ok":
+            if self._gitx.rebase_onto(env, integration) == "conflict":
+                self._delivery_fail(tid, attempt, "rebase_conflict")
+                return
+            e = t.get("rebased_from") or t.get("commit")
+            r = self._gitx.head(integration)
+            if r == before and not self._gitx.is_ancestor(target, e, base):
+                # 幻影空集重放（ag-54bd98 G1 同判，外部版）：弹回 worker 自愈
+                self._audit(tid, "empty_rebase_noop")
+                self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
+                                   reason="空集 rebase 无交付")
+                return
+            self._state.set_fields(tid, commit=r, rebased_from=e)
+            self._audit(tid, "rebased", **{"from": e, "to": r})
+        deliver = self._gitx.head(integration)  # ff 直通＝env 头；重放＝R
+        report = self._gitx.materialize_checkout(integration, target)
+        if report:
+            self._audit(tid, "checkout_materialize", note=report)
+        irc, iout = runner(integration, cmd)
+        if irc == 124:  # F36 集成超硬顶：同款分类路由，目标支未动
+            self._audit(tid, "verify_overrun")
+            self._router.notify_dispatcher(
+                tid, "result",
+                f"集成 verify 超硬顶，目标支未动——进程组已终止"
+                f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
+                f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
+            return
+        if _cmd_dead(irc, iout):
+            self._verify_dead(tid, irc, iout)
+            return
+        if irc != 0:
+            where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
+            self._quality_fail(tid, "reopened",
+                               f"{where}，目标支未动——修复后重新"
+                               f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
+                               reason=where)
+            return
+        self._handoff_external(tid, branch, deliver, base, attempt)
+
+    def _handoff_external(self, tid, branch, sha, base, attempt):  # Req: F101
+        """external_branch 绿 handoff 唯一出口：投影 awaiting_external（commit/
+        base/attempt 机器可读，local_status=not_required——外部权威，本地无
+        同步义务）＋任务驻留 done＋env/凭据保留；通知面带齐四要素（commit/
+        target branch/base/attempt），确认权在外部派发方（task_deliver）。"""
+        t = self._state.get(tid)
+        d = dict(t.get("delivery") or {})
+        d.update(status="awaiting_external", commit=sha, base=base,
+                 attempt=attempt, local_status="not_required", error=None)
+        self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
+        self._state.set_fields(tid, delivery=d)
+        self._audit(tid, "awaiting_external", commit=sha, base=base,
+                    attempt=attempt)
+        try:
+            self._router.notify_dispatcher(
+                tid, "result",
+                f"任务 {tid} handoff 就绪（awaiting_external）：commit={sha} "
+                f"target={branch} base={base} attempt={attempt}"
+                "——外部确认经 task_deliver(delivered/non_ff/failed)")
+        except Exception:  # 通知面尽力而为（F54 口径）——不逆转驻留
+            pass
+        try:  # 评审 R1：state 仍 done——_post 裸抛会被门内 except 误判门体
+            # 异常而 reopened，逆转已驻留的 handoff（通知面尽力而为不逆转）
+            self._post(tid, f"handoff 就绪 @{sha[:7]}（base {base[:7]}，"
+                            f"第 {attempt} 次）——等待外部派发方 task_deliver 确认，"
+                            "环境保留")
+        except Exception:
+            pass
 
     def recover_managed(self):  # Req: F100
         """启动恢复面：managed 交付投影非终态任务的崩溃收敛。

@@ -8,7 +8,8 @@ from agorad.access.store import Store
 from agorad.core.auth import Auth
 
 TOOLS = ["task_create", "task_dispatch", "task_update", "task_cancel",
-         "post", "check_mail", "board", "doctor", "wiki_read", "wiki_write", "enforce"]
+         "task_deliver", "post", "check_mail", "board", "doctor",
+         "wiki_read", "wiki_write", "enforce"]  # Req: F101 增 task_deliver
 WORKER_OK = {"post", "check_mail", "wiki_read", "wiki_write", "task_create",
              "task_dispatch", "task_update", "task_cancel"}
 # 目标任务快照行（State.snapshot()["tasks"][tid] 形态），供 task 域工具判定
@@ -41,11 +42,14 @@ class TestCoreAuth(unittest.TestCase):
                 self.assertEqual(got, want, f"{role}×{tool}")
 
     def test_may_task_scoped_needs_task_row(self):  # Req: F1
-        # dispatcher 的 task_update(自己任务)/task_cancel(子链) 为 task 域：无任务行即拒
+        # dispatcher 的 task_update(自己任务)/task_cancel(子链)/task_deliver
+        # (Req: F101 外部交付确认) 为 task 域：无任务行即拒
         self.assertFalse(self.au.may("dispatcher", "task_update", "t1", None))
         self.assertFalse(self.au.may("dispatcher", "task_cancel", "t1", None))
+        self.assertFalse(self.au.may("dispatcher", "task_deliver", "t1", None))
         self.assertTrue(self.au.may("dispatcher", "task_update", "t1", dict(ROW)))
         self.assertTrue(self.au.may("dispatcher", "task_cancel", "t1", dict(ROW)))
+        self.assertTrue(self.au.may("dispatcher", "task_deliver", "t1", dict(ROW)))
 
     def test_issue_identify_survives_restart(self):  # Req: F6
         tok = self.au.issue("s1", "worker")

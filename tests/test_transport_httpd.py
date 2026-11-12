@@ -494,9 +494,9 @@ class TestHttpSmoke(HttpdTest):
                                      "tasks"])  # F57：stats 分桶随返回体
         self.assertEqual(r["forest"], [tid])
         self.assertEqual(sorted(r["tasks"][tid]),
-                         ["created", "dispatcher_sid", "last_seen",
+                         ["created", "delivery", "dispatcher_sid", "last_seen",
                           "model", "project_dir", "state", "title",
-                          "worker_sid"])  # F55：model 恒在键，随白名单投影
+                          "worker_sid"])  # F55：model 恒在键，随白名单投影；delivery＝Req: F101
         self.assertTrue(all(e.get("event") == "escalate" for e in r["events"]))
         st, top = call(self.port, "POST", "/board", {}, self.root)
         self.assertEqual(st, 200)
@@ -1567,6 +1567,9 @@ class TestStringParamContract(HttpdTest):
             ("/wiki_read", {"path": 789}),
             ("/wiki_write", {"path": "notes/x.md", "text": {"evil": 1}}),
             ("/repo_board", {"repo": {"evil": 1}}),
+            ("/task_deliver", {"task": tid, "outcome": 123, "commit": "x" * 40}),
+            ("/task_deliver", {"task": tid, "outcome": "non_ff",
+                               "commit": 456, "base": "y" * 40}),  # Req: F101
         ]
         for path, body in cases:
             st, r = call(self.port, "POST", path, body, self.root)
@@ -1680,6 +1683,86 @@ class TestF95ClientKeyHttp(HttpdTest):
                       "verify_cmd": "true", "client_key": "k"}, self.root)
         self.assertEqual(st, 403)
         self.assertIn("client_key", r["error"])
+
+
+class TestF101ExternalChain(HttpdTest):
+    """Req: F101 HTTP 面全链：external_branch 派发本地定基→done→门内 handoff
+    驻留 awaiting_external→task_deliver 确认（delivered 收口/non_ff 重排/worker 拒）。"""
+
+    def seed_awaiting_via_gate(self):
+        """建外部任务→派发→worker done→等门内 handoff 驻留。"""
+        tid = self.create_task({"goal": "外支交付", "project_dir": "/repo",
+                                "deliverable": "external_branch",
+                                "target_branch": "issue/7-fix",
+                                "verify_cmd": "true"})
+        wtok = self.dispatch_task(tid)
+        self.app.gitx.env_head = SHA  # ff 直通：integration 头＝env 头
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": SHA}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["result"], "accepted")
+        self.assertTrue(wait_until(lambda: (
+            self.app.state.get(tid).get("delivery") or {}
+        ).get("status") == "awaiting_external"))
+        return tid
+
+    def test_full_chain_handoff_then_delivered_closes(self):  # Req: F101
+        tid = self.seed_awaiting_via_gate()
+        t = self.app.state.get(tid)
+        self.assertEqual(t["state"], "done")  # 驻留不合并不 closed
+        d = t["delivery"]
+        self.assertEqual((d["commit"], d["base"], d["attempt"]),
+                         (SHA, "c" * 40, 1))
+        self.assertEqual(getattr(self.gitx, "pushes", []), [])  # 零推送
+        self.assertEqual(self.gitx.removed, [])  # env 保留
+        st, r = call(self.port, "POST", "/task_deliver",
+                     {"task": tid, "outcome": "delivered", "commit": SHA,
+                      "reason": "MR!9 merged"}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"ok": True, "outcome": "delivered"})
+        self.assertEqual(self.app.state.get(tid)["state"], "closed")
+        self.assertIn(self.app.state.get(tid)["env_dir"],
+                      self.gitx.removed)  # 确认后回收
+
+    def test_non_ff_requeues_via_gate_and_rotates(self):  # Req: F101
+        tid = self.seed_awaiting_via_gate()
+        tip = "d" * 40
+        st, r = call(self.port, "POST", "/task_deliver",
+                     {"task": tid, "outcome": "non_ff", "commit": SHA,
+                      "base": tip}, self.root)
+        self.assertEqual(st, 200)
+        self.assertTrue(r["requeued"])  # 响应面携带重排语义
+        # 后台门队列自动重跑 handoff：绿即换基驻留（attempt=2）
+        self.assertTrue(wait_until(lambda: (
+            self.app.state.get(tid).get("delivery") or {}
+        ).get("status") == "awaiting_external"
+            and self.app.state.get(tid)["delivery"]["base"] == tip))
+        d = self.app.state.get(tid)["delivery"]
+        self.assertEqual((d["base"], d["attempt"]), (tip, 2))
+
+    def test_stale_commit_403_without_mutation(self):  # Req: F101
+        tid = self.seed_awaiting_via_gate()
+        st, r = call(self.port, "POST", "/task_deliver",
+                     {"task": tid, "outcome": "delivered", "commit": "e" * 40},
+                     self.root)
+        self.assertEqual(st, 403)
+        self.assertIn("过期", r["error"])
+        t = self.app.state.get(tid)
+        self.assertEqual((t["state"], t["delivery"]["status"]),
+                         ("done", "awaiting_external"))  # 零状态改写
+
+    def test_worker_and_missing_fields_rejected(self):  # Req: F101
+        tid = self.seed_awaiting_via_gate()
+        wsid = self.app.state.get(tid)["worker_sid"]
+        wtok = self.app.auth.token_for(wsid)
+        st, r = call(self.port, "POST", "/task_deliver",
+                     {"task": tid, "outcome": "delivered", "commit": SHA},
+                     wtok)
+        self.assertEqual(st, 403)  # worker 角色永拒
+        st, r = call(self.port, "POST", "/task_deliver",
+                     {"task": tid, "commit": SHA}, self.root)
+        self.assertEqual(st, 400)  # 缺 outcome
+        self.assertIn("outcome", r["error"])
 
 
 if __name__ == "__main__":
