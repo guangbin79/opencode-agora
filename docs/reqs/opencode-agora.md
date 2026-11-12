@@ -490,7 +490,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ### F87 消息交付 inflight 语义——在线注入与 check_mail 不重复不丢失（2026-11-12，用户目标「稳定性、性能」）
 **现状**：`_delivered` 按“GIL 原子”注释使用，但 check_mail 的读取/过滤/标记是复合操作：消息已落库、在线注入尚未返回时，check_mail 可先把 mid 标已投并返回，注入成功后又视为在线送达——同一消息双通道重复交付；且空拉也推进 mail_read 游标，在线注入失败后该消息被游标跳过，可能永久不可补拉。note digest 冲刷同样可与补拉交错重复。
-**裁定**：Router 增加交付锁与短生命周期 `_inflight` 集：立即注入消息和 digest 冲刷批次在“可被 check_mail 看见”前原子登记 inflight，网络注入在锁外；成功转 delivered，失败释放交付权留库。仍在 `_pending` 未冲刷的 note 不标 inflight，保留提前补拉能力。check_mail 的过滤＋标记原子化，且只有非空拉取才推进游标；游标推进到本次实取消息最大 ts（非 wall clock），并行 inflight 注入失败后不被跳过。F75 root backlog 副本同样遵守 inflight 语义；State 锁内不反向等待 Router 锁。
+**裁定**：Router 增加交付锁与短生命周期 `_inflight` 集：立即注入消息和 digest 冲刷批次在“可被 check_mail 看见”前原子登记 inflight，网络注入在锁外；成功转 delivered，失败释放交付权留库。仍在 `_pending` 未冲刷的 note 不标 inflight，保留提前补拉能力。check_mail 的过滤＋标记原子化，且只有非空拉取才推进游标；游标推进受本收件最老 inflight 消息 ts 下界约束（严格低于），更晚消息先被补拉也不会越过未决注入，注入失败后仍可补拉。F75 root backlog 副本同样遵守 inflight 语义；State 锁内不反向等待 Router 锁。
 **落点**：agorad/core/msg.py（交付锁＋inflight＋check_mail 游标语义）、tests/test_core_msg.py（立即注入、失败补拉、digest 冲刷三交错）、docs/reqs/opencode-agora.md（本条）。
 **验收**：先红后绿（Req: F87 锚）——旧实现三交错用例重复交付/抢交（6 fail 含继承复跑）；新实现 `python3 -m pytest tests/test_core_msg.py tests/test_core_health.py -q` 216 passed，全量 pytest 另行绿。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
 

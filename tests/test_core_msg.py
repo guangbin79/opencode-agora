@@ -162,6 +162,37 @@ class TestCoreMsg(unittest.TestCase):
         self.assertEqual([m["id"] for m in self.r.check_mail("d1")],
                          inflight_ids)  # 旧实现：游标已跳过 X
 
+    def test_failed_older_inflight_not_skipped_by_newer_pull(self):  # Req: F87
+        """更晚消息先被补拉时，游标不得越过更老 inflight：其失败后仍可补拉。"""
+        import threading
+        import time
+
+        self.state.add("t2", {"state": "running", "fail_streak": 0,
+                              "title": "B", "created": 0.0, "updated": 0.0,
+                              "dispatcher_sid": "d1", "worker_sid": "w1"})
+        entered = threading.Event()
+        release = threading.Event()
+        inflight_ids = []
+
+        def failing_inject(sid, text):
+            entered.set()
+            release.wait(2.0)
+            return False
+
+        self.oc.inject = failing_inject
+        older = threading.Thread(target=lambda: inflight_ids.append(
+            self.r.post("w1", ("up", "t1"), "process", "older critical")))
+        older.start()
+        self.assertTrue(entered.wait(2.0))
+        time.sleep(0.01)  # 确定晚于 inflight 消息 ts
+        newer_note = self.r.post("w1", ("up", "t2"), "note", "newer pullable")
+        got = self.r.check_mail("d1")
+        self.assertEqual([m["id"] for m in got], [newer_note])
+        release.set()
+        older.join()
+        self.assertEqual([m["id"] for m in self.r.check_mail("d1")],
+                         inflight_ids)  # 旧实现：游标已越过 older
+
     def test_failed_inflight_inject_still_pullable(self):  # Req: F87
         """inflight 注入失败必须释放交付权，下一次 check_mail 可补拉。"""
         import threading

@@ -21,6 +21,7 @@ F63 终态邮件必达：终态迁移经注入 mail 缝外呼公共 send_email�
 正文＝会话行同源服务合成（零 worker 文本），(tid,60s) 窗吞 merged→closed
 门尾相邻双发（merged 崩窗滞留仍有一封）。
 """
+import math
 import threading
 import time
 
@@ -235,15 +236,23 @@ class Router:
     def check_mail(self, sid: str) -> list:
         with self._delivery_lock:  # 过滤＋标记原子：inflight 消息让位在线注入
             cursor = self._state.snapshot()["mail_read"].get(sid, 0.0)
-            got = [m for m in self._store.read_messages()
-                   if (m["to"] == sid or (self._same_lineage is not None
-                                          and self._same_lineage(sid, m["to"])))
-                   and m["id"] not in self._delivered
+            inbox = [m for m in self._store.read_messages()
+                     if m["to"] == sid or (
+                         self._same_lineage is not None
+                         and self._same_lineage(sid, m["to"]))]
+            got = [m for m in inbox
+                   if m["id"] not in self._delivered
                    and m["id"] not in self._inflight
                    and float(m["ts"]) > cursor]
-            if got:  # 游标只推到本次实取消息：并行 inflight 失败后不被跳过（F87）
-                self._state.touch_mail(
-                    sid, max(float(m["ts"]) for m in got))
+            if got:
+                # 游标不得越过本收件更老 inflight：其注入失败后仍须补拉（F87）
+                inflight_ts = [float(m["ts"]) for m in inbox
+                               if m["id"] in self._inflight]
+                advance = max(float(m["ts"]) for m in got)
+                if inflight_ts:
+                    cap = min(inflight_ts)
+                    advance = min(advance, math.nextafter(cap, -math.inf))
+                self._state.touch_mail(sid, advance)
                 self._delivered.update(m["id"] for m in got)  # 拉取即送达（无 ack）
             return got
 
