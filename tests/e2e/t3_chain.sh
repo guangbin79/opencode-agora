@@ -299,6 +299,19 @@ def wait_idle(sid, after_ms, timeout=120):
         time.sleep(1)
     return False
 
+def wait_not_busy(sid, timeout=120):
+    """等会话服务态真空闲（time.updated<=time.idle，F28 同款）。
+
+    仅看 idle 部件会撞自发续作：首个 idle 后模型可再启新回合，prompt 仍排队，
+    把模型回合时长误记为注入时延。"""
+    dl = time.time() + timeout
+    while time.time() < dl:
+        tm = (api(f"/session/{sid}").get("data") or {}).get("time") or {}
+        if (tm.get("updated") or 0) <= (tm.get("idle") or 0):
+            return True
+        time.sleep(1)
+    return False
+
 def wait_file(path, content, timeout=240):
     """目标即指令的验收原语：worker 真会话自主落盘（作者/轮次无关），只认文件事实。"""
     dl = time.time() + timeout
@@ -495,7 +508,10 @@ check(bool(ms) or any(m["kind"] == "milestone" and m.get("task") == tid1
 tidA, wtokA, envA, wsidA = dispatch(
     "Create a file named merged.md containing exactly one line: s2-marker. Commit it with git.",
     "repoA")
-wait_idle(wsidA, time.time() * 1000)  # 先收束初始回合：在线时延测注入面，不测模型 steering 排队
+wait_idle(wsidA, time.time() * 1000)
+if not wait_not_busy(wsidA):
+    check(False, "S3 前置 worker 会话空闲（服务态 updated<=idle） # Req: F4")
+    raise SystemExit(1)
 
 qbody = f"s3-q-{STAMP} what is the marker"
 t0 = time.time() * 1000
