@@ -13,3 +13,6 @@
 ## [2026-11-12] ingest | knowledge-index
 - Added F99 verify command hygiene gate to architecture decisions.
 - Types: Decision
+## [2026-11-13] ingest | knowledge-index
+- Added delivery-authority split (F98/F100/F101/F102): remote authority with origin, local CAS authority without origin, external dispatcher authority for external_branch, instance-owned cleanup; e2e proof at tests/e2e/multi_instance_delivery.py.
+- Types: Decision

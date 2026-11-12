@@ -113,6 +113,17 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 
 完整规范——契约细节、worker 协议、威胁模型、idle 自触发设计笔记：[docs/review-loop.md](docs/review-loop.md)。
 
+## 交付语义
+
+提交落到哪里取决于交付模式与权威所在。每个任务行带机器可读 `delivery` 投影（`mode/status/commit/base/attempt/local_status/error`）。
+
+- **managed 任务（缺省）＋origin 在位——远端权威、远端优先。** env 以远端 tip 定基；门体在最新远端 tip 上集成，远端已动则门内 rebase 重放、重跑 verify，再在仓级交付锁下发布：恰 `<sha>:refs/heads/<branch>` 的 ff-only 推送，绝不 force。干净 non-ff（他写者已推进远端）或等锁超时消耗一次尝试，**至多三次总尝试**，耗尽即交付失败（`retry_exhausted`）。rebase 内容冲突与推送失败同样是交付终局失败：任务转 `blocked`、`delivery.status=failed` 带机器可读 error，权威目标不动、不弹回 worker、不计连败——交付失败不是质量结论。本地主检出全程零接触：远端落地后服务尽力同步本地支（`local_status=synced`），或记 `local_status=pending`——被检出/占用/带 WIP 的本地支原样保全，**本地 pending 绝不回滚远端交付**。
+- **managed 任务＋无 origin——本地权威、CAS ff-only。** 钉死本地支 tip 即权威：门体只在交付锁下经 compare-and-swap ff-only 推进。脏/占用目标是交付终局失败（`local_target_dirty`/`local_target_busy`）——绝不伪装 pending、绝不清洗。启动恢复面收敛崩溃残留；交付 failed 绝不自动重试（重派才重置投影）。
+- **`external_branch` 任务——外部派发方权威。** 外部管理的开发分支：agora 不推 `origin`、不合默认支——门体在钉死支上私有验证后驻留 `done`＋`awaiting_external`（commit/base/attempt 落账，env 与凭据保留）。外部派发方经 `task_deliver` 确认：`delivered` 收口 closed；`non_ff` 携外部新 tip 换基重排重验出新的 handoff commit（同一三次总预算；第 4 次确认即 `retry_exhausted`）；`failed` 带 machine-readable error 转 blocked。携带过期 handoff commit 的确认一律拒绝、零状态改写。
+- **多实例安全。** 多个 agora 实例可操作同一仓：各实例属主自己的任务 worktree（实例成分命名；清理按精确路径注销、绝不摘他实例在册 worktree），仓级交付锁串行化最终推进，并发交付产出线性 first-parent 历史。端到端证明：`python3 tests/e2e/multi_instance_delivery.py`（两个真实服务实例、九场景）。**禁止新旧（F96 前后）agora 实例混写同一仓**——同仓全部写者必须升级到锁/实例协议。
+
+部署注意：插件与服务载荷是拷贝不是引用——升级 agora 仓后必须重跑 `./install.sh` **并重启服务**，否则运行中的 daemon 仍是旧交付代码。
+
 ## 核心能力
 
 - **验证过的自治**——服务真跑测试＋评审锚绿才自动合并，且合并前重验锚

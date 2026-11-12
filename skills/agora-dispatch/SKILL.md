@@ -92,7 +92,13 @@ verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。�
 
 > 来源：F7/F10/F11/§2（verify 绿即自动合并）；设计 §4.1（merged→closed）；e2e S1（closed＋env 回收＋merged 带 commit）＋F11 门内 cancel 排队
 
-## 7. 禁手清单
+## 7. external_branch 交付确认——task_deliver 只属外部派发方
+
+普通 managed 任务 verify 绿即自动交付（远端优先/本地权威/三预算见 README「交付语义」），**人不手动合并/推送、无确认动作**。唯一例外是 `deliverable="external_branch"` 任务（外部开发分支，issue-agent 适配器场景）：门体验证后驻留 `done`＋`awaiting_external`（不推 origin、不合默认支），确认走 `task_deliver(task, outcome, commit)`——`delivered` 收口 closed／`non_ff`（携外部新 tip 的 40 位 base）换基重排重验出新的 handoff commit／`failed` 终局 blocked；共三次总尝试，第四次确认即 `retry_exhausted`。携带过期 handoff commit 的确认一律拒绝（零状态改写）——收到过期拒绝时以 board 明细里在案的 `delivery.commit` 重发。该面只服务外部适配器；人工 dispatcher 对普通任务勿触碰（无手动合并/推送面）。
+
+> 来源：Req: F101（handoff 驻留与 task_deliver 协议）／F102（文档口径：TUI 常规任务指引不变）
+
+## 8. 禁手清单
 
 - **不直写仓**：无凭据 edit/write 必被闸拒（拒因含派发引导）；bash 不拦但同属禁手——兜底是 verify 门＋审计＋纪律。
 - **不手动合并**：无 merge 工具，合并仅由服务自动门执行（ff-only）。

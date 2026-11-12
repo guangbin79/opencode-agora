@@ -44,7 +44,13 @@ MCP 路径的 `task_cancel` 无确认门（无 board-tui 式 y/n），确认纪�
 
 > 来源：F12／决策记录（名册初始为空／保护名册不做）／agora-plugin/scope.ts:1-37（中央名册/精确匹配/缺失＝空/不热载）／index.ts:85-87（休眠分支短路）
 
-## 4. doctor 快查解读
+## 4. task_deliver——仅外部派发方确认面
+
+`external_branch` 任务门体验证后驻留 `done`＋`awaiting_external`（不推 origin、不合默认支）；确认只经 `task_deliver(task, outcome, commit)`：`delivered` 收口 closed／`non_ff` 携外部新 tip 的 base 换基重排（三次总尝试，第四次即 `retry_exhausted`）／`failed` 终局 blocked。过期 handoff commit 的确认拒绝且零状态改写（以 board 明细在案 `delivery.commit` 重发）。该面只属外部适配器（issue-agent）——普通 managed 任务 verify 绿即自动交付，人无手动合并/推送动作（语义详见 README「交付语义」）。
+
+> 来源：Req: F101／F102（文档口径）
+
+## 5. doctor 快查解读
 
 `doctor` 无参直调，返回账本侧事实四组（age_rank／last_seen_rank／stale_candidates／env），逐组解读：
 
