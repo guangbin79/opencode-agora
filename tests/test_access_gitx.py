@@ -1,4 +1,5 @@
 """T5 访问层契约：gitx worktree 建清/ff-only/回滚/闸体检测（真实 git，tmp 夹具，零 mock）。"""
+import os
 import re
 import shutil
 import signal
@@ -771,6 +772,128 @@ class TestAccessGitx(unittest.TestCase):
             self.skipTest("git-lfs 不可用")
         env = self.gx.build_env(self.repo, "gt-l3")
         self.assertEqual(self.gx.materialize_checkout(env, self.repo), "")
+
+    # ---- F96 实例隔离与仓级交付锁 ----
+
+    def test_env_name_carries_sanitized_instance_id(self):  # Req: F96
+        gx = Gitx(instance_id="my host+01")
+        env = gx.build_env(self.repo, "gt-i1")
+        # 实例成分经 _slug 消毒入名；tid/时间戳/随机后缀与 ../ 同级拓扑保留
+        self.assertRegex(
+            Path(env).name,
+            re.escape(self.repo.name) + r"__wt-gt-i1-"
+            + re.escape(gx.instance_id) + r"__\d{8}[0-9a-z]{4}$")
+        self.assertEqual(Path(env).parent, self.repo.parent)
+        self._git(["check-ref-format", "--branch", Path(env).name], cwd=self.repo)
+
+    def test_legacy_env_name_and_constructors_unchanged(self):  # Req: F96
+        env = self.gx.build_env(self.repo, "gt-legacy")  # 缺省 Gitx()＝legacy 形态
+        self.assertRegex(
+            Path(env).name,
+            re.escape(self.repo.name) + r"__wt-gt-legacy__\d{8}[0-9a-z]{4}$")
+        integration = self.tmp / "integ-legacy"
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self._head(integration), self._head(self.repo))
+        self.gx.remove_integration(str(integration), str(self.repo))
+        self.gx.remove_env(env)
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])
+
+    def test_legacy_env_cleanup_by_other_instance(self):  # Req: F96
+        legacy = Gitx().build_env(self.repo, "gt-leg2")  # 无实例成分的存量 env
+        Gitx(instance_id="host-bbbbbbbb").remove_env(legacy)  # 精确路径回收照常
+        self.assertFalse(Path(legacy).exists())
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])
+        self.assertEqual(self._git(["branch", "--list", Path(legacy).name],
+                                   cwd=self.repo).stdout.strip(), "")
+
+    def test_instances_do_not_remove_each_others_envs(self):  # Req: F96
+        a = Gitx(instance_id="host-aaaaaaaa")
+        b = Gitx(instance_id="host-bbbbbbbb")
+        env_b = b.build_env(self.repo, "gt-ix")
+        env_a = a.build_env(self.repo, "gt-ix")  # 同 tid：实例成分令名字互异
+        self.assertNotEqual(Path(env_a).name, Path(env_b).name)
+        shutil.rmtree(env_b)  # B 崩溃残留：目录没了、注册在案
+        a.remove_env(env_a)  # A 只回收自身，不得顺手动 B 的注册/分支
+        wt = self._worktrees(self.repo)
+        self.assertNotIn(str(Path(env_a).resolve()), wt)  # 自身含 ghost 注册收敛
+        self.assertIn(str(Path(env_b).resolve()), wt)  # B 的注册分毫不动
+        self.assertIn(Path(env_b).name,
+                      self._git(["branch", "--list", Path(env_b).name],
+                                cwd=self.repo).stdout)  # B 的分支不动
+
+    def test_cleanup_hot_paths_no_global_prune(self):  # Req: F96
+        calls = []
+
+        class SpyGitx(Gitx):
+            def _git(self, args, cwd, check=True, timeout=None):
+                calls.append(list(args))
+                return Gitx._git(args, cwd, check, timeout)
+
+        spy = SpyGitx(instance_id="host-9c96f96a")
+        env = spy.build_env(self.repo, "gt-prune")
+        integ = self.tmp / "integ-prune"
+        spy.build_integration(str(self.repo), str(integ))
+        spy.remove_integration(str(integ), str(self.repo))
+        spy.remove_env(env)
+        self.assertEqual(self._worktrees(self.repo), [str(self.repo)])  # 回收照常收敛
+        # token 精确匹配：子串匹配会被含「prune」的夹具路径误伤
+        self.assertFalse(any("prune" == arg for c in calls for arg in c))
+
+    def test_build_env_at_heads_supplied_sha(self):  # Req: F96
+        base = self._head(self.repo)
+        gx = Gitx(instance_id="host-at01")
+        env = gx.build_env_at(self.repo, "gt-at1", None, base)
+        self.assertEqual(self._head(Path(env)), base)  # HEAD＝显式 SHA
+        self.assertRegex(
+            Path(env).name,
+            re.escape(self.repo.name) + r"__wt-gt-at1-"
+            + re.escape(gx.instance_id) + r"__\d{8}[0-9a-z]{4}$")
+        sha2 = self._commit(self.repo, {"src.py": "v2"}, "advance")
+        env2 = gx.build_env_at(self.repo, "gt-at2", None, sha2.upper())
+        self.assertEqual(self._head(Path(env2)), sha2)  # 大写十六进制归一
+
+    def test_build_env_at_malformed_sha_rejected_before_git(self):  # Req: F96
+        for bad in ("", "abc", "HEAD", "0" * 39, "0" * 41, "z" * 40, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    Gitx().build_env_at(self.repo, "gt-bad", None, bad)
+        calls = []
+
+        class SpyGitx(Gitx):
+            def _git(self, args, cwd, check=True, timeout=None):
+                calls.append(list(args))
+                return Gitx._git(args, cwd, check, timeout)
+
+        with self.assertRaises(ValueError):
+            SpyGitx().build_env_at(self.repo, "gt-bad2", None, "nope")
+        self.assertEqual(calls, [])  # 校验先于任何 git 调用
+
+    def test_build_integration_at_detached_at_sha(self):  # Req: F96
+        sha2 = self._commit(self.repo, {"src.py": "v2"}, "advance")
+        sha3 = self._commit(self.repo, {"src.py": "v3"}, "advance2")
+        integ = self.tmp / "integ-at"
+        Gitx().build_integration_at(str(self.repo), str(integ), sha2)
+        self.assertEqual(self._head(integ), sha2)  # 恰在显式 SHA（非分支头）
+        self.assertEqual(self.gx.symref(str(integ)), "HEAD")  # detached
+        Gitx().build_integration_at(str(self.repo), str(integ), sha3)  # 复跑收敛
+        self.assertEqual(self._head(integ), sha3)
+        with self.assertRaises(ValueError):
+            Gitx().build_integration_at(str(self.repo), str(integ), "short")
+        self.gx.remove_integration(str(integ), str(self.repo))
+        self.assertNotIn(str(integ), self._worktrees(self.repo))
+
+    def test_gitx_delivery_lock_cm(self):  # Req: F96
+        with self.gx.delivery_lock(str(self.repo)):
+            common = self._git(["rev-parse", "--git-common-dir"],
+                               cwd=self.repo).stdout.strip()
+            lockfile = Path(common) if os.path.isabs(common) \
+                else self.repo / common
+            self.assertTrue((lockfile / "agora-delivery.lock").exists())
+            second = Gitx().delivery_lock(str(self.repo))
+            self.assertFalse(second.acquire(blocking=False))  # 持锁期间不可再得
+        third = Gitx().delivery_lock(str(self.repo))
+        self.assertTrue(third.acquire(blocking=False))  # 退出即释放
+        third.release()
 
 
 class TestGateBaseline(unittest.TestCase):

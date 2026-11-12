@@ -15,9 +15,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agorad.access.gitx import Gitx
 from agorad.access.store import Store
-from agorad.main import assemble, audit_root_poison, env_config, issue_root, \
-    load_env_file, main, migrate_root_poison, quick_limits_from_env, \
+from agorad.main import assemble, audit_root_poison, env_config, instance_identity, \
+    issue_root, load_env_file, main, migrate_root_poison, quick_limits_from_env, \
     verify_ceiling_from_env, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -193,6 +194,33 @@ class TestGateQuickWiring(unittest.TestCase):
                            quick_max_files=5, quick_max_lines=40)
             self.assertEqual(app.gate._quick_max_files, 5)  # 装配透传
             self.assertEqual(app.gate._quick_max_lines, 40)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestInstanceIdentityWiring(unittest.TestCase):
+    """F96 实例身份：hostname＋AGORA_HOME realpath 指纹，装配注入 Gitx。"""
+
+    def test_identity_shape_and_stability(self):  # Req: F96
+        import socket
+        tmp = tempfile.mkdtemp()
+        try:
+            iid = instance_identity(tmp)
+            self.assertTrue(iid.startswith(socket.gethostname() + "-"))
+            self.assertRegex(iid, r"[0-9a-f]{8}$")  # sha256(home realpath) 前 8 位
+            self.assertEqual(iid, instance_identity(tmp))  # 同 home 跨调用稳定
+            self.assertNotEqual(iid, instance_identity(tmp + "/x"))  # 异 home 互异
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_assemble_injects_stable_instance_id(self):  # Req: F96
+        tmp = tempfile.mkdtemp()
+        try:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            self.assertEqual(app.gitx.instance_id,
+                             Gitx._slug(instance_identity(tmp)))  # 主装配注入
+            app2 = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            self.assertEqual(app.gitx.instance_id, app2.gitx.instance_id)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

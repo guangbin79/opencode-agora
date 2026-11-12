@@ -4,9 +4,11 @@ flock 单实例→装配 App（root 牌于此授予）→recover.startup 复查�
 service.json（$AGORA_HOME/.agora/ 下，pid/port/started/version/oc_version）→
 health 后台定时线程（默认 300s，AGORA_HEALTH_INTERVAL 可配）→serve_forever。
 """
+import hashlib
 import math
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -140,6 +142,14 @@ def quick_limits_from_env():
     return tuple(limits)
 
 
+def instance_identity(home):
+    """F96 稳定实例身份：hostname + AGORA_HOME realpath 的 sha256 前 8 位——
+    同机同 home 跨重启恒等、异机/异 home 互异；入 Gitx 属主化 env 命名。"""
+    digest = hashlib.sha256(os.path.realpath(str(home)).encode("utf-8")
+                            ).hexdigest()[:8]
+    return f"{socket.gethostname()}-{digest}"
+
+
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
              verify_timeout=300, verify_ceiling=None, roster_path=None,
@@ -149,7 +159,7 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     state = State(store)
     auth = Auth(store)
     oc = oc if oc is not None else Oc(oc_url, oc_password)
-    gitx = gitx if gitx is not None else Gitx()
+    gitx = gitx if gitx is not None else Gitx(instance_id=instance_identity(home))
     router = Router(store, state, oc,
                     same_lineage=auth.same_lineage,  # F16 血统链边（装配注入）
                     mail=lambda tid, text: send_email(  # F63 终态邮件必达（外呼缝同 Health）

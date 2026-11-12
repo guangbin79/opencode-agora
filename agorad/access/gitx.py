@@ -26,6 +26,13 @@ _PUSH_TIMEOUT = 300
 
 
 class Gitx:
+    _SHA40 = re.compile(r"[0-9a-fA-F]{40}")
+
+    def __init__(self, instance_id: str = None):
+        # F96 实例身份：None＝legacy 形态（直接测试/旧路径，env 名零变化）；
+        # 非空经 _slug 消毒后才进 worktree/分支名（ref 安全纪律单一落点）
+        self.instance_id = self._slug(instance_id) if instance_id else None
+
     @staticmethod
     def _slug(name: str) -> str:
         # repo 名消毒为 ref 安全 slug：ref 禁字符→_、@{ 序列断开、折叠 ..、去首部 ./-（.dotfiles 类仓名可派发）
@@ -43,16 +50,41 @@ class Gitx:
             raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
         return r
 
-    def build_env(self, project_dir: str, tid: str, branch: str = None) -> str:
-        repo = Path(project_dir).resolve()
+    @classmethod
+    def _check_sha(cls, sha: str) -> str:  # Req: F96
+        # 信任边界：显式 SHA 构造器——malformed 一律在触 git 前拒（大写归一小写）
+        if not isinstance(sha, str) or not cls._SHA40.fullmatch(sha):
+            raise ValueError(
+                f"base_sha 须为完整 40 位十六进制 commit SHA（收到 {sha!r}）")
+        return sha.lower()
+
+    def _env_name(self, repo: Path, tid: str) -> str:
+        # F96：实例属主成分插在 tid 之后；None＝legacy 名（存量形态零变化）
+        iid = f"-{self.instance_id}" if self.instance_id else ""
         stamp = datetime.now().strftime("%m%d%H%M")
-        name = f"{self._slug(repo.name)}__wt-{tid}__{stamp}{''.join(secrets.choice(_RAND) for _ in range(4))}"
+        return (f"{self._slug(repo.name)}__wt-{tid}{iid}__{stamp}"
+                f"{''.join(secrets.choice(_RAND) for _ in range(4))}")
+
+    def _build_env(self, project_dir: str, tid: str, startpoint: list) -> str:
+        repo = Path(project_dir).resolve()
+        name = self._env_name(repo, tid)
         env = repo.parent / name  # repo 同级父目录＝../ 相对拓扑等价
+        self._git(["worktree", "add", "-b", name, str(env), *startpoint], cwd=repo)
+        return str(env)
+
+    def build_env(self, project_dir: str, tid: str, branch: str = None) -> str:
         # branch＝起点分支（外部工作流，如 issue/N-fix）；缺省＝仓默认支。
         # 起点全限定 refs/heads/<branch>：裸名解析 tag 优先（同名 tag 遮蔽致错基线）
-        self._git(["worktree", "add", "-b", name, str(env)]
-                  + ([f"refs/heads/{branch}"] if branch else []), cwd=repo)
-        return str(env)
+        return self._build_env(
+            project_dir, tid, [f"refs/heads/{branch}"] if branch else [])
+
+    def build_env_at(self, project_dir: str, tid: str, branch: str = None,
+                     base_sha: str = None) -> str:  # Req: F96
+        """从完整 40 位 SHA 建实例属主任务 env/分支（权威定基，不经分支 ref 解析）。
+
+        branch 仅保留签名对齐（起点已由 base_sha 钉死），不参与起点解析。
+        """
+        return self._build_env(project_dir, tid, [self._check_sha(base_sha)])
 
     def env_on_disk(self, env_dir: str) -> bool:  # Req: F71
         """记录 env 是否仍在盘（dispatch 重派自愈判据；空值＝无 env 视不在盘）。"""
@@ -65,15 +97,30 @@ class Gitx:
         复跑先收敛 kill 窗口留下的目录/注册元数据；detached 避免与主检出争用分支。
         """
         target = Path(target_dir).resolve()
-        integration = Path(integration_dir).resolve()
-        self.remove_integration(str(integration), str(target))
         # 起基经 baseline()（ag-49312d）：本地支陈旧时落在真实远端头上，F32 自愈后 push 恒 ff
-        self._git(["worktree", "add", "--detach", str(integration),
-                   self.baseline(target, branch)], cwd=target)
+        return self._build_integration(
+            target, Path(integration_dir).resolve(),
+            self.baseline(target, branch))
+
+    def build_integration_at(self, target_dir: str, integration_dir: str,
+                             base_sha: str = None) -> str:  # Req: F96
+        """从完整 40 位 SHA 建 detached 集成环境（权威定基，不经 baseline 解析）。"""
+        return self._build_integration(
+            Path(target_dir).resolve(), Path(integration_dir).resolve(),
+            self._check_sha(base_sha))
+
+    def _build_integration(self, target: Path, integration: Path,
+                           startpoint: str) -> str:
+        self.remove_integration(str(integration), str(target))
+        self._git(["worktree", "add", "--detach", str(integration), startpoint],
+                  cwd=target)
         return str(integration)
 
     def remove_integration(self, integration_dir: str, target_dir: str) -> None:
-        """回收 detached 集成环境；不删任务分支，幂等处理 kill 窗口残留。"""
+        """回收 detached 集成环境；不删任务分支，幂等处理 kill 窗口残留。
+
+        F96：热路径零全局 prune——残留注册按精确路径注销，绝不动同仓其他
+        实例/任务的在册条目。"""
         integration = Path(integration_dir).resolve()
         target = Path(target_dir).resolve()
         if integration.exists():
@@ -86,7 +133,15 @@ class Gitx:
                 time.sleep(_RMT_WAIT)
             if integration.exists():
                 raise RuntimeError(f"integration 目录删除失败（并发写入未停）: {integration}")
-        self._git(["worktree", "prune"], cwd=target, check=False)
+        self._unregister_worktree(target, integration)
+
+    def delivery_lock(self, repo_dir: str):  # Req: F96
+        """仓级跨进程交付锁 CM（只护最终 ref 推进互斥；verify 期间绝不持有）。
+
+        兄弟模块经动态 import 取用——access 包静态分层仅许 stdlib
+        （test_architecture 声明动态 import 不在扫描范围），gitlock 零 agorad 依赖。"""
+        from importlib import import_module
+        return import_module("agorad.access.gitlock").RepoDeliveryLock(repo_dir)
 
     def ensure_clean(self, repo_dir: str, exempt=()) -> None:
         """主检出写前硬闸：任何已跟踪或未跟踪变更都拒绝，防合并/回滚伤用户工作。
@@ -172,11 +227,33 @@ class Gitx:
             if env.exists():  # 重试走完仍残留＝并发写入未停，如实上抛（分支留给重试收敛）
                 raise RuntimeError(f"env 目录删除失败（并发写入未停）: {env}")
         # kill 窗口/外部删除留下的 worktree 注册元数据（.git/worktrees/<name>）不随
-        # 目录消失收敛，分支删除亦被其挡（used by worktree）——先 prune 再级联删支
-        self._git(["worktree", "prune"], cwd=main, check=False)
+        # 目录消失收敛，分支删除亦被其挡（used by worktree）——按精确路径注销当前
+        # 任务的注册后级联删支（F96：全局 prune 会顺带摘其他实例的在册条目，禁用）
+        self._unregister_worktree(main, env)
         r = self._git(["branch", "-d", env.name], cwd=main, check=False)
         if r.returncode != 0:  # 未合并分支 -d 必拒；级联清理不可半途，升 -D
             self._git(["branch", "-D", env.name], cwd=main)
+
+    def _unregister_worktree(self, main: Path, wt: Path) -> None:  # Req: F96
+        """精确路径注销 worktree 注册元数据（替代全局 prune 的跨实例误伤面）。
+
+        注册项＝<common-dir>/worktrees/<admin>/gitdir（内容＝该 worktree 的
+        .git 文件路径）；仅当其指向恰为 wt 时摘除，绝不按前缀/名字匹配。"""
+        common = Path(self._git(["rev-parse", "--git-common-dir"],
+                                cwd=main).stdout.strip())
+        if not common.is_absolute():
+            common = main / common
+        admin_root = common / "worktrees"
+        if not admin_root.is_dir():
+            return
+        for admin in list(admin_root.iterdir()):
+            try:
+                ref = (admin / "gitdir").read_text(
+                    encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if ref and os.path.realpath(str(Path(ref).parent)) == str(wt):
+                shutil.rmtree(admin, ignore_errors=True)
 
     def materialize_checkout(self, tree_dir: str, source_dir: str) -> str:  # Req: ag-0d2daa
         """检出后依赖物化（submodule gitlink 预置＋LFS 实体还原）：零网络零凭据。
