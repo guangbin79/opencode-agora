@@ -32,6 +32,7 @@ EV_VERIFY = "verify_registered"
 EV_DENIED = "auth_denied"
 EV_REJECTED = "dispatch_rejected"
 EV_REJECTED_VERIFY = "dispatch_rejected_verify_missing"
+EV_VERIFY_HYGIENE_REJECTED = "verify_hygiene_rejected"  # F99 卫生闸专属审计行
 
 
 def _bad_timeout(v):
@@ -52,10 +53,11 @@ class TaskService:
     口径同 Health 消息写面）；无锁无线程。"""
 
     def __init__(self, state, auth, gitx, oc, store, router, pages,
-                 stale_candidates=None):
+                 stale_candidates=None, verify_hygiene=None):
         self._state, self._auth, self._gitx, self._oc = state, auth, gitx, oc
         self._store, self._router, self._pages = store, router, pages
         self._stale_candidates = stale_candidates  # ag-d1d8c1：僵态口径单一事实源
+        self._verify_hygiene = verify_hygiene  # F99：纯函数检查器构造注入（core 禁兄弟 import）
 
     @staticmethod
     def _repo_key(path: str) -> str:
@@ -123,6 +125,8 @@ class TaskService:
             self._reject(tid, sid, "quick 验收按账本历史动态判定，勿自带命令")
         if quick and verify_pending:  # F65：quick 原子登记与豁免旗同款互斥
             self._reject(tid, sid, "quick 与 verify_pending 互斥——二选一")
+        if verify_cmd is not None:  # F99：卫生闸在归一/继承后、quick 解析与幂等命中前
+            self._hygiene_gate(tid, sid, verify_cmd, project_dir)
         resolved = self._history_cmd(tid, sid, project_dir) if quick else None
         if verify_cmd is not None and not verify_cmd.strip():
             self._reject(tid, sid, "verify 命令为空——task_create 登记非空命令")
@@ -564,6 +568,7 @@ class TaskService:
             self._reject(tid, sid, "verify 命令为空——task_update 登记非空命令")
         if timeout is not None and _bad_timeout(timeout):  # F51：坏值 fail-fast，同款文案
             self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
+        self._hygiene_gate(tid, sid, cmd, t["project_dir"])  # F99：set_fields 前卫生闸
         self._state.set_fields(tid, verify={
             "cmd": cmd, "state": "registered", "registered_by": sid,
             "registered_at": time.time(),
@@ -623,6 +628,24 @@ class TaskService:
             raise Rejected(f"{tid or ''}: {tool} 拒绝（role={role}）")
         return sid, role
 
+    # ---- F99 卫生闸（检查器构造注入；未注入＝闸关，判放行） ----
+
+    def _hygiene_block(self, cmd, project_dir):
+        """返回首条 blocking finding（无/未注入＝None）——create/update 与
+        quick 历史过滤共用同一判定面。"""
+        if self._verify_hygiene is None:
+            return None
+        return next((f for f in self._verify_hygiene(cmd, project_dir)
+                     if f["blocking"]), None)
+
+    def _hygiene_gate(self, tid, sid, cmd, project_dir):
+        """显式登记闸：blocking finding 即拒，报因含 code/fragment/hint（修复指引）。"""
+        hit = self._hygiene_block(cmd, project_dir)
+        if hit is not None:
+            self._reject(tid, sid, f"verify 命令卫生未过（{hit['code']}: "
+                                   f"{hit['fragment']}）——{hit['hint']}",
+                         ev=EV_VERIFY_HYGIENE_REJECTED)
+
     def _reject(self, tid, sid, reason, ev=EV_REJECTED):
         self._store.append_event({"ts": time.time(), "actor": sid, "event": ev,
                                   "task": tid, "note": reason})
@@ -638,10 +661,11 @@ class TaskService:
 
     def _history_cmd(self, tid, sid, project_dir):
         """F67 quick 验收动态判定：账本历史多数（同仓 merged 非 quick 且
-        verify.cmd 非空串）。收＝唯一最高频且次数 ≥2，取该命令原子登记；
-        否则拒并报候选证据（空历史省候选清单）。quick 行不计——其 cmd 本是
-        判定产物（防自证）；常规路不读本函数（历史零染非 quick 建单）。"""
-        counts = {}
+        verify.cmd 非空串）。F99 历史候选先过卫生闸——blocking finding 不计票
+        （GLOBAL_STATE 仅告警不过滤）。收＝唯一最高频且次数 ≥2，取该命令原子
+        登记；否则拒并报候选证据（空历史省候选清单）。quick 行不计——其 cmd
+        本是判定产物（防自证）；常规路不读本函数（历史零染非 quick 建单）。"""
+        counts, blocked = {}, 0
         for t in self._state.snapshot()["tasks"].values():
             if (t["state"] in ("merged", "closed") and t.get("commit")
                     and not t.get("quick")
@@ -649,6 +673,9 @@ class TaskService:
                     and isinstance(t["verify"]["cmd"], str)
                     and t["verify"]["cmd"].strip()):
                 cmd = t["verify"]["cmd"].strip()  # 空白变体同键计票
+                if self._hygiene_block(cmd, project_dir) is not None:
+                    blocked += 1  # F99：坏历史命令出局，不计票
+                    continue
                 counts[cmd] = counts.get(cmd, 0) + 1
         evid = ""
         if counts:
@@ -659,8 +686,10 @@ class TaskService:
             evid = "（候选: " + " / ".join(
                 f"{c}×{counts[c]}"
                 for c in sorted(counts, key=lambda k: (-counts[k], k))) + "）"
+        risk = ("——历史高频 verify 均存在 worktree 逃逸风险"
+                if blocked and not counts else "")  # F99：全滤空时点名根因
         self._reject(tid, sid, "quick 验收按账本历史动态判定：证据不足"
-                               + evid)
+                               + evid + risk)
 
     def _boot(self, tid, env, title=None):
         if title:  # F46 B-1 纵深防御：存量脏 title 同款压平，断多行穿透开场解析面

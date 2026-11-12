@@ -1030,6 +1030,26 @@ class TestParamContract(HttpdTest):
               if e["event"] == "auth_denied" and "timeout" in str(e.get("note"))]
         self.assertTrue(ev)  # F37 同款 auth_denied 审计
 
+    def test_verify_hygiene_rejection_over_http(self):  # Req: F99
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g", "project_dir": "/repo",
+                      "verify_cmd": "cd /tmp && pytest -q"}, self.root)
+        self.assertEqual(st, 403)  # core 卫生闸 Rejected→403
+        self.assertIn("ABSOLUTE_CD", r["error"])
+        self.assertEqual([t for t in self.app.state.snapshot()["tasks"].values()
+                          if t["goal"] == "g"], [])  # 拒绝零建行
+        tid = self.create_task({"goal": "g2", "project_dir": "/repo",
+                                "verify_cmd": "true"})
+        st, r = call(self.port, "POST", "/task_update",
+                     {"task": tid, "verify_cmd": "/repo/scripts/run.sh"},
+                     self.root)
+        self.assertEqual(st, 403)
+        self.assertIn("PROJECT_PATH", r["error"])
+        self.assertEqual(self.app.state.get(tid)["verify"]["cmd"], "true")  # 旧值原样
+        self.assertEqual(len([e for e in self.app.store.read_events()
+                               if e["event"] == "verify_hygiene_rejected"]),
+                         2)  # create/update 两路审计
+
     def test_task_create_model_type_checked_and_projected(self):  # Req: F55
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "g", "project_dir": "/repo", "model": 123}, self.root)

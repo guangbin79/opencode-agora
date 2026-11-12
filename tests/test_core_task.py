@@ -20,6 +20,7 @@ from agorad.core.auth import Auth
 from agorad.core.msg import Router
 from agorad.core.state import State
 from agorad.core.task import Rejected, TaskService
+from agorad.core.verify_hygiene import find_verify_hygiene_issues
 
 
 class FakeGitx:
@@ -99,7 +100,8 @@ class TestCoreTask(unittest.TestCase):
         self.gitx, self.oc = FakeGitx(), FakeOc()
         self.router = Router(self.store, self.state, self.oc)
         self.svc = TaskService(self.state, self.auth, self.gitx, self.oc,
-                               self.store, self.router, write_task_page)
+                               self.store, self.router, write_task_page,
+                               verify_hygiene=find_verify_hygiene_issues)  # F99 卫生闸
         self.root = self.auth.issue("main", "root")
 
     def tearDown(self):
@@ -1620,6 +1622,97 @@ class TestQuickTask(TestCoreTask):
         t = self.state.get(tid)
         self.assertEqual(t["verify"]["cmd"], "other")  # 历史不染常规路
         self.assertFalse(t["quick"])
+
+
+class TestVerifyHygieneGate(TestCoreTask):
+    """Req: F99 第二段：卫生闸接入 create/update 登记面——blocking 即拒、放行零变化。"""
+
+    def test_create_absolute_cd_rejected_no_side_effects(self):  # Req: F99
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root,
+                            verify_cmd="cd /tmp && pytest -q")
+        msg = str(cm.exception)
+        self.assertIn("ABSOLUTE_CD", msg)  # 报因含 code
+        self.assertIn("/tmp", msg)         # …与 fragment
+        self.assertIn("相对路径", msg)      # …与修复指引（hint）
+        self.assertEqual(self.state.snapshot()["tasks"], {})  # 零任务行
+        self.assertEqual(self.gitx.built, [])  # 零 env
+        names = [e["event"] for e in self.events()]
+        self.assertNotIn("task_created", names)      # 零建单
+        self.assertNotIn("verify_registered", names)  # 零 verify 登记
+        self.assertEqual(names.count("verify_hygiene_rejected"), 1)  # 专属审计
+        self.assertIn("ABSOLUTE_CD", [e for e in self.events()
+                                      if e["event"] == "verify_hygiene_rejected"
+                                      ][0]["note"])
+
+    def test_create_project_script_rejected(self):  # Req: F99
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root,
+                            verify_cmd="/repo/scripts/run.sh --all")
+        self.assertIn("PROJECT_PATH", str(cm.exception))
+
+    def test_create_external_deps_and_relative_allowed(self):  # Req: F99
+        for cmd in ("/repo/venv/bin/python -m pytest",  # 仓内依赖目录：隔离副本
+                    "/opt/other-tool/bin/lint run",     # 仓外工具：零行为变化
+                    "cd server && pytest -q"):          # 相对 cd 合法
+            with self.subTest(cmd=cmd):
+                tid = self.svc.create("g", "/repo", None, self.root,
+                                      verify_cmd=cmd)
+                row = self.state.get(tid)["verify"]
+                self.assertEqual(row["cmd"], cmd)
+                self.assertEqual(row["state"], "registered")
+
+    def test_update_bad_cmd_rejected_old_verify_intact(self):  # Req: F99
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.update_verify(tid, self.root, "cd /tmp && make")
+        self.assertIn("ABSOLUTE_CD", str(cm.exception))
+        row = self.state.get(tid)["verify"]
+        self.assertEqual(row["cmd"], "true")          # 旧 verify 原样保留
+        self.assertEqual(row["state"], "registered")
+        self.assertTrue(any(e["event"] == "verify_hygiene_rejected"
+                            for e in self.events()))
+
+
+class TestQuickHygiene(TestCoreTask):
+    """Req: F99 第二段：quick 历史先滤 blocking 再计票；GLOBAL_STATE 告警不过滤。"""
+
+    def hist(self, tid, cmd):
+        """直接播种 merged 历史行（坏命令过不了 create 闸——账本即播种面）。"""
+        self.seed(tid, state="merged", disp="main")
+        self.state.set_fields(tid, commit="c" * 40,
+                              verify={"cmd": cmd, "state": "registered",
+                                      "registered_by": "main",
+                                      "registered_at": 1.0, "timeout": None})
+
+    def test_quick_skips_bad_history_picks_unique_qualified(self):  # Req: F99
+        for i in range(3):
+            self.hist(f"bad{i}", "cd /tmp && pytest -q")  # 高频坏命令出局
+        self.hist("g1", "python3 -m unittest")
+        self.hist("g2", "python3 -m unittest")
+        tid = self.svc.create("g", "/repo", None, self.root, quick=True)
+        self.assertEqual(self.state.get(tid)["verify"]["cmd"],
+                         "python3 -m unittest")  # 下一条唯一高频合格命令
+
+    def test_quick_all_bad_rejected_with_risk_note(self):  # Req: F99
+        for i in range(2):
+            self.hist(f"bad{i}", "cd /tmp && pytest -q")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, quick=True)
+        msg = str(cm.exception)
+        self.assertIn("证据不足", msg)  # 沿用证据不足拒绝
+        self.assertIn("历史高频 verify 均存在 worktree 逃逸风险", msg)
+
+    def test_quick_global_state_warning_not_filtered(self):  # Req: F99
+        import os
+        from unittest.mock import patch
+
+        cmd = "cp conf $HOME/.config/app.conf"  # GLOBAL_STATE 仅告警
+        with patch.dict(os.environ, {"HOME": str(self.tmp)}):
+            self.hist("w1", cmd)
+            self.hist("w2", cmd)
+            tid = self.svc.create("g", "/repo", None, self.root, quick=True)
+        self.assertEqual(self.state.get(tid)["verify"]["cmd"], cmd)
 
 
 class TestF75RouteGuard(TestCoreTask):

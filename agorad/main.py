@@ -32,6 +32,7 @@ from agorad.core.peer import PeerBoard
 from agorad.core.recover import Recover
 from agorad.core.state import State
 from agorad.core.task import TaskService
+from agorad.core.verify_hygiene import find_verify_hygiene_issues
 from agorad.transport.httpd import make_server
 
 _VERSION = "0.1.0"
@@ -169,7 +170,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
         lambda home, tid, row: write_task_page(  # F44：快照与事件装配注入
             home, tid, row, tasks=state.snapshot()["tasks"],
             events=store.read_events(tid)),
-        stale_candidates=report.stale_candidates)  # ag-d1d8c1：僵态同口径
+        stale_candidates=report.stale_candidates,  # ag-d1d8c1：僵态同口径
+        verify_hygiene=find_verify_hygiene_issues)  # F99：登记面卫生闸
     peer = PeerBoard(store, state)  # F22 同仓协作面（写面权限归 httpd 角色判定）
     recover = Recover(state, oc, gitx, store, auth, router=router)
     app = App(store=store, state=state, auth=auth, router=router, task=task,
