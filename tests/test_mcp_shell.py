@@ -33,6 +33,13 @@ class FakeGitx:
         self.ondisk.add(env)
         return env
 
+    def local_branch_sha(self, repo_dir, branch):  # Req: F100 本地权威定基
+        return "c" * 40
+
+    def build_env_at(self, project_dir, tid, branch=None,
+                     base_sha=None):  # Req: F100 委托同款 env 模型
+        return self.build_env(project_dir, tid, branch)
+
     def env_on_disk(self, env_dir):  # Req: F71
         return env_dir in self.ondisk
 

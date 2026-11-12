@@ -311,18 +311,29 @@ class TaskService:
             # fetch 失败拒派报 remote_base——绝不回退本地支（远端才是交付权威）。
             # has_origin/fetch 同入守卫（评审 D1）：仓亡（FileNotFoundError）与
             # 网络病一律清晰拒因＋审计（env_build 同口径），短预算防死 origin
-            # 停摆串行门（评审 D4）
+            # 停摆串行门（评审 D4）。
+            # Req: F100 no-origin 本地权威定基：缺 origin 解析钉死本地目标支
+            # tip（local_branch_sha 精确 SHA）建 env——缺支/malformed 拒派报
+            # local_base 点名钉死支，绝不回退仓默认支。
             base_sha = None
-            try:
-                d = t.get("delivery") or {}
-                if (d.get("mode") == "managed"
-                        and t.get("target_branch") is not None
-                        and self._gitx.has_origin(t["project_dir"])):
-                    base_sha = self._gitx.fetch_origin_branch(
-                        t["project_dir"], t["target_branch"],
-                        timeout=_REMOTE_BASE_TIMEOUT)
-            except Exception as e:
-                self._reject(tid, sid, f"remote_base: {e}")
+            d = t.get("delivery") or {}
+            if d.get("mode") == "managed" and t.get("target_branch") is not None:
+                try:
+                    origin = self._gitx.has_origin(t["project_dir"])
+                except Exception as e:  # 仓亡等：归远端面口径（F98 评审 D1）
+                    self._reject(tid, sid, f"remote_base: {e}")
+                try:
+                    base_sha = (
+                        self._gitx.fetch_origin_branch(
+                            t["project_dir"], t["target_branch"],
+                            timeout=_REMOTE_BASE_TIMEOUT)
+                        if origin else
+                        self._gitx.local_branch_sha(t["project_dir"],
+                                                    t["target_branch"]))
+                except Exception as e:
+                    self._reject(tid, sid,
+                                 f"remote_base: {e}" if origin
+                                 else f"local_base: {e}")
             try:
                 if base_sha is not None:
                     env = self._gitx.build_env_at(

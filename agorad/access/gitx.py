@@ -538,13 +538,15 @@ class Gitx:
                               or "fetch first" in tail) else "failed"
         return status, tail
 
-    def remote_contains(self, repo_dir: str, branch: str,
-                        commit: str) -> bool:  # Req: F98
+    def remote_contains(self, repo_dir: str, branch: str, commit: str,
+                        timeout: float = None) -> bool:  # Req: F98
         """刷新远端后判 commit 是否 origin/<branch> tip 的祖先（含相等）。
 
         交付权威判据：push 超时/网络败后的对账与崩溃窗口补终态都走此面；
-        fetch 失败如实抛——调用方按「对账不可得」处理，不猜。"""
-        tip = self.fetch_origin_branch(repo_dir, branch)
+        fetch 失败如实抛——调用方按「对账不可得」处理，不猜。timeout＝恢复
+        面短预算透传（Req: F100，缺省 None＝_PUSH_TIMEOUT 全预算，门体口径
+        不变）。"""
+        tip = self.fetch_origin_branch(repo_dir, branch, timeout=timeout)
         r = self._git(["merge-base", "--is-ancestor", commit, tip],
                       cwd=repo_dir, check=False)
         if r.returncode == 0:
@@ -578,6 +580,90 @@ class Gitx:
         r = self._git(["update-ref", f"refs/heads/{branch}", sha, expected_old],
                       cwd=repo_dir, check=False)
         return "synced" if r.returncode == 0 else "pending"  # CAS 原子收口
+
+    def local_branch_sha(self, repo_dir: str, branch: str) -> str:  # Req: F100
+        """本地钉死目标支 tip 解析（no-origin 权威定基）：refs/heads/<branch>
+        精确 40 位 SHA；缺支/malformed 如实 RuntimeError——绝不静默回退仓默认支。"""
+        r = self._git(["rev-parse", "--verify", f"refs/heads/{branch}"],
+                      cwd=repo_dir, check=False)
+        if r.returncode != 0:
+            raise RuntimeError(f"本地目标分支不存在: refs/heads/{branch}"
+                               f"（{r.stderr.strip()}）")
+        sha = r.stdout.strip().lower()
+        if not self._SHA40.fullmatch(sha):
+            raise RuntimeError(f"本地目标分支 tip 非 40 位 SHA"
+                               f"（refs/heads/{branch}: {sha!r}）")
+        return sha
+
+    def advance_local_target(self, repo_dir: str, branch: str, sha: str,
+                             expected_old) -> str:  # Req: F100
+        """本地权威目标支推进（调用方持仓级交付锁）：CAS＋ff-only 双守卫。
+
+        先重读 tip 要求 expected_old 匹配（他写者已推进/分叉＝non-ff，整链
+        重试口径）；支未被任何 worktree 检出＝update-ref 原子 CAS 推进；被
+        检出＝仅在该检出内 merge --ff-only（干净且仍在 expected_old）——脏
+        ＝dirty（保全 WIP）、机械拒绝＝failed；绝不清洗/换支/stash/force，
+        绝不重写历史。返回 synced/non-ff/failed/dirty。expected_old=None＝
+        无从 CAS，按 non-ff 交调用方重取基线。"""
+        sha = self._check_sha(sha)  # malformed 在触 git 前拒（F96 信任边界同源）
+        if expected_old is None:
+            return "non-ff"
+        cur = self._git(["rev-parse", "--verify", "--quiet",
+                         f"refs/heads/{branch}"], cwd=repo_dir, check=False)
+        if cur.returncode != 0:
+            return "non-ff"  # 建单后被删：非机械病，重取基线口径
+        tip = cur.stdout.strip().lower()
+        if tip != expected_old.lower():
+            return "non-ff"  # CAS：他写者已推进/分叉
+        anc = self._git(["merge-base", "--is-ancestor", tip, sha],
+                        cwd=repo_dir, check=False)
+        if anc.returncode == 1:
+            return "non-ff"  # sha 不构成 fast-forward（分叉）
+        if anc.returncode != 0:
+            return "failed"  # 环境病（对象损坏等）
+        wt = self._holding_worktree(repo_dir, branch)
+        if wt is None:  # 未检出：ref 级原子 CAS 推进（不撕裂任何工作树）
+            r = self._git(["update-ref", f"refs/heads/{branch}", sha,
+                           expected_old], cwd=repo_dir, check=False)
+            if r.returncode == 0:
+                return "synced"
+            moved = self._git(["rev-parse", "--verify", "--quiet",
+                               f"refs/heads/{branch}"], cwd=repo_dir,
+                              check=False)
+            # CAS 窗口落空（tip 已非快照值）＝non-ff；其余＝机械病
+            return ("non-ff" if moved.returncode == 0
+                    and moved.stdout.strip().lower() != tip else "failed")
+        # 被检出：仅在该检出内推进——从仓本级改被检出 ref 会撕裂工作树
+        if self._git(["status", "--porcelain", "-z",
+                      "--untracked-files=normal"], cwd=wt,
+                     check=False).stdout:
+            return "dirty"  # 用户 WIP 在场：保全现场零接触
+        head = self._git(["rev-parse", "HEAD"], cwd=wt, check=False)
+        if head.returncode != 0:
+            return "failed"
+        if head.stdout.strip().lower() == sha:
+            return "synced"  # 幂等：已在交付位
+        if head.stdout.strip().lower() != tip:
+            return "non-ff"  # 检出漂移（mid-rebase 等）：不碰
+        r = self._git(["merge", "--ff-only", sha], cwd=wt, check=False)
+        now = self._git(["rev-parse", "HEAD"], cwd=wt, check=False)
+        if (r.returncode == 0 and now.returncode == 0
+                and now.stdout.strip().lower() == sha):
+            return "synced"
+        return "failed"  # 干净同位仍拒＝占用/机械病（index.lock 等）：不清洗不强制
+
+    def _holding_worktree(self, repo_dir: str, branch: str):  # Req: F100
+        """refs/heads/<branch> 被哪个 worktree 检出（None＝未检出）。porcelain
+        块归属：worktree 行开块、branch 行闭块（sync_local_target 同源判定）。"""
+        out = self._git(["worktree", "list", "--porcelain"],
+                        cwd=repo_dir).stdout
+        cur = None
+        for line in out.splitlines():
+            if line.startswith("worktree "):
+                cur = line.split(" ", 1)[1]
+            elif cur and line.strip() == f"branch refs/heads/{branch}":
+                return cur
+        return None
 
     def rebase_onto(self, env_dir: str, integration: str) -> str:
         """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交

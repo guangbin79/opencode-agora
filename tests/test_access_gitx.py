@@ -1382,5 +1382,152 @@ class TestRemoteDelivery(unittest.TestCase):
             "pending")
 
 
+class TestLocalDelivery(unittest.TestCase):
+    """Req: F100 无origin本地权威原语：local_branch_sha/advance_local_target
+    （真 git、零 origin 夹具）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "proj"
+        self.repo.mkdir()
+        self._git(["init", "-b", "main"], cwd=self.repo)
+        self._git(["config", "user.email", "t@t"], cwd=self.repo)
+        self._git(["config", "user.name", "t"], cwd=self.repo)
+        self._commit(self.repo, {"src.py": "v1"}, "init")
+        self.gx = Gitx()
+        self.base = self._head(self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _git(args, cwd, check=True):
+        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                           text=True)
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def _commit(self, cwd, files, msg):
+        for name, content in files.items():
+            path = Path(cwd) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self._git(["add", "-A"], cwd=cwd)
+        self._git(["commit", "-m", msg], cwd=cwd)
+        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+    def _head(self, cwd):
+        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+    def _ref(self, branch):
+        return self._git(["rev-parse", f"refs/heads/{branch}"],
+                         cwd=self.repo).stdout.strip()
+
+    def test_local_branch_sha_resolves_and_rejects(self):  # Req: F100
+        self.assertEqual(self.gx.local_branch_sha(str(self.repo), "main"),
+                         self.base)
+        with self.assertRaises(RuntimeError) as cm:  # 缺支：报因点名，不回退默认支
+            self.gx.local_branch_sha(str(self.repo), "release")
+        self.assertIn("release", str(cm.exception))
+
+    def test_advance_unchecked_out_branch_cas_ff(self):  # Req: F100
+        self._git(["branch", "release"], cwd=self.repo)  # 未被任何 worktree 检出
+        env = self.gx.build_env(self.repo, "gt-la", branch="release")
+        tip = self._commit(Path(env), {"src.py": "v2"}, "work")
+        self.assertEqual(
+            self.gx.advance_local_target(str(self.repo), "release", tip,
+                                         self.base), "synced")
+        self.assertEqual(self._ref("release"), tip)  # ref 级原子推进
+        other = self._commit(Path(env), {"src.py": "v3"}, "next")
+        self.assertEqual(  # CAS：expected_old 已陈旧（tip 非 base）＝拒
+            self.gx.advance_local_target(str(self.repo), "release", other,
+                                         self.base), "non-ff")
+        self.assertEqual(self._ref("release"), tip)  # 拒绝不改 ref
+        self.assertEqual(  # 重读锚后整链重试口径：ff 推进
+            self.gx.advance_local_target(str(self.repo), "release", other,
+                                         tip), "synced")
+        self.assertEqual(self._ref("release"), other)
+
+    def test_advance_checked_out_clean_ff_in_exact_checkout(self):  # Req: F100
+        env = self.gx.build_env(self.repo, "gt-ck", branch="main")
+        tip = self._commit(Path(env), {"src.py": "v2"}, "work")
+        self.assertEqual(
+            self.gx.advance_local_target(str(self.repo), "main", tip,
+                                         self.base), "synced")
+        self.assertEqual(self._head(self.repo), tip)  # 主检出在该检出内推进
+        self.assertEqual(self.gx.symref(self.repo), "main")  # 不换支不 detach
+
+    def test_advance_dirty_checkout_preserves_wip(self):  # Req: F100
+        env = self.gx.build_env(self.repo, "gt-dirty", branch="main")
+        tip = self._commit(Path(env), {"src.py": "v2"}, "work")
+        (self.repo / "wip.txt").write_text("user wip")  # 用户 WIP（未跟踪）
+        self.assertEqual(
+            self.gx.advance_local_target(str(self.repo), "main", tip,
+                                         self.base), "dirty")
+        self.assertEqual(self._head(self.repo), self.base)  # ref 不动
+        self.assertEqual((self.repo / "wip.txt").read_text(), "user wip")
+        self.assertTrue(self._git(["status", "--porcelain"],
+                                  cwd=self.repo).stdout.strip())  # 现场仍脏
+
+    def test_advance_diverged_never_rewrites(self):  # Req: F100
+        env = self.gx.build_env(self.repo, "gt-dv", branch="main")
+        tip = self._commit(Path(env), {"src.py": "v2"}, "work")
+        repo_tip = self._commit(self.repo, {"other.txt": "x"}, "parallel")
+        # sha 与目标支分叉（tip 不是 sha 祖先）：non-ff，绝不 force 重写
+        self.assertEqual(
+            self.gx.advance_local_target(str(self.repo), "main", tip,
+                                         repo_tip), "non-ff")
+        self.assertEqual(self._ref("main"), repo_tip)
+        self.assertEqual(  # 缺支：非机械病，重取基线口径
+            self.gx.advance_local_target(str(self.repo), "ghost", tip,
+                                         repo_tip), "non-ff")
+
+    def test_advance_malformed_and_anchorless_rejected(self):  # Req: F100
+        with self.assertRaises(ValueError):  # 40 位信任边界先于 git
+            self.gx.advance_local_target(str(self.repo), "main", "deadbeef",
+                                         self.base)
+        self.assertEqual(  # expected_old=None：无从 CAS＝non-ff 交重取基线
+            self.gx.advance_local_target(str(self.repo), "main", self.base,
+                                         None), "non-ff")
+
+    def test_two_instances_serialize_advance_linear_history(self):  # Req: F100
+        """两 Gitx 实例同仓：仓级锁互斥最终推进＋CAS 拒陈旧锚逼整链重排——
+        线性历史零丢失更新。"""
+        ga, gb = Gitx(instance_id="host-aaaa1111"), Gitx(
+            instance_id="host-bbbb2222")
+        self._git(["branch", "release"], cwd=self.repo)
+        ea = ga.build_env(self.repo, "i-a", branch="release")
+        eb = gb.build_env(self.repo, "i-b", branch="release")
+        sa = self._commit(Path(ea), {"a.txt": "1"}, "a")
+        sb = self._commit(Path(eb), {"b.txt": "1"}, "b")
+        lock = ga.delivery_lock(self.repo)  # 仓级锁互斥（跨实例共 git common dir）
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            self.assertFalse(gb.delivery_lock(self.repo).acquire(
+                blocking=False))
+        finally:
+            lock.release()
+        with ga.delivery_lock(self.repo):  # A 先交付（基=self.base）
+            self.assertEqual(ga.advance_local_target(str(self.repo), "release",
+                                                     sa, self.base), "synced")
+        with gb.delivery_lock(self.repo):  # B 携陈旧锚：CAS 拒→重读→rebase→再推
+            self.assertEqual(gb.advance_local_target(str(self.repo), "release",
+                                                     sb, self.base), "non-ff")
+            tip = gb.local_branch_sha(str(self.repo), "release")
+            self.assertEqual(tip, sa)
+            self._git(["rebase", "--onto", tip, self.base], cwd=eb)
+            sb2 = self._head(eb)
+            self.assertEqual(gb.advance_local_target(str(self.repo),
+                                                     "release", sb2, tip),
+                             "synced")
+        self.assertEqual(self._ref("release"), sb2)
+        self.assertEqual(self._git(  # 线性：sa 是终态 tip 祖先
+            ["merge-base", "--is-ancestor", sa, "release"], cwd=self.repo,
+            check=False).returncode, 0)
+        for name in ("a.txt", "b.txt"):  # 零丢失：两实例交付内容俱在
+            self._git(["cat-file", "-e", f"release:{name}"], cwd=self.repo)
+
+
 if __name__ == "__main__":
     unittest.main()

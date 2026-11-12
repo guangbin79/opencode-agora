@@ -51,6 +51,13 @@ class FakeGitx:
         (env / ".review-loop").mkdir(parents=True)
         return str(env)
 
+    def local_branch_sha(self, repo_dir, branch):  # Req: F100 本地权威定基
+        return "c" * 40
+
+    def build_env_at(self, project_dir, tid, branch=None,
+                     base_sha=None):  # Req: F100 委托同款 env 目录模型
+        return self.build_env(project_dir, tid, branch)
+
     def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
         return "b" * 40
 
@@ -104,6 +111,20 @@ class FakeGitx:
         Path(integration_dir).mkdir(parents=True, exist_ok=True)
         return integration_dir
 
+    def build_integration_at(self, target_dir, integration_dir,
+                             base_sha=None):  # Req: F100 本地定基集成同款
+        Path(integration_dir).mkdir(parents=True, exist_ok=True)
+        return integration_dir
+
+    def advance_local_target(self, repo_dir, branch, sha,
+                             expected_old):  # Req: F100 本地权威推进落地
+        # 不置 landed：新交付路径无 _succeed 的 contains 终检消费点，置位会
+        # 泄漏进后续 accept_done 空集探针（B 册终闸：父任务假 vacuous 崩 500）
+        return "synced"
+
+    def delivery_lock(self, repo_dir):  # Req: F100 假件恒可得锁
+        return FakeDeliveryLock()
+
     def remove_integration(self, integration_dir, target_dir):
         shutil.rmtree(integration_dir, ignore_errors=True)
 
@@ -113,13 +134,23 @@ class FakeGitx:
         return "ok"
 
     def head(self, repo_dir, branch=None):
-        return "aaa111"
+        # Req: F100 交付落账读 head(integration)——生产 ff 直通＝env 头＝交付
+        # sha；断言落账 commit 的用例经 env_head 注入该值（缺省旧口径 aaa111）
+        return getattr(self, "env_head", "aaa111")
 
     def touches_gate(self, env_dir, patterns, branch=None):
         return False
 
     def diff_check(self, env_dir, branch=None):
         return ""
+
+
+class FakeDeliveryLock:  # Req: F100 门体本地交付锁假件
+    def acquire(self, blocking=False):
+        return True
+
+    def release(self):
+        pass
 
 
 class DeadInjectOc:
@@ -234,6 +265,8 @@ class TestHttpSmoke(HttpdTest):
     def test_full_chain_create_dispatch_done_gate_close(self):  # Req: F2/F4/F7
         tid = self.create_task()
         wtok = self.dispatch_task(tid)
+        # Req: F100 本地权威交付落账读 head(integration)——env 头＝交付 sha
+        self.app.gitx.env_head = SHA
         wsid = self.app.state.get(tid)["worker_sid"]
         # T5 真形状：boot 随 create 走 prompt 通道，先于 dispatch 的 credential 注入（F43 指针形态）
         self.assertEqual(self.stub.sessions[wsid]["injects"][-1],

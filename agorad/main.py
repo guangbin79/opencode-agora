@@ -294,6 +294,10 @@ def main():
     audit_root_poison(app)  # ag-588eb8：迁移后残留看门（只记账不撤销）
     app.recover.startup()
     try:
+        app.gate.recover_managed()  # Req: F100 managed 交付崩溃收敛（恢复面）
+    except Exception:  # 恢复面尽力而为不挡启动：门重排链路（done 残留）兜底
+        pass
+    try:
         app.health.repair_dispatcher_routes()  # F75：启动即修（不等首个 tick）
     except Exception:  # 修复面 I/O 败不挡服务：health 线程下轮重试（同 probe 口径）
         pass
