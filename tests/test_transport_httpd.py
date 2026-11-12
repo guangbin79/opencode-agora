@@ -77,6 +77,14 @@ class FakeGitx:
     def check_branch(self, repo_dir, branch):
         pass
 
+    def checkout(self, repo_dir, branch):  # Req: F94 钉支任务走显式支还原面
+        self.checkouts = getattr(self, "checkouts", [])
+        self.checkouts.append((repo_dir, branch))
+        return True
+
+    def strictly_behind(self, repo_dir, branch):  # Req: F94 推前守卫面（假件恒不落后）
+        return False
+
     def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
         if self.landed:  # ag-54bd98：一次消费——最终推进落地恰由本门 merged 前终检
             self.landed = False  # 读取即还原：不跨任务/跨门泄漏给受理探针
@@ -204,7 +212,7 @@ class HttpdTest(unittest.TestCase):
         self.assertEqual(self.gitx.branch, "issue/7")  # httpd→task→gitx 全链透传
         tid2 = self.create_task()
         self.dispatch_task(tid2)
-        self.assertIsNone(self.gitx.branch)  # 缺省＝None（向后兼容）
+        self.assertEqual(self.gitx.branch, "main")  # Req: F94 缺省＝建单钉死 symref 支
 
     def dispatch_task(self, tid):
         st, r = call(self.port, "POST", "/task_update",

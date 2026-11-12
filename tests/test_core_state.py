@@ -206,8 +206,9 @@ class TestSnapshotNormalization(unittest.TestCase):
         self.assertEqual(
             (t["chain_depth"], t["fail_streak"], t["quick"],
              t["verify_pending"], t["model"], t["deliverable"],
+             t["delivery"],  # Req: F94 旧行无投影补 None（仅内存视图）
              t["root_sid"]),
-            (1, 0, False, False, None, None, "d1"))
+            (1, 0, False, False, None, None, None, "d1"))
         st.transition("t1", "dispatched", worker_sid="w1")  # 补缺后可继续迁移
 
     def test_bad_snapshot_fails_fast_with_field_context(self):  # Req: F91

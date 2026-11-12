@@ -62,6 +62,14 @@ class TaskService:
         """F90 仓库身份键：绝对 realpath——尾斜杠/符号链接别名归一。"""
         return str(pathlib.Path(path).resolve())
 
+    @staticmethod
+    def _new_delivery(mode, target_branch):
+        """Req: F94 建单 delivery 投影初值（managed/external_branch 两模式；
+        out_of_band 不建投影——旧门协议不动）。"""
+        return {"mode": mode, "status": "pending", "commit": None,
+                "base": None, "target_branch": target_branch, "attempt": 0,
+                "local_status": "pending", "error": None}
+
     # ---- F2 建任务 ----
 
     def create(self, goal, project_dir, after, actor_token, title=None,
@@ -71,6 +79,7 @@ class TaskService:
         sid, role = self._gate(actor_token, "task_create", None, None)
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
+        explicit_branch = target_branch is not None  # Req: F94 显式传入才走信任边界校验
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
         if project_dir is not None:
             project_dir = self._repo_key(project_dir)  # F90：入账/比较前归一别名
@@ -121,18 +130,33 @@ class TaskService:
             self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
         if model is not None and not _MODEL_RE.fullmatch(model):  # F55：坏格式 fail-fast（错名由 can_spawn 熔断暴露）
             self._reject(tid, sid, f"model 须为 providerID/modelID 形（收到 {model!r}）")
-        if deliverable is not None and deliverable != "out_of_band":  # ag-af96bb②：单值白名单 fail-fast
-            self._reject(tid, sid, f"deliverable 仅支持 out_of_band（收到 {deliverable!r}）")
+        if deliverable is not None and deliverable not in ("out_of_band",
+                                                           "external_branch"):
+            # ag-af96bb② 白名单 fail-fast；Req: F94 扩 external_branch（报因两名全点名）
+            self._reject(tid, sid, f"deliverable 仅支持 out_of_band/external_branch"
+                                   f"（收到 {deliverable!r}）")
         if after is not None:
             try:
                 self._state.get(after)
             except KeyError:
                 self._reject(tid, sid, f"after: 前任务 {after} 不存在")
-        if target_branch is not None:  # 信任边界校验：语法＋存在，坏名 fail-fast
+        if explicit_branch:  # 信任边界校验：语法＋存在，坏名 fail-fast
             try:
                 self._gitx.check_branch(project_dir, target_branch)
             except Exception as e:
                 self._reject(tid, sid, f"target_branch: {e}")
+        elif target_branch is None and role != "worker":
+            # Req: F94 建单钉死缺省支；worker 继承 legacy None 支不落此路——
+            # worker 不能显式传支（传即 EV_DENIED），钉支路 detached 拒对其是
+            # 死路；保持旧动态语义与父行同态（门体按实时 symref 解析）
+            try:
+                pinned = self._gitx.symref(project_dir)
+            except Exception as e:
+                self._reject(tid, sid, f"target_branch: {e}")
+            if not pinned or pinned == "HEAD":  # detached 无从谈钉支
+                self._reject(tid, sid, "target_branch 缺省解析得主检出 detached"
+                                      "（HEAD）——须显式指定 target_branch")
+            target_branch = pinned  # 实名入账：已知存在，不走 check_branch
         if req_id is not None:  # F34 发放面查重：服务串行单写者，并行撞号根治
             self._req_check(tid, sid, project_dir, req_id)
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
@@ -152,12 +176,18 @@ class TaskService:
             verify = dict(parent["verify"])
         root_sid = sid if role != "worker" else (
             parent.get("root_sid") or parent["dispatcher_sid"])  # F45 一次性定死：worker 继承父池
+        delivery = None  # Req: F94 out_of_band 走旧门协议：不建 delivery 投影
+        if deliverable != "out_of_band":
+            delivery = self._new_delivery(
+                "external_branch" if deliverable == "external_branch"
+                else "managed", target_branch)
         head = (title or goal.splitlines()[0][:40]) if (title or goal) else tid
         self._state.add(tid, {
             "title": " ".join(str(head).split()),  # F46 B-1：压平 title（boot 开场按行解析；goal 合法多行不动）
             "goal": goal, "project_dir": project_dir, "target_branch": target_branch,
             "req_id": req_id, "model": model,  # model 恒在键，None 缺省（F55）
             "deliverable": deliverable,  # ag-af96bb②：恒在键，None＝普通合并任务
+            "delivery": delivery,  # Req: F94 恒在键，out_of_band/旧行＝None
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
             "quick": bool(quick),  # F65：quick 旗随行（快照/事件自然携带）

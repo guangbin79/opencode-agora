@@ -26,6 +26,10 @@ class FakeGitx:
     def __init__(self):
         self.built, self.removed, self.branches, self.checked = [], [], [], []
         self.ondisk = set()  # Req: F71 在盘模型——build_env 成功即记为存在
+        self.sym = "main"  # Req: F94 主检出 symref 可切（换支/detached 仿形）
+
+    def symref(self, repo_dir):  # Req: F94 建单钉支解析面
+        return self.sym
 
     def check_branch(self, repo_dir, branch):
         if branch == "bad..name":
@@ -801,7 +805,7 @@ class TestVerifyGate(TestCoreTask):
         self.assertEqual(self.state.get(tid)["target_branch"], "issue/7")
         self.assertEqual(self.gitx.checked[-1], ("/repo", "issue/7"))  # 信任边界已校验
         tid2 = self.dispatchable()
-        self.assertIsNone(self.state.get(tid2)["target_branch"])  # 缺省＝None
+        self.assertEqual(self.state.get(tid2)["target_branch"], "main")  # Req: F94 缺省＝建单钉死 symref 支
 
     def test_create_rejects_bad_target_branch(self):  # Req: gt-132747
         for bad in ("bad..name",):  # 存在性拒绝归真 gitx（test_access_gitx）
@@ -816,7 +820,7 @@ class TestVerifyGate(TestCoreTask):
         self.svc.dispatch(tid, disp)
         self.assertEqual(self.gitx.branches[-1], "issue/7")  # 起点分支透传
         tid2, disp2, _ = self.dispatched_pair()
-        self.assertEqual(self.gitx.branches[-1], None)  # 缺省＝None（向后兼容）
+        self.assertEqual(self.gitx.branches[-1], "main")  # Req: F94 缺省＝建单钉死支透传建 env
 
     def test_create_seeds_queryable_row(self):  # Req: F2
         tid = self.svc.create("my goal", "/repo", None, self.root)  # 裸 create：缺省 pending
@@ -1108,6 +1112,55 @@ class TestModelRouting(TestCoreTask):
                          self.state.get(parent)["model"])  # 缺省继承父任务
 
 
+class TestF94TargetBranchPin(TestCoreTask):
+    """Req: F94 建单钉死目标分支——缺省 symref 实名入账，主检出换支不漂移。"""
+
+    def test_default_pinned_at_create_survives_checkout_switch(self):  # Req: F94
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertEqual(self.state.get(tid)["target_branch"], "main")
+        self.gitx.sym = "feature/x"  # 建单后主检出换支
+        self.assertEqual(self.state.get(tid)["target_branch"], "main")  # 行不随漂
+        self.svc.dispatch(tid, self.root)
+        self.assertEqual(self.gitx.branches[-1], "main")  # env 也按钉死支建
+
+    def test_detached_checkout_rejects_without_explicit_branch(self):  # Req: F94
+        self.gitx.sym = "HEAD"  # 主检出 detached
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertIn("target_branch", str(cm.exception))
+        self.assertIn("detached", str(cm.exception))
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", target_branch="issue/7")
+        self.assertEqual(self.state.get(tid)["target_branch"], "issue/7")  # 显式支可建
+
+    def test_worker_child_of_legacy_none_parent_keeps_dynamic_semantics(self):  # Req: F94
+        """legacy 父行 target_branch=None：worker 子单不落钉支路——继承 None
+        保持旧动态语义（worker 不能显式传支，钉支路 detached 拒对其是死路）。"""
+        self.state.add("legacy", {
+            "state": "running", "goal": "g", "project_dir": "/repo",
+            "target_branch": None,
+            "verify": {"cmd": "true", "state": "registered",
+                       "registered_by": "main", "registered_at": 1.0,
+                       "timeout": None},
+            "dispatcher_sid": "main", "worker_sid": "w-legacy",
+            "chain_depth": 1, "fail_streak": 0,
+            "created": 0.0, "updated": 0.0})
+        wtok = self.auth.issue("w-legacy", "worker")
+        self.gitx.sym = "HEAD"  # 主检出 detached：钉支路会拒，worker 无处申诉
+        child = self.svc.create("child", None, None, wtok)  # 继承 None 不钉支
+        t = self.state.get(child)
+        self.assertIsNone(t["target_branch"])  # 与父行同态：门体按旧实时 symref 解析
+        self.assertEqual(t["delivery"]["mode"], "managed")  # 投影随行照建
+        self.assertIsNone(t["delivery"]["target_branch"])
+
+    def test_resolved_default_skips_check_branch(self):  # Req: F94
+        self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertNotIn(("/repo", "main"), self.gitx.checked)  # 解析支已知存在：免信任边界校验
+        self.svc.create("g2", "/repo", None, self.root, verify_cmd="true",
+                        target_branch="issue/7")
+        self.assertIn(("/repo", "issue/7"), self.gitx.checked)  # 显式传入照旧校验
+
+
 class TestDeliverable(TestCoreTask):
     """ag-af96bb② deliverable=out_of_band 建单面：值白名单＋worker 拒/继承（F37 同族）
     ＋review-only BOOT done 行换装（普通任务逐字不变）。"""
@@ -1124,6 +1177,27 @@ class TestDeliverable(TestCoreTask):
             self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
                             deliverable="inline")
         self.assertIn("out_of_band", str(cm.exception))
+        self.assertIn("external_branch", str(cm.exception))  # Req: F94 报因两名全点名
+
+    def test_external_branch_delivery_projection(self):  # Req: F94
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", deliverable="external_branch")
+        t = self.state.get(tid)
+        self.assertEqual(t["deliverable"], "external_branch")
+        self.assertEqual(t["delivery"], {
+            "mode": "external_branch", "status": "pending", "commit": None,
+            "base": None, "target_branch": "main", "attempt": 0,
+            "local_status": "pending", "error": None})  # 精确初值
+
+    def test_managed_delivery_default_and_out_of_band_none(self):  # Req: F94
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertEqual(self.state.get(tid)["delivery"], {
+            "mode": "managed", "status": "pending", "commit": None,
+            "base": None, "target_branch": "main", "attempt": 0,
+            "local_status": "pending", "error": None})
+        oob = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", deliverable="out_of_band")
+        self.assertIsNone(self.state.get(oob)["delivery"])  # 旧门协议不动
 
     def test_worker_cannot_set_and_inherits_parent(self):  # ag-af96bb② F37 同族
         parent = self.svc.create("parent", "/repo", None, self.root,

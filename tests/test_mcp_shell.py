@@ -178,12 +178,22 @@ class TestSchemaContract(McpShellTest):
                   self.rpc("tools/list")["result"]["tools"]}
         prop = schema["task_create"]["inputSchema"]["properties"]["deliverable"]
         self.assertEqual((prop["type"], prop["enum"]),
-                         ("string", ["out_of_band"]))
+                         ("string", ["out_of_band", "external_branch"]))  # Req: F94
         r = self.call_tool("task_create", {"_token": self.root, "goal": "评审-only",
                                            "project_dir": "/repo",
                                            "deliverable": "out_of_band"})
         tid = self.result_of(r)["task"]
         self.assertEqual(self.app.state.get(tid)["deliverable"], "out_of_band")
+
+    def test_task_create_deliverable_external_branch_passthrough(self):  # Req: F94
+        r = self.call_tool("task_create", {"_token": self.root, "goal": "外支交付",
+                                           "project_dir": "/repo",
+                                           "deliverable": "external_branch"})
+        tid = self.result_of(r)["task"]
+        t = self.app.state.get(tid)
+        self.assertEqual(t["deliverable"], "external_branch")
+        self.assertEqual(t["delivery"]["mode"], "external_branch")  # 投影随建单入行
+        self.assertEqual(t["target_branch"], "main")  # MCP→HTTP→task 建单钉支全链
 
     def test_task_timeout_schema_described(self):  # Req: F51
         schema = {t["name"]: t for t in
