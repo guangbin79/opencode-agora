@@ -32,6 +32,7 @@ KIND_GATEFILES = "gatefiles"
 KIND_VERIFY_DEAD = "verify-dead"
 
 _TAIL = 2000
+_VERIFY_DEAD_RAW_TAIL = 400  # health 头截 500：先取尾并留 exit= 前缀/拍平余量
 # F36 软硬双顶轮询步长：硬顶判死及时性 0.5s 级（秒）
 _VERIFY_POLL = 0.5
 # 闸体＝verify 依赖面（构建/测试配置）：任务 diff 触及即升级拍人
@@ -649,7 +650,9 @@ class Gate:
         通知面尽力而为（F54 同口径）——败不改变驻留语义。"""
         self._audit(tid, "verify_dead", rc=rc)
         try:
-            self._health.escalate(KIND_VERIFY_DEAD, tid, raw=f"exit={rc} {out}")
+            self._health.escalate(
+                KIND_VERIFY_DEAD, tid,
+                raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}")
         except Exception:
             pass
         try:

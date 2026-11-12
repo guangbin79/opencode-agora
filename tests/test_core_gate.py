@@ -180,9 +180,11 @@ class FakeGitx:
 class FakeHealth:
     def __init__(self):
         self.calls = []
+        self.raws = []
 
     def escalate(self, kind, tid, raw=None, streak=None):  # raw/streak：F80/退避面签名对齐
         self.calls.append((kind, tid))
+        self.raws.append(raw)
 
 
 class FakeRunner:
@@ -1495,6 +1497,19 @@ class TestGateVerifyDeadRc2(TestCoreGate):
         self.assertNotIn(("verify-dead", "t1"), self.health.calls)
         self.assertTrue(any("重新 post(done" in m["body"]
                             for m in self.worker_msgs()))  # 弹回自愈照旧
+
+    def test_cmd_dead_raw_carries_output_tail(self):  # Req: F82
+        """命令死升级携带输出尾：health 头截 500，前置长噪声不得吃掉尾部诊断行。"""
+        tail = "bash: ./missing-check.sh: No such file or directory"
+        self.runner = FakeRunner((127, "lead-noise-" + "x" * 900 + "\n" + tail))
+        self.mk_gate()
+        self.in_gate(streak=1)
+        self.gate.run("t1")
+        raw = self.health.raws[-1]
+        self.assertIn("exit=127", raw)
+        self.assertIn(tail, raw)
+        self.assertTrue(raw.endswith(tail))
+        self.assertNotIn("lead-noise", raw)
 
     def test_cmd_dead_judgement_scope(self):  # Req: F82
         """判定矩阵：126/127 死（F80 回归）；rc=2 仅含 ENOENT 文案才死；文案不独立触发（rc=1 带同文案不入死类）。"""
