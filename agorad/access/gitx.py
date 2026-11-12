@@ -412,6 +412,80 @@ class Gitx:
                               or "fetch first" in out) else "failed"
         return status, out
 
+    @staticmethod
+    def _net(args, cwd):
+        """网络面 git 原语（ag-0f60fd ls-remote/删除 push）：start_new_session＋
+        超时 killpg 全组（push 同款 F38 纪律——ssh/传输孙进程不孤儿泄漏）。返回
+        (rc, stdout, stderr) 三元——ls-remote tip 解析只吃 stdout（评审 R1：stderr
+        传输噪声如 ssh 首连告警不得混进 fields[0]）；超时 rc=124 带 stderr 文案。"""
+        proc = subprocess.Popen(["git", *args], cwd=str(cwd),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=_PUSH_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+            try:  # 有限宽限收尸；逃逸后代持管道时弃读，防线程挂死
+                proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe:
+                        pipe.close()
+            return 124, "", f"git {' '.join(args[:2])} 超时（>{_PUSH_TIMEOUT}s）"
+        return proc.returncode, (out or ""), (err or "")
+
+    def delete_branch(self, repo_dir: str, branch: str,
+                      target_branch: str) -> tuple[str, str]:  # Req: ag-0f60fd
+        """ag-0f60fd merged 终局删远端任务支（守卫删除）。
+
+        无 origin＝"none"（本地仓静默）；ls-remote 取 refs/heads/<branch> tip，
+        远端无此支＝"absent"（静默幂等）；tip 本地对象库不可达＝"skip"（无从
+        校验 ancestor，保守不删）；tip 不含于本地目标支＝"skip"（远端支有未并
+        内容，保守不删；ag-49312d：merge-base 直比既有本地 refs——不经
+        baseline()，其 best-effort fetch 违反本需求不 fetch 契约）；为真才
+        push origin --delete refs/heads/<branch>（只此一引用、不 force，带
+        --force-with-lease=<ref>:<tip> CAS——终闸 B1：守卫通过后远端支被第三
+        方推进则拒删，不丢未并提交唯一远端副本）。失败分类同 push：non-ff/
+        failed 带 git 输出尾（lease 拒含 stale info 归 failed 告警）；返回
+        (status, tail)，只报告不重试。
+        """
+        if self._git(["remote", "get-url", "origin"],
+                     cwd=repo_dir, check=False).returncode != 0:
+            return "none", ""
+        rc, out, err = self._net(["ls-remote", "origin", f"refs/heads/{branch}"],
+                                 repo_dir)
+        if rc != 0:
+            return "failed", " ".join(
+                x for x in (err.strip(), out.strip()) if x)
+        fields = out.split()  # 仅 stdout：stderr 传输噪声不得混入 tip 解析
+        if not fields:
+            return "absent", ""
+        tip = fields[0]
+        if self._git(["cat-file", "-e", f"{tip}^{{commit}}"],
+                     cwd=repo_dir, check=False).returncode != 0:
+            return "skip", ""  # tip 本地不可达：对象缺失无从校验，保守不删
+        # ag-49312d 直比既有本地 refs（目标支在 project_dir 本地已含合并）；
+        # 不经 baseline()——其缓存过期会 best-effort fetch，违反不 fetch 契约
+        anc = self._git(["merge-base", "--is-ancestor", tip, target_branch],
+                        cwd=repo_dir, check=False)
+        if anc.returncode != 0:
+            return "skip", ""  # 含未并内容/本地目标支缺失：保守不删
+        # lease CAS（终闸 B1）：远端支已非 ls-remote 所见 tip（被第三方推进）
+        # 则拒删——防丢未并提交唯一远端副本
+        rc, out, err = self._net(["push", "origin", "--delete",
+                                  f"--force-with-lease=refs/heads/{branch}:{tip}",
+                                  f"refs/heads/{branch}"], repo_dir)
+        if rc == 0:
+            return "ok", ""
+        out = " ".join(x for x in (err.strip(), out.strip()) if x)
+        status = "non-ff" if ("non-fast-forward" in out
+                              or "fetch first" in out) else "failed"
+        return status, out
+
     def rebase_onto(self, env_dir: str, integration: str) -> str:
         """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交
         rebase --onto 目标 HEAD 重放（mb=merge-base），返回重放后 sha R。

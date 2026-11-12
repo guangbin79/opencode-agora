@@ -713,6 +713,145 @@ class TestAccessGitx(unittest.TestCase):
         self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL（非仅直接子进程）
         self.assertEqual(FakePopen.returncode, -9)  # 收尸已 reap
 
+    # ---- ag-0f60fd merged 终局删远端任务支（守卫删除） ----
+
+    def _origin_with_task_branch(self, suffix):
+        """origin＋已并任务支现场：main 提交后把 HEAD 推成任务支（tip 含于
+        main，镜像 merged 后形态）。返回 (branch, tip)。"""
+        origin = self.tmp / f"origin-{suffix}.git"
+        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
+        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
+        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
+        tip = self._commit(self.repo, {"src.py": "v2"}, "task work")
+        self._git(["push", "-q", "origin", f"HEAD:refs/heads/task-{suffix}"],
+                  cwd=self.repo)
+        return f"task-{suffix}", tip
+
+    def test_delete_branch_ok_when_tip_in_target(self):  # Req: ag-0f60fd
+        branch, tip = self._origin_with_task_branch("b1")
+        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
+                         ("ok", ""))
+        r = self._git(["ls-remote", "origin", f"refs/heads/{branch}"],
+                      cwd=self.repo)
+        self.assertEqual(r.stdout.strip(), "")  # 远端任务支已删
+        self.assertEqual(self._head(self.repo), tip)  # 目标支不动
+
+    def test_delete_branch_absent_when_remote_lacks_branch(self):  # Req: ag-0f60fd
+        origin = self.tmp / "origin-absent.git"
+        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
+        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
+        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
+        self.assertEqual(self.gx.delete_branch(str(self.repo), "nope-b", "main"),
+                         ("absent", ""))
+
+    def test_delete_branch_none_without_origin(self):  # Req: ag-0f60fd
+        self.assertEqual(self.gx.delete_branch(str(self.repo), "task-b4", "main"),
+                         ("none", ""))
+
+    def test_delete_branch_skip_when_tip_not_in_target(self):  # Req: ag-0f60fd
+        """任务支 tip 含未并提交（ancestor 假）：保守不删，远端支保留。"""
+        origin = self.tmp / "origin-unmerged.git"
+        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
+        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
+        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
+        self._git(["checkout", "-q", "-b", "task-unmerged"], cwd=self.repo)
+        tip = self._commit(self.repo, {"src.py": "v2"}, "unmerged work")
+        self._git(["push", "-q", "origin", "task-unmerged"], cwd=self.repo)
+        self._git(["checkout", "-q", "main"], cwd=self.repo)
+        self.assertEqual(
+            self.gx.delete_branch(str(self.repo), "task-unmerged", "main"),
+            ("skip", ""))
+        r = self._git(["ls-remote", "origin", "refs/heads/task-unmerged"],
+                      cwd=self.repo)
+        self.assertIn(tip, r.stdout)  # 远端支保留
+
+    def test_delete_branch_skip_when_tip_unreachable_locally(self):  # Req: ag-0f60fd
+        """远端任务支被第三方推进到本地对象库没有的提交：无从校验 ancestor，
+        保守不删。"""
+        branch, _ = self._origin_with_task_branch("b3")
+        peer = self.tmp / "peer3"
+        self._git(["clone", "-q", str(self.tmp / "origin-b3.git"), str(peer)],
+                  cwd=self.tmp)
+        self._git(["config", "user.email", "t@t"], cwd=peer)
+        self._git(["config", "user.name", "t"], cwd=peer)
+        self._git(["checkout", "-q", "-b", branch, f"origin/{branch}"], cwd=peer)
+        peer_tip = self._commit(peer, {"src.py": "v3"}, "third party advance")
+        self._git(["push", "-q", "origin", branch], cwd=peer)
+        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
+                         ("skip", ""))
+        r = self._git(["ls-remote", "origin", f"refs/heads/{branch}"],
+                      cwd=self.repo)
+        self.assertIn(peer_tip, r.stdout)  # 远端支保留
+
+    def test_delete_branch_failure_classified(self):  # Req: ag-0f60fd
+        self._git(["remote", "add", "origin", str(self.tmp / "nope2.git")],
+                  cwd=self.repo)
+        status, tail = self.gx.delete_branch(str(self.repo), "task-b5", "main")
+        self.assertEqual(status, "failed")
+        self.assertIn("nope2.git", tail)  # 失败因随输出尾
+
+    def test_delete_branch_stderr_noise_not_tip(self):  # Req: ag-0f60fd
+        """评审 R1：ls-remote 成功但 stderr 带 ssh 首连告警——tip 只解析
+        stdout，噪声不得混进 fields[0] 致误 skip（分支永久泄漏）。"""
+        branch, tip = self._origin_with_task_branch("b6")
+        calls = []
+
+        def fake_net(args, cwd):
+            calls.append(list(args))
+            if args[0] == "ls-remote":
+                return (0, f"{tip}\trefs/heads/{branch}",
+                        "Warning: Permanently added 'githost' (ED25519) "
+                        "to the list of known hosts.")
+            return (0, "", "")
+
+        self.gx._net = fake_net
+        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
+                         ("ok", ""))
+        self.assertEqual(calls[-1][:3], ["push", "origin", "--delete"])
+
+    def test_delete_branch_no_fetch(self):  # Req: ag-0f60fd
+        """终闸 A1：全程零 fetch argv——只比对既有本地 refs（ag-49312d），
+        不经 baseline() 的 best-effort fetch（冷缓存会在 merged 收尾阻塞网络）。"""
+        branch, _ = self._origin_with_task_branch("b7")
+        orig, seen = self.gx._git, []
+
+        def spy(args, **kw):
+            seen.append(list(args))
+            return orig(args, **kw)
+
+        self.gx._git = spy
+        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
+                         ("ok", ""))
+        self.assertFalse(any("fetch" in a for a in seen),
+                         f"出现 fetch argv: {seen}")
+
+    def test_delete_branch_cas_rejects_moved_tip(self):  # Req: ag-0f60fd
+        """终闸 B1 TOCTOU：守卫通过后远端任务支被第三方推进（ls-remote 仍见
+        旧 tip）——lease CAS 拒删，未并提交远端副本保留。"""
+        branch, tip = self._origin_with_task_branch("b8")
+        peer = self.tmp / "peer8"
+        self._git(["clone", "-q", str(self.tmp / "origin-b8.git"), str(peer)],
+                  cwd=self.tmp)
+        self._git(["config", "user.email", "t@t"], cwd=peer)
+        self._git(["config", "user.name", "t"], cwd=peer)
+        self._git(["checkout", "-q", "-b", branch, f"origin/{branch}"], cwd=peer)
+        self._git(["commit", "-q", "--allow-empty", "-m", "third party advance"],
+                  cwd=peer)
+        self._git(["push", "-q", "origin", branch], cwd=peer)
+
+        def fake_ls(args, cwd):
+            if args[0] == "ls-remote":  # 守卫已过、删除未落的窗口：仍见旧 tip
+                return (0, f"{tip}\trefs/heads/{branch}", "")
+            return type(self.gx)._net(args, cwd)
+
+        self.gx._net = fake_ls
+        status, tail = self.gx.delete_branch(str(self.repo), branch, "main")
+        self.assertIn(status, ("failed", "non-ff"))  # lease 拒：远端非预期 tip
+        self.assertTrue(tail)
+        r = self._git(["ls-remote", "origin", f"refs/heads/{branch}"],
+                      cwd=self.repo)
+        self.assertNotEqual(r.stdout.strip(), "")  # 远端支保留（含未并推进）
+
     # ---- LFS 实体物化（ag-c1aa63 同族：指针文件≠内容） ----
 
     def _init_lfs_repo(self):

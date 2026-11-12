@@ -566,7 +566,14 @@ class Gate:
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
-        self._push_after_merge(tid)
+        push_st = self._push_after_merge(tid)
+        if push_st in ("non-ff", "failed"):
+            # 评审 R1：目标支未落 origin（push 被拒/失败）——任务支是已并提交
+            # 唯一远端副本，留作恢复源不删
+            self._audit(tid, "task_branch_delete_skipped_push_failed",
+                        note=push_st)
+        else:
+            self._delete_remote_task_branch(tid)
 
     def _push_after_merge(self, tid):  # Req: ag-0d2daa
         """ag-0d2daa 服务侧 origin 同步：merged 落账后推目标支（含缺省支）。
@@ -574,13 +581,15 @@ class Gate:
         幂等（崩溃重排补终态路径也推，已同步静默）；非 ff 被拒/失败仅告警留痕
         ——不 force、不回滚本地合并、不影响已落 merged 终态；无 origin 零动作。
         本地支严格落后 origin 时零动作（ag-49312d：推之必 non-ff 假警报）。
-        全兜底：push 链任何异常不掩盖门结果。
+        全兜底：push 链任何异常不掩盖门结果。返回推送结果供 _succeed 决策删任务
+        支（ag-0f60fd）：ok/none/skip＝origin 已含或本无远端；non-ff/failed＝
+        未落 origin，删除跳过保恢复源；异常归 failed。
         """
         try:
             t = self._state.get(tid)
             branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
             if self._gitx.strictly_behind(t["project_dir"], branch):
-                return  # 本地支已全含于 origin（ag-49312d 直通场景）：推陈旧支必 non-ff 假警报
+                return "skip"  # 本地支已全含于 origin（ag-49312d 直通场景）：推陈旧支必 non-ff 假警报
             r, tail = self._gitx.push(t["project_dir"], branch)
             if r == "non-ff":
                 self._audit(tid, "push_rejected", branch=branch, note=tail[:200])
@@ -596,8 +605,34 @@ class Gate:
                     f"origin push 失败（不影响任务终态，本地合并保持不动）: "
                     f"refs/heads/{branch}"
                     + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
+            return r
         except Exception as e:
             self._audit(tid, "push_failed", note=str(e)[:200])
+            return "failed"  # 归 failed：_succeed 据此跳过删任务支（ag-0f60fd）
+
+    def _delete_remote_task_branch(self, tid):  # Req: ag-0f60fd
+        """ag-0f60fd merged 终局删远端任务支：支名＝env_dir basename，仅 merged
+        路径调用（_succeed 尾）；成功 audit task_branch_deleted；失败（non-ff/
+        failed）audit task_branch_delete_failed＋派发方告警；none/absent/skip
+        （无 origin/远端无支/守卫拒删）静默幂等。全兜底：任何异常不掩盖门结果
+        （_push_after_merge 同纪律）。"""
+        try:
+            t = self._state.get(tid)
+            branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
+            name = Path(t["env_dir"]).name
+            r, tail = self._gitx.delete_branch(t["project_dir"], name, branch)
+            if r == "ok":
+                self._audit(tid, "task_branch_deleted", branch=name)
+            elif r in ("non-ff", "failed"):
+                self._audit(tid, "task_branch_delete_failed", branch=name,
+                            note=tail[:200])
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"远端任务支删除失败（不影响任务终态，本地合并保持不动）: "
+                    f"refs/heads/{name}"
+                    + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
+        except Exception as e:
+            self._audit(tid, "task_branch_delete_failed", note=str(e)[:200])
 
     def _non_ff(self, tid, branch, before, conflict=False):
         """F32 同步冲突或最终推进窄竞态遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""

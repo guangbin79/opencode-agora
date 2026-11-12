@@ -69,6 +69,8 @@ class FakeGitx:
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
         self.push_calls, self.push_result = [], "ok"  # Req: ag-0d2daa
         self.push_tail = ""  # push 失败输出尾（审计/告警外带）
+        self.delete_calls, self.delete_result = [], "ok"  # Req: ag-0f60fd
+        self.delete_tail = ""  # 删除失败输出尾
         self.behind_result = False  # ag-49312d strictly_behind 注入（push 前守卫）
         self.materialize_calls = []  # F: 检出后物化调用记录
         self.materialize_result = ""  # 缺省零依赖物＝空报告
@@ -164,6 +166,10 @@ class FakeGitx:
     def push(self, repo_dir, branch):  # Req: ag-0d2daa
         self.push_calls.append((repo_dir, branch))
         return self.push_result, self.push_tail
+
+    def delete_branch(self, repo_dir, branch, target_branch):  # Req: ag-0f60fd
+        self.delete_calls.append((repo_dir, branch, target_branch))
+        return self.delete_result, self.delete_tail
 
     def strictly_behind(self, repo_dir, branch):  # Req: ag-49312d
         return self.behind_result
@@ -1330,6 +1336,104 @@ class TestGateSupply(TestCoreGate):
                           if e["event"].startswith("push_")], [])  # 零审计噪音
         self.assertEqual([m for m in self.store.read_messages()
                           if m["to"] == "disp1" and "push" in m["body"]], [])
+
+    # ---- ag-0f60fd merged 终局删远端任务支 ----
+
+    def test_merged_deletes_remote_task_branch(self):  # Req: ag-0f60fd
+        """merged 后删除调用：支名＝env_dir basename，目标支经任务 target_branch
+        （缺省＝symref 实名解析），成功审计 task_branch_deleted。"""
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.gx.delete_calls, [("/repo", "t1", "main")])
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "task_branch_deleted"]
+        self.assertEqual([e["branch"] for e in ev], ["t1"])
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+
+    def test_delete_named_target_branch_passed_through(self):  # Req: ag-0f60fd
+        self.seed(tb="issue/7-fix")
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gate.run("t1")
+        self.assertEqual(self.gx.delete_calls, [("/repo", "t1", "issue/7-fix")])
+
+    def test_delete_guard_rejection_silent(self):  # Req: ag-0f60fd
+        """skip（tip 未含于目标支/本地不可达）＝守卫拒删：静默零审计零告警。"""
+        self.gx.delete_result = "skip"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual([e for e in self.store.read_events("t1")
+                          if e["event"].startswith("task_branch_delete")], [])
+        self.assertEqual([m for m in self.store.read_messages()
+                          if m["to"] == "disp1" and "任务支删除失败" in m["body"]],
+                         [])
+
+    def test_delete_absent_silent(self):  # Req: ag-0f60fd
+        """远端无此支＝静默幂等：零审计零告警，终态不受影响。"""
+        self.gx.delete_result = "absent"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual([e for e in self.store.read_events("t1")
+                          if e["event"].startswith("task_branch_delete")], [])
+        self.assertEqual([m for m in self.store.read_messages()
+                          if m["to"] == "disp1" and "任务支删除失败" in m["body"]],
+                         [])
+
+    def test_delete_skipped_when_push_not_landed(self):  # Req: ag-0f60fd
+        """评审 R1：目标支 push 被拒/失败＝origin 未含已并提交——跳删任务支
+        （留作唯一远端恢复源）＋audit 留痕；终态不受影响。"""
+        for tid, st in (("t1", "non-ff"), ("t2", "failed")):
+            self.seed(tid=tid)
+            self.gx.push_result = st
+            # 双任务各耗 2 份 runner 结果（env+集成），缺额即 IndexError 假 reopened
+            self.runner.results = [(0, "pass")] * 4
+            # contains_result 在 t1 门内被 ff_sha 粘滞置 True（ag-54bd98），复位防 t2 误 vacuous
+            self.gx.contains_result = False
+            self.assertEqual(self.gate.accept_done(tid, "s-w1", SHA), "accepted")
+            self.gate.run(tid)
+            self.assertEqual(self.state.get(tid)["state"], "closed")
+            self.assertEqual(self.gx.delete_calls, [])  # 跳删：保恢复源
+            ev = [e for e in self.store.read_events(tid)
+                  if e["event"] == "task_branch_delete_skipped_push_failed"]
+            self.assertEqual([e["note"] for e in ev], [st])
+
+    def test_delete_failed_notifies_keeps_merged(self):  # Req: ag-0f60fd
+        self.gx.delete_result = "failed"
+        self.gx.delete_tail = "remote: error: refusing to delete protected branch"
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 终态不受影响
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "task_branch_delete_failed"]
+        self.assertEqual([e["note"] for e in ev],
+                         ["remote: error: refusing to delete protected branch"])
+        notes = [m["body"] for m in self.store.read_messages()
+                 if m["to"] == "disp1" and "任务支删除失败" in m["body"]]
+        self.assertEqual(len(notes), 1)  # 告警恰一次
+        self.assertIn("refs/heads/t1", notes[0])
+        self.assertIn("protected branch", notes[0])  # 因随告警
+
+    def test_delete_exception_never_breaks_merged(self):  # Req: ag-0f60fd
+        def boom(repo_dir, branch, target_branch):
+            raise RuntimeError("network unreachable")
+        self.gx.delete_branch = boom
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 全兜底：异常不废门结果
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "task_branch_delete_failed"]
+        self.assertEqual([e["note"] for e in ev], ["network unreachable"])
+
+    def test_verify_fail_never_touches_remote_task_branch(self):  # Req: ag-0f60fd
+        """仅 merged 路径调用：verify_failed（cancelled/blocked 同理不入 _succeed）
+        不碰远端任务支。"""
+        self.runner = FakeRunner((1, "boom"))
+        self.mk_gate()
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "verify_failed")
+        self.assertEqual(self.gx.delete_calls, [])
 
 
 class TestGateVerifyOverrun(TestCoreGate):
