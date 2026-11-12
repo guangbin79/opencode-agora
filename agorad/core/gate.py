@@ -709,19 +709,29 @@ class Gate:
             finally:
                 lock.release()
             if st == "ok":
-                if self._remote_contains_safe(target, branch, deliver):
+                landed = self._remote_contains_safe(target, branch, deliver)
+                if landed is True:
                     self._finish_delivered(tid, branch, deliver, base, attempt,
                                            local_head)
                     return
-                self._delivery_fail(tid, attempt, "push_failed",
-                                    "push ok 但远端复核不含交付 commit")
+                if landed is False:  # 复核成功确认不含：既有 push_failed 口径
+                    self._delivery_fail(tid, attempt, "push_failed",
+                                        "push ok 但远端复核不含交付 commit")
+                    return
+                # Req: F103 探针不可得：push 自报成功但远端确认不可得——
+                # 未证实≠不含，独立终局 push_unconfirmed，绝不二次推送
+                self._delivery_fail(tid, attempt, "push_unconfirmed",
+                                    "push ok 但远端复核不可得"
+                                    "（无法确认远端是否含交付 commit）")
                 return
             if st == "non-ff":  # 干净 non-ff：远端已被他写者推进，整链重试
                 self._audit(tid, "delivery_nonff", attempt=attempt,
                             note=tail[:200])
                 continue
-            # failed（超时/网络病）：先对账远端——已含即已交付，不二次推送
-            if self._remote_contains_safe(target, branch, deliver):
+            # failed（超时/网络病）：先对账远端——已含即已交付，不二次推送；
+            # 探针不可得(None)与确认不含(False)同归 push_failed（note＝push
+            # 自身失败输出，无包含性声明——Req: F103 不扩大交付语义）
+            if self._remote_contains_safe(target, branch, deliver) is True:
                 self._finish_delivered(tid, branch, deliver, base, attempt,
                                        local_head)
                 return
@@ -785,11 +795,13 @@ class Gate:
         except RuntimeError:  # 本地缺支＝同步无锚（pending）；交付不因此失败
             return None
 
-    def _remote_contains_safe(self, target, branch, commit):  # Req: F98
+    def _remote_contains_safe(self, target, branch, commit):  # Req: F98/F103
+        """三向对账：True＝远端确认含；False＝远端复核成功且确认不含；
+        None＝探针自身不可得（网络病）——绝不猜已交付，也绝不冒充确认不含。"""
         try:
             return self._gitx.remote_contains(target, branch, commit)
-        except RuntimeError:  # 对账不可得：按未证实处理（绝不猜已交付）
-            return False
+        except RuntimeError:
+            return None
 
     def _acquire_delivery_lock(self, lock):  # Req: F98
         """有界等锁：非阻塞探测＋短步长轮询，到点让位＝一次失败尝试，

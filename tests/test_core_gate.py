@@ -245,7 +245,10 @@ class FakeGitx:
         self.remote_contains_calls.append((repo_dir, branch, commit))
         self.remote_contains_timeouts.append(timeout)
         if self.remote_contains_results:
-            return self.remote_contains_results.pop(0)
+            r = self.remote_contains_results.pop(0)
+            if isinstance(r, Exception):  # 按次注入探针网络病（Req: F103）
+                raise r
+            return r
         return self.remote_contains_result
 
     def sync_local_target(self, repo_dir, branch, sha, expected_old):  # Req: F98
@@ -2350,6 +2353,48 @@ class TestManagedDelivery(TestCoreGate):
         d = self.delivery()
         self.assertEqual((d["status"], d["commit"]), ("delivered", SHA))
         self.assertEqual(len(self.gx.push_commit_calls), 1)  # 对账归零不重推
+
+    def test_managed_push_ok_probe_unavailable_push_unconfirmed(self):  # Req: F103
+        """push ok 但复核探针自身不可得（网络病）＝未证实，非「远端确认不含」：
+        独立终局 push_unconfirmed，绝不假称远端已复核且不含、绝不二次推送。"""
+        self.in_gate_managed()
+        self.gx.head_shas[self.integration] = SHA  # ff 直通：integration 头＝env 头
+        self.gx.remote_contains_results = [
+            False, RuntimeError("git fetch origin main: network down")]
+        # 入口探针未落远端；推送后复核探针自身抛（不可得）
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["error"]),
+                         ("failed", "push_unconfirmed"))
+        self.assertEqual(t["fail_streak"], 0)  # 非质量败不计连败
+        self.assertEqual(self.gx.push_commit_calls,
+                         [("/repo", SHA, "main")])  # 恰一次推送，绝不重推
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("reopened", evs)  # 不弹回 worker
+        self.assertEqual(  # worker 零续修指引（门入口知会除外）
+            [m for m in self.worker_msgs() if "重新 post(done" in m["body"]], [])
+        notes = [e.get("note", "") for e in self.store.read_events("t1")
+                 if e["event"] == "delivery_failed"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("无法确认", notes[0])  # 未证实口径
+        self.assertNotIn("不含", notes[0])  # 绝不假称远端已复核且不含
+
+    def test_managed_push_ok_confirmed_absent_keeps_push_failed(self):  # Req: F103
+        """对照：复核成功且确认不含＝既有 push_failed 分类不变（措辞明示已查远端）。"""
+        self.in_gate_managed()
+        self.gx.head_shas[self.integration] = SHA
+        self.gx.remote_contains_results = [False, False]  # 入口探针未落；复核成功确认不含
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual((self.delivery()["status"],
+                          self.delivery()["error"]), ("failed", "push_failed"))
+        notes = [e.get("note", "") for e in self.store.read_events("t1")
+                 if e["event"] == "delivery_failed"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("不含", notes[0])  # 复核成功缺席：明示远端已查且不含
 
     def test_managed_delivered_dirty_local_pending(self):  # Req: F98
         self.in_gate_managed()
