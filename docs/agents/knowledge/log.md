@@ -7,3 +7,6 @@
 ## [2026-11-11] ingest | agora-dispatch-routing
 - 记录 F75 CLI 派发错址修复与补交语义
 - Types: Decision/Bug
+## [2026-11-12] ingest | stability-performance
+- 记录 F84-F93 写闸双路径、凭据/消息并发、账本热读缓存与 e2e 裸拉 MCP 的 HOME 沙箱坑位
+- Types: Decision/Bug/Strategy

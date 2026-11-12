@@ -20,6 +20,9 @@
 - **quick 微任务车道**（F65/F67）：task_create(quick=true) 建单原子登记——验收按账本历史动态判定（同仓 merged 非 quick 的 verify.cmd 唯一最高频且 ≥2 次；证据不足即拒并报候选，quick 行不计证据；自带 verify_cmd 即拒）；合并门前量 merge-base 累计 diff，超 AGORA_QUICK_MAX_FILES/LINES（缺省 3/30）按 verify 红既有路径退回（复用 verify-failed＋3-strike 零新状态）；BOOT 减配砍嵌套/协作/沉淀三行；非 quick 任务零变化
 - **零提交 done 拒收**（F69；ag-1ae0f1 空集放行）：done 受理点校验 merge-base --is-ancestor 目标基线（含 origin，ag-49312d 口径）——空集不再自动拒收：env HEAD 相对起点 base 有前进（dispatch 落账 env_base）或前次受理 commit 在目标支可达即放行；真零提交按锚拒收同款弹回 worker；no-op 出口＝worker post(kind=question) 申报＋派发方 cancel 归档（F78/F81 对齐）；不新增「驻留 done」出口（F36 护栏）
 - **CLI 派发错址自愈**（F75）：无头派发以 root_sid 记真建单人；health 启动/tick 修 active 顶层错址；to=root 积压 replay_of 幂等补交；真 headless/嵌套/终态不动
+- **写闸双路径不变量**（F84）：worker 原生 edit/write 放行须 cwd 与写入目标同在任务 env；仅 cwd 合法而 target 越界必拒，拒因点名 target
+- **凭据与消息并发不变量**（F85-F87）：task_dispatch 公共响应不带 token；Auth 修改＋ephemeral 落盘同临界区；在线注入用 inflight 持交付权，check_mail 游标只推实取消息最大 ts
+- **账本热读缓存**（F92）：消息/事件惰性缓存，append 写盘成功后同锁发布；消息按 id 保序，读取一层 dict 拷贝隔离调用方；热读零触盘但仍非索引查询
 
 ## 关键模式
 
@@ -47,6 +50,7 @@
 - **rebase 冲突态检测须双 backend 目录**（F32/ag-4b300d）：sequencer 目录随 backend 分叉——merge 停 rebase-merge、apply 停 rebase-apply，单查其一即把真冲突误判环境病；定式＝rev-parse --git-path 两目录逐一探测，任一在位→abort→冲突，皆缺才按环境病上抛（分类先于动作）
 - **递归引用图遍历必带 visited＋显式栈**（F38 W-2）：after 环无校验→stop_after_failed 下钻 RecursionError（落假 reclaim_failed 审计）；定式＝起点自身入 seen、已访问不下钻、dispatch 沿 after 链查自引用/成环拒派报因含路径；visited 只消环不消链深，递归版长链仍引爆
 - **网络子进程超时杀按进程组**（F-1）：git push 类派生 ssh 孙进程——start_new_session＋TimeoutExpired 时 os.killpg(SIGKILL)＋宽限收尸（逃逸后代持管道弃读防挂死）；只杀直接子＝孤儿累积（gate runner 同款对齐）
+- **e2e 裸拉 MCP 必沙箱 HOME**（20261112-081929-95c0）：直拉 agora_mcp.py 只覆写 AGORA_HOME 不够——write_pointer 仍写宿主 ~/.agora-home；子进程 env 必同时覆写 HOME，红跑后核对/恢复宿主指针
 
 ## 已知接受面
 
