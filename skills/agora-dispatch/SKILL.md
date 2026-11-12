@@ -99,7 +99,7 @@ verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。�
 - **不拨 enforce**：on/off 是人的权限（仅 root 牌），非 root 调用必拒 403＋auth_denied 审计。
 - **不删任务记录**：只许 cancel／closed，无删除面。
 - **不上巡检**：无 cron／全局扫描／stalled 自动处置——health tick 僵态只拍人并注入一次自检提示（F70），判断与处置仍归人或上级。
-- **休眠仓里 agora 不可用**：名册（`$AGORA_HOME/.agora/inactive-repos`）中的仓，agora_* 工具一律拒"此仓未启用 agora"——目标在休眠仓就转活跃仓派发或报人手改。
+- **休眠仓里 agora 不可用**：名册（`$AGORA_HOME/.agora/inactive-repos`）中的仓，其仓内会话的 agora_* 工具一律拒"此仓未启用 agora"；休眠拦仓内会话不拦派发——目标仓在册仍可从活跃仓会话派发（worker env 路径对不上名册行，闸照常活跃），无需报人手改。
 - **不代 worker 改 verify**：worker 改必拒；你改须走登记前，登记后锁定。
 
 > 来源：F1/F2/F12；设计 B1/§9；e2e T6 S1（拒因文案）＋T7 非 root enforce 403
