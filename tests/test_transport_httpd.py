@@ -133,6 +133,11 @@ class FakeGitx:
             self.landed = True
         return "ok"
 
+    def ff_sha(self, target, sha, branch=None):  # ag-28f327：sha 级试合并/推进同款
+        if branch is not None:
+            self.landed = True
+        return "ok"
+
     def head(self, repo_dir, branch=None):
         # Req: F100 交付落账读 head(integration)——生产 ff 直通＝env 头＝交付
         # sha；断言落账 commit 的用例经 env_head 注入该值（缺省旧口径 aaa111）

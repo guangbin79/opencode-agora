@@ -610,8 +610,12 @@ class Gate:
             # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
             self._gitx.build_integration(target, integration, branch)
             before = self._gitx.head(integration)
+            e = t.get("rebased_from") or t.get("commit")  # done sha＝交付权威
             r = None  # R＝F32 重放后任务提交（None＝ff 试合并直通）
-            if self._gitx.merge_ff(env, integration) != "ok":
+            # ag-28f327：ff 源＝done sha——worker 回报且已过 verify 的 commit 是
+            # 交付权威；env 名分支可停旧基线（worker 自建工作分支交付），作源则
+            # 零增量推进＝假终态/reopen 循环（ag-f77d90/ag-2f6c8a 判例）。
+            if self._gitx.ff_sha(integration, e) != "ok":
                 # F32 真非 ff：门内 detached rebase 干净自愈（env 分支与锚不动），
                 # 同步冲突才弹回（不计连败）；环境病如实上抛走门内 except。
                 if self._gitx.rebase_onto(env, integration) == "conflict":
@@ -619,18 +623,33 @@ class Gate:
                                  auto_ignored=auto_ignored)
                     return
                 # E＝锚对齐的 env 提交：崩溃重排时留痕值优先于落库残值 R
-                e = t.get("rebased_from") or t.get("commit")
                 r = self._gitx.head(integration)
-                if r == before and not self._gitx.contains(target, e, branch):
+                if r == before:
                     # ag-54bd98 G1 幻影形态②（ag-c3de0f/ag-e75d89）：空集重放
                     # R==onto＝env boot 分支零交付——原锚（run() 起点快照）不在
                     # 目标支即非崩溃窗口，禁以 set_fields(commit=R) 伪装推进。
-                    self._audit(tid, "empty_rebase_noop")
-                    self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
-                                       reason="空集 rebase 无交付")
-                    return
-                self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
-                self._audit(tid, "rebased", **{"from": e, "to": r})
+                    # ag-28f327：「已含交付」以远端目标支为准（env 外操作可污染
+                    # 本地 ref，ag-f77d90 worker 曾 ff 本地 master 旁路守卫致
+                    # merged@旧 tip 假终态）；无 origin 本地仓退化本地 ref——
+                    # 本无远端权威可对账。
+                    if self._gitx.has_origin(target):
+                        landed = self._gitx.remote_contains(target, branch, e)
+                    else:
+                        landed = self._gitx.contains(target, e, branch)
+                    if not landed:
+                        self._audit(tid, "empty_rebase_noop")
+                        self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
+                                           reason="空集 rebase 无交付")
+                        return
+                    # 崩溃补终态窗口（权威已含交付）：账面保真 done sha，禁以
+                    # 集成头覆写——差异入 audit（ag-28f327 set_fields 保真裁定）
+                    self._audit(tid, "already_delivered",
+                                **{"done": e, "head": r})
+                    if t.get("commit") != e or t.get("rebased_from"):
+                        self._state.set_fields(tid, commit=e, rebased_from=None)
+                else:
+                    self._state.set_fields(tid, commit=r, rebased_from=e)  # 先落库再推进（崩溃幂等）
+                    self._audit(tid, "rebased", **{"from": e, "to": r})
             report = self._gitx.materialize_checkout(integration, target)  # Req: ag-0d2daa
             if report:  # 检出后依赖物化：推进后按任务 pin 预置（含 gitlink bump 的任务 pin）
                 self._audit(tid, "checkout_materialize", note=report)
@@ -669,11 +688,12 @@ class Gate:
                     return
             else:
                 if t.get("rebased_from"):
-                    # 崩溃态②残值遇直通（目标支回退使 E 可 ff）：合入的是 env 头，
-                    # 落账对齐之并清留痕——防 merged 账面 sha 与验证内容脱节（反目标）
-                    self._state.set_fields(tid, commit=self._gitx.head(env),
-                                           rebased_from=None)
-                if self._gitx.merge_ff(env, target, branch) != "ok":
+                    # 崩溃态②残值遇直通（目标支回退使 E 可 ff）：直通合入的即
+                    # done sha（E）——落账对齐之并清留痕——防 merged 账面 sha 与
+                    # 验证内容脱节（反目标）
+                    self._state.set_fields(tid, commit=e, rebased_from=None)
+                # ag-28f327：推进源＝done sha——env 名分支零增量推进＝假终态
+                if self._gitx.ff_sha(target, e, branch) != "ok":
                     self._non_ff(tid, branch, self._gitx.head(target, branch),
                                  auto_ignored=auto_ignored)
                     return
