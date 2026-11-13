@@ -19,3 +19,6 @@
 ## [2026-11-13] ingest | knowledge-index
 - Added delivery-authority split (F98/F100/F101/F102): remote authority with origin, local CAS authority without origin, external dispatcher authority for external_branch, instance-owned cleanup; e2e proof at tests/e2e/multi_instance_delivery.py.
 - Types: Decision
+## [2026-11-13] ingest | knowledge-index
+- Added F104 CLI cancel root channel: dispatcher-card cross-pool cancel denied by design (ownership invariant); operator channel is agora cancel <tid> [--force] with exit 0/1/2 contract; CLI becomes dispatch/cancel dual write surface.
+- Types: Decision
