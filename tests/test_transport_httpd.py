@@ -936,6 +936,17 @@ class TestReworkLoop(HttpdTest):
                    if e["event"] == "running"]
         self.assertEqual(len(running), 2)  # 首跑＋续修两段开工均审计
 
+    def test_running_transition_refreshes_task_page(self):  # ag-0f60fd
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        page = self.app.store.home / "wiki" / "tasks" / f"{tid}.md"
+        self.assertIn("state: dispatched", page.read_text(encoding="utf-8"))
+        st, _ = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "start"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertIn("state: running",
+                      page.read_text(encoding="utf-8"))  # 开工即刷新
+
 
 class TestDispatcherRebind(HttpdTest):
     """F21：post 非链边死号改绑放行——壳重启 dispatcher 换号后旧任务可达。"""

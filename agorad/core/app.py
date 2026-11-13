@@ -27,6 +27,7 @@ class App:
     oc: object
     gitx: object
     main_sid: str
+    page_writer: object = None  # ag-0f60fd 任务页刷新面（httpd running 转换补刷）
 
     def bind_main(self, sid, caller):
         """root 牌身份钉死 daemon 身份（ag-f80309 B 案，替代 R25-A 活绑定 rebind）：

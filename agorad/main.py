@@ -165,18 +165,18 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                     same_lineage=auth.same_lineage,  # F16 血统链边（装配注入）
                     mail=lambda tid, text: send_email(  # F63 终态邮件必达（外呼缝同 Health）
                         store, tid, text, runner=mail_runner))
+    page_writer = lambda home, tid, row: write_task_page(  # F44：快照与事件装配注入
+        home, tid, row, tasks=state.snapshot()["tasks"],
+        events=store.read_events(tid))  # ag-0f60fd：TaskService/Gate/httpd 三面共用
     task = TaskService(
-        state, auth, gitx, oc, store, router,
-        lambda home, tid, row: write_task_page(  # F44：快照与事件装配注入
-            home, tid, row, tasks=state.snapshot()["tasks"],
-            events=store.read_events(tid)),
+        state, auth, gitx, oc, store, router, page_writer,
         stale_candidates=report.stale_candidates,  # ag-d1d8c1：僵态同口径
         verify_hygiene=find_verify_hygiene_issues)  # F99：登记面卫生闸
     peer = PeerBoard(store, state)  # F22 同仓协作面（写面权限归 httpd 角色判定）
     recover = Recover(state, oc, gitx, store, auth, router=router)
     app = App(store=store, state=state, auth=auth, router=router, task=task,
               peer=peer, gate=None, health=None, recover=recover, report=report,
-              oc=oc, gitx=gitx, main_sid=main_sid)
+              oc=oc, gitx=gitx, main_sid=main_sid, page_writer=page_writer)
     health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
                     env_activity=report._env_activity,  # F59 env 活性同口径（禁兄弟 import）
@@ -190,7 +190,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 roster_path=roster_path or str(Path(home) / ".agora" / "ignore.roster"),
                 quick_max_files=quick_max_files,  # F65 quick 包络旋钮透传
                 quick_max_lines=quick_max_lines,
-                clean_ignore_env=clean_ignore_env)  # ag-f5aa4d 数据层豁免 env 面
+                clean_ignore_env=clean_ignore_env,  # ag-f5aa4d 数据层豁免 env 面
+                page_writer=page_writer)  # ag-0f60fd：门段事件刷新任务页
     app.gate, app.health = gate, health
     return app
 

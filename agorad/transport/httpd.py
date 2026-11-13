@@ -133,6 +133,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.app.state.transition(tid, EV_RUNNING)
                 self.app.store.append_event({"ts": time.time(), "actor": sid,
                                              "event": EV_RUNNING, "task": tid})
+                if self.app.page_writer is not None:  # ag-0f60fd：任务页随开工刷新
+                    try:  # 页面写面尽力而为（F54 口径）：败不断工具调用
+                        self.app.page_writer(self.app.store.home, tid,
+                                             self.app.state.get(tid))
+                    except Exception:
+                        pass
             return self._json(200, self._tool(name, sid, role, token, body))
         except Rejected as e:      # 归属细判/保险丝拒（报因在消息）
             return self._json(403, {"error": str(e)})

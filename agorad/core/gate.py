@@ -197,10 +197,12 @@ class Gate:
     def __init__(self, state, gitx, router, oc, read_anchor, health, auth,
                  store, runner=None, verify_timeout=300, verify_ceiling=None,
                  on_blocked=None, roster_path=None, quick_max_files=3,
-                 quick_max_lines=30, clean_ignore_env=""):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env
+                 quick_max_lines=30, clean_ignore_env="",
+                 page_writer=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
+        self._pages = page_writer  # ag-0f60fd：门段任务页刷新面（_audit 单点挂钩）
         self._roster_path = roster_path
         self._clean_ignore_env = clean_ignore_env  # ag-f5aa4d 数据层豁免 env 面
         self._verify_timeout, self._verify_ceiling = verify_timeout, verify_ceiling
@@ -1391,6 +1393,11 @@ class Gate:
         """F8 门段审计：迁移即 events.jsonl 一行（事件名＝迁移后状态名）。"""
         self._store.append_event({"ts": time.time(), "actor": "gate",
                                   "event": event, "task": tid, **extra})
+        if self._pages is not None:  # ag-0f60fd：门段全部事件经此单点刷新任务页
+            try:  # 页面写面尽力而为（F54 同口径）：败不断门结果
+                self._pages(self._store.home, tid, self._state.get(tid))
+            except Exception:
+                pass
 
     def _post(self, tid, body):
         t = self._state.get(tid)

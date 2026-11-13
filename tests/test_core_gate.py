@@ -391,7 +391,8 @@ class TestCoreGate(unittest.TestCase):
 
     def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False,
                 on_blocked=None, roster_path=None,
-                quick_max_files=3, quick_max_lines=30, clean_ignore_env=""):
+                quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
+                page_writer=None):
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
                            fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
@@ -403,7 +404,8 @@ class TestCoreGate(unittest.TestCase):
                          roster_path=roster_path,
                          quick_max_files=quick_max_files,
                          quick_max_lines=quick_max_lines,
-                         clean_ignore_env=clean_ignore_env)
+                         clean_ignore_env=clean_ignore_env,
+                         page_writer=page_writer)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None,
              cmd="pytest -q", timeout=None, quick=False):
@@ -2087,6 +2089,42 @@ class TestReopenDispatcherNotice(TestCoreGate):
         self.gate.run("t1")
         (m,) = self.notices()
         self.assertIn("任务 t1 reopened 门内异常", m["body"])
+
+
+class TestTaskPageRefresh(TestCoreGate):
+    """ag-0f60fd：门段事件经 _audit 单点刷新任务页——终态不再停在派发快照。"""
+
+    def mk_pages(self, raise_on_call=False):
+        self.pages = pages = []
+
+        def writer(home, tid, row):
+            if raise_on_call:
+                raise OSError("disk full")
+            pages.append((tid, row["state"]))
+
+        return writer
+
+    def test_merged_final_state_refreshes_page(self):  # ag-0f60fd
+        self.mk_gate(page_writer=self.mk_pages())
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertIn(("t1", "merged"), self.pages)  # merged 终态行已刷
+        self.assertEqual(self.pages[-1], ("t1", "closed"))  # 门尾 closed 同刷
+
+    def test_reopened_path_refreshes_page(self):  # ag-0f60fd
+        self.mk_gate(page_writer=self.mk_pages())
+        self.in_gate()
+        shutil.rmtree(self.env / ".review-loop")  # 合并时锚缺失 → reopened 弹回
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.assertIn(("t1", "reopened"), self.pages)
+
+    def test_refresh_failure_does_not_break_gate(self):  # ag-0f60fd（F54 口径）
+        self.mk_gate(page_writer=self.mk_pages(raise_on_call=True))
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 门照常走完
 
 
 class TestGateAudit(TestCoreGate):
