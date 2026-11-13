@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""agora CLI（F14→F64）：bash 可判定的条件谓词——看门狗规范条件等待＋派发等待一体（dispatch 为唯一写面）。
+"""agora CLI（F14→F104）：bash 可判定的条件谓词——看门狗规范条件等待＋派发等待一体（dispatch/cancel 双写面）。
 
 dispatch 子命令派发任务并阻塞等终态（派发＋等待一体）；watch 子命令盯
 非本回合派发的在飞任务（同事任务/跨会话遗留/中断重挂）阻塞至终态，对齐
 docker wait / kubectl wait 约定。status 子命令（F28 防误杀）单查任务三态
 判读：数据全取既有 /board 单任务视图＋/doctor（零服务端新端点），分类
-客户端推导。取数照抄 board_tui.py 形态：
+客户端推导。cancel 子命令（F104）薄代理 /task_cancel 中止任务——主会话
+持 dispatcher 牌经 MCP 被归属细判拒的他池任务，走 root CLI 通道取消。
+取数照抄 board_tui.py 形态：
 $AGORA_HOME/.agora/{root.token,service.json}，零直读状态文件、零格式逆向。
 非 MCP agora sleep（那是 agent 回合内本地睡眠，两者不互替）。
 """
@@ -178,6 +180,27 @@ def run_dispatch(a):
     return code
 
 
+def run_cancel(a):
+    """F104 root 取消通道：薄代理 agorad 既有 /task_cancel 端点（服务端
+    归属细判/F28 busy/依赖确认语义零改动）——主会话持 dispatcher 牌经 MCP
+    被拒的他池任务由此直通。单跳不重试：任何异常终局 exit 2。
+    """
+    base, token = discover()
+    if not token:
+        raise Fail("root 牌缺失")
+    body = {"task": a.task_id}
+    if a.force:
+        body["force"] = True  # F28 busy 强杀确认透传；缺省不带键（服务端口径）
+    r = _call(base, token, "/task_cancel", body)  # Fail/Rejected/Transient→main exit 2
+    n, reason = r.get("cancelled", 0), r.get("reason", "")
+    line = f"cancel {a.task_id}: cancelled={n}" + (f" reason={reason}" if reason else "")
+    if reason == "worker_busy":
+        print(line + " hint=加 --force 重试")
+        return 1
+    print(line)
+    return 0 if n or reason == "dependency_skip_confirmed" else 1
+
+
 def status_view(tid, task, stale_ids, now):
     """F28 三态判读（客户端推导，零服务端新端点）：数据＝/board 单任务视图＋/doctor。
 
@@ -255,8 +278,8 @@ def _resolve_timeout(flag):
 def _parser():
     ap = argparse.ArgumentParser(
         prog="agora",
-        description="agora CLI——bash 可判定的条件谓词（F14→F64）：dispatch＝"
-                    "派发＋等待一体（唯一写面），watch/status 只读。")
+        description="agora CLI——bash 可判定的条件谓词（F14→F104）：dispatch＝"
+                    "派发＋等待一体、cancel＝中止任务（双写面），watch/status 只读。")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="command")
     d = sub.add_parser("dispatch",
                        help="派发任务并阻塞等终态（派发＋等待一体，F64）",
@@ -302,6 +325,21 @@ def _parser():
     s.add_argument("task_id", metavar="task-id", help="任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx）")
     s.add_argument("--json", action="store_true", help="机器可读 JSON 形态")
     s.set_defaults(fn=run_status)
+    c = sub.add_parser(
+        "cancel", help="中止任务（级联下级；busy 须 --force 确认强杀，F104）",
+        description="中止任务（F104 root 通道）：薄代理 agorad 既有 /task_cancel"
+                    " 端点（服务端语义零改动）——MCP task_cancel 归属细判拒的"
+                    "他池任务经 root CLI 直通；取消前先 status 看判读防误杀。",
+        epilog="退出码：0＝cancelled>=1（取消生效）或 reason=dependency_skip_confirmed"
+               "（显式确认跳过生效）\n"
+               "1＝未取消（cancelled=0 无 reason＝已终态 noop；或 reason=worker_busy"
+               "——hint 加 --force 重试）\n"
+               "2＝异常（用法错/任务未知 404/认牌失败 401/403/网络不可达）",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    c.add_argument("task_id", metavar="task-id", help="任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx）")
+    c.add_argument("--force", action="store_true",
+                   help="确认强杀回合进行中的 busy worker（F28）")
+    c.set_defaults(fn=run_cancel)
     return ap
 
 

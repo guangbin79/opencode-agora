@@ -1,4 +1,4 @@
-"""F14→F64 agora CLI dispatch/watch 契约：派发＋等待一体与终态阻塞谓词。
+"""F14→F104 agora CLI dispatch/watch/cancel 契约：派发＋等待一体与终态阻塞谓词。
 
 extensionless 脚本经 SourceFileLoader 载入直测状态分类/取数/轮询缝；
 壳与 --help 走子进程真连 stub agorad（test_board_tui 同法）。
@@ -136,6 +136,40 @@ class _DetailSrv:
     @property
     def base(self):
         return f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    @property
+    def port(self):
+        return self.srv.server_address[1]
+
+    def stop(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def _cancel_stub(resp, code=200):
+    """F104 /task_cancel stub：记请求体回固定 resp；code 非 200＝拒（空体）。"""
+    count = {"bodies": []}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            count["bodies"].append(json.loads(raw or b"{}"))
+            data = json.dumps(resp).encode() if code == 200 else b""
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    return H, count
+
+
+class _CancelSrv:
+    def __init__(self, resp, code=200):
+        h, self.count = _cancel_stub(resp, code)
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), h)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     @property
     def port(self):
@@ -637,6 +671,93 @@ class TestDispatch(unittest.TestCase):
             srv.stop()
         self.assertEqual(p.returncode, 2)
         self.assertIn("404", p.stderr)
+
+
+class TestCancel(unittest.TestCase):
+    """F104 cancel 子命令：薄代理 /task_cancel；退出码 0/1/2 三态契约。"""
+
+    def setUp(self):
+        self.homes = []
+
+    def tearDown(self):
+        for h in self.homes:
+            shutil.rmtree(h, ignore_errors=True)
+
+    def home(self, srv, token="tok"):
+        port = srv.srv.server_address[1] if srv else _dead_port()
+        h = mkhome(port, token)
+        self.homes.append(h)
+        return h
+
+    def test_cancel_success_exit_zero(self):  # Req: F104
+        srv = _CancelSrv({"cancelled": 2})
+        try:
+            p = run_cli(["cancel", "t1"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual((p.returncode, p.stdout.strip()),
+                         (0, "cancel t1: cancelled=2"))
+        self.assertEqual(srv.count["bodies"], [{"task": "t1"}])  # 缺省不带 force 键
+
+    def test_dependency_skip_confirmed_exit_zero(self):  # Req: F104
+        srv = _CancelSrv({"cancelled": 0, "reason": "dependency_skip_confirmed"})
+        try:
+            p = run_cli(["cancel", "t1"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual((p.returncode, p.stdout.strip()),
+                         (0, "cancel t1: cancelled=0 reason=dependency_skip_confirmed"))
+
+    def test_terminal_noop_exit_one(self):  # Req: F104
+        srv = _CancelSrv({"cancelled": 0})
+        try:
+            p = run_cli(["cancel", "t1"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual((p.returncode, p.stdout.strip()),
+                         (1, "cancel t1: cancelled=0"))
+
+    def test_worker_busy_without_force_exit_one(self):  # Req: F104
+        srv = _CancelSrv({"cancelled": 0, "reason": "worker_busy",
+                          "hint": "worker 会话回合进行中——确认强杀请携 force:true 重试"})
+        try:
+            p = run_cli(["cancel", "t1"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("reason=worker_busy", p.stdout)
+        self.assertIn("加 --force 重试", p.stdout)  # hint 一行
+        self.assertEqual(srv.count["bodies"], [{"task": "t1"}])  # 请求体不含 force 键
+
+    def test_worker_busy_with_force_exit_zero(self):  # Req: F104
+        srv = _CancelSrv({"cancelled": 1})
+        try:
+            p = run_cli(["cancel", "t1", "--force"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual((p.returncode, p.stdout.strip()),
+                         (0, "cancel t1: cancelled=1"))
+        self.assertEqual(srv.count["bodies"],
+                         [{"task": "t1", "force": True}])  # 强杀确认透传
+
+    def test_unknown_task_exit_two(self):  # Req: F104
+        srv = _CancelSrv({}, code=404)
+        try:
+            p = run_cli(["cancel", "gt-none"], self.home(srv))
+        finally:
+            srv.stop()
+        self.assertEqual((p.returncode, p.stdout), (2, ""))
+        self.assertIn("404", p.stderr)
+
+    def test_help_smoke_lists_cancel(self):  # Req: F104
+        p = run_cli(["--help"], self.home(None))
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("cancel", p.stdout)  # 顶层子命令清单
+        p = run_cli(["cancel", "--help"], self.home(None))
+        self.assertEqual(p.returncode, 0)
+        for frag in ("agora cancel", "task-id", "--force", "退出码",
+                     "worker_busy", "dependency_skip_confirmed"):
+            self.assertIn(frag, p.stdout, frag)
 
 
 class TestMcpSchema(unittest.TestCase):
