@@ -528,7 +528,7 @@ while time.time() * 1000 - t0 < 30000:
         break
     time.sleep(0.2)
 check(hit and ready and elapsed <= 5.0,
-      f"S3 问题在线注入实测 {elapsed:.2f}s ≤5s # Req: F4")
+      f"S3 问题在线注入实测 {elapsed:.2f}s ≤5s（就位={ready}, 到达={hit}） # Req: F4")
 
 # worker 应答走服务面（与 MCP agora_post 同端点同牌语义）。注：opencode v2.1.4 的 MCP
 # spawn 间歇缺失（run8 在场成功、run10/11 全会话无 agora 工具——排障志#9），链边/留库/
