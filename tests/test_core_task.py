@@ -1869,6 +1869,27 @@ class TestF95ClientKeyIdempotency(TestCoreTask):
             self.svc.create("child", None, None, wtok, verify_cmd="true",
                             client_key="wk2")
 
+    def test_retry_with_req_id_and_client_key_returns_original(self):  # Req: F95
+        """req_id＋client_key 组合重试：幂等命中先于 F34 发放查重——
+        网络重试携带原 req_id 是常态，不得被「已发放」确定性拒收。"""
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                              req_id="F95", client_key="issue-42")
+        self.assertEqual(
+            self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                            req_id="F95", client_key="issue-42"),
+            tid)  # 幂等命中：不重查 req_id（原行已记）
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 1)
+        self.assertEqual(self.state.get(tid)["req_id"], "F95")
+
+    def test_new_task_duplicate_req_id_still_rejected(self):  # Req: F95
+        """不同键＝真新任务：F34 发放查重不因幂等让路而弱化。"""
+        self.svc.create("g", "/repo", None, self.root, verify_cmd="true",
+                        req_id="F95", client_key="k1")
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g2", "/repo", None, self.root, verify_cmd="true",
+                            req_id="F95", client_key="k2")
+        self.assertIn("已发放", str(cm.exception))
+
     def test_untrusted_pool_key_reuse_rejected_root_allowed(self):  # Req: F95
         disp_a = self.auth.issue("dA", "dispatcher")
         tid = self.svc.create("g", "/repo", None, disp_a, verify_cmd="true",

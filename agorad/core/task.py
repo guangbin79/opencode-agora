@@ -171,8 +171,6 @@ class TaskService:
                 self._reject(tid, sid, "target_branch 缺省解析得主检出 detached"
                                       "（HEAD）——须显式指定 target_branch")
             target_branch = pinned  # 实名入账：已知存在，不走 check_branch
-        if req_id is not None:  # F34 发放面查重：服务串行单写者，并行撞号根治
-            self._req_check(tid, sid, project_dir, req_id)
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
         now = time.time()
@@ -217,6 +215,10 @@ class TaskService:
                                            f"任务 {x_id}——非其派发谱系调用方"
                                            "不得复用（key conflict）")
                 return x_id  # 幂等命中：零新行/零事件/零页面，返回原任务
+        if req_id is not None:  # F34 发放面查重：服务串行单写者，并行撞号根治
+            # Req: F95 置于幂等扫描后——同键同载荷重试携带原 req_id
+            # 先命中幂等返回原任务，不得被「已发放」拒（网络重试常态形态）
+            self._req_check(tid, sid, project_dir, req_id)
         head = (title or goal.splitlines()[0][:40]) if (title or goal) else tid
         self._state.add(tid, {
             "title": " ".join(str(head).split()),  # F46 B-1：压平 title（boot 开场按行解析；goal 合法多行不动）
