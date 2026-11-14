@@ -89,6 +89,8 @@ class FakeGitx:
         self.rebase_calls = []
         self.rebase_done = None  # ag-54bd98：重放翻页——integration 头在 rebase 前后取不同值
         self.rebase_new_head = None  # 重放后 R；None＝空集 no-op（头==onto）
+        self.rebase_results = []  # Req: F105 按次队列：空则回退 rebase_result
+        self.rebase_conflict_files = ["src/conflict.py"]  # Req: F105 冲突回填清单
         self.phantom_ff = False  # ag-54bd98 形态①注入：幂等 ff 零移动，交付从未落库
         self.ff_sha_calls, self.ff_sha_result = [], "ok"
         self.push_calls, self.push_result = [], "ok"  # Req: ag-0d2daa
@@ -115,15 +117,20 @@ class FakeGitx:
         self.local_sha_result = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9"
         self.local_sha_raise = False
         self.local_sha_raises = []  # 按次抛掷队列（True/False）：锁内窗口注入
+        self.local_sha_results = []  # Req: F105 按次取值队列（tip 刷新窗口）
         self.advance_calls, self.advance_result = [], "synced"
         self.advance_results = []
         self.remote_contains_timeouts = []  # Req: F100 恢复面短预算透传记录
 
-    def rebase_onto(self, env_dir, integration):
+    def rebase_onto(self, env_dir, integration, conflicts=None):
         self.rebase_calls.append((env_dir, integration))
-        if self.rebase_result != "conflict":
+        result = (self.rebase_results.pop(0)
+                  if self.rebase_results else self.rebase_result)
+        if result != "conflict":
             self.rebase_done = integration  # 重放成功：integration 头翻页（时序）
-        return self.rebase_result
+        elif conflicts is not None:  # Req: F105 冲突文件清单回填
+            conflicts.extend(self.rebase_conflict_files)
+        return result
 
     def ff_sha(self, target, sha, branch=None):
         self.ff_sha_calls.append((target, sha, branch))
@@ -283,6 +290,8 @@ class FakeGitx:
                 raise RuntimeError(f"本地目标分支不存在: refs/heads/{branch}")
         if self.local_sha_raise:
             raise RuntimeError(f"本地目标分支不存在: refs/heads/{branch}")
+        if self.local_sha_results:  # Req: F105 按次取值（冲突后重读＝新 tip）
+            return self.local_sha_results.pop(0)
         return self.local_sha_result
 
     def advance_local_target(self, repo_dir, branch, sha, expected_old):  # Req: F100
@@ -3058,6 +3067,133 @@ class TestExternalHandoff(TestCoreGate):
         evs = [e["event"] for e in self.store.read_events("t1")]
         self.assertNotIn("reopened", evs)  # 不弹回 worker
         self.assertEqual(self.gx.removed, [])  # 留 env 现场
+
+    def test_external_fake_conflict_self_heals_on_refreshed_local_tip(self):  # Req: F105
+        """过期基点假冲突自愈（本地基）：首 rebase 冲突→重读钉死支 tip 已移动
+        →新基重建 integration 再 rebase 干净→交付成功驻留 handoff；自愈非
+        non_ff 竞争重试，attempt 不被消耗；审计行区分 rebase_conflict_retry。"""
+        self.in_gate_external()
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_results = ["conflict", "sha"]
+        self.gx.rebase_new_head = R_SHA
+        self.gx.local_sha_results = [LOCAL_BASE, TIP_SHA]  # 冲突后重读＝新 tip
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        d = self.delivery()
+        self.assertEqual(t["state"], "done")  # 自愈成功照常驻留 handoff
+        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
+                         ("awaiting_external", R_SHA, TIP_SHA, 1))
+        self.assertEqual(self.gx.build_at_calls,
+                         [("/repo", self.integration, LOCAL_BASE),
+                          ("/repo", self.integration, TIP_SHA)])  # 新基重建
+        self.assertEqual(len(self.gx.rebase_calls), 2)  # 恰再试一次
+        self.assertEqual(self.gx.fetch_calls, [])  # 本地基自愈不 fetch
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("rebase_conflict_retry", evs)  # 审计区分自愈重试
+        self.assertNotIn("delivery_failed", evs)
+
+    def test_external_fake_conflict_external_base_refetch_self_heals(self):  # Req: F105
+        """过期基点假冲突自愈（外部基，non_ff 重排队）：重 fetch origin 支取新
+        tip 重建自愈；自愈不消耗 attempt 轮转号（仍 2）、不读本地钉死支。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_results = ["conflict", "sha"]
+        self.gx.rebase_new_head = R_SHA
+        self.gx.has_origin_result = True
+        self.gx.fetch_result = "d" * 40  # 重 fetch 所见新 tip
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        d = self.delivery()
+        self.assertEqual(t["state"], "done")
+        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
+                         ("awaiting_external", R_SHA, "d" * 40, 2))
+        self.assertEqual(self.gx.fetch_calls, [("/repo", "main")])  # 恰一次重 fetch
+        self.assertEqual(self.gx.local_sha_calls, [])  # 外部基不回退本地支
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("rebase_conflict_retry", evs)
+        self.assertNotIn("delivery_failed", evs)
+
+    def test_external_real_conflict_terminal_with_file_list(self):  # Req: F105
+        """真冲突终局：刷新基后二次 rebase 仍冲突→failed/blocked 口径不变，
+        attempt 不被消耗；delivery 投影附 machine-readable conflict_files、
+        blocked 通知附冲突文件清单。"""
+        self.in_gate_external(streak=2)
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "conflict"  # 两次皆冲突（刷新基亦不消解）
+        self.gx.local_sha_results = [LOCAL_BASE, TIP_SHA]
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        d = self.delivery()
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(t["fail_streak"], 2)  # 非质量败不计连败
+        self.assertEqual((d["status"], d["error"], d["attempt"],
+                          d["conflict_files"]),
+                         ("failed", "rebase_conflict", 1,
+                          ["src/conflict.py"]))
+        self.assertEqual(len(self.gx.build_at_calls), 2)  # 自愈重试确曾发生
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("rebase_conflict_retry", evs)  # 审计行区分
+        self.assertIn("delivery_failed", evs)
+        self.assertNotIn("reopened", evs)
+        disp = [m for m in self.store.read_messages() if m["to"] == "disp1"]
+        self.assertTrue(any("rebase_conflict" in m["body"]
+                            and "src/conflict.py" in m["body"]
+                            for m in disp))  # 通知带冲突文件清单
+
+    def test_external_refresh_fetch_unavailable_falls_terminal(self):  # Req: F105
+        """外部基自愈重 fetch 网络病：最新基不可得＝不盲试旧基，径直终局
+        failed/blocked（一次 rebase、零二次重建）。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "conflict"
+        self.gx.has_origin_result = True
+        self.gx.fetch_raise = True  # 重 fetch 网络病
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        d = self.delivery()
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual((d["status"], d["error"], d["attempt"]),
+                         ("failed", "rebase_conflict", 2))
+        self.assertEqual(len(self.gx.build_at_calls), 1)  # 未盲试旧基重建
+        self.assertEqual(len(self.gx.rebase_calls), 1)
+        self.assertEqual(self.gx.fetch_calls, [("/repo", "main")])  # 取证 fetch
+
+    def test_external_handoff_clears_stale_conflict_files(self):  # Req: F105
+        """终闸 B1 生命周期：handoff 投影清 conflict_files 残值——上轮终局
+        清单不得泄漏进 awaiting_external 投影与后续确认链（错误归因）。"""
+        self.in_gate_external()
+        self.state.set_fields("t1", delivery=dict(
+            EXTERNAL_DELIVERY, conflict_files=["stale.py"]))
+        self.gx.head_shas[self.integration] = SHA  # ff 直通
+        self.gate.run("t1")
+        d = self.delivery()
+        self.assertEqual((d["status"], d["conflict_files"]),
+                         ("awaiting_external", None))  # 残值必清
+
+    def test_external_same_base_conflict_no_blind_retry(self):  # Req: F105
+        """终闸 B2：重 fetch 取回同基＝无新基可换，禁以旧基盲试二次——径直
+        终局（一次 rebase、零重建、零 retry 审计）。"""
+        self.seed(tb="main", state="done")
+        self.state.set_fields("t1", commit=SHA, delivery=dict(
+            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=1))
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "conflict"
+        self.gx.has_origin_result = True
+        self.gx.fetch_result = TIP_SHA  # 重 fetch 同值（外部未推进）
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        d = self.delivery()
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual((d["status"], d["error"]),
+                         ("failed", "rebase_conflict"))
+        self.assertEqual(len(self.gx.build_at_calls), 1)  # 零旧基重建
+        self.assertEqual(len(self.gx.rebase_calls), 1)
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertNotIn("rebase_conflict_retry", evs)
 
     def test_external_rebased_verify_fail_reopens_quality(self):  # Req: F101
         self.in_gate_external()

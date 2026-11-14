@@ -674,12 +674,16 @@ class Gitx:
                 return cur
         return None
 
-    def rebase_onto(self, env_dir: str, integration: str) -> str:
+    def rebase_onto(self, env_dir: str, integration: str,
+                    conflicts: list = None) -> str:
         """F32 门内自愈：integration（detached at 目标 HEAD）内把 env 分支提交
         rebase --onto 目标 HEAD 重放（mb=merge-base），返回重放后 sha R。
         detached 零临时分支：不碰 env 分支、不碰目标检出；等价提交全 drop 时
         R＝目标 HEAD（no-op 形态）。分类（F29 纪律）：冲突（sequencer 态在位）
-        → abort 后回 "conflict"；其余非零（对象损坏等环境病）如实 RuntimeError。"""
+        → abort 后回 "conflict"；其余非零（对象损坏等环境病）如实 RuntimeError。
+        conflicts（Req: F105）非 None 时，abort 前以 index 未合并路径回填
+        冲突文件清单（diff --name-only --diff-filter=U，machine-readable）；
+        既有双参调用零变化。"""
         integration = Path(integration).resolve()
         src = Path(env_dir).resolve().name
         onto = self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()
@@ -694,6 +698,11 @@ class Gitx:
                 p = self._git(["rev-parse", "--git-path", state_dir],
                               cwd=integration).stdout.strip()
                 if p and (integration / p).exists():
+                    if conflicts is not None:  # Req: F105 abort 前取证（abort 即失态）
+                        u = self._git(["diff", "--name-only", "--diff-filter=U",
+                                       "-z"], cwd=integration, check=False)
+                        if u.returncode == 0:  # 取证面尽力而为：不逆转冲突分类
+                            conflicts.extend(x for x in u.stdout.split("\0") if x)
                     self._git(["rebase", "--abort"], cwd=integration, check=False)
                     return "conflict"
             raise RuntimeError(f"git rebase --onto {onto} {mb}: "

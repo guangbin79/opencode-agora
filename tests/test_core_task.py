@@ -1992,6 +1992,24 @@ class TestDispatchRemoteBase(TestCoreTask):
                          ("managed", "main"))  # 身份字段不动
         self.assertEqual(self.state.get(tid)["state"], "dispatched")
 
+    def test_redispatch_resets_stale_conflict_files(self):  # Req: F105
+        """终闸 B1：重派开新交付轮清 conflict_files 残值——防上轮冲突清单
+        泄漏进后续非冲突失败/成功投影（错误归因，评审 D3 同口径）。"""
+        self.gitx.origin = True
+        tid = self.dispatchable()
+        self.svc.dispatch(tid, self.root)
+        self.state.transition(tid, "running")
+        self.state.transition(tid, "done")
+        self.state.set_fields(tid, delivery={
+            "mode": "managed", "status": "failed", "commit": "a" * 40,
+            "base": "b" * 40, "target_branch": "main", "attempt": 3,
+            "local_status": "pending", "error": "rebase_conflict",
+            "conflict_files": ["src/conflict.py"]})
+        self.state.transition(tid, "blocked")  # done→blocked 交付失败专用边
+        self.svc.dispatch(tid, self.root)  # blocked 重派（env 在盘复用）
+        self.assertIsNone(
+            self.state.get(tid)["delivery"].get("conflict_files"))
+
 
 class TestDispatchLocalBase(TestCoreTask):
     """Req: F100 managed no-origin 派发本地权威定基：缺支/malformed 拒派报
@@ -2111,6 +2129,22 @@ class TestTaskDeliver(TestCoreTask):
 
     def events_of(self, tid):
         return [e for e in self.events() if e.get("task") == tid]
+
+    def test_deliver_ack_surfaces_clear_stale_conflict_files(self):  # Req: F105
+        """终闸 B1：non_ff 重排队/delivered/failed 三确认面清 conflict_files
+        残值——崩窗残留清单不得随投影扩散到后续轮。"""
+        for tid in ("t1", "t2", "t3"):
+            self.seed_awaiting(tid)
+            d = dict(self.state.get(tid)["delivery"],
+                     conflict_files=["stale.py"])
+            self.state.set_fields(tid, delivery=d)
+        disp = self.auth.issue("disp1", "dispatcher")
+        self.svc.deliver("t1", disp, "non_ff", SHA_40, base="c" * 40)
+        self.svc.deliver("t2", disp, "delivered", SHA_40)
+        self.svc.deliver("t3", self.root, "failed", SHA_40)
+        for tid in ("t1", "t2", "t3"):
+            self.assertIsNone(
+                self.state.get(tid)["delivery"].get("conflict_files"), tid)
 
     def test_delivered_closes_and_reclaims(self):  # Req: F101
         tid = self.seed_awaiting()

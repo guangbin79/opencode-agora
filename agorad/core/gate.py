@@ -829,22 +829,27 @@ class Gate:
         self._delivery_fail(tid, 3, "retry_exhausted",
                             "3 次总尝试内远端持续被推进或交付锁不可得")
 
-    def _delivery_fail(self, tid, attempt, error, note=""):  # Req: F98
+    def _delivery_fail(self, tid, attempt, error, note="",
+                       conflict_files=None):  # Req: F98/F105
         """交付失败终局：delivery.status=failed＋error 机器可读（报表失败桶与
         任务明细可见）；done→blocked（本需求唯一新增合法边）。非质量败——
         不计 fail_streak、不弹回 worker、不自动取消/重派；env 留现场，处置权
-        在派发方。"""
+        在派发方。conflict_files（Req: F105）＝终局 rebase_conflict 的冲突
+        文件清单：入 delivery 投影（machine-readable）与 blocked 通知。"""
         t = self._state.get(tid)
         d = dict(t.get("delivery") or {})
         d.update(status="failed", error=error, attempt=attempt)
+        if conflict_files is not None:  # Req: F105 排障内置（今日靠人工 merge-tree）
+            d["conflict_files"] = list(conflict_files)
         self._state.set_fields(tid, delivery=d)
         self._state.transition(tid, "blocked")
         self._audit(tid, "delivery_failed", error=error, note=str(note)[:200])
+        body = f"任务 {tid} 交付失败（{error}）——已 blocked（非质量问题，" \
+               "不计连败）；核对远端/网络后重派或取消"
+        if conflict_files:
+            body += "；冲突文件: " + ", ".join(conflict_files)
         try:
-            self._router.notify_transition(
-                tid, "blocked",
-                body=f"任务 {tid} 交付失败（{error}）——已 blocked（非质量问题，"
-                     "不计连败）；核对远端/网络后重派或取消")
+            self._router.notify_transition(tid, "blocked", body=body)
         except Exception:  # 通知面尽力而为（F54 同口径）——不逆转终局
             pass
 
@@ -1023,47 +1028,66 @@ class Gate:
         """external_branch 外部交付 handoff：钉死本地支 tip（或 non_ff 重排队
         携带的外部确认基）定基集成→ff/rebase→集成 verify→绿即驻留
         awaiting_external——不合目标支、不推 origin、不回收 env/凭据（外部
-        派发方持有远端交付权，确认经 task_deliver）。rebase 内容冲突即终局
-        failed/blocked（F98 口径：不弹回 worker、不计连败）；重排成功但集成
-        verify 败保持质量 reopened 语义；超时/命令死分类路由同款。"""
+        派发方持有远端交付权，确认经 task_deliver）。rebase 内容冲突先自愈一次
+        （Req: F105 过期基点假冲突：以最新基——本地钉死支重读 tip/外部基重
+        fetch——重建 integration 再 rebase；不占 non_ff attempt 预算），二次
+        仍冲突才终局 failed/blocked（F98 口径：不弹回 worker、不计连败；通知
+        与投影附冲突文件清单）；重排成功但集成 verify 败保持质量 reopened
+        语义；超时/命令死分类路由同款。"""
         t = self._state.get(tid)
         d = t.get("delivery") or {}
         attempt = d.get("attempt") or 1  # non_ff 重排队已带尝试号；首跑＝1
         base = d.get("base")  # non_ff 重排队的外部基；None＝本地钉死支 tip
-        if base is None:
-            if branch is None:
-                self._delivery_fail(tid, attempt, "local_base",
-                                    "target_branch 未钉死——external_branch"
-                                    "不回退仓默认支")
+        refreshed = False  # Req: F105 假冲突自愈恰重试一次
+        while True:
+            if base is None:
+                if branch is None:
+                    self._delivery_fail(tid, attempt, "local_base",
+                                        "target_branch 未钉死——external_branch"
+                                        "不回退仓默认支")
+                    return
+                try:
+                    base = self._gitx.local_branch_sha(target, branch)
+                except RuntimeError as e:
+                    self._delivery_fail(tid, attempt, "local_base", str(e))
+                    return
+            try:  # 评审 R1：外部基由派发方供给——本地不可解析（未 fetch/外部改写
+                # 历史）＝交付面终局，不走门内异常 reopened 弹回 worker（F98 D2 口径）
+                self._gitx.build_integration_at(target, integration,
+                                                base_sha=base)
+            except (RuntimeError, ValueError) as e:
+                self._delivery_fail(tid, attempt, "external_base", str(e))
                 return
-            try:
-                base = self._gitx.local_branch_sha(target, branch)
-            except RuntimeError as e:
-                self._delivery_fail(tid, attempt, "local_base", str(e))
-                return
-        try:  # 评审 R1：外部基由派发方供给——本地不可解析（未 fetch/外部改写
-            # 历史）＝交付面终局，不走门内异常 reopened 弹回 worker（F98 D2 口径）
-            self._gitx.build_integration_at(target, integration, base_sha=base)
-        except (RuntimeError, ValueError) as e:
-            self._delivery_fail(tid, attempt, "external_base", str(e))
-            return
-        before = self._gitx.head(integration)
-        r = None  # R＝重放后交付 sha（None＝ff 直通）
-        if self._gitx.merge_ff(env, integration) != "ok":
-            if self._gitx.rebase_onto(env, integration) == "conflict":
-                self._delivery_fail(tid, attempt, "rebase_conflict")
-                return
-            e = t.get("rebased_from") or t.get("commit")
-            r = self._gitx.head(integration)
-            if r == before and not self._gitx.is_ancestor(target, e, base):
-                # 幻影空集重放（ag-54bd98 G1 同判，外部版）：弹回 worker 自愈
-                self._audit(tid, "empty_rebase_noop")
-                self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
-                                   reason="空集 rebase 无交付")
-                return
-            self._state.set_fields(tid, commit=r, rebased_from=e)
-            self._audit(tid, "rebased", **{"from": e, "to": r})
-        deliver = self._gitx.head(integration)  # ff 直通＝env 头；重放＝R
+            before = self._gitx.head(integration)
+            r = None  # R＝重放后交付 sha（None＝ff 直通）
+            if self._gitx.merge_ff(env, integration) != "ok":
+                conflicts = []  # Req: F105 终局通知/投影的冲突文件取证
+                if self._gitx.rebase_onto(env, integration,
+                                          conflicts) == "conflict":
+                    if not refreshed:  # Req: F105 过期基点假冲突自愈一次
+                        new_base = self._refresh_external_base(
+                            branch, target, d.get("base"))
+                        # 同基（重读/重 fetch 均未动）＝无新基可换，禁旧基盲试
+                        if new_base is not None and new_base != base:
+                            self._audit(tid, "rebase_conflict_retry",
+                                        **{"from": base, "to": new_base})
+                            base, refreshed = new_base, True
+                            continue
+                    self._delivery_fail(tid, attempt, "rebase_conflict",
+                                        conflict_files=conflicts)
+                    return
+                e = t.get("rebased_from") or t.get("commit")
+                r = self._gitx.head(integration)
+                if r == before and not self._gitx.is_ancestor(target, e, base):
+                    # 幻影空集重放（ag-54bd98 G1 同判，外部版）：弹回 worker 自愈
+                    self._audit(tid, "empty_rebase_noop")
+                    self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
+                                       reason="空集 rebase 无交付")
+                    return
+                self._state.set_fields(tid, commit=r, rebased_from=e)
+                self._audit(tid, "rebased", **{"from": e, "to": r})
+            deliver = self._gitx.head(integration)  # ff 直通＝env 头；重放＝R
+            break
         report = self._gitx.materialize_checkout(integration, target)
         if report:
             self._audit(tid, "checkout_materialize", note=report)
@@ -1088,6 +1112,19 @@ class Gate:
             return
         self._handoff_external(tid, branch, deliver, base, attempt)
 
+    def _refresh_external_base(self, branch, target, supplied):  # Req: F105
+        """假冲突自愈最新基：supplied＝原基来自 non_ff 重排（外部远端权威）→
+        重 fetch origin 支取新 tip；否则重读本地钉死支 tip。取不到（缺支/
+        缺 origin/网络病）＝None——调用方径直终局，绝不以旧基盲试二次。"""
+        try:
+            if supplied is not None:
+                if branch is None or not self._gitx.has_origin(target):
+                    return None
+                return self._gitx.fetch_origin_branch(target, branch)
+            return self._gitx.local_branch_sha(target, branch)
+        except RuntimeError:
+            return None
+
     def _handoff_external(self, tid, branch, sha, base, attempt):  # Req: F101
         """external_branch 绿 handoff 唯一出口：投影 awaiting_external（commit/
         base/attempt 机器可读，local_status=not_required——外部权威，本地无
@@ -1096,7 +1133,8 @@ class Gate:
         t = self._state.get(tid)
         d = dict(t.get("delivery") or {})
         d.update(status="awaiting_external", commit=sha, base=base,
-                 attempt=attempt, local_status="not_required", error=None)
+                 attempt=attempt, local_status="not_required", error=None,
+                 conflict_files=None)  # Req: F105 上轮终局清单残值必清（B1）
         self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
         self._state.set_fields(tid, delivery=d)
         self._audit(tid, "awaiting_external", commit=sha, base=base,

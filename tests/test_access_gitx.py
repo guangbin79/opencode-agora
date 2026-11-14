@@ -169,6 +169,22 @@ class TestAccessGitx(unittest.TestCase):
                               cwd=integration).stdout.strip()
         self.assertFalse((integration / apply_dir).exists())  # abort 已收敛
 
+    def test_rebase_onto_conflict_captures_conflicted_files(self):  # Req: F105
+        """F105 冲突取证：conflicts 回填停点未合并路径清单（abort 前取证，
+        machine-readable）；干净重放不回填。"""
+        env = self.gx.build_env(self.repo, "gt-f105a")
+        self._commit(Path(env), {"a.py": "task edit", "b.py": "task edit"},
+                     "task edit")
+        self._commit(self.repo, {"a.py": "main edit", "b.py": "main edit"},
+                     "main edit")  # 双文件真冲突
+        integration = Path(self.tmp / "gate-f105a")
+        self.gx.build_integration(str(self.repo), str(integration))
+        self.assertEqual(self.gx.merge_ff(env, str(integration)), "non-ff")
+        files = []
+        self.assertEqual(self.gx.rebase_onto(env, str(integration), files),
+                         "conflict")
+        self.assertEqual(files, ["a.py", "b.py"])
+
     def test_rebase_onto_environment_disease_raises_not_conflict(self):  # Req: F32
         class BoomGitx(Gitx):  # rebase 自身病（rc=128 对象损坏类）宁抛不并入冲突
             def _git(self, args, cwd, check=True):

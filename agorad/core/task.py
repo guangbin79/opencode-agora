@@ -303,7 +303,8 @@ class TaskService:
         if (t.get("delivery") or {}).get("status") == "failed":
             self._state.set_fields(tid, delivery=dict(
                 t["delivery"], status="pending", error=None, attempt=0,
-                commit=None, base=None, local_status="pending"))
+                commit=None, base=None, local_status="pending",
+                conflict_files=None))  # Req: F105 冲突清单残值随重派重置
         env = t.get("env_dir")
         env_base = t.get("env_base")
         # Req: F71 记录 env 不在盘（/tmp 清理/误删，ag-724152）＝无 env，重派全新建路自愈
@@ -709,7 +710,8 @@ class TaskService:
                 tid, sid, d, "retry_exhausted",
                 "3 次总尝试内外侧持续 non-ff")
         nd = dict(d, status="pending", base=b, commit=None, error=None,
-                  attempt=d.get("attempt", 0) + 1)
+                  attempt=d.get("attempt", 0) + 1,
+                  conflict_files=None)  # Req: F105 冲突清单残值不随重排队扩散
         self._state.set_fields(tid, delivery=nd)
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": "delivery_requeued", "task": tid,
@@ -722,7 +724,8 @@ class TaskService:
         （口径对齐 gate._finish_local_delivered／门尾结算）。"""
         t = self._state.get(tid)
         nd = dict(d, status="delivered", local_status="not_required",
-                  error=None, reason=(str(reason or "").strip() or None))
+                  error=None, conflict_files=None,  # Req: F105 残值必清（B1）
+                  reason=(str(reason or "").strip() or None))
         if nd["reason"] is None:
             nd.pop("reason")
         self._state.fail_streak_reset(tid)
@@ -768,7 +771,8 @@ class TaskService:
         """failed 终局：机器可读 error＋done→blocked 交付失败边（失败桶语义
         沿用 F98）；不 reopen/不自动重派，env 留现场处置权在派发方。"""
         self._state.set_fields(tid, delivery=dict(d, status="failed",
-                                                  error=error))
+                                                  error=error,
+                                                  conflict_files=None))
         self._state.transition(tid, "blocked")
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": "delivery_failed", "task": tid,
