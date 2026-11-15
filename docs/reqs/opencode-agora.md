@@ -608,3 +608,6 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **现状**：dispatcher 向人的汇报只存于会话转录，会话 compaction/换手后新会话无从得知已告知过什么——重复汇报或漏「已告知」上下文；既有 wiki/why（派发上下文）与 wiki/orch（编排单）留痕均不覆盖汇报面。
 **裁定**：每次向人汇报后，dispatcher 把一行 `date | tid | 一句结论 | 证据指针` 并入 `wiki/reported.md`（append-only 账：wiki_read 现文→追加→整页写回，页不存在则新建）；下次汇报前先查该 tid，已告知过的结论不重复展开。零服务改动，复用 wiki_write；只覆盖 dispatcher→人方向（worker 汇报经任务页/服务已留痕）。
 **落点**：skills/agora-dispatch/SKILL.md §6 新增一条纪律＋来源行增补；docs/reqs/opencode-agora.md（本条）。
+
+### F107 verify 门 base-red 探针（2026-11-15，提案待裁决）
+提案：verify 门在任务起点 base 上运行一次 verify_cmd——红放行、绿按豁免分类处置，防空洞 verify 假绿（对照 SWE-bench FAIL_TO_PASS 纪律）；豁免备选、裁决点、e2e 影响与备选否决详见 `docs/f107-base-red-verify.md`。未裁决不实施。

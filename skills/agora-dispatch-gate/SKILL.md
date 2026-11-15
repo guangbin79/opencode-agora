@@ -1,7 +1,7 @@
 ---
 name: agora-dispatch-gate
 description: |
-  MUST USE before any agora dispatch action（task_create/task_dispatch 前、写派发文本/issue 前、把模糊诉求翻译成任务时）: grade the task by 三可 (verifiability/reversibility/budget), pick autonomy level L0–L3, compile the six-piece spec; the gate follows the action, not the executor. 派发/拆任务/写任务/粒度判定之前必须使用本 skill：三可定档、六件套编译、不可逆动作先过确认门（含主会话自执行的动作）。与 agora-dispatch 成对：闸在前定档，剧本在后编排。
+  MUST USE before any agora dispatch action（task_create/task_dispatch 前、写派发文本/issue 前、把模糊诉求翻译成任务时）: grade the task by 三可 (verifiability/reversibility/budget), pick autonomy level L0–L3, compile the seven-piece spec; the gate follows the action, not the executor. 派发/拆任务/写任务/粒度判定之前必须使用本 skill：三可定档、七件套编译、不可逆动作先过确认门（含主会话自执行的动作）。与 agora-dispatch 成对：闸在前定档，剧本在后编排。
 ---
 
 # agora-dispatch-gate 派发粒度闸
@@ -27,11 +27,15 @@ description: |
 - **可验证弱**→**降档不升档**：写不出 L2 验收判据就落 L1，派能肉眼判的交付物；最忌反向跳 L3。
 - **可预算弱**（开放调研活）→预算封顶的是**尝试**不是任务：耗尽=回报已发现的东西，不是失败。
 
-## 3. 六件套任务公式（L1/L2 派发文本必含，缺件即不派）
+## 3. 七件套任务公式（L1/L2 派发文本必含，缺件即不派）
 
-**动词 + 交付物 + 边界**（不做什么）**+ 预算**（轮数/时间/行数/金额；超限停并报）**+ 停止条件**（何时停/上报）**+ 回滚路径**（谁撤怎么撤——worktree 流=删 wt）。
+**动词 + 交付物 + 边界**（不做什么）**+ 预算**（轮数/时间/行数/金额；超限停并报）**+ 停止条件**（何时停/上报）**+ 回滚路径**（谁撤怎么撤——worktree 流=删 wt）**+ 断言清单**。
 
-**verify 命令卫生（F99）**：六件套里的验收命令相对任务 env cwd 写——禁绝对 cd/pushd；被测文件/脚本相对路径；外部工具链可绝对；文件校验工具显式传目标（或确认按 Git 根解析）；落主仓的绝对路径（含 `$HOME`/`~` 展开；`--flag=<绝对路径>` 选项值不查，同样写相对）登记即被静态闸拒——验收件先过这关再派。
+**断言清单（第 7 件）**：应用开发级任务（判据：行为需求、多文件、涉 UI 或 API）验收必须逐条列断言——每条一行、可机械判定（接口返回值、文件内容、页面行为），verify_cmd 逐条对应；单行机械任务可豁免（一行验收已全覆盖）。
+
+**verify 命令卫生（F99）**：七件套里的验收命令相对任务 env cwd 写——禁绝对 cd/pushd；被测文件/脚本相对路径；外部工具链可绝对；文件校验工具显式传目标（或确认按 Git 根解析）；落主仓的绝对路径（含 `$HOME`/`~` 展开；`--flag=<绝对路径>` 选项值不查，同样写相对）登记即被静态闸拒——验收件先过这关再派。
+
+**行为级验收**：API 任务 verify 须含真实 HTTP 断言（如 curl 冒烟）；UI 任务须含浏览器断言（playwright）；核心逻辑任务优先性质测试（如 Hypothesis）；应用级任务禁只有 build/lint/全量测试的笼统 verify——判据：笼统 verify 在 base 上本来就绿＝假绿。
 
 ## 4. 派发前四步
 
@@ -40,7 +44,11 @@ description: |
 3. **定预算**：超限停并报告，禁即兴扩大目标。
 4. **检查点挂状态转换，不挂时间**：计划定了报一次（首次合打的活必报）/测试绿后报一次/不可逆动作前必报；熟活只验终点。
 
-## 5. Pitfalls
+## 5. 独立终审（候选纪律，服务端暂不强制）
+
+应用级任务（判据：diff 预期超 100 行或涉 API/UI）在 worker 报 done 后、dispatcher 出验收结论前，加一道零共享评审——评审者只读 goal＋断言清单＋diff，不读实现过程，裁决三值 pass/fail/unverified（unverified＝检查跑了但没触达变更，防假绿）；本地复用 review-loop 零共享评审或 ocr。
+
+## 6. Pitfalls
 
 - **闸门只防子代理不防自己**（2026-10-31 RED 场景 A）：主会话把不可逆动作留给自己做就不设门。闸门跟动作走，不跟执行者走。常备**预授权清单**（如"feature 分支评审绿后推送"）算已过闸；未预授权的碰主支/共享远端一律先问。
 - **档位跟文件在哪走，不跟动词走**：worktree 里删草稿是 L1；删 main 上未跟踪文件才是 L0。
@@ -48,8 +56,9 @@ description: |
 - **小活别硬派**：删个文件是委托开销>执行成本——共享上下文的小活打包成一个清单一次派发。
 - **与 req-gate 分工**：req-gate 管验收标准登记（`Req: <id>`），本 skill 管粒度定档与任务编译；先过本闸，再走登记。
 
-## 6. 定稿与实测证据
+## 7. 定稿与实测证据
 
 - 定稿：2026-10-31 与用户共同定稿（触发事故：目标太大「赚1000万」失控/太小「删文件」开销倒挂的粒度讨论），记忆 `99508a68e0af4331`。
 - RED 基线（2026-10-31，无本 skill，2 例）：场景 A 不可逆裸派——push origin main 与删分支留主会话自做、无确认门（仅对子代理禁 git）；场景 B 开放愿望——拒绝转发并翻译正确，但缺预算、回滚路径、显式档位。注：基线子代理上下文含仓内 AGENTS.md，部分污染，但两失败形态仍超出既有规则覆盖。
 - GREEN（2026-10-31，嵌入本 skill 文本，同款场景 2 例）：场景 A——按三可拆段，lint 修复出完整六件套 L1 文本，push 以用户原话为预授权但验收门前置，`-D` 删支列 L0 确认门；场景 B——判「愿望当任务派」拒绝转发，产出含预算/回滚路径的 L1 翻译版，L0 闸留给用户。两个 RED 失败形态均闭合。
+- 溯源：2026-11-15 用户会话裁定方向（agora verify 假绿风险分析，对照 SWE-bench FAIL_TO_PASS 纪律），断言清单/行为级验收/独立终审三处增补为 skill-evolution 候选、待评测晋升。
