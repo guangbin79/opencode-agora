@@ -3151,13 +3151,13 @@ class TestDeliveryRecovery(TestCoreGate):
         self.assertIn("delivery_recover_probe_failed", evs)
 
     def test_recovery_probe_uses_short_fetch_budget(self):  # Req: F100
-        """终闸 B 册：恢复探针短预算（5s）透传——启动串行面防死 origin 停摆
+        """终闸 B 册：恢复探针短预算（15s）透传——启动串行面防死 origin 停摆
         端口绑定（门体重排链路保持全预算口径不变）。"""
         self.seed_done(origin=True)
         self.gx.remote_contains_result = True
         self.gate.recover_managed()
         self.assertEqual(self.state.get("t1")["state"], "closed")
-        self.assertEqual(self.gx.remote_contains_timeouts, [5])
+        self.assertEqual(self.gx.remote_contains_timeouts, [15])
 
     def test_recovery_task_failure_isolated_and_merged_closed(self):  # Req: F100
         """终闸 B 册/OCR：单任务收口半途抛（env 回收败）＝留痕＋merged 补闭合

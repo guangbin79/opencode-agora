@@ -17,9 +17,9 @@ import time
 _MAX_DEPTH = 3
 _QUOTA = 6  # F41：Graicunas/ICS 跨度锚定
 # Req: F98 派发面远端定基短预算：dispatch 在单线程 HTTP 串行面同步 fetch，死/
-# 黑洞 origin 不得停摆全服务（accept_done 探针 fetch_timeout=5 同口径；门体交付
+# 黑洞 origin 不得停摆全服务（accept_done 探针 fetch_timeout=15 同口径；门体交付
 # 面仍走 _PUSH_TIMEOUT 全预算——verify/push 本就有分钟级网络面先例）
-_REMOTE_BASE_TIMEOUT = 5
+_REMOTE_BASE_TIMEOUT = 15
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _AFTER_OK = {"merged", "closed", "cancelled"}  # cancelled 还须非 dependency_failed；派发处终审
 _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged 不逆转历史）

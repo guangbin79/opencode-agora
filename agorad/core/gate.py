@@ -70,7 +70,7 @@ _LOCK_POLL = 0.05
 # Req: F100 恢复面探针短预算（task._REMOTE_BASE_TIMEOUT 同口径异地声明）：启动
 # 串行面防死 origin 停摆——300s×N 全预算阻塞端口绑定且单例锁已持（终闸 B 册）；
 # 超时/网络病＝对账不可得，留门重排链路在其自身失败面内兜底，语义不变
-_RECOVER_FETCH_TIMEOUT = 5
+_RECOVER_FETCH_TIMEOUT = 15
 
 
 def _roster_from_file(path):
@@ -259,7 +259,7 @@ class Gate:
         try:  # Req: F69 vacuous-done；谓词病（锚伪造 sha/目标支被删）不拦受理：
             vacuous = self._gitx.contains(t["project_dir"], commit,
                                           t.get("target_branch"),
-                                          fetch_timeout=5)  # 同步受理面短 fetch 预算
+                                          fetch_timeout=15)  # 同步受理面短 fetch 预算
         except RuntimeError:  # gitx 失败契约（_git/contains 同款）；编程错误照崩不静默
             self._audit(tid, "zero_commit_probe_failed")  # 带痕放行：run() 同款异常面兜底
             vacuous = False
@@ -307,7 +307,7 @@ class Gate:
                 return True  # (a)
             if prev and self._gitx.contains(t["project_dir"], prev,
                                             t.get("target_branch"),
-                                            fetch_timeout=5):
+                                            fetch_timeout=15):
                 return True  # (b)
         except RuntimeError:  # gitx 失败契约；编程错误照崩不静默
             self._audit(tid, "zero_commit_probe_failed")

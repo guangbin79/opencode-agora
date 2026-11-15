@@ -1940,7 +1940,7 @@ class TestDispatchRemoteBase(TestCoreTask):
         tid = self.dispatchable()  # 建单钉支 main＋delivery mode=managed
         self.svc.dispatch(tid, self.root)
         self.assertEqual(self.gitx.fetched, [("/repo", "main")])
-        self.assertEqual(self.gitx.fetch_timeouts, [5])  # 评审 D4：派发面短预算
+        self.assertEqual(self.gitx.fetch_timeouts, [15])  # 评审 D4：派发面短预算
         self.assertEqual(self.gitx.built_at, [("/repo", tid, "main", remote)])
         self.assertEqual(self.gitx.built, [])  # 不走本地支起点
         self.assertEqual(self.state.get(tid)["env_base"], "b" * 40)  # head(env)
