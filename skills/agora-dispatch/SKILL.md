@@ -89,8 +89,9 @@ verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。�
 - **done**：verify 门运行中（board 可见 in_gate）——勿动；绿即自动合并，不等人点头。门内 cancel 只排队（pending_cancel），门走完由服务结算。零新增提交的 done 必拒（锚拒同款弹回）——worker 以 post(kind=question) 报 no-op（唤醒通道），由你 cancel 归档。
 - **merged→closed**：环境回收完成后服务自动置位，全程勿动；merged 不回滚。**部署提醒**：如果 worker 修改的是 opencode-agora 自身代码，merged 后须重跑 `./install.sh` 使安装盘生效（拷贝不是引用）。
 - 汇报用五桶＋结论＋证据指针（commit／事件链），不自述细节。
+- **已告知留痕（F106）**：向人汇报后把一行 `date | tid | 一句结论 | 证据指针` 并入 `wiki/reported.md`（wiki_read 现文→追加→整页写回，页不存在则新建，append-only）；下次汇报前先查该 tid，已告知过的结论不重复展开。
 
-> 来源：F7/F10/F11/§2（verify 绿即自动合并）；设计 §4.1（merged→closed）；e2e S1（closed＋env 回收＋merged 带 commit）＋F11 门内 cancel 排队
+> 来源：F7/F10/F11/§2（verify 绿即自动合并）；设计 §4.1（merged→closed）；e2e S1（closed＋env 回收＋merged 带 commit）＋F11 门内 cancel 排队＋F106 已告知留痕（2026-11-15 用户裁定，纯文档——Anthropic always-on agents 对照：四类记忆第四类「已告知内容」无 durable 载体）
 
 ## 7. external_branch 交付确认——task_deliver 只属外部派发方
 
