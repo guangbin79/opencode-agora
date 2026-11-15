@@ -729,6 +729,9 @@ class _NudgeStub(http.server.BaseHTTPRequestHandler):
 
 
 class TestTryNudge(unittest.TestCase):
+    def setUp(self):
+        _NudgeStub.result = {"nudged": True}  # 类属性复位：前序 TestTryAlarm 残值不串扰
+
     def test_nudge_status_uses_service_reason(self):  # Req: F73
         srv = http.server.HTTPServer(("127.0.0.1", 0), _NudgeStub)
         threading.Thread(target=srv.serve_forever, daemon=True).start()

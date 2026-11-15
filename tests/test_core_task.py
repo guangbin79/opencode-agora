@@ -1119,6 +1119,31 @@ class TestTaskVerifyTimeout(TestCoreTask):
         self.assertIsNone(v["timeout"])
 
 
+class TestBaseRedExemptFlag(TestCoreTask):
+    """Req: F107 建单豁免旗 verify_base_exempt：权限面同 verify_cmd——仅
+    dispatcher/root 显式设；worker 显式传拒、缺省继承父任务。"""
+
+    def test_dispatcher_create_registers_flag(self):  # Req: F107
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", verify_base_exempt=True)
+        self.assertIs(self.state.get(tid)["verify_base_exempt"], True)
+        plain = self.svc.create("g2", "/repo", None, self.root,
+                                verify_cmd="true")
+        self.assertIs(self.state.get(plain)["verify_base_exempt"], False)
+
+    def test_worker_set_flag_rejected_and_inherits(self):  # Req: F107
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true", verify_base_exempt=True)
+        wtok = self.svc.dispatch(parent, self.root)
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("child", None, None, wtok,
+                            verify_base_exempt=False)
+        self.assertIn("verify_base_exempt", str(cm.exception))
+        self.assertTrue(any(e["event"] == "auth_denied" for e in self.events()))
+        child = self.svc.create("child", None, None, wtok)  # 缺省继承父值
+        self.assertIs(self.state.get(child)["verify_base_exempt"], True)
+
+
 class TestModelRouting(TestCoreTask):
     """F55 任务级 worker 模型字段：model 逐回合随 prompt 携带（opencode /session 不收 model）。"""
 

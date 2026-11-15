@@ -168,12 +168,15 @@ class _Handler(BaseHTTPRequestHandler):
             to = body.get("timeout")  # F51：任务级 verify 预算（正整数秒）
             md = body.get("model")  # F55：任务级 worker 模型
             qk = body.get("quick", False)  # F65：quick 微任务旗
+            be = body.get("verify_base_exempt")  # Req: F107 base-red 豁免旗（缺 None＝不设）
             dl = body.get("deliverable")  # ag-af96bb②：review-only 交付契约（值白名单归 task 域）
             ck = body.get("client_key")  # Req: F95 幂等建单键（域校验归 task 域）
             if not isinstance(vp, bool):  # "false" 字符串得 True——豁免旗语义反转拒收
                 raise ValueError("verify_pending 须为布尔")
             if not isinstance(qk, bool):  # 同豁免旗口径
                 raise ValueError("quick 须为布尔")
+            if be is not None and not isinstance(be, bool):  # Req: F107 同口径
+                raise ValueError("verify_base_exempt 须为布尔")
             if to is not None and (isinstance(to, bool)
                                     or not isinstance(to, int)):  # 同 verify_cmd 口径
                 raise ValueError("timeout 须为正整数秒")
@@ -187,6 +190,7 @@ class _Handler(BaseHTTPRequestHandler):
                                             req_id=rq, timeout=to, model=md,
                                             quick=qk, deliverable=dl,
                                             client_key=ck,  # Req: F95
+                                            verify_base_exempt=be,  # Req: F107
                                             actor_sid=sid)}  # ag-f80309：归属记真实调用 sid
         if name == "task_dispatch":
             # 公共响应不带 worker 牌：凭据只经文件指针注入/拉取面（F43/F85）

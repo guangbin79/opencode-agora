@@ -81,7 +81,8 @@ class TaskService:
     def create(self, goal, project_dir, after, actor_token, title=None,
                target_branch=None, verify_cmd=None, verify_pending=False,
                req_id=None, timeout=None, model=None, quick=False,
-               deliverable=None, client_key=None, actor_sid=None):
+               deliverable=None, client_key=None, actor_sid=None,
+               verify_base_exempt=None):  # Req: F107
         sid, role = self._gate(actor_token, "task_create", None, None)
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
@@ -100,6 +101,10 @@ class TaskService:
             if verify_pending:
                 self._reject(tid, sid, "verify_pending 豁免旗由派发方持有——worker 建单"
                                        "缺省继承父任务配置", ev=EV_DENIED)
+            if verify_base_exempt is not None:  # Req: F107：显式传入即拒（含 False）
+                self._reject(tid, sid, "worker 不得设置 base-red 探针豁免旗"
+                                       "（verify_base_exempt）——缺省继承父任务",
+                             ev=EV_DENIED)
             if parent["verify"]["state"] == "pending":  # F46 H-1 fail-fast：探索父登记前
                 # 建子单必继承 pending 配置→dispatch 恒拒死单；登记后旗残留但配置已
                 # registered——判配置不判旗，引导待登记后再建
@@ -123,6 +128,11 @@ class TaskService:
             target_branch = parent["target_branch"]
             model = parent.get("model")  # F55：缺省继承父任务
             deliverable = parent.get("deliverable")  # ag-af96bb②：缺省继承父任务
+            verify_base_exempt = parent.get("verify_base_exempt")  # Req: F107 继承
+        if verify_base_exempt is not None \
+                and not isinstance(verify_base_exempt, bool):
+            self._reject(tid, sid, f"verify_base_exempt 须为布尔"
+                                   f"（收到 {verify_base_exempt!r}）")
         if verify_cmd is not None and verify_pending:  # 语义互斥：登记与豁免不同求
             self._reject(tid, sid, "verify_cmd 与 verify_pending 互斥——二选一")
         if quick and verify_cmd is not None:  # F65：quick 自带命令拒（防自查）
@@ -201,9 +211,10 @@ class TaskService:
                 x_id, x = hit
                 if ((x["goal"], self._repo_key(x["project_dir"]),
                      x["target_branch"], x.get("deliverable"), x.get("model"),
-                     x["verify"]["cmd"])
+                     x["verify"]["cmd"], bool(x.get("verify_base_exempt")))
                         != (goal, project_dir, target_branch, deliverable,
-                            model, verify["cmd"])):
+                            model, verify["cmd"],
+                            bool(verify_base_exempt))):
                     self._reject(tid, sid, f"client_key {client_key!r} 已用"
                                            f"（任务 {x_id}）且载荷不同——同键"
                                            "载荷须逐字段一致")
@@ -230,6 +241,7 @@ class TaskService:
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
             "quick": bool(quick),  # F65：quick 旗随行（快照/事件自然携带）
+            "verify_base_exempt": bool(verify_base_exempt),  # Req: F107 旗 A
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
             "root_sid": root_sid,
             "chain_depth": depth, "fail_streak": 0, "last_seen": None,

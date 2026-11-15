@@ -44,6 +44,12 @@ _TOOLS = [
                                            "（worker 建单不可自旗——缺省继承父任务配置）"},
          "quick": {"type": "boolean",
                    "description": "quick 微任务——验收按账本历史动态判定，超包络合并门退回"},
+         "verify_base_exempt": {"type": "boolean",
+                                "description": "base-red 探针豁免旗（F107）：true＝跳过"
+                                               "「验收命令在任务起点 base 上须红」"
+                                               "判别力探针（回归守卫型任务用；"
+                                               "quick 自动豁免；仅 dispatcher/root"
+                                               "——worker 拒，缺省继承父任务）"},
          "deliverable": {"type": "string",
                           "enum": ["out_of_band", "external_branch"],  # Req: F94
                           "description": "交付契约：out_of_band＝零提交 review-only"

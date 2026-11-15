@@ -166,12 +166,15 @@ class Instance:
         self.stub.stop()
 
 
-def make_task(inst, repo, *, target=None, verify="true", deliverable=None):
+def make_task(inst, repo, *, target=None, verify="true", deliverable=None,
+              exempt=True):
     # 防御夹具错位：任务仓必须落在场景根内——绝不允许把服务指向意外真仓
     check(str(Path(repo).resolve()).startswith(str(inst.tmp.resolve()) + os.sep),
           f"project_dir 越出场景夹具区: {repo}")
+    # Req: F107 缺省豁免 base-red 探针：本套 verify="true" 在 base 上恒绿——
+    # 交付机械不因此被探针拦截；场景 a 以真实红绿命令关掉豁免验证探针本身
     body = {"goal": f"e2e {inst.tag}", "project_dir": str(repo),
-            "verify_cmd": verify}
+            "verify_cmd": verify, "verify_base_exempt": exempt}
     if target is not None:
         body["target_branch"] = target
     if deliverable is not None:
@@ -263,8 +266,10 @@ def scenario_a(tmp):
     ia, ib = Instance(tmp / "a", "A"), Instance(tmp / "a", "B")
     check(ia.app.gitx.instance_id != ib.app.gitx.instance_id,
           "两实例身份必须互异（F96）")
-    ta = make_task(ia, repo, target="main")
-    tb = make_task(ib, repo, target="main")
+    ta = make_task(ia, repo, target="main", verify="test -f a.txt",
+                   exempt=False)  # Req: F107 base-red 探针真跑：base 无 a.txt＝红
+    tb = make_task(ib, repo, target="main", verify="test -f b.txt",
+                   exempt=False)
     worker_done(ia, ta, {"a.txt": "from A"}, "A1")
     worker_done(ib, tb, {"b.txt": "from B"}, "B1")
     ra = wait_for(ia, ta, settled, what="closed")

@@ -439,6 +439,9 @@ class Gate:
             pass
         try:
             if t.get("deliverable") == "out_of_band":  # ag-af96bb② review-only：只验不合
+                if not self._base_probe(tid, t, target, integration,
+                                        runner, cmd):  # Req: F107 探针不豁免 review-only
+                    return
                 rc, out = runner(env, cmd)
                 if rc == 124:
                     self._verify_overrun(tid, out, budget, ceiling)
@@ -568,6 +571,9 @@ class Gate:
                         "——缩减改动后重新 post(done, commit)"
                         f"\n输出尾部:\n{detail[-_TAIL:]}")
                     return
+            if not self._base_probe(tid, t, target, integration,
+                                    runner, cmd):  # Req: F107 base-red 探针
+                return
             rc, out = runner(env, cmd)
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._verify_overrun(tid, out, budget, ceiling)
@@ -1383,6 +1389,87 @@ class Gate:
                             "等待通知即可")
         except Exception:
             pass
+
+    def _base_probe(self, tid, t, target, integration, runner,
+                    cmd):  # Req: F107
+        """base-red 探针（FAIL_TO_PASS 最小机械近似）：env verify 前在任务起点
+        base（env_base）的 detached 集成树上跑一次 verify——红＝有判别力放行
+        （门流程零变化）；绿且无豁免＝硬拒弹回（裁决②）。豁免：建单旗标
+        verify_base_exempt（裁决① A）／quick 自动豁免（裁决③）。探针死（F81/
+        F82）/超硬顶（F36）/机械败＝分类路由派发方——驻留 done、不计连败、不弹
+        worker（探针死≠活差）。结果缓存任务行 probe={result,cmd,base,ran_at}
+        （cmd+base 双键：换命令或重派换基即失效重探），reopen／崩溃重排不重跑；
+        env_base 缺席（升级前在飞任务）＝探针不可确立 fail-open 放行。"""
+        base = t.get("env_base")
+        if t.get("verify_base_exempt") or t.get("quick") or not base:
+            return True
+        probe = t.get("probe") or {}
+        if probe.get("cmd") == cmd and probe.get("base") == base:
+            if probe.get("result") == "red":
+                return True
+            self._probe_green(tid)
+            return False
+        try:
+            self._gitx.build_integration_at(target, integration, base_sha=base)
+            self._gitx.materialize_checkout(integration, target)  # ag-0d2daa 同款：submodule/LFS 物化后探针红才可信
+            rc, out = runner(integration, cmd)
+        except RuntimeError as e:  # env_base 对象缺失/引用被回收＝机械面不可用
+            self._audit(tid, "base_probe_failed", note=str(e)[:200])
+            try:
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"任务 {tid} base-red 探针无法运行：{e}——核对 env_base "
+                    "对象在位后重排，或换验收命令／豁免"
+                    "（非质量败，无需 worker 重试）")
+            except Exception:
+                pass
+            return False
+        if rc == 124:  # 超硬顶：F36 语义（驻留 done、不 bump、不弹 worker）
+            self._audit(tid, "base_probe_overrun")
+            try:
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"任务 {tid} base-red 探针超硬顶——进程组已终止"
+                    f"（非质量败，无需 worker 重试）；"
+                    f"输出尾部:\n{out[-_TAIL:]}")
+            except Exception:
+                pass
+            return False
+        if _cmd_dead(rc, out):  # 命令死：F81/F82 语义——escalate 通知通道拍派发方
+            self._audit(tid, "base_probe_dead", rc=rc)
+            try:
+                self._health.escalate(
+                    KIND_VERIFY_DEAD, tid,
+                    raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}")
+            except Exception:
+                pass
+            try:
+                self._post(tid, f"base-red 探针命令自身死（exit {rc}：命令不"
+                                "存在/不可执行）——非活不达标，无需自愈重试；"
+                                "已升级派发方处置，等待通知即可")
+            except Exception:
+                pass
+            return False
+        red = rc != 0
+        self._state.set_fields(tid, probe={
+            "result": "red" if red else "green", "cmd": cmd, "base": base,
+            "ran_at": time.time()})
+        self._audit(tid, "base_probe_red" if red else "base_probe_green",
+                    rc=rc)
+        if not red:
+            self._probe_green(tid)
+        return red
+
+    def _probe_green(self, tid):  # Req: F107 裁决②
+        """base 绿硬拒弹回：验收命令不区分任务前后（空洞 verify 假绿面）——
+        worker 无豁免权，拒因引导换命令或经派发方豁免。"""
+        self._quality_fail(
+            tid, "reopened",
+            "base-red 探针拒收：verify 命令在任务起点 base 上即绿（无判别力，"
+            "F107）——换能区分任务前后的验收命令，或由派发方豁免（task_create "
+            "verify_base_exempt=true／quick）；worker 自己无豁免权——"
+            "post(kind=question) 请派发方处置后重新 post(done, commit)",
+            reason="base-red 探针：验收命令在 base 上绿")
 
     def _quality_fail(self, tid, to, body, reason=""):
         """质量败（verify 败/集成败/合并前锚败）：迁移＋审计＋实时回 worker＋计连败

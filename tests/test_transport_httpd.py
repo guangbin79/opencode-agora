@@ -234,8 +234,11 @@ class HttpdTest(unittest.TestCase):
     # ---- 夹具 ----
 
     def create_task(self, body=None):
+        # Req: F107 缺省豁免 base-red 探针：本文件 verify 恒绿（"true"/ok_runner）
+        # ——门全链夹具测 HTTP 面，探针行为归 test_core_gate 与 e2e
         st, r = call(self.port, "POST", "/task_create",
-                     body or {"goal": "g", "project_dir": "/repo"}, self.root)
+                     body or {"goal": "g", "project_dir": "/repo",
+                              "verify_base_exempt": True}, self.root)
         self.assertEqual(st, 200)
         return r["task"]
 
@@ -287,6 +290,7 @@ class TestHttpSmoke(HttpdTest):
             lambda: self.app.state.get(tid)["state"] == "closed"))
         t = self.app.state.get(tid)
         self.assertEqual(t["commit"], SHA)  # 证据指针落行
+        self.assertIs(t["verify_base_exempt"], True)  # Req: F107 旗标全链入行
         self.assertEqual(self.app.gitx.removed,
                          [self.app.state.get(tid)["env_dir"]])  # 环境回收
         self.assertIn("merged", self.stub.sessions[wsid]["injects"][-1])
@@ -575,6 +579,10 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(st, 403)  # 互斥组合 core 层拒（同 after/target_branch 先例）
         self.assertEqual([t for t in self.app.state.snapshot()["tasks"].values()
                           if t["goal"] == "g2"], [])  # 拒绝零建行
+        st, r = call(self.port, "POST", "/task_create",
+                     {"goal": "g3", "project_dir": "/repo",
+                      "verify_base_exempt": "true"}, self.root)
+        self.assertEqual(st, 400)  # Req: F107 豁免旗坏类型 400（enforce 同口径）
         # 快速路正向锚：httpd 透传 verify_cmd，建单登记后 dispatch 免 update 过闸
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "fast", "project_dir": "/repo",
@@ -756,7 +764,8 @@ class TestHttpSmoke(HttpdTest):
 class TestNestedDispatchLoop(HttpdTest):
     def test_worker_nested_child_result_unblocks_parent_done(self):
         RUNNER_CALLS.clear()
-        parent = self.create_task({"goal": "parent", "project_dir": "/repo"})
+        parent = self.create_task({"goal": "parent", "project_dir": "/repo",
+                                   "verify_base_exempt": True})  # Req: F107 夹具豁免
         parent_token = self.dispatch_task(parent)
         parent_sid = self.app.state.get(parent)["worker_sid"]
         st, r = call(self.port, "POST", "/task_create",
@@ -1518,7 +1527,8 @@ class TestOutOfBandChain(HttpdTest):
     def test_full_chain_zero_commit_done_closes(self):  # ag-af96bb②
         st, r = call(self.port, "POST", "/task_create",
                      {"goal": "评审-only", "project_dir": "/repo",
-                      "deliverable": "out_of_band"}, self.root)
+                      "deliverable": "out_of_band",
+                      "verify_base_exempt": True}, self.root)  # Req: F107 夹具豁免
         self.assertEqual(st, 200)
         tid = r["task"]
         self.assertEqual(self.app.state.get(tid)["deliverable"], "out_of_band")
@@ -1710,7 +1720,8 @@ class TestF101ExternalChain(HttpdTest):
         tid = self.create_task({"goal": "外支交付", "project_dir": "/repo",
                                 "deliverable": "external_branch",
                                 "target_branch": "issue/7-fix",
-                                "verify_cmd": "true"})
+                                "verify_cmd": "true",
+                                "verify_base_exempt": True})  # Req: F107 夹具豁免
         wtok = self.dispatch_task(tid)
         self.app.gitx.env_head = SHA  # ff 直通：integration 头＝env 头
         st, r = call(self.port, "POST", "/post",

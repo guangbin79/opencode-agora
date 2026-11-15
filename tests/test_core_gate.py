@@ -821,6 +821,31 @@ class TestOutOfBandDone(TestCoreGate):
         self.assertEqual(self.gx.merge_calls, [])
         self.assertIn("post(done", self.worker_msgs()[-1]["body"])
 
+    def test_probe_green_hard_rejects_review_only(self):  # Req: F107（终闸 A 册）
+        """review-only 也过 base-red 探针：base 绿（空洞 verify）同款硬拒弹回
+        ——探针不按交付模式切割，假绿面与合并门同构。"""
+        self.runner = FakeRunner((0, "base green"), (0, "pass"))
+        self.mk_gate()
+        self.seed_oob()
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.gate.accept_done("t1", "s-w1", "docs/review.md 在案")
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(len(self.runner.calls), 1)  # 探针后零 env verify
+        self.assertIn("无判别力", self.worker_msgs()[-1]["body"])
+
+    def test_probe_red_review_only_verifies_and_closes(self):  # Req: F107
+        self.runner = FakeRunner((1, "base red"), (0, "pass"))
+        self.mk_gate()
+        self.seed_oob()
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.gate.accept_done("t1", "s-w1", "docs/review.md 在案")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual([c[0] for c in self.runner.calls],  # 探针→env
+                         [f"{self.env}__gate", str(self.env)])
+
 
 class TestGateRun(TestCoreGate):
     def test_gate_entry_milestone_both_sides(self):  # Req: F54
@@ -2454,6 +2479,165 @@ class TestQuickEnvelope(TestCoreGate):
         self.in_gate(quick=True)
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
+
+
+class TestBaseRedProbe(TestCoreGate):
+    """Req: F107 base-red 探针：env verify 前在任务起点 base（env_base）跑一次
+    verify——红放行／绿硬拒（裁决②）／旗标与 quick 豁免（裁决①③）／死与超时
+    分类路由派发方／结果缓存 reopen 不重跑。"""
+
+    def in_gate_probe(self, streak=0, exempt=None, quick=False):
+        self.seed(streak=streak, quick=quick)
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        if exempt is not None:
+            self.state.set_fields("t1", verify_base_exempt=exempt)
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+
+    def events(self):
+        return [e["event"] for e in self.store.read_events("t1")]
+
+    def test_base_red_passes_gate_flow_unchanged(self):  # Req: F107
+        self.runner = FakeRunner((1, "base red"), (0, "pass"), (0, "pass"))
+        self.mk_gate()
+        self.in_gate_probe()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        integ = f"{self.env}__gate"
+        self.assertEqual(t["state"], "closed")  # 红＝探针通过，门流程零变化
+        self.assertEqual(self.gx.build_at_calls,
+                         [("/repo", integ, OTHER_SHA)])  # env_base 定基
+        self.assertEqual(self.runner.calls,  # 探针→env→集成
+                         [(integ, "pytest -q"), (str(self.env), "pytest -q"),
+                          (integ, "pytest -q")])
+        self.assertEqual(t["probe"]["result"], "red")  # 结果缓存落行
+        self.assertIn("base_probe_red", self.events())
+
+    def test_base_green_hard_rejects_with_guidance(self):  # Req: F107
+        self.runner = FakeRunner((0, "base green"), (0, "pass"))
+        self.mk_gate()
+        self.in_gate_probe(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")  # 裁决②：硬拒弹回（禁仅警告）
+        self.assertEqual(t["fail_streak"], 2)  # 计连败（3 连败拍人）
+        self.assertEqual(len(self.runner.calls), 1)  # 探针后零 env verify
+        self.assertEqual(t["probe"]["result"], "green")  # 缓存绿
+        body = self.worker_msgs()[-1]["body"]
+        self.assertIn("无判别力", body)
+        self.assertIn("verify_base_exempt", body)
+        self.assertIn("无豁免权", body)  # worker 自己无豁免权
+        self.assertIn("post(kind=question", body)
+
+    def test_exempt_flag_skips_probe(self):  # Req: F107（裁决①旗标 A）
+        self.runner = FakeRunner((0, "pass"), (0, "pass"))
+        self.mk_gate()
+        self.in_gate_probe(exempt=True)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.build_at_calls, [])  # 零探针机械
+        self.assertEqual(self.runner.calls,
+                         [(str(self.env), "pytest -q"),
+                          (f"{self.env}__gate", "pytest -q")])
+
+    def test_quick_auto_exempt_skips_probe(self):  # Req: F107（裁决③）
+        self.in_gate_probe(quick=True)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.build_at_calls, [])
+
+    def test_probe_dead_parks_done_no_streak(self):  # Req: F107
+        self.runner = FakeRunner((127, "noise"))
+        self.mk_gate()
+        self.in_gate_probe(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留：不 transition
+        self.assertEqual(t["fail_streak"], 1)  # 不计连败
+        self.assertIn(("verify-dead", "t1"), self.health.calls)  # escalate 通道
+        self.assertIn("base_probe_dead", self.events())
+        self.assertFalse(any("重新 post(done" in m["body"]
+                             for m in self.worker_msgs()))  # 不弹回自愈
+
+    def test_probe_overrun_parks_done_routes_dispatcher(self):  # Req: F107
+        self.runner = FakeRunner((124, "hang"))
+        self.mk_gate()
+        self.in_gate_probe(streak=1)
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")
+        self.assertEqual(t["fail_streak"], 1)
+        self.assertIn("base_probe_overrun", self.events())
+        disp = [m for m in self.store.read_messages()
+                if m["to"] == "disp1" and m["kind"] == "result"]
+        self.assertIn("超硬顶", disp[-1]["body"])  # 分类路由派发方
+        self.assertIn("探针", disp[-1]["body"])
+
+    def test_probe_build_failure_parks_to_dispatcher(self):  # Req: F107
+        self.runner = FakeRunner((0, "pass"), (0, "pass"))
+        self.mk_gate()
+        self.gx.build_integration_at = lambda t, i, base_sha=None: (
+            (_ for _ in ()).throw(
+                RuntimeError(f"invalid reference: {base_sha}")))
+        self.in_gate_probe()
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 机械败驻留：不弹 worker 不计连败
+        self.assertEqual(t["fail_streak"], 0)
+        self.assertIn("base_probe_failed", self.events())
+        self.assertNotIn("reopened", self.events())
+
+    def test_reopen_redoes_not_rerun_probe(self):  # Req: F107（缓存生效）
+        self.runner = FakeRunner((1, "base red"), (1, "env boom"))
+        self.mk_gate()
+        self.in_gate_probe()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "verify_failed")
+        self.runner.results = [(0, "pass"), (0, "pass")]  # 续修转绿
+        self.state.transition("t1", "running")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")
+        self.assertEqual(self.gx.build_at_calls,
+                         [("/repo", f"{self.env}__gate", OTHER_SHA)])  # 恰一次
+        self.assertEqual(len(self.runner.calls), 4)  # 二轮零探针重跑
+
+    def test_cached_green_rejects_redo_without_rerun(self):  # Req: F107
+        self.runner = FakeRunner((0, "base green"), (0, "pass"))
+        self.mk_gate()
+        self.in_gate_probe()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.state.transition("t1", "running")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")  # 缓存绿照拒
+        self.assertEqual(len(self.runner.calls), 1)  # 零探针重跑
+
+    def test_cmd_change_invalidates_probe_cache(self):  # Req: F107
+        self.runner = FakeRunner((0, "base green"), (1, "base red"),
+                                 (0, "pass"), (0, "pass"))
+        self.mk_gate()
+        self.in_gate_probe()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "reopened")
+        self.state.set_fields("t1", verify={  # 派发方换验收命令（仿真登记）
+            "cmd": "pytest -q new", "state": "registered",
+            "registered_by": "disp1", "registered_at": 2.0})
+        self.state.transition("t1", "running")
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")  # 新命令重探红
+        self.assertEqual([c[1] for c in self.runner.calls],
+                         ["pytest -q", "pytest -q new", "pytest -q new",
+                          "pytest -q new"])
+
+    def test_env_base_absent_skips_probe(self):  # Req: F107
+        """legacy 在飞行（env_base 缺席）＝探针不可确立 fail-open：门流程零变化。"""
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        self.assertEqual(self.gx.build_at_calls, [])
 
 
 BASE_SHA = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9"  # Req: F98 远端基线

@@ -26,6 +26,9 @@ class TestAccessGitx(unittest.TestCase):
         self._git(["init", "-b", "main"], cwd=path)
         self._git(["config", "user.email", "t@t"], cwd=path)
         self._git(["config", "user.name", "t"], cwd=path)
+        # 密闭：剥全局 excludes（如本机 ~/.gitignore 的 .superpowers/ 隐掉
+        # 未跟踪目录，ensure_clean 脏面判空假绿）
+        self._git(["config", "core.excludesFile", "/dev/null"], cwd=path)
         self._commit(path, {"src.py": "v1"}, "init")
 
     def tearDown(self):
