@@ -211,11 +211,13 @@ def classify(tid, t, stale_ids, now):
     return "busy_round" if ago is None or ago > _STALE_AFTER else "fresh"
 
 
-def detail(snap, store, tid):
+def detail(snap, store, tid, publication=None):
     """单任务明细三件套：全字段行＋事件链＋done 正文（最新一条＝当前结论）。
 
     F15 增 env_active_seconds_ago：env 在盘时 now-最新 mtime（int 秒）；回收/缺失省略。
     F64 增 classification：三态判读结论（report.classify），agent 查单任务即得。
+    P1b 增 publication：merged/closed 行带 origin 出版投影（publication 注入，
+    refs-only 零网络——本地权威交付后 merged≠已出版 origin 的观测面）。
     """
     now = time.time()
     t = snap["tasks"][tid]
@@ -223,15 +225,26 @@ def detail(snap, store, tid):
     base = {tid: max(t.get("last_seen") or t.get("created", 0.0), act)}
     done = [m for m in store.read_messages()
             if m.get("task") == tid and m.get("kind") == "done"]
+    # P1b R1（ocr#3）：排队分型按全量 snap 判（gate 占用零 env walk）——与
+    # health/doctor 同口径，单行快照不丢 gate_busy 语境，免 detail 报 stale
+    # 而 health 不拍的自相矛盾；classification 直接标 'queued'（需求原文）
+    queued = (t["state"] == "done" and not t.get("in_gate")
+              and any(x.get("in_gate") for x in snap["tasks"].values()))
     out = {"task": dict(t), "events": store.read_events(tid),
            "done_body": done[-1]["body"] if done else None,
-           "classification": classify(
+           "classification": "queued" if queued else classify(
                tid, t,
                {c for c, _ in stale_candidates({"tasks": {tid: t}}, now,
                                                base=base)},
                now)}  # 单任务快照入判读：候选集只涉本行，不为他任务白走 env
     if act > 0.0:  # env 回收/缺失 walk 空→省略而非输出 1.7e9 假值
         out["env_active_seconds_ago"] = int(now - act)
+    if publication is not None and t["state"] in _MERGED:
+        try:  # 观测面尽力而为：refs 病/缺支省略字段，read path 不因投影 500
+            out["publication"] = publication(t.get("project_dir"),
+                                             t.get("target_branch"))
+        except Exception:
+            pass
     return out
 
 
@@ -242,10 +255,16 @@ def stale_candidates(snap, now, base=None):
     基线＝max(last_seen or created, env 文件活性)；health tick 构造注入复用同一口径。
     base＝doctor_view 预计算基线 map（评审环 round1：免同请求二遍全树 walk），缺省现算。
     """
+    # P1b（ag-b49329）：done＋非门内＋他任务占门＝串行门排队（queued），不作
+    # 候选——排队等待是正常态，旧口径 20min 必假拍；门闲时 done 滞留仍候选
+    # （无人消费＝真异常）。门内 done 改经 health 阶段审计基线判僵（P1b
+    # ag-9e055d 首例门楔死）——in_gate 不再永久免检。
+    gate_busy = any(x.get("in_gate") for x in snap["tasks"].values())
     cand = []
     for tid, t in snap["tasks"].items():
-        # shortcut: 门线程挂死（verify 永不返回）随 in_gate 永久免检，门故障类报警另立，when: 出现首例门挂死
         if t["state"] in _STALE_STATES and not t.get("in_gate"):
+            if gate_busy and t["state"] == "done":
+                continue
             b = base.get(tid) if base is not None else None
             if b is None:
                 b = _stale_baseline(t)

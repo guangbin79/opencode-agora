@@ -237,7 +237,9 @@ class _Handler(BaseHTTPRequestHandler):
         if name == "board":
             snap = app.state.snapshot()
             if "task" in body:
-                return report.detail(snap, app.store, body["task"])
+                return report.detail(snap, app.store, body["task"],
+                                     publication=getattr(  # P1b 出版投影（假件无该面＝缺席零变化）
+                                         app.gitx, "publication", None))
             if body.get("view") == "full":  # F48 单调用全量（紧凑 {} 形态一字不动）
                 return report.full_view(snap, app.store)
             return {"buckets": report.buckets(snap),

@@ -575,6 +575,7 @@ class Gate:
                 if not self._base_probe(tid, t, target, integration,
                                         runner, cmd):  # Req: F107 探针不豁免 review-only
                     return
+                self._phase(tid, "verify")  # P1b 阶段审计
                 rc, out = runner(env, cmd)
                 if rc == 124:
                     self._verify_overrun(tid, out, budget, ceiling)
@@ -702,6 +703,7 @@ class Gate:
             if not self._base_probe(tid, t, target, integration,
                                     runner, cmd):  # Req: F107 base-red 探针
                 return
+            self._phase(tid, "verify")  # P1b 阶段审计
             rc, out = runner(env, cmd)
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._verify_overrun(tid, out, budget, ceiling)
@@ -738,6 +740,7 @@ class Gate:
                                        target, runner, cmd, budget, ceiling)
                 return
             # 集成阶段全部落在 detached worktree：试合并/测试失败都不会改目标主检出。
+            self._phase(tid, "integration")  # P1b 阶段审计
             self._gitx.build_integration(target, integration, branch)
             before = self._gitx.head(integration)
             e = t.get("rebased_from") or t.get("commit")  # done sha＝交付权威
@@ -811,6 +814,7 @@ class Gate:
                                            + _roster_gate_patterns(roster),
                                            branch=branch):
                     self._health.escalate(KIND_GATEFILES, tid)
+            self._phase(tid, "publish")  # P1b 阶段审计：进入最终推进
             if r is not None:  # 重放推进：sha 级 ff（env 分支仍在 E，不可再作合并源）
                 if self._gitx.ff_sha(target, r, branch) != "ok":
                     self._non_ff(tid, branch, self._gitx.head(target, branch),
@@ -947,6 +951,7 @@ class Gate:
             except RuntimeError as e:
                 self._delivery_fail(tid, attempt, "local_base", str(e))
                 return
+            self._phase(tid, "integration", attempt=attempt)  # P1b 阶段审计
             self._gitx.build_integration_at(target, integration, base_sha=base)
             before = self._gitx.head(integration)
             r = None  # R＝重放后交付 sha（None＝ff 直通）
@@ -999,6 +1004,7 @@ class Gate:
                     self._audit(tid, "delivery_nonff", attempt=attempt,
                                 note=f"{base[:12]}→{tip[:12]}")
                     continue
+                self._phase(tid, "publish", attempt=attempt)  # P1b 阶段审计
                 st = self._gitx.advance_local_target(target, branch, deliver,
                                                      base)
             except RuntimeError as e:  # 锁内缺支/环境病＝交付终局（F98 评审 D2
@@ -1070,6 +1076,7 @@ class Gate:
             except RuntimeError as e:
                 self._delivery_fail(tid, attempt, "local_base", str(e))
                 return
+        self._phase(tid, "integration", attempt=attempt)  # P1b 阶段审计
         try:  # 评审 R1：外部基由派发方供给——本地不可解析（未 fetch/外部改写
             # 历史）＝交付面终局，不走门内异常 reopened 弹回 worker（F98 D2 口径）
             self._gitx.build_integration_at(target, integration,
@@ -1106,6 +1113,7 @@ class Gate:
                                f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
                                reason="集成 verify 失败")
             return
+        self._phase(tid, "publish", attempt=attempt)  # P1b 阶段审计：handoff 即外部交付发布
         self._handoff_external(tid, branch, deliver, base, attempt)
 
     def _handoff_external(self, tid, branch, sha, base, attempt):  # Req: F101
@@ -1387,6 +1395,7 @@ class Gate:
                 return True
             self._probe_green(tid)
             return False
+        self._phase(tid, "base_probe")  # P1b 阶段审计（实跑才发：豁免/缓存零噪音）
         try:
             self._gitx.build_integration_at(target, integration, base_sha=base)
             self._gitx.materialize_checkout(integration, target)  # ag-0d2daa 同款：submodule/LFS 物化后探针红才可信
@@ -1509,6 +1518,15 @@ class Gate:
                 self._pages(self._store.home, tid, self._state.get(tid))
             except Exception:
                 pass
+
+    def _phase(self, tid, name, **extra):
+        """P1b 门阶段审计（ag-9e055d 门楔死 1.5h 人工 forensics）：阶段迁移即
+        phase_<name> 事件（verify/base_probe/integration/publish）——楔死可按
+        末次阶段事件定位；health 门内判僵以本面为活性基线。尽力而为：败不断门。"""
+        try:
+            self._audit(tid, f"phase_{name}", **extra)
+        except Exception:
+            pass
 
     def _post(self, tid, body):
         t = self._state.get(tid)

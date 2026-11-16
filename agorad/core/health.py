@@ -107,13 +107,14 @@ class Health:
 
     def __init__(self, state, oc, router, recover, app, store,
                  runner=None, stale_candidates=None, env_activity=None,
-                 draft_writer=None):
+                 draft_writer=None, gate_stale_after=1200.0):
         """app 按引用注入：main_sid 是活绑定（R25-A），escalate 每次取当前值。
 
         stale_candidates＝report.stale_candidates（core 禁兄弟 import，构造注入）；
         env_activity＝report._env_activity（F59 同款构造注入）；draft_writer＝
         pages.write_stalled_draft（F59 草稿页写面）；runner＝邮件外呼缝（gate
-        同款），缺省真 subprocess。"""
+        同款），缺省真 subprocess；gate_stale_after＝P1b 门内 done 无阶段审计
+        进展的拍人阈（秒，缺省 20min，测试可注入）。"""
         self._state, self._oc, self._router = state, oc, router
         self._recover, self._app = recover, app
         self._store = store
@@ -121,6 +122,7 @@ class Health:
         self._stale_candidates = stale_candidates
         self._env_activity = env_activity
         self._draft_writer = draft_writer
+        self._gate_stale_after = gate_stale_after
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
@@ -178,6 +180,22 @@ class Health:
                 in self._stale_candidates({"tasks": tasks}, time.time())
                 if tid not in busy]
         now = time.time()
+        # P1b（ag-9e055d 门楔死 1.5h）：done＋门内任务以阶段审计为活性基线
+        # ——上次 phase_* 事件超过 gate_stale_after 无进展＝门内僵（含门线程
+        # 挂死），并入候选集走同一边沿/退避；无 phase 事件（升级前在飞/崩窗
+        # 残留）回落 last_seen/created 基线，不静默免检。
+        gate_phase = {}  # tid→当前门阶段名（escalate 正文带出）
+        for tid, t in tasks.items():
+            if t["state"] == "done" and t.get("in_gate") and tid not in busy:
+                phase, last = self._gate_phase(tid)
+                # R1（ocr#2）：phase 基线与任务基线取新——重排再入门窗（旧轮
+                # phase 事件在案、新轮首事件未发）不以旧轮事件误拍；门中真
+                # 楔死时本轮 phase ts 恒新于 last_seen，判僵不受影响
+                last = max(last or 0.0, t.get("last_seen") or 0.0,
+                           t.get("created", 0.0))
+                if now - last > self._gate_stale_after:
+                    gate_phase[tid] = phase or "unknown"
+                    cand.append([tid, last])
         for tid, _ in cand:
             env_dir = tasks[tid].get("env_dir")
             if env_dir and not Path(env_dir).is_dir():  # F72 在盘判定（勿用 env_activity：0.0 分不清缺失与不活跃）
@@ -189,11 +207,13 @@ class Health:
                 n, last = self._stale_esc.get(tid, (0, 0.0))
                 if now - last < self._stale_gap(n):
                     continue  # 退避窗内：抑制本轮拍人，不记边沿下轮重试
-                self.escalate(KIND_STALLED, tid, streak=n + 1)
+                self.escalate(KIND_STALLED, tid, streak=n + 1,
+                              phase=gate_phase.get(tid))
                 self._stale_esc[tid] = (n + 1, time.time())
                 self._stale_seen.add(tid)  # 拍到才记：escalate 失败下轮重试不丢报
                 wsid = tasks[tid].get("worker_sid")
-                if wsid:  # F70 自检提示：模型自行纠偏；注入败不重试不阻断拍人
+                # 门内僵＝门侧楔死，worker 无从自纠：免 F70 自检注入
+                if wsid and tid not in gate_phase:
                     self.nudge_worker(tid)
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
@@ -338,7 +358,23 @@ class Health:
                 pass  # 草稿照写失败不阻塞拍人
         return lines, draft
 
-    def escalate(self, kind, tid, raw=None, streak=None):
+    def _gate_phase(self, tid):
+        """P1b 门阶段进度读数：（当前阶段名, 末次 phase_* 审计 ts）。
+
+        事件面读故障/无 phase 事件＝(None, None)——证据缺席由调用方回落任务
+        基线，不阻塞判僵（降级纪律同 F59 证据包）。"""
+        try:
+            evs = [e for e in self._store.read_events(tid)
+                   if str(e.get("event", "")).startswith("phase_")]
+        except Exception:
+            return None, None
+        if not evs:
+            return None, None
+        last = evs[-1]
+        ts = last.get("ts") or 0.0
+        return str(last["event"])[len("phase_"):], ts or None
+
+    def escalate(self, kind, tid, raw=None, streak=None, phase=None):
         """失控拍人：正文服务权威合成；raw 为任务/worker 供给文本（不可信）。
 
         stalled/env-gone/verify-dead 走通知通道（synthetic resume:true——落合成消息
@@ -355,6 +391,8 @@ class Health:
                 f"连败 {t.get('fail_streak', 0)}")
         if streak:
             body += f"，第 {streak} 次升级"
+        if phase:  # P1b 门内僵：当前门阶段随行（服务侧事件面事实，非供给文本）
+            body += f"，门阶段 {phase}"
         note = None
         if kind == KIND_STALLED and t.get("worker_sid"):
             note = self._last_activity(t["worker_sid"])  # 加一次取末条（F52 裁定）

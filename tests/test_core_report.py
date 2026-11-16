@@ -284,9 +284,14 @@ class TestReport(unittest.TestCase):
         self.assertEqual([age for _, age in v["age_rank"]],
                          [1600.0, 1600.0, 1500.0, 1500.0, 1300.0, 1.0])  # F15 融合基线：t1(300)→1300、t2(1599)→1，复用同一 now
 
-    def test_stale_candidates_skip_in_gate(self):  # Req: F5
+    def test_stale_candidates_skip_in_gate(self):  # Req: F5；P1b 分型修订（ag-b49329/ag-9e055d）
         s = snap(tg=dict(row("done"), in_gate=True), tl=row("done"))
-        self.assertEqual(stale_candidates(s, 3000.0), [["tl", 0.0]])  # 门内静默属正常：免判；同态无闩照拍
+        # P1b：tl＝排队（queued）——他任务占门不作候选；tg＝门内——本层仍免判
+        # （health 以 phase_* 阶段审计为活性基线另行判僵，见 test_p1_observability）
+        self.assertEqual(stale_candidates(s, 3000.0), [])
+        s["tasks"]["tg"]["in_gate"] = False  # 门闲：done 滞留无消费＝真异常照拍
+        self.assertEqual([c[0] for c in stale_candidates(s, 3000.0)],
+                         ["tg", "tl"])
 
     def test_env_activity_missing_or_empty_zero(self):  # Req: F15
         self.assertEqual(_env_activity(None), 0.0)

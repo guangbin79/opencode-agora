@@ -634,6 +634,34 @@ class Gitx:
                                f"（refs/heads/{branch}: {sha!r}）")
         return sha
 
+    def publication(self, repo_dir: str, branch: str = None) -> dict:  # P1b ag-454fbe
+        """origin 出版投影（零网络，refs-only）：本地权威交付后 merged≠已出版
+        origin——target_ref=本地目标支 tip、origin_ref=origin/<branch> 跟踪 ref
+        tip（无跟踪 ref＝None）、ahead=rev-list origin..local 计数（无跟踪
+        ref＝0）、note=as of last fetch（读数截至上次 fetch）。branch=None＝
+        symref 解析默认支；本地缺支如实 RuntimeError（调用方观测面省略字段）。"""
+        if branch is None:
+            branch = self.symref(repo_dir)
+
+        def _ref(ref):
+            r = self._git(["rev-parse", "--verify", "--quiet", ref],
+                          cwd=repo_dir, check=False)
+            return r.stdout.strip().lower() if r.returncode == 0 else None
+
+        out = {"branch": branch,
+               "target_ref": _ref(f"refs/heads/{branch}"),
+               "origin_ref": _ref(f"refs/remotes/origin/{branch}"),
+               "note": "as of last fetch"}
+        if out["target_ref"] is None:  # 本地缺支投影无意义：如实抛（调用方省略字段，detached-HEAD 同盖）
+            raise RuntimeError(f"本地缺支: refs/heads/{branch}")
+        c = (self._git(["rev-list", "--count",
+                        f"refs/remotes/origin/{branch}..refs/heads/{branch}"],
+                       cwd=repo_dir, check=False)
+             if out["origin_ref"] and out["target_ref"] else None)
+        out["ahead"] = int(c.stdout.strip()) if c is not None \
+            and c.returncode == 0 else 0
+        return out
+
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
         """本地权威目标支推进（调用方持仓级交付锁）：CAS＋ff-only 双守卫。
