@@ -3,7 +3,7 @@
 
 独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
 stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
-14 工具（13 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
+15 工具（14 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
 X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 `$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
 错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
@@ -123,6 +123,11 @@ _TOOLS = [
                     "description": "delivered＝外部证据留痕（入 delivery.reason）；"
                                    "failed＝机器可读错误（空则 external_delivery_failed）"}},
          "required": ["task", "outcome", "commit"]}},
+    {"name": "reverify", "description": "把 done 驻留任务重排回验证门（任务派发方/root；"
+                                        "仅 state==done——verify-dead 停车恢复边：task_update "
+                                        "换命令后重跑门；全局 worker 角色永拒，ag-d68faf）",
+     "inputSchema": {"type": "object", "properties": {"task": _TID},
+                     "required": ["task"]}},
     {"name": "post", "description": "链边发消息（方向服务按角色定）",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string",

@@ -764,7 +764,7 @@ class TestMcpSchema(unittest.TestCase):
     def test_sleep_rename_points_to_dispatch_watch(self):  # Req: F64 改名不减数
         import agora_mcp
         tools = {t["name"]: t for t in agora_mcp._TOOLS}
-        self.assertEqual(len(tools), 14)  # Req: F101 增 task_deliver
+        self.assertEqual(len(tools), 15)  # ag-d68faf 增 reverify
         self.assertNotIn("wait", tools)
         desc = tools["sleep"]["description"]
         self.assertNotIn("agora wait", desc)  # 不引用已退役 CLI wait

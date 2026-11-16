@@ -1372,9 +1372,10 @@ class Gate:
         """base-red 探针（FAIL_TO_PASS 最小机械近似）：env verify 前在任务起点
         base（env_base）的 detached 集成树上跑一次 verify——红＝有判别力放行
         （门流程零变化）；绿且无豁免＝硬拒弹回（裁决②）。豁免：建单旗标
-        verify_base_exempt（裁决① A）／quick 自动豁免（裁决③）。探针死（F81/
-        F82）/超硬顶（F36）/机械败＝分类路由派发方——驻留 done、不计连败、不弹
-        worker（探针死≠活差）。结果缓存任务行 probe={result,cmd,base,ran_at}
+        verify_base_exempt（裁决① A）／quick 自动豁免（裁决③）。base 阶段命令
+        死（126/127）＝判别红放行（ag-d68faf：缺文件形态——真死命令由 env 阶段
+        F81/F82 分类兜底）；超硬顶（F36）／机械败＝分类路由派发方——驻留 done、
+        不计连败、不弹 worker。结果缓存任务行 probe={result,cmd,base,ran_at}
         （cmd+base 双键：换命令或重派换基即失效重探），reopen／崩溃重排不重跑；
         env_base 缺席（升级前在飞任务）＝探针不可确立 fail-open 放行。"""
         base = t.get("env_base")
@@ -1412,21 +1413,9 @@ class Gate:
             except Exception:
                 pass
             return False
-        if _cmd_dead(rc, out):  # 命令死：F81/F82 语义——escalate 通知通道拍派发方
-            self._audit(tid, "base_probe_dead", rc=rc)
-            try:
-                self._health.escalate(
-                    KIND_VERIFY_DEAD, tid,
-                    raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}")
-            except Exception:
-                pass
-            try:
-                self._post(tid, f"base-red 探针命令自身死（exit {rc}：命令不"
-                                "存在/不可执行）——非活不达标，无需自愈重试；"
-                                "已升级派发方处置，等待通知即可")
-            except Exception:
-                pass
-            return False
+        # ag-d68faf 修订：base 阶段命令死（126/127 等）＝判别红——缺文件形态
+        # （verify 引用任务随后才建的测试脚本）在 base 上恰红；真死命令由 env
+        # 阶段 F81/F82 分类兜底（_cmd_dead 不在此处适用）。
         red = rc != 0
         self._state.set_fields(tid, probe={
             "result": "red" if red else "green", "cmd": cmd, "base": base,

@@ -1,4 +1,4 @@
-"""入向 JSON 口（B4）：13 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
+"""入向 JSON 口（B4）：14 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
 牌签发面）＋/view＋/health；单线程串行＋后台门队列。
 
 门队列消费经 gate.run_guarded（P0-1 看门狗，ag-9c4cbb）：门级硬顶到点杀本门
@@ -29,7 +29,8 @@ from agorad.core.verify_hygiene import find_verify_hygiene_issues
 
 _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel",
                     "task_deliver", "post", "check_mail", "board", "doctor",
-                    "repo_board", "wiki_read", "wiki_write", "enforce"})  # Req: F101 task_deliver
+                    "repo_board", "wiki_read", "wiki_write", "enforce",
+                    "reverify"})  # Req: F101 task_deliver；ag-d68faf reverify
 _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
                "peer")
 _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
@@ -49,6 +50,7 @@ _STRING_FIELDS = {
     "task_update": ("task", "verify_cmd"),
     "task_cancel": ("task",),
     "task_deliver": ("task", "outcome", "commit", "base", "reason"),  # Req: F101
+    "reverify": ("task",),
     "post": ("task", "kind", "body"),
     "board": ("task", "view"),
     "repo_board": ("repo",),
@@ -222,6 +224,11 @@ class _Handler(BaseHTTPRequestHandler):
                                  reason=body.get("reason", ""), actor_sid=sid)
             if r.get("requeued"):
                 self.gate_q.put(body["task"])  # non_ff：门体按外部基重排重验
+            return r
+        if name == "reverify":  # ag-d68faf：done 驻留重排（verify-dead 恢复边）
+            r = app.task.reverify(body["task"], token, actor_sid=sid)
+            if r.get("requeued"):
+                self.gate_q.put(body["task"])  # 与 task_deliver non_ff 同款投门队列
             return r
         if name == "post":
             return self._post(sid, role, body)

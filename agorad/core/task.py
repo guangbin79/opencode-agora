@@ -653,6 +653,33 @@ class TaskService:
             except Exception:
                 pass  # worker 不活则留库补拉（消息先落库铁则）
 
+    # ---- ag-d68faf P1a：done 驻留重排（reverify） ----
+
+    def reverify(self, tid, actor_token, actor_sid=None):
+        """done 驻留任务重排回验证门（verify-dead 停车恢复边）：此前唯一恢复
+        路＝整服务重启。仅 state==done 可重排（非 done 拒且零改写）；worker
+        全局角色永拒（may 矩阵 F37 同口径）；审计 reverify 行，响应 requeued
+        由 transport 投 gate_q（task_deliver non_ff 同款）。"""
+        t = self._state.get(tid)
+        sid, _ = self._gate(actor_token, "reverify", tid, t,
+                            owner=t.get("dispatcher_sid"))
+        sid = actor_sid or sid  # ag-f80309：归属记对齐调用 sid
+        if t["state"] != "done":
+            self._reject(tid, sid, f"任务 {tid} 当前 {t['state']}——仅 done"
+                                   " 驻留可 reverify 重排（在飞等 worker "
+                                   "post(done)；终态无需重验）")
+        d = t.get("delivery") or {}
+        if d.get("mode") == "external_branch" \
+                and d.get("status") == "awaiting_external":
+            # 外部交付驻留＝设计内稳态（门体 F101 直通不重验）——重排是谎报
+            # no-op；处置动词是 task_deliver（评审 R1：B 册/OCR 同发现）
+            self._reject(tid, sid, f"任务 {tid} done＋awaiting_external"
+                                   " 外部交付驻留——门体直通不重验；确认/"
+                                   "失败走 task_deliver")
+        self._store.append_event({"ts": time.time(), "actor": sid,
+                                  "event": "reverify", "task": tid})
+        return {"ok": True, "requeued": True}
+
     # ---- Req: F101 外部交付确认（task_deliver：dispatcher 归属/root 专用） ----
 
     _DELIVER_ERRORS = ("external_delivery_failed",)  # 空理由缺省错误名
@@ -935,7 +962,7 @@ class TaskService:
                 "goal 中的主仓路径仅指代——你的可写区＝env 副本（同构 worktree），编辑一律用副本内对应路径\n"
                 "role: worker。可用: post/check_mail/repo_board/wiki_read/wiki_write/"
                 "task_create/task_dispatch/task_cancel(仅限己建子任务)/sleep\n"
-                "不可用(403): board / doctor / enforce / task_update；task_cancel 他任务亦拒；"
+                "不可用(403): board / doctor / enforce / task_update / reverify；task_cancel 他任务亦拒；"
                 "验收命令（verify_cmd/task_update）全局 worker 角色永拒\n"
                 "kind 纪律: 凡需要派发方回应——裁定、答复、处置、确认、no-op 申报——"
                 "一律 post(kind=question)（唤醒通道，会把对方叫醒）；此类消息绝不可用 note："

@@ -2483,8 +2483,8 @@ class TestQuickEnvelope(TestCoreGate):
 
 class TestBaseRedProbe(TestCoreGate):
     """Req: F107 base-red 探针：env verify 前在任务起点 base（env_base）跑一次
-    verify——红放行／绿硬拒（裁决②）／旗标与 quick 豁免（裁决①③）／死与超时
-    分类路由派发方／结果缓存 reopen 不重跑。"""
+    verify——红放行／绿硬拒（裁决②）／旗标与 quick 豁免（裁决①③）／命令死在
+    base＝判别红（ag-d68faf 修订）／超时分类路由派发方／结果缓存 reopen 不重跑。"""
 
     def in_gate_probe(self, streak=0, exempt=None, quick=False):
         self.seed(streak=streak, quick=quick)
@@ -2545,18 +2545,19 @@ class TestBaseRedProbe(TestCoreGate):
         self.assertEqual(self.state.get("t1")["state"], "closed")
         self.assertEqual(self.gx.build_at_calls, [])
 
-    def test_probe_dead_parks_done_no_streak(self):  # Req: F107
-        self.runner = FakeRunner((127, "noise"))
+    def test_probe_dead_is_red_at_base(self):  # Req: F107（ag-d68faf 修订）
+        """base 阶段命令死＝判别红：缺文件形态（任务自建验收脚本）放行门
+        流程，不再驻留路由派发方。"""
+        self.runner = FakeRunner((127, "noise"), (0, "pass"), (0, "pass"))
         self.mk_gate()
         self.in_gate_probe(streak=1)
         self.gate.run("t1")
         t = self.state.get("t1")
-        self.assertEqual(t["state"], "done")  # 驻留：不 transition
-        self.assertEqual(t["fail_streak"], 1)  # 不计连败
-        self.assertIn(("verify-dead", "t1"), self.health.calls)  # escalate 通道
-        self.assertIn("base_probe_dead", self.events())
-        self.assertFalse(any("重新 post(done" in m["body"]
-                             for m in self.worker_msgs()))  # 不弹回自愈
+        self.assertEqual(t["state"], "closed")  # 红放行：门流程走完
+        self.assertEqual(t["fail_streak"], 0)  # 全绿清连败（R12）：探针死红不 bump
+        self.assertEqual(t["probe"]["result"], "red")  # 死红照缓存
+        self.assertNotIn("base_probe_dead", self.events())
+        self.assertNotIn(("verify-dead", "t1"), self.health.calls)  # 不 escalate
 
     def test_probe_overrun_parks_done_routes_dispatcher(self):  # Req: F107
         self.runner = FakeRunner((124, "hang"))

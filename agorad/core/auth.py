@@ -163,7 +163,8 @@ class Auth:
         if role == "worker":
             return tool in WORKER_TOOLS
         if role == "dispatcher":
-            if tool in ("task_update", "task_cancel", "task_deliver"):  # Req: F101 增外部交付确认
+            if tool in ("task_update", "task_cancel", "task_deliver",
+                        "reverify"):  # Req: F101 外部交付确认；ag-d68faf 重排
                 return state is not None
             return tool in DISPATCHER_TOOLS
         return False

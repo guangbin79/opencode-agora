@@ -609,7 +609,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：每次向人汇报后，dispatcher 把一行 `date | tid | 一句结论 | 证据指针` 并入 `wiki/reported.md`（append-only 账：wiki_read 现文→追加→整页写回，页不存在则新建）；下次汇报前先查该 tid，已告知过的结论不重复展开。零服务改动，复用 wiki_write；只覆盖 dispatcher→人方向（worker 汇报经任务页/服务已留痕）。
 **落点**：skills/agora-dispatch/SKILL.md §6 新增一条纪律＋来源行增补；docs/reqs/opencode-agora.md（本条）。
 
-### F107 verify 门 base-red 探针（2026-11-15，已实施；三裁决＝用户 2026-11-15 裁定）
+### F107 verify 门 base-red 探针（2026-11-15，已实施；三裁决＝用户 2026-11-15 裁定；探针死分类经 ag-d68faf 修订为 base 阶段判别红）
 **现状**：verify 门只认「命令绿→合并」，verify_cmd 从不在任务起点 base 上运行——与任务无关、在 base 上本来就绿的空洞 verify 可一路绿到合并（假绿；对照 SWE-bench FAIL_TO_PASS 纪律：验证器双向都会错，修前也绿的测试不证明修复；提案全文见 `docs/f107-base-red-verify.md`）。
 **裁定**：①豁免形态＝A 显式建单旗标 `verify_base_exempt`（B 静态判据弃——文本启发式可被措辞绕过且恰与假绿高危面重合；C 无豁免弃——回归守卫单全数误杀）②base 绿＝硬拒打回（禁仅警告；拒因引导换验收命令或派发方豁免，worker 自己无豁免权）③quick=true 自动豁免（账本多数投票已含已验证多数判）。
 **落点**：agorad/core/gate.py（`_base_probe`＋`_probe_green`：env verify 前经 build_integration_at 在任务行 env_base 定基跑一次 verify——红放行门流程零变化；绿硬拒弹回计连败；探针死（F81/F82 分类）／超硬顶（F36 分类）／机械败（env_base 对象缺失等）＝驻留 done 分类路由派发方，不计连败不弹 worker；结果缓存任务行 `probe={result,cmd,base,ran_at}`，reopen／崩溃重排不重跑，换命令或重派换基即失效重探；env_base 缺席（升级前在飞任务）＝fail-open 放行）、agorad/core/task.py＋agorad/transport/httpd.py＋agora_mcp.py（建单旗标：仅 dispatcher/root，worker 显式传拒、缺省继承父任务，入 client_key 幂等载荷；MCP schema 同步）、skills/agora-dispatch/SKILL.md §1 一句、README／README.zh-CN verify 门段、tests/test_core_gate.py（Req: F107 锚十一：红放行／绿硬拒／旗标豁免／quick 豁免／死驻留／超顶路由／机械败路由／reopen 缓存红不重跑／缓存绿照拒零重跑／换命令重探／legacy 缺 env_base 跳过）＋tests/test_core_task.py（旗标建单面二）＋tests/test_transport_httpd.py（布尔 400＋全链入行，既有门全链夹具改走豁免旗）＋tests/e2e/multi_instance_delivery.py（缺省豁免保交付机械；场景 a 关豁免以真实红绿命令真跑探针）。
