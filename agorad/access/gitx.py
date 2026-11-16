@@ -840,6 +840,30 @@ class Gitx:
         return self._git(["rev-parse", "--abbrev-ref", "HEAD"],
                          cwd=repo_dir).stdout.strip()
 
+    def default_branch(self, repo_dir: str) -> str:  # ag-b5f2e9
+        """仓默认支（建单缺省父支 detached/解析失败的回退面）：origin/HEAD
+        本地声明（clone 地道）优先，次取 init.defaultBranch 配置，兜底 main
+        ——只读本地引用/配置，零网络；返回名不担保存在，不存在时由派发
+        local_base 拒因点名暴露。终闸 C 册：两路由输出不可信（origin/HEAD
+        可伪造/config 值零校验，前导 - 与换行实测可注入），逐路由过 check_branch
+        同款校验，不过即弃走下一路由。"""
+        r = self._git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                      cwd=repo_dir, check=False)
+        name = r.stdout.strip()
+        if r.returncode == 0 and name.startswith("origin/"):
+            branch = name[len("origin/"):]
+            if self._git(["check-ref-format", "--branch", branch],
+                         cwd=repo_dir, check=False).returncode == 0:
+                return branch
+        r = self._git(["config", "--get", "init.defaultBranch"],
+                      cwd=repo_dir, check=False)
+        if r.returncode == 0 and r.stdout.strip():
+            branch = r.stdout.strip()
+            if self._git(["check-ref-format", "--branch", branch],
+                         cwd=repo_dir, check=False).returncode == 0:
+                return branch
+        return "main"
+
     def checkout(self, repo_dir: str, branch: str) -> bool:
         try:  # 门毕还原分支位；失败不掩盖门结果，回 False 交调用方留痕
             self._git(["checkout", branch], cwd=repo_dir)

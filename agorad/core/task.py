@@ -16,10 +16,6 @@ import time
 
 _MAX_DEPTH = 3
 _QUOTA = 6  # F41：Graicunas/ICS 跨度锚定
-# Req: F98 派发面远端定基短预算：dispatch 在单线程 HTTP 串行面同步 fetch，死/
-# 黑洞 origin 不得停摆全服务（accept_done 探针 fetch_timeout=15 同口径；门体交付
-# 面仍走 _PUSH_TIMEOUT 全预算——verify/push 本就有分钟级网络面先例）
-_REMOTE_BASE_TIMEOUT = 15
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _AFTER_OK = {"merged", "closed", "cancelled"}  # cancelled 还须非 dependency_failed；派发处终审
 _FROZEN = {"cancelled", "closed", "merged"}    # cancel 不再触碰（merged 不逆转历史）
@@ -87,6 +83,7 @@ class TaskService:
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
         explicit_branch = target_branch is not None  # Req: F94 显式传入才走信任边界校验
+        fallback_note = None  # ag-b5f2e9 缺省父支回退审计载荷（None＝无回退）
         parent = self._worker_parent(tid, sid, role)  # F37：worker 建单须父任务上下文
         if project_dir is not None:
             project_dir = self._repo_key(project_dir)  # F90：入账/比较前归一别名
@@ -170,17 +167,28 @@ class TaskService:
             except Exception as e:
                 self._reject(tid, sid, f"target_branch: {e}")
         elif target_branch is None and role != "worker":
-            # Req: F94 建单钉死缺省支；worker 继承 legacy None 支不落此路——
-            # worker 不能显式传支（传即 EV_DENIED），钉支路 detached 拒对其是
-            # 死路；保持旧动态语义与父行同态（门体按实时 symref 解析）
+            # Req: F94 建单钉死缺省支＝主检出当前分支（symref 实名入账，主检出
+            # 换支不漂移）；worker 继承 legacy None 支不落此路——worker 不能显式
+            # 传支（传即 EV_DENIED），钉支路对其是死路；保持旧动态语义与父行
+            # 同态（门体按实时 symref 解析）。
+            # ag-b5f2e9：detached/解析失败不再硬拒——回退仓默认支＋审计行。
+            why = ""
             try:
                 pinned = self._gitx.symref(project_dir)
             except Exception as e:
-                self._reject(tid, sid, f"target_branch: {e}")
-            if not pinned or pinned == "HEAD":  # detached 无从谈钉支
-                self._reject(tid, sid, "target_branch 缺省解析得主检出 detached"
-                                      "（HEAD）——须显式指定 target_branch")
-            target_branch = pinned  # 实名入账：已知存在，不走 check_branch
+                pinned, why = None, str(e)
+            if pinned and pinned != "HEAD":
+                target_branch = pinned  # 实名入账：已知存在，不走 check_branch
+            else:
+                try:
+                    target_branch = self._gitx.default_branch(project_dir)
+                except Exception as e:
+                    self._reject(tid, sid, f"target_branch: {e}")
+                fallback_note = (
+                    f"主检出当前分支 detached（HEAD）——回退仓默认支"
+                    f" {target_branch}" if pinned == "HEAD" else
+                    f"主检出当前分支解析失败（{why}）——回退仓默认支"
+                    f" {target_branch}")
         depth = 1 + max((t["chain_depth"] for t in self._state.snapshot()["tasks"].values()
                          if t.get("worker_sid") == sid), default=0)
         now = time.time()
@@ -248,6 +256,10 @@ class TaskService:
             "created": now, "updated": now})
         self._store.append_event({"ts": now, "actor": sid,
                                   "event": EV_CREATED, "task": tid})
+        if fallback_note:  # ag-b5f2e9 缺省父支回退审计行（detached/解析失败）
+            self._store.append_event({"ts": now, "actor": sid,
+                                      "event": "target_branch_fallback",
+                                      "task": tid, "note": fallback_note})
         if verify_cmd is not None or resolved is not None:  # 登记事件照落（与 update 路同款审计）
             self._store.append_event({"ts": now, "actor": sid,
                                       "event": EV_VERIFY, "task": tid})
@@ -322,14 +334,10 @@ class TaskService:
         # Req: F71 记录 env 不在盘（/tmp 清理/误删，ag-724152）＝无 env，重派全新建路自愈
         new_env = not self._gitx.env_on_disk(env)
         if new_env:
-            # Req: F98 managed 远端权威定基：origin 在位即取远端 tip 建 env，
-            # fetch 失败拒派报 remote_base——绝不回退本地支（远端才是交付权威）。
-            # has_origin/fetch 同入守卫（评审 D1）：仓亡（FileNotFoundError）与
-            # 网络病一律清晰拒因＋审计（env_build 同口径），短预算防死 origin
-            # 停摆串行门（评审 D4）。
-            # Req: F100 no-origin 本地权威定基：缺 origin 解析钉死本地目标支
-            # tip（local_branch_sha 精确 SHA）建 env——缺支/malformed 拒派报
-            # local_base 点名钉死支，绝不回退仓默认支。
+            # ag-b5f2e9 managed 定基一律本地权威：解析钉死本地目标支 tip
+            # （local_branch_sha 精确 SHA）建 env——origin 在位不再改变定基面
+            # （F98 远端定基废除）；缺支/malformed 拒派报 local_base 点名
+            # 钉死支，绝不回退仓默认支。
             # Req: F101 external_branch 定基：本地钉死支 tip 权威（外部派发方
             # 持有远端交付权——不 fetch 不 push，origin 在位不改变定基面）；
             # 缺钉死支/缺支拒派报 local_base，绝不回退仓默认支。
@@ -346,21 +354,10 @@ class TaskService:
                     self._reject(tid, sid, f"local_base: {e}")
             elif d.get("mode") == "managed" and t.get("target_branch") is not None:
                 try:
-                    origin = self._gitx.has_origin(t["project_dir"])
-                except Exception as e:  # 仓亡等：归远端面口径（F98 评审 D1）
-                    self._reject(tid, sid, f"remote_base: {e}")
-                try:
-                    base_sha = (
-                        self._gitx.fetch_origin_branch(
-                            t["project_dir"], t["target_branch"],
-                            timeout=_REMOTE_BASE_TIMEOUT)
-                        if origin else
-                        self._gitx.local_branch_sha(t["project_dir"],
-                                                    t["target_branch"]))
+                    base_sha = self._gitx.local_branch_sha(
+                        t["project_dir"], t["target_branch"])
                 except Exception as e:
-                    self._reject(tid, sid,
-                                 f"remote_base: {e}" if origin
-                                 else f"local_base: {e}")
+                    self._reject(tid, sid, f"local_base: {e}")
             try:
                 if base_sha is not None:
                     env = self._gitx.build_env_at(

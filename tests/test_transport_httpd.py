@@ -54,6 +54,9 @@ class FakeGitx:
     def local_branch_sha(self, repo_dir, branch):  # Req: F100 本地权威定基
         return "c" * 40
 
+    def is_ancestor(self, repo_dir, base, commit):  # ag-b5f2e9 崩窗探针严格本地
+        return self.landed  # 与 contains 同口径：最终推进落地后目标支才含交付
+
     def build_env_at(self, project_dir, tid, branch=None,
                      base_sha=None):  # Req: F100 委托同款 env 目录模型
         return self.build_env(project_dir, tid, branch)

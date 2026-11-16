@@ -6,12 +6,13 @@ verify，再在目标分支当前 HEAD 的 detached integration worktree 内 ff-
 集成 verify 跑在新内容上，绿则 sha 级 ff 推进），同步冲突才弹回；只有全绿且目标
 主检出两次干净检查通过，才推进真实目标分支。集成
 失败不再依赖 reset --hard 回滚，用户未提交工作与目标分支均不受测试副作用影响。
-managed 任务（Req: F98，delivery.mode=managed＋origin 在位）改走远端优先交付
-（_deliver_managed）：远端 tip 定基集成、锁内 ff-only 发布、本地主检出零接触，
-交付败走 delivery failed/blocked 专用终局（非质量口径）。无 origin 的 managed
-任务（Req: F100）走本地权威交付（_deliver_managed_local）：本地钉死支 tip 定基
-＋锁内 advance_local_target CAS ff-only 推进，脏/占用目标＝交付终局失败；
-启动恢复面 recover_managed 收敛崩溃残留（failed 防重试、权威已含补终态）。
+managed 任务（Req: F100，delivery.mode=managed＋钉死目标支）一律走本地权威
+交付（_deliver_managed_local，ag-b5f2e9 用户裁定废除 F98 远端优先）：本地钉死
+支 tip 定基＋锁内 advance_local_target CAS ff-only 推进，origin 在位不改变
+定基/交付面（零 fetch 零 push），脏/占用目标＝交付终局失败；交付败走
+delivery failed/blocked 专用终局（非质量口径）；启动恢复面 recover_managed
+收敛崩溃残留（failed 防重试、权威已含补终态——恢复面远端探针保留兼容
+F98 时代已推远端的崩窗残留）。
 external_branch 任务（Req: F101，外部开发分支交付）走 _deliver_external：本地
 钉死支 tip（或 task_deliver(non_ff) 携带的外部基）定基集成→rebase→集成 verify，
 绿即驻留 done＋delivery.status=awaiting_external——不合目标支、不推 origin、
@@ -68,7 +69,7 @@ _GATE_ENV_STRIP = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD")
 # 不 import access 故同值异地声明）；等锁超时＝一次失败尝试，绝不无限阻塞串行门
 _LOCK_WAIT = 300
 _LOCK_POLL = 0.05
-# Req: F100 恢复面探针短预算（task._REMOTE_BASE_TIMEOUT 同口径异地声明）：启动
+# Req: F100 恢复面探针短预算（ag-b5f2e9 起与 task 派发面无耦合，值自治）：启动
 # 串行面防死 origin 停摆——300s×N 全预算阻塞端口绑定且单例锁已持（终闸 B 册）；
 # 超时/网络病＝对账不可得，留门重排链路在其自身失败面内兜底，语义不变
 _RECOVER_FETCH_TIMEOUT = 15
@@ -596,12 +597,12 @@ class Gate:
                 self._post(tid, "review-only 交付在案（零合入）——环境已回收")
                 return
             # Req: F100 managed 判据拆分：delivery.mode=managed＋钉死目标支即入
-            # 交付协议；origin 在位走 F98 远端优先，缺 origin 走本地权威交付
-            # （_deliver_managed_local）。legacy delivery=None 行保持本地门不变
+            # 交付协议。ag-b5f2e9 用户裁定：managed 一律本地权威交付
+            # （_deliver_managed_local，F98 远端优先废除——有 origin 的仓
+            # local=pending 账面根因）。legacy delivery=None 行保持本地门不变
             delivery = t.get("delivery") or {}
             managed = delivery.get("mode") == "managed" and branch is not None
             external = delivery.get("mode") == "external_branch"  # Req: F101
-            remote_first = managed and self._gitx.has_origin(target)
             if external and delivery.get("status") == "awaiting_external":
                 # Req: F101 外部确认驻留：done+awaiting_external 重排（重启 done
                 # 残留恰一次）直通——不重跑 handoff、不发明结果、不过期等待
@@ -628,25 +629,20 @@ class Gate:
                     self._state.transition(tid, "blocked")
                     self._audit(tid, "delivery_failed_recovery")
                 return
-            if managed:  # 崩溃窗口补终态：权威目标已含任务 commit 即收尾，不重验不重推
+            if managed:  # 崩溃窗口补终态：本地目标支已含任务 commit 即收尾，不重验不重推
+                # ag-b5f2e9 权威恒＝本地钉死支（origin 在位不问远端）。终闸 B 册：
+                # contains 经 baseline 在「本地支严格落后」时基线取 origin——origin
+                # 含≠本地支含；探针严格问 refs/heads/<branch>，origin 含而本地不含
+                # 交本地交付自愈（rebase 重放＋advance 真推进），绝不零推进谎报 synced
                 try:
-                    landed = (self._gitx.remote_contains(target, branch,
-                                                         t["commit"])
-                              if remote_first
-                              else self._gitx.contains(target, t["commit"],
-                                                       branch))
+                    landed = self._gitx.is_ancestor(
+                        target, t["commit"], f"refs/heads/{branch}")
                 except RuntimeError:
-                    landed = False  # 网络病照走投递路径（其内 fetch 自有失败面）
+                    landed = False  # 探针病照走投递路径（其内自有失败面）
                 if landed:
-                    if remote_first:
-                        self._finish_delivered(
-                            tid, branch, t["commit"], None,
-                            delivery.get("attempt", 0),
-                            self._local_head_safe(target, branch))
-                    else:  # Req: F100 本地权威已含：按已交付收口零推进
-                        self._finish_local_delivered(
-                            tid, branch, t["commit"], None,
-                            delivery.get("attempt", 0))
+                    self._finish_local_delivered(
+                        tid, branch, t["commit"], None,
+                        delivery.get("attempt", 0))
                     return
             elif external:
                 pass  # Req: F101 外部权威在派发方（task_deliver）——无本地/远端 landed 补终态探针
@@ -731,15 +727,11 @@ class Gate:
                     "重新 post(done, commit)",
                     reason="锚缺失/落后/未绿")
                 return
-            if managed:  # Req: F98/F100 交付协议：集成基＝权威 tip，主检出零接触
-                if remote_first:  # F98 远端优先：集成基＝远端 tip
-                    self._deliver_managed(tid, branch, env, integration,
-                                          target, runner, cmd, budget,
-                                          ceiling)
-                else:  # Req: F100 本地权威：集成基＝本地钉死支 tip
-                    self._deliver_managed_local(tid, branch, env, integration,
-                                                target, runner, cmd, budget,
-                                                ceiling)
+            if managed:  # Req: F100 交付协议（ag-b5f2e9 一律本地权威）：集成基＝
+                # 本地钉死支 tip，主检出经 advance 守卫推进，origin 零接触
+                self._deliver_managed_local(tid, branch, env, integration,
+                                            target, runner, cmd, budget,
+                                            ceiling)
                 return
             if external:  # Req: F101 外部交付：绿即驻留 awaiting_external 等确认
                 self._deliver_external(tid, branch, env, integration,
@@ -863,112 +855,6 @@ class Gate:
                     self._state.set_fields(tid, gate_origin_branch=None)
             self._tail(tid)
 
-    def _deliver_managed(self, tid, branch, env, integration, target,
-                         runner, cmd, budget=None, ceiling=None):  # Req: F98
-        """managed origin-first 交付：远端 tip 定基集成→ff/rebase→集成 verify→
-        仓级锁内有界发布。至多 3 次总尝试（含首次）——干净 non-ff 与等锁超时
-        消耗预算后整链重走（重取基线/重排/重验）；rebase 内容冲突与推送败
-        （对账不可得）即终局 delivery failed/blocked（done→blocked 专用边，
-        非质量败不计连败不弹回 worker）。本地主检出全程零接触。"""
-        t = self._state.get(tid)
-        local_head = self._local_head_safe(target, branch)  # 同步 CAS 锚
-        for attempt in range(1, 4):
-            try:
-                base = self._gitx.fetch_origin_branch(target, branch)
-            except RuntimeError as e:
-                self._delivery_fail(tid, attempt, "fetch_failed", str(e))
-                return
-            self._gitx.build_integration_at(target, integration, base_sha=base)
-            before = self._gitx.head(integration)
-            r = None  # R＝重放后交付 sha（None＝ff 直通）
-            if self._gitx.merge_ff(env, integration) != "ok":
-                if self._gitx.rebase_onto(env, integration) == "conflict":
-                    self._delivery_fail(tid, attempt, "rebase_conflict")
-                    return
-                e = t.get("rebased_from") or t.get("commit")
-                r = self._gitx.head(integration)
-                if r == before and not self._gitx.is_ancestor(target, e, base):
-                    # 幻影空集重放（ag-54bd98 G1 同判，远端版）：env 无交付且
-                    # 远端基亦不含——弹回 worker 自愈（质量口径，与 legacy 一致）
-                    self._audit(tid, "empty_rebase_noop")
-                    self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
-                                       reason="空集 rebase 无交付")
-                    return
-                self._state.set_fields(tid, commit=r, rebased_from=e)
-                self._audit(tid, "rebased", **{"from": e, "to": r})
-            deliver = self._gitx.head(integration)  # ff 直通＝env 头；重放＝R
-            report = self._gitx.materialize_checkout(integration, target)
-            if report:
-                self._audit(tid, "checkout_materialize", note=report)
-            irc, iout = runner(integration, cmd)
-            if irc == 124:  # F36 集成超硬顶：同款分类路由，远端未推送
-                self._audit(tid, "verify_overrun")
-                self._router.notify_dispatcher(
-                    tid, "result",
-                    f"集成 verify 超硬顶，远端未推送——进程组已终止"
-                    f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
-                    f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
-                return
-            if _cmd_dead(irc, iout):
-                self._verify_dead(tid, irc, iout)
-                return
-            if irc != 0:
-                where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
-                self._quality_fail(tid, "reopened",
-                                   f"{where}，远端未推送——修复后重新"
-                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
-                                   reason=where)
-                return
-            # 发布：仓级交付锁＋有界等待（F96 裁定对齐 push 上界口径）
-            lock = self._gitx.delivery_lock(target)
-            if not self._acquire_delivery_lock(lock):
-                self._audit(tid, "delivery_lock_timeout", attempt=attempt)
-                continue
-            try:
-                tip = self._gitx.fetch_origin_branch(target, branch)  # 锁内重读远端
-                if tip != base:  # 他写者已推进：释放后整链重试（重排重验）
-                    self._audit(tid, "delivery_nonff", attempt=attempt,
-                                note=f"{base[:12]}→{tip[:12]}")
-                    continue
-                st, tail = self._gitx.push_commit(target, deliver, branch)
-            except RuntimeError as e:  # 锁内网络病＝交付终局（评审 D2：与循环顶
-                # fetch_failed 同口径）——绝不走门内异常 reopened 弹回 worker
-                self._delivery_fail(tid, attempt, "fetch_failed", str(e))
-                return
-            finally:
-                lock.release()
-            if st == "ok":
-                landed = self._remote_contains_safe(target, branch, deliver)
-                if landed is True:
-                    self._finish_delivered(tid, branch, deliver, base, attempt,
-                                           local_head)
-                    return
-                if landed is False:  # 复核成功确认不含：既有 push_failed 口径
-                    self._delivery_fail(tid, attempt, "push_failed",
-                                        "push ok 但远端复核不含交付 commit")
-                    return
-                # Req: F103 探针不可得：push 自报成功但远端确认不可得——
-                # 未证实≠不含，独立终局 push_unconfirmed，绝不二次推送
-                self._delivery_fail(tid, attempt, "push_unconfirmed",
-                                    "push ok 但远端复核不可得"
-                                    "（无法确认远端是否含交付 commit）")
-                return
-            if st == "non-ff":  # 干净 non-ff：远端已被他写者推进，整链重试
-                self._audit(tid, "delivery_nonff", attempt=attempt,
-                            note=tail[:200])
-                continue
-            # failed（超时/网络病）：先对账远端——已含即已交付，不二次推送；
-            # 探针不可得(None)与确认不含(False)同归 push_failed（note＝push
-            # 自身失败输出，无包含性声明——Req: F103 不扩大交付语义）
-            if self._remote_contains_safe(target, branch, deliver) is True:
-                self._finish_delivered(tid, branch, deliver, base, attempt,
-                                       local_head)
-                return
-            self._delivery_fail(tid, attempt, "push_failed", tail)
-            return
-        self._delivery_fail(tid, 3, "retry_exhausted",
-                            "3 次总尝试内远端持续被推进或交付锁不可得")
-
     def _delivery_fail(self, tid, attempt, error, note="",
                        conflict_files=None):  # Req: F98/F105
         """交付失败终局：delivery.status=failed＋error 机器可读（报表失败桶与
@@ -1031,14 +917,6 @@ class Gate:
         try:
             return self._gitx.head(target, branch)
         except RuntimeError:  # 本地缺支＝同步无锚（pending）；交付不因此失败
-            return None
-
-    def _remote_contains_safe(self, target, branch, commit):  # Req: F98/F103
-        """三向对账：True＝远端确认含；False＝远端复核成功且确认不含；
-        None＝探针自身不可得（网络病）——绝不猜已交付，也绝不冒充确认不含。"""
-        try:
-            return self._gitx.remote_contains(target, branch, commit)
-        except RuntimeError:
             return None
 
     def _acquire_delivery_lock(self, lock):  # Req: F98

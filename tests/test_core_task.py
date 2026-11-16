@@ -28,6 +28,10 @@ class FakeGitx:
         self.built, self.removed, self.branches, self.checked = [], [], [], []
         self.ondisk = set()  # Req: F71 在盘模型——build_env 成功即记为存在
         self.sym = "main"  # Req: F94 主检出 symref 可切（换支/detached 仿形）
+        self.sym_raise = None  # ag-b5f2e9 主检出 symref 解析失败注入
+        self.default_branch_result = "main"  # ag-b5f2e9 仓默认支回退面
+        self.default_branch_raise = None
+        self.default_branch_calls = []
         self.origin = False  # Req: F98 origin 在位注入
         self.origin_raise = None  # Req: F98 仓亡注入（has_origin 抛 OSError 族）
         self.fetch_raise = False
@@ -39,7 +43,15 @@ class FakeGitx:
         self.local_shas = []
 
     def symref(self, repo_dir):  # Req: F94 建单钉支解析面
+        if self.sym_raise is not None:
+            raise self.sym_raise
         return self.sym
+
+    def default_branch(self, repo_dir):  # ag-b5f2e9 建单 detached 回退面
+        self.default_branch_calls.append(repo_dir)
+        if self.default_branch_raise is not None:
+            raise self.default_branch_raise
+        return self.default_branch_result
 
     def check_branch(self, repo_dir, branch):
         if branch == "bad..name":
@@ -1177,7 +1189,8 @@ class TestModelRouting(TestCoreTask):
 
 
 class TestF94TargetBranchPin(TestCoreTask):
-    """Req: F94 建单钉死目标分支——缺省 symref 实名入账，主检出换支不漂移。"""
+    """Req: F94 建单钉死目标分支——缺省 symref 实名入账，主检出换支不漂移；
+    ag-b5f2e9 detached/解析失败不再硬拒：回退仓默认支＋审计行。"""
 
     def test_default_pinned_at_create_survives_checkout_switch(self):  # Req: F94
         tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
@@ -1188,15 +1201,33 @@ class TestF94TargetBranchPin(TestCoreTask):
         # Req: F100 env 经 build_env_at 按钉死支 tip 定基（branch 槽位透传钉死支）
         self.assertEqual(self.gitx.built_at[-1][2], "main")
 
-    def test_detached_checkout_rejects_without_explicit_branch(self):  # Req: F94
+    def test_detached_checkout_falls_back_to_repo_default_branch(self):  # ag-b5f2e9
+        """主检出 detached 不再硬拒建单：回退仓默认支实名入账＋审计行。"""
         self.gitx.sym = "HEAD"  # 主检出 detached
+        self.gitx.default_branch_result = "develop"
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertEqual(self.state.get(tid)["target_branch"], "develop")
+        self.assertEqual(self.gitx.default_branch_calls, ["/repo"])  # 回退恰一次
+        self.assertIn("target_branch_fallback",
+                      [e["event"] for e in self.events()])  # 审计行留痕
+
+    def test_symref_failure_falls_back_to_repo_default_branch(self):  # ag-b5f2e9
+        self.gitx.sym_raise = RuntimeError("fatal: not a git repository")
+        self.gitx.default_branch_result = "develop"
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.assertEqual(self.state.get(tid)["target_branch"], "develop")
+        self.assertIn("target_branch_fallback",
+                      [e["event"] for e in self.events()])
+
+    def test_unresolvable_default_rejects_with_target_branch(self):  # ag-b5f2e9
+        """主检出与仓默认支均不可解析（仓亡）＝无从钉支，照旧硬拒零副作用。"""
+        self.gitx.sym_raise = RuntimeError("fatal: not a git repository")
+        self.gitx.default_branch_raise = RuntimeError(
+            "fatal: not a git repository")
         with self.assertRaises(Rejected) as cm:
             self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
         self.assertIn("target_branch", str(cm.exception))
-        self.assertIn("detached", str(cm.exception))
-        tid = self.svc.create("g", "/repo", None, self.root,
-                              verify_cmd="true", target_branch="issue/7")
-        self.assertEqual(self.state.get(tid)["target_branch"], "issue/7")  # 显式支可建
+        self.assertEqual(len(self.state.snapshot()["tasks"]), 0)  # 零行落账
 
     def test_worker_child_of_legacy_none_parent_keeps_dynamic_semantics(self):  # Req: F94
         """legacy 父行 target_branch=None：worker 子单不落钉支路——继承 None
@@ -1930,32 +1961,31 @@ class TestF95ClientKeyIdempotency(TestCoreTask):
             tid)  # root 不受池约束（信任边界＝root 或同 root_sid/dispatcher 谱系）
 
 
-class TestDispatchRemoteBase(TestCoreTask):
-    """Req: F98 managed 派发远端权威定基：origin 在位即取远端 tip 建 env，
-    fetch 败拒派绝不回退本地支；legacy/无 origin 行零变化。"""
+class TestDispatchManagedBase(TestCoreTask):
+    """ag-b5f2e9 managed 派发定基一律本地权威：origin 在位也解析钉死本地
+    目标支 tip（local_branch_sha）建 env——零 fetch 零 origin 探测（F98 远端
+    定基废除）；legacy 行零变化。"""
 
-    def test_managed_dispatch_bases_env_on_remote_tip(self):  # Req: F98
-        self.gitx.origin = True
-        remote = self.gitx.fetch_sha
+    def test_managed_dispatch_with_origin_bases_on_local_tip(self):  # ag-b5f2e9
+        self.gitx.origin = True  # origin 在位：定基面不变
         tid = self.dispatchable()  # 建单钉支 main＋delivery mode=managed
         self.svc.dispatch(tid, self.root)
-        self.assertEqual(self.gitx.fetched, [("/repo", "main")])
-        self.assertEqual(self.gitx.fetch_timeouts, [15])  # 评审 D4：派发面短预算
-        self.assertEqual(self.gitx.built_at, [("/repo", tid, "main", remote)])
-        self.assertEqual(self.gitx.built, [])  # 不走本地支起点
+        self.assertEqual(self.gitx.local_shas, [("/repo", "main")])
+        self.assertEqual(self.gitx.built_at,
+                         [("/repo", tid, "main", self.gitx.local_sha)])
+        self.assertEqual(self.gitx.fetched, [])  # F98 远端定基废除：零 fetch
+        self.assertEqual(self.gitx.built, [])  # 不走本地支 ref 起点
         self.assertEqual(self.state.get(tid)["env_base"], "b" * 40)  # head(env)
 
-    def test_managed_fetch_failure_rejects_without_local_fallback(self):  # Req: F98
-        self.gitx.origin = True
-        self.gitx.fetch_raise = True
+    def test_managed_origin_probe_failure_never_breaks_dispatch(self):  # ag-b5f2e9
+        """managed 面零接触 has_origin——仓亡仿形（has_origin 抛）不拦派发，
+        定基败一律走 local_base 口径（原 F98 remote_base 拒因面废除）。"""
+        self.gitx.origin_raise = FileNotFoundError(
+            "[Errno 2] No such file or directory: '/repo'")
         tid = self.dispatchable()
-        with self.assertRaises(Rejected) as cm:
-            self.svc.dispatch(tid, self.root)
-        self.assertIn("remote_base", str(cm.exception))
-        self.assertEqual(self.gitx.built, [])  # 零回退：不落本地支 env
-        self.assertEqual(self.gitx.built_at, [])
-        self.assertEqual(self.oc.sessions, [])  # 未建会话
-        self.assertEqual(self.state.get(tid)["state"], "todo")  # 拒绝零副作用
+        self.svc.dispatch(tid, self.root)  # 不拒：origin 探测不在 managed 面
+        self.assertEqual(self.gitx.fetched, [])
+        self.assertEqual(self.state.get(tid)["state"], "dispatched")
 
     def test_managed_without_origin_bases_on_local_tip(self):  # Req: F100
         """无 origin 的 managed 行不再走分支 ref 起点（F98 过渡期语义由 F100
@@ -1978,20 +2008,6 @@ class TestDispatchRemoteBase(TestCoreTask):
         self.assertEqual(self.gitx.fetched, [])
         self.assertEqual(self.gitx.built, ["/envs/t-legacy"])
         self.assertEqual(self.gitx.built_at, [])
-
-    def test_managed_dead_repo_rejects_with_remote_base(self):  # Req: F98
-        """评审 D1：仓亡（项目目录被删）时 has_origin 抛 FileNotFoundError——
-        入守卫报 remote_base 清晰拒因＋审计，绝不裸 OSError 逃逸 dispatch。"""
-        self.gitx.origin = True
-        self.gitx.origin_raise = FileNotFoundError(
-            "[Errno 2] No such file or directory: '/repo'")
-        tid = self.dispatchable()
-        with self.assertRaises(Rejected) as cm:
-            self.svc.dispatch(tid, self.root)
-        self.assertIn("remote_base", str(cm.exception))
-        self.assertEqual(self.gitx.built, [])
-        self.assertEqual(self.oc.sessions, [])  # 拒绝零副作用
-        self.assertEqual(self.state.get(tid)["state"], "todo")
 
     def test_redispatch_resets_failed_delivery_projection(self):  # Req: F98
         """评审 D3：交付败 blocked 后重派开新交付轮——终局残值（status/error/
@@ -2037,8 +2053,8 @@ class TestDispatchRemoteBase(TestCoreTask):
 
 
 class TestDispatchLocalBase(TestCoreTask):
-    """Req: F100 managed no-origin 派发本地权威定基：缺支/malformed 拒派报
-    local_base 点名钉死支，绝不回退仓默认支；仓亡维持 F98 remote_base 口径。"""
+    """Req: F100 managed 本地权威定基（ag-b5f2e9 收编 origin 在位面）：缺支/
+    malformed 拒派报 local_base 点名钉死支，绝不回退仓默认支。"""
 
     def test_no_origin_missing_target_rejects_without_default_fallback(self):  # Req: F100
         self.gitx.origin = False
@@ -2052,18 +2068,6 @@ class TestDispatchLocalBase(TestCoreTask):
         self.assertEqual(self.gitx.built_at, [])
         self.assertEqual(self.oc.sessions, [])  # 未建会话
         self.assertEqual(self.state.get(tid)["state"], "todo")  # 拒绝零副作用
-
-    def test_no_origin_dead_repo_keeps_remote_base_report(self):  # Req: F100
-        """仓亡（has_origin 抛）维持 F98 评审 D1 口径 remote_base——origin
-        判定失败先于本地面，报因不因无 origin 而改口径。"""
-        self.gitx.origin_raise = FileNotFoundError(
-            "[Errno 2] No such file or directory: '/repo'")
-        tid = self.dispatchable()
-        with self.assertRaises(Rejected) as cm:
-            self.svc.dispatch(tid, self.root)
-        self.assertIn("remote_base", str(cm.exception))
-        self.assertEqual(self.gitx.local_shas, [])
-        self.assertEqual(self.gitx.built, [])
 
     def test_no_origin_legacy_rows_never_touch_local_sha(self):  # Req: F100
         self.gitx.origin = False

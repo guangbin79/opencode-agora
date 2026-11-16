@@ -1630,5 +1630,87 @@ class TestLocalDelivery(unittest.TestCase):
             self._git(["cat-file", "-e", f"release:{name}"], cwd=self.repo)
 
 
+class TestDefaultBranch(unittest.TestCase):  # ag-b5f2e9
+    """仓默认支解析原语（建单 detached 回退面）：origin/HEAD 本地声明优先、
+    init.defaultBranch 次之、兜底 main——只读本地引用/配置，零网络。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._saved_global = os.environ.get("GIT_CONFIG_GLOBAL")
+        os.environ["GIT_CONFIG_GLOBAL"] = "/dev/null"  # 隔离全局配置漂移
+        self.gx = Gitx()
+
+    def tearDown(self):
+        if self._saved_global is None:
+            os.environ.pop("GIT_CONFIG_GLOBAL", None)
+        else:
+            os.environ["GIT_CONFIG_GLOBAL"] = self._saved_global
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _git(self, args, cwd=None):
+        r = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def _seed_repo(self, path):
+        path.mkdir(parents=True)
+        self._git(["init", "-b", "main"], cwd=path)
+        self._git(["config", "user.email", "t@t"], cwd=path)
+        self._git(["config", "user.name", "t"], cwd=path)
+        (path / "a.txt").write_text("x")
+        self._git(["add", "-A"], cwd=path)
+        self._git(["commit", "-m", "init"], cwd=path)
+
+    def test_origin_head_declaration_wins(self):  # ag-b5f2e9
+        origin = self.tmp / "origin.git"
+        origin.mkdir()
+        self._git(["init", "--bare", "-b", "main", str(origin)])
+        seed = self.tmp / "seed"
+        self._seed_repo(seed)
+        self._git(["push", str(origin.resolve()), "main:refs/heads/main"],
+                  cwd=seed)
+        clone = self.tmp / "clone"
+        self._git(["clone", str(origin.resolve()), str(clone)])
+        self._git(["config", "init.defaultBranch", "trunk"], cwd=clone)  # 干扰项
+        self.assertEqual(self.gx.default_branch(str(clone)), "main")
+
+    def test_init_default_branch_config_second(self):  # ag-b5f2e9
+        repo = self.tmp / "solo"
+        self._seed_repo(repo)
+        self._git(["config", "init.defaultBranch", "trunk"], cwd=repo)
+        self.assertEqual(self.gx.default_branch(str(repo)), "trunk")
+
+    def test_forged_routes_rejected_to_next_fallback(self):  # ag-b5f2e9 终闸 C 册
+        """回退路由输出不可信即弃：伪造 origin/HEAD（前导 -）与脏 config 值
+        （换行注入）都不得入账——弃该路由走下一路由/兜底 main。"""
+        origin = self.tmp / "origin.git"
+        origin.mkdir()
+        self._git(["init", "--bare", "-b", "main", str(origin)])
+        seed = self.tmp / "seed"
+        self._seed_repo(seed)
+        self._git(["push", str(origin.resolve()), "main:refs/heads/main"],
+                  cwd=seed)
+        clone = self.tmp / "clone"
+        self._git(["clone", str(origin.resolve()), str(clone)])
+        head_ref = clone / ".git" / "refs" / "remotes" / "origin" / "HEAD"
+        head_ref.write_text("ref: refs/remotes/origin/--force\n")  # 伪造前导 -
+        self.assertEqual(self.gx.default_branch(str(clone)), "main")
+        head_ref.write_text("ref: refs/remotes/origin/ok\n")  # 合法路由仍可用
+        self.assertEqual(self.gx.default_branch(str(clone)), "ok")
+        solo = self.tmp / "solo"
+        self._seed_repo(solo)
+        self._git(["config", "init.defaultBranch", "tr\nk"], cwd=solo)  # 换行注入
+        self.assertEqual(self.gx.default_branch(str(solo)), "main")
+        self._git(["config", "init.defaultBranch", "trunk"], cwd=solo)
+        self.assertEqual(self.gx.default_branch(str(solo)), "trunk")
+
+    def test_main_fallback_when_nothing_declared(self):  # ag-b5f2e9
+        repo = self.tmp / "solo"
+        self._seed_repo(repo)
+        self.assertEqual(self.gx.default_branch(str(repo)), "main")
+
+
 if __name__ == "__main__":
     unittest.main()
