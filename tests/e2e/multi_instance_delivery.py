@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Req: F102 多实例交付端到端证明（F94-F101 交付栈全链真码）。
+"""Req: F102/F108 多实例交付端到端证明（F94-F101 交付栈全链真码；b/c/e
+场景为 F108 本地权威口径——managed 一律本地权威、origin 零接触）。
 
 自包含脚本：python3 tests/e2e/multi_instance_delivery.py（零 pytest 依赖、零
 网络、零凭据——origin 一律本地 bare 仓）。并发场景（a/b/i）每场景起两个真实
@@ -8,12 +9,14 @@ agora 服务实例（assemble + make_server，各自 AGORA_HOME/端口/StubOpenc
 演。全部动作经 agorad HTTP 面（root/worker 牌）驱动，worker 提交为真实 git
 提交；门体/交付锁/ff-only/rebase/三预算/CAS 全走产品码，无一处 mock 交付路径。
 
-场景（对应需求 a-i）：
+场景（对应需求 a-i；b/c/e 为 F108 本地权威口径）：
   a 共享本地仓并发交付——仓级交付锁串行化终推，first-parent 线性含两提交；
-  b 同 bare origin 双克隆并发交付——远端 ff 终裁，输家 refetch/rebase/重验；
-  c 干净远端 non-ff 在三次总尝试预算内重试成功（锁内重读远端漂移）；
+  b 同 bare origin 双克隆并发交付——本地权威各推本仓支、零 fetch/push，
+    origin ref 不动（远程对账不再是门职责）；
+  c 门体持基线后 origin 被外部推进——远端漂移不影响本地交付（无变基/
+    重放、零 fetch）；
   d rebase 内容冲突——failed/blocked 终局、权威目标不动、不弹回、不计连败；
-  e 远端已交付而本地主检出带 WIP——delivered＋local_status=pending 且保全 WIP；
+  e origin 在位走本地权威交付——远端 ref 不变、本地 main 含交付；
   f 无 origin 本地权威——干净目标 CAS ff-only 推进 synced；脏目标保全终局失败；
   g external_branch 全 handoff——awaiting_external 驻留、不推 origin 不合默认支，
     task_deliver(delivered) 收口 closed、默认支 SHA 不变；
@@ -21,8 +24,7 @@ agora 服务实例（assemble + make_server，各自 AGORA_HOME/端口/StubOpenc
   i 环境回收实例属主——一实例清理不注销他实例在册 worktree。
 
 断言面：delivery 投影（mode/status/commit/base/attempt/local_status/error）、
-权威目标 tip、first-parent 线性、外部分支/默认支保全、审计事件（rebased/
-delivery_nonff）。失败也清理临时仓/家目录/服务。
+权威目标 tip、first-parent 线性、外部分支/默认支保全、审计事件（rebased 等）。失败也清理临时仓/家目录/服务。
 """
 import json
 import os
@@ -292,39 +294,39 @@ def scenario_a(tmp):
 
 
 def scenario_b(tmp):
-    """b 同 origin 双克隆并发交付：远端 ff 终裁，输家 rebase 重验。"""
+    """b 同 origin 双克隆并发交付（F108）：本地权威各推本仓支，origin 零接触。"""
     root = tmp / "b"
     origin, base = init_bare(root)
     ca_repo = clone(origin, root / "cloneA")
     cb_repo = clone(origin, root / "cloneB")
+    before_refs = remote_refs(ca_repo)  # 快照在交付前——门全程零 fetch/push
     ia, ib = Instance(root, "A"), Instance(root, "B")
     ta = make_task(ia, ca_repo, target="main")
     tb = make_task(ib, cb_repo, target="main")
-    worker_done(ia, ta, {"b1.txt": "from A"}, "B-A1")
-    worker_done(ib, tb, {"b2.txt": "from B"}, "B-B1")
+    ca_sha, _ = worker_done(ia, ta, {"b1.txt": "from A"}, "B-A1")
+    cb_sha, _ = worker_done(ib, tb, {"b2.txt": "from B"}, "B-B1")
     ra = wait_for(ia, ta, settled, what="closed")
     rb = wait_for(ib, tb, settled, what="closed")
-    for row in (ra, rb):
+    for row, repo, sha in ((ra, ca_repo, ca_sha), (rb, cb_repo, cb_sha)):
         d = row["delivery"]
         check(row["state"] == "closed", f"b: 终态 {row['state']}")
         check(d["mode"] == "managed" and d["status"] == "delivered"
-              and d["error"] is None and d["attempt"] in (1, 2),
+              and d["error"] is None and d["attempt"] == 1
+              and d["local_status"] == "synced",
               f"b: 投影异常 {d}")
-        check(d["local_status"] == "pending",
-              "b: 本地克隆被检出——同步必须留 pending 不强推")
-    git(["fetch", "origin"], ca_repo)
-    linear = first_parent(ca_repo, f"{base}..refs/remotes/origin/main")
-    check(len(linear) == 2 and ra["delivery"]["commit"] in linear
-          and rb["delivery"]["commit"] in linear,
-          "b: origin 权威 first-parent 线性恰含两个交付提交")
+        check(d["commit"] == sha and d["base"] == base,
+              f"b: 交付与基线应为本仓本地支（零远程对账）：{d}")
+        check(branch_sha(repo, "main") == sha,
+              "b: 本地权威目标应恰推进到交付 commit")
     rebases = ("rebased" in ia.events(ta)) + ("rebased" in ib.events(tb))
-    check(rebases == 1, "b: 输家必须 refetch/rebase/reverify（恰一方）")
-    check(base in (ra["delivery"]["base"], rb["delivery"]["base"]),
-          "b: 先推者交付基线应为共享远端起点")
+    check(rebases == 0, "b: 各仓本地权威独立推进——不得有 rebase 重放")
+    check(remote_refs(ca_repo) == before_refs
+          and remote_refs(cb_repo) == before_refs,
+          "b: origin ref 必须原位不动（门零 fetch/push，远程对账非门职责）")
 
 
 def scenario_c(tmp):
-    """c 干净远端 non-ff：锁内重读发现漂移→整链重试，预算内成功。"""
+    """c 门体持基线后 origin 被外部推进（F108）：远端漂移不影响本地交付。"""
     root = tmp / "c"
     origin, base = init_bare(root)
     repo = clone(origin, root / "clone")
@@ -334,26 +336,29 @@ def scenario_c(tmp):
     tid = make_task(ia, repo, target="main",
                     verify=blocking_verify(vd, 2))
     c_sha, _ = worker_done(ia, tid, {"c.txt": "worker"}, "C1")
-    wait_count(vd, 2)  # 集成 verify 在跑＝本轮交付基线已取（base=base）
+    wait_count(vd, 2)  # 集成 verify 在跑＝本轮本地基线已取
     ext_sha = commit(ext, {"ext.txt": "external"}, "external advance")
-    git(["push", "origin", "main"], ext)  # 远端在门体持基线后被推进
-    (vd / "go").write_text("go")  # 放行：锁内重读将见 tip!=base
+    git(["push", "origin", "main"], ext)  # 远端在门体持基线后被外部推进
+    (vd / "go").write_text("go")  # 放行：本地权威交付不得理会远端漂移
     row = wait_for(ia, tid, settled, what="closed")
     d = row["delivery"]
     check(row["state"] == "closed" and d["mode"] == "managed"
           and d["status"] == "delivered" and d["error"] is None
-          and d["local_status"] == "pending",
+          and d["local_status"] == "synced",
           f"c: 投影异常 {d}")
-    check(d["attempt"] == 2, f"c: 锁内远端漂移应耗一次重试（attempt=2）：{d}")
-    check(d["base"] == ext_sha, "c: 成功轮基线应为外部推进后的远端 tip")
+    check(d["attempt"] == 1, f"c: 远端漂移不耗预算（attempt=1）：{d}")
+    check(d["base"] == base and d["commit"] == c_sha,
+          "c: 对远端新 tip 零变基/零重放——ff 直通原交付 commit")
     ev = ia.events(tid)
-    check("delivery_nonff" in ev and "rebased" in ev,
-          f"c: 缺漂移/重放审计事件：{ev}")
-    git(["fetch", "origin"], repo)
-    linear = first_parent(repo, f"{base}..refs/remotes/origin/main")
-    check(len(linear) == 2 and ext_sha in linear and d["commit"] in linear
-          and d["commit"] != c_sha,
-          "c: origin 线性含外部推进＋重放后的交付提交")
+    check("delivery_nonff" not in ev and "rebased" not in ev,
+          f"c: 远端漂移不得触发 non-ff 重试/重放审计：{ev}")
+    check(branch_sha(repo, "main") == c_sha, "c: 本地目标已含交付")
+    check(git(["rev-parse", "refs/remotes/origin/main"], repo)
+          .stdout.strip() == base,
+          "c: 门零 fetch——远端追踪 ref 保持基线")
+    check(git(["ls-remote", "origin", "refs/heads/main"], repo)
+          .stdout.split()[0] == ext_sha,
+          "c: origin 确已被外部推进——门不推不拉、照常本地交付")
 
 
 def scenario_d(tmp):
@@ -385,26 +390,24 @@ def scenario_d(tmp):
 
 
 def scenario_e(tmp):
-    """e 远端交付＋本地 WIP：delivered＋pending，WIP 保全。"""
+    """e origin 在位的本地权威交付（F108）：远端 ref 不动，本地 main 含交付。"""
     root = tmp / "e"
     origin, base = init_bare(root)
     repo = clone(origin, root / "clone")
+    before_refs = remote_refs(repo)  # 快照在交付前——门全程不推远程
     ia = Instance(root, "A")
     tid = make_task(ia, repo, target="main")
-    worker_done(ia, tid, {"e.txt": "worker"}, "E1")
-    (repo / "wip.txt").write_text("user wip", encoding="utf-8")  # 本地 WIP
+    e_sha, _ = worker_done(ia, tid, {"e.txt": "worker"}, "E1")
     row = wait_for(ia, tid, settled, what="closed")
     d = row["delivery"]
     check(row["state"] == "closed" and d["mode"] == "managed"
-          and d["status"] == "delivered",
+          and d["status"] == "delivered" and d["error"] is None
+          and d["local_status"] == "synced",
           f"e: 投影异常 {d}")
-    check(d["local_status"] == "pending", "e: 本地被检出带 WIP＝pending")
-    git(["fetch", "origin"], repo)
-    check(git(["rev-parse", "refs/remotes/origin/main"], repo)
-          .stdout.strip() == d["commit"], "e: 远端权威已含交付 commit")
-    check(branch_sha(repo, "main") == base, "e: 本地检出/引用不被强推")
-    check((repo / "wip.txt").read_text(encoding="utf-8") == "user wip",
-          "e: 用户 WIP 必须保全")
+    check(branch_sha(repo, "main") == e_sha,
+          "e: 本地权威目标应恰推进到交付 commit")
+    check(remote_refs(repo) == before_refs,
+          "e: 门不推远程——origin ref 原位不动")
 
 
 def scenario_f(tmp):
