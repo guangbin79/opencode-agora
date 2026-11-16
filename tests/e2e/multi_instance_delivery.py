@@ -323,6 +323,12 @@ def scenario_b(tmp):
     check(remote_refs(ca_repo) == before_refs
           and remote_refs(cb_repo) == before_refs,
           "b: origin ref 必须原位不动（门零 fetch/push，远程对账非门职责）")
+    check(git(["rev-parse", "refs/remotes/origin/main"], ca_repo)
+          .stdout.strip() == base,
+          "b: 门零 fetch——A 克隆远端追踪 ref 保持基线")
+    check(git(["rev-parse", "refs/remotes/origin/main"], cb_repo)
+          .stdout.strip() == base,
+          "b: 门零 fetch——B 克隆远端追踪 ref 保持基线")
 
 
 def scenario_c(tmp):
