@@ -3238,113 +3238,35 @@ class TestExternalHandoff(TestCoreGate):
                             and "main" in m["body"] and LOCAL_BASE in m["body"]
                             and "attempt=1" in m["body"] for m in disp))
 
-    def test_external_rebase_conflict_terminal_blocked(self):  # Req: F101
+    def test_external_non_ff_diverges_fast_without_auto_rebase(self):  # Req: ag-f12220
+        """ff-only：非 ff 即终局 diverged——零自动变基、零自愈重建、零
+        fetch，attempt 不被消耗；env 留现场，处置权交人工（ag-92fc36 判例）。"""
         self.in_gate_external(streak=2)  # 连败 2 在案：交付失败不得推到 3
         self.gx.merge_result = "non-ff"
-        self.gx.rebase_result = "conflict"
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "blocked")
         self.assertEqual(t["fail_streak"], 2)  # 非质量败不计连败
         self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
-                         ("failed", "rebase_conflict"))
+                         ("failed", "diverged"))
+        self.assertEqual(self.gx.rebase_calls, [])  # 自动变基已废除
+        self.assertEqual(len(self.gx.build_at_calls), 1)  # 一次定基零重建
+        self.assertEqual(self.gx.fetch_calls, [])
         evs = [e["event"] for e in self.store.read_events("t1")]
         self.assertNotIn("reopened", evs)  # 不弹回 worker
         self.assertEqual(self.gx.removed, [])  # 留 env 现场
 
-    def test_external_fake_conflict_self_heals_on_refreshed_local_tip(self):  # Req: F105
-        """过期基点假冲突自愈（本地基）：首 rebase 冲突→重读钉死支 tip 已移动
-        →新基重建 integration 再 rebase 干净→交付成功驻留 handoff；自愈非
-        non_ff 竞争重试，attempt 不被消耗；审计行区分 rebase_conflict_retry。"""
+    def test_external_diverged_notice_actionable(self):  # Req: ag-f12220
+        """diverged 终局通知可处置：指引（内容超集 force-with-lease 推送/
+        取消重开/人工调和）随 note 附进派发方 blocked 通知面。"""
         self.in_gate_external()
         self.gx.merge_result = "non-ff"
-        self.gx.rebase_results = ["conflict", "sha"]
-        self.gx.rebase_new_head = R_SHA
-        self.gx.local_sha_results = [LOCAL_BASE, TIP_SHA]  # 冲突后重读＝新 tip
         self.gate.run("t1")
-        t = self.state.get("t1")
-        d = self.delivery()
-        self.assertEqual(t["state"], "done")  # 自愈成功照常驻留 handoff
-        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
-                         ("awaiting_external", R_SHA, TIP_SHA, 1))
-        self.assertEqual(self.gx.build_at_calls,
-                         [("/repo", self.integration, LOCAL_BASE),
-                          ("/repo", self.integration, TIP_SHA)])  # 新基重建
-        self.assertEqual(len(self.gx.rebase_calls), 2)  # 恰再试一次
-        self.assertEqual(self.gx.fetch_calls, [])  # 本地基自愈不 fetch
-        evs = [e["event"] for e in self.store.read_events("t1")]
-        self.assertIn("rebase_conflict_retry", evs)  # 审计区分自愈重试
-        self.assertNotIn("delivery_failed", evs)
-
-    def test_external_fake_conflict_external_base_refetch_self_heals(self):  # Req: F105
-        """过期基点假冲突自愈（外部基，non_ff 重排队）：重 fetch origin 支取新
-        tip 重建自愈；自愈不消耗 attempt 轮转号（仍 2）、不读本地钉死支。"""
-        self.seed(tb="main", state="done")
-        self.state.set_fields("t1", commit=SHA, delivery=dict(
-            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
-        self.gx.merge_result = "non-ff"
-        self.gx.rebase_results = ["conflict", "sha"]
-        self.gx.rebase_new_head = R_SHA
-        self.gx.has_origin_result = True
-        self.gx.fetch_result = "d" * 40  # 重 fetch 所见新 tip
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        d = self.delivery()
-        self.assertEqual(t["state"], "done")
-        self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
-                         ("awaiting_external", R_SHA, "d" * 40, 2))
-        self.assertEqual(self.gx.fetch_calls, [("/repo", "main")])  # 恰一次重 fetch
-        self.assertEqual(self.gx.local_sha_calls, [])  # 外部基不回退本地支
-        evs = [e["event"] for e in self.store.read_events("t1")]
-        self.assertIn("rebase_conflict_retry", evs)
-        self.assertNotIn("delivery_failed", evs)
-
-    def test_external_real_conflict_terminal_with_file_list(self):  # Req: F105
-        """真冲突终局：刷新基后二次 rebase 仍冲突→failed/blocked 口径不变，
-        attempt 不被消耗；delivery 投影附 machine-readable conflict_files、
-        blocked 通知附冲突文件清单。"""
-        self.in_gate_external(streak=2)
-        self.gx.merge_result = "non-ff"
-        self.gx.rebase_result = "conflict"  # 两次皆冲突（刷新基亦不消解）
-        self.gx.local_sha_results = [LOCAL_BASE, TIP_SHA]
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        d = self.delivery()
-        self.assertEqual(t["state"], "blocked")
-        self.assertEqual(t["fail_streak"], 2)  # 非质量败不计连败
-        self.assertEqual((d["status"], d["error"], d["attempt"],
-                          d["conflict_files"]),
-                         ("failed", "rebase_conflict", 1,
-                          ["src/conflict.py"]))
-        self.assertEqual(len(self.gx.build_at_calls), 2)  # 自愈重试确曾发生
-        evs = [e["event"] for e in self.store.read_events("t1")]
-        self.assertIn("rebase_conflict_retry", evs)  # 审计行区分
-        self.assertIn("delivery_failed", evs)
-        self.assertNotIn("reopened", evs)
+        self.assertEqual(self.state.get("t1")["state"], "blocked")
         disp = [m for m in self.store.read_messages() if m["to"] == "disp1"]
-        self.assertTrue(any("rebase_conflict" in m["body"]
-                            and "src/conflict.py" in m["body"]
-                            for m in disp))  # 通知带冲突文件清单
-
-    def test_external_refresh_fetch_unavailable_falls_terminal(self):  # Req: F105
-        """外部基自愈重 fetch 网络病：最新基不可得＝不盲试旧基，径直终局
-        failed/blocked（一次 rebase、零二次重建）。"""
-        self.seed(tb="main", state="done")
-        self.state.set_fields("t1", commit=SHA, delivery=dict(
-            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
-        self.gx.merge_result = "non-ff"
-        self.gx.rebase_result = "conflict"
-        self.gx.has_origin_result = True
-        self.gx.fetch_raise = True  # 重 fetch 网络病
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        d = self.delivery()
-        self.assertEqual(t["state"], "blocked")
-        self.assertEqual((d["status"], d["error"], d["attempt"]),
-                         ("failed", "rebase_conflict", 2))
-        self.assertEqual(len(self.gx.build_at_calls), 1)  # 未盲试旧基重建
-        self.assertEqual(len(self.gx.rebase_calls), 1)
-        self.assertEqual(self.gx.fetch_calls, [("/repo", "main")])  # 取证 fetch
+        self.assertTrue(any("diverged" in m["body"]
+                            and "force-with-lease" in m["body"]
+                            and "取消" in m["body"] for m in disp))
 
     def test_external_handoff_clears_stale_conflict_files(self):  # Req: F105
         """终闸 B1 生命周期：handoff 投影清 conflict_files 残值——上轮终局
@@ -3358,32 +3280,9 @@ class TestExternalHandoff(TestCoreGate):
         self.assertEqual((d["status"], d["conflict_files"]),
                          ("awaiting_external", None))  # 残值必清
 
-    def test_external_same_base_conflict_no_blind_retry(self):  # Req: F105
-        """终闸 B2：重 fetch 取回同基＝无新基可换，禁以旧基盲试二次——径直
-        终局（一次 rebase、零重建、零 retry 审计）。"""
-        self.seed(tb="main", state="done")
-        self.state.set_fields("t1", commit=SHA, delivery=dict(
-            EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=1))
-        self.gx.merge_result = "non-ff"
-        self.gx.rebase_result = "conflict"
-        self.gx.has_origin_result = True
-        self.gx.fetch_result = TIP_SHA  # 重 fetch 同值（外部未推进）
-        self.gate.run("t1")
-        t = self.state.get("t1")
-        d = self.delivery()
-        self.assertEqual(t["state"], "blocked")
-        self.assertEqual((d["status"], d["error"]),
-                         ("failed", "rebase_conflict"))
-        self.assertEqual(len(self.gx.build_at_calls), 1)  # 零旧基重建
-        self.assertEqual(len(self.gx.rebase_calls), 1)
-        evs = [e["event"] for e in self.store.read_events("t1")]
-        self.assertNotIn("rebase_conflict_retry", evs)
-
-    def test_external_rebased_verify_fail_reopens_quality(self):  # Req: F101
+    def test_external_ff_verify_fail_reopens_quality(self):  # Req: F101
         self.in_gate_external()
-        self.gx.merge_result = "non-ff"
-        self.gx.rebase_result = "sha"
-        self.gx.rebase_new_head = R_SHA
+        self.gx.merge_result = "ok"  # ff 直通
         self.runner.results = [(0, "p"), (1, "boom")]
         self.gate.run("t1")
         t = self.state.get("t1")
@@ -3391,7 +3290,7 @@ class TestExternalHandoff(TestCoreGate):
         self.assertEqual(t["fail_streak"], 1)
         self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
                          ("pending", None))  # 非交付终局
-        self.assertTrue(any("rebase 后集成 verify 失败" in m["body"]
+        self.assertTrue(any("集成 verify 失败" in m["body"]
                             for m in self.worker_msgs()))
 
     def test_external_missing_target_branch_terminal_local_base(self):  # Req: F101
@@ -3429,21 +3328,20 @@ class TestExternalHandoff(TestCoreGate):
         self.assertIn("delivery_failed_recovery", evs)
 
     def test_external_nonff_requeue_reverifies_at_supplied_base(self):  # Req: F101
-        """task_deliver(non_ff) 重排队（task 域用例）：门体按外部确认基重排重验，
-        绿即换新 handoff commit 并沿用轮转尝试号——不取本地 tip。"""
+        """task_deliver(non_ff) 重排队（task 域用例）：门体按外部确认基定基
+        重验，ff 直通绿即换新 handoff commit 并沿用轮转尝试号——不取本地
+        tip（rebase 腿已废 ag-f12220，非 ff 由 diverged 用例覆盖）。"""
         self.seed(tb="main", state="done")
         self.state.set_fields("t1", commit=SHA, delivery=dict(
             EXTERNAL_DELIVERY, status="pending", base=TIP_SHA, attempt=2))
-        self.gx.merge_result = "non-ff"
-        self.gx.rebase_result = "sha"
-        self.gx.rebase_new_head = R_SHA
+        self.gx.merge_result = "ok"  # 新基 ff 直通
+        self.gx.head_shas[self.integration] = R_SHA
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "done")  # 二次 handoff 仍驻留
         d = self.delivery()
         self.assertEqual((d["status"], d["commit"], d["base"], d["attempt"]),
                          ("awaiting_external", R_SHA, TIP_SHA, 2))
-        self.assertEqual(t["commit"], R_SHA)  # 账面随重排换新
         self.assertEqual([c[2] for c in self.gx.build_at_calls], [TIP_SHA])
         self.assertEqual(self.gx.local_sha_calls, [])  # 基线来自外部确认
 
