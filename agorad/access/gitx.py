@@ -38,10 +38,13 @@ class DirtyWorktree(RuntimeError):
 class Gitx:
     _SHA40 = re.compile(r"[0-9a-fA-F]{40}")
 
-    def __init__(self, instance_id: str = None):
+    def __init__(self, instance_id: str = None, spawn_tracker=None):
         # F96 实例身份：None＝legacy 形态（直接测试/旧路径，env 名零变化）；
         # 非空经 _slug 消毒后才进 worktree/分支名（ref 安全纪律单一落点）
         self.instance_id = self._slug(instance_id) if instance_id else None
+        # P0-1（ag-9c4cbb）：门路径 spawn 登记簿（与 Gate 同实例注入）——
+        # 门线程内 _git 子进程组可被看门狗整组收杀；None＝不登记（直接测试）
+        self._tracker = spawn_tracker
 
     @staticmethod
     def _slug(name: str) -> str:
@@ -50,15 +53,42 @@ class Gitx:
         s = re.sub(r"[\x00-\x20\x7f~^:?*\[\\]", "_", s)
         return re.sub(r"\.{2,}", ".", s).lstrip(".-") or "repo"
 
-    @staticmethod
-    def _git(args, cwd, check=True, timeout=None):
-        # 分支历史/diff 文本可含非 UTF-8 字节（GBK 资源混入）：降级 U+FFFD 禁崩（ag-830b1b 同族）
-        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout)
-        if check and r.returncode != 0:
-            raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
-        return r
+    def _git(self, args, cwd, check=True, timeout=None):
+        """git plumbing 统一执行点。P0-2（ag-9c4cbb）：start_new_session 自立
+        进程组＋超时 killpg 全组——孤儿孙进程（ssh/传输）不再持管道挂死
+        communicate()（旧 subprocess.run(timeout=) 只杀直接子进程的 wedge 形态）；
+        超时按 gitx 失败契约抛 RuntimeError。spawn_tracker 在位时登记 pgid，
+        归门看门狗兜底收杀（timeout=None 的挂死亦可达）。"""
+        proc = subprocess.Popen(["git", *args], cwd=str(cwd),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                start_new_session=True)
+        if self._tracker is not None:
+            self._tracker.add(proc.pid)
+        try:
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+                try:  # 有限宽限收尸；逃逸后代持管道时弃读，防线程挂死
+                    proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    for pipe in (proc.stdout, proc.stderr):
+                        if pipe:
+                            pipe.close()
+                raise RuntimeError(
+                    f"git {' '.join(args)}: 超时（>{timeout:g}s）——已终止进程组"
+                ) from None
+            if check and proc.returncode != 0:
+                raise RuntimeError(f"git {' '.join(args)}: {err.strip()}")
+            return subprocess.CompletedProcess(
+                ["git", *args], proc.returncode, stdout=out, stderr=err)
+        finally:
+            if self._tracker is not None:
+                self._tracker.discard(proc.pid)
 
     @classmethod
     def _check_sha(cls, sha: str) -> str:  # Req: F96
@@ -869,8 +899,7 @@ class Gitx:
         return self._git(["merge-base", self.baseline(main, branch), env.name],
                          cwd=main).stdout.strip()
 
-    @staticmethod
-    def _main(env: Path) -> Path:
-        out = Gitx._git(["worktree", "list", "--porcelain"], cwd=env).stdout
+    def _main(self, env: Path) -> Path:
+        out = self._git(["worktree", "list", "--porcelain"], cwd=env).stdout
         first = next(line.split(" ", 1)[1] for line in out.splitlines() if line.startswith("worktree "))
         return Path(first)

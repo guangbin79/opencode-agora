@@ -1,6 +1,10 @@
 """入向 JSON 口（B4）：13 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
 牌签发面）＋/view＋/health；单线程串行＋后台门队列。
 
+门队列消费经 gate.run_guarded（P0-1 看门狗，ag-9c4cbb）：门级硬顶到点杀本门
+子进程组＋blocked(gate_overrun) 终局，单个挂死门不再堵死后续 done 任务；门体
+崩溃留 gate_crashed 审计行不杀消费线程。
+
 transport 只 import agorad.core（R2）——access 件经 App 属性触达（store.home
 下 wiki 裸读写，无 import）。鉴权两段（R18）：X-Agora-Token→identify（无牌
 401）→may 粗判（越权 403＋审计行）；归属细判与保险丝归 TaskService。done
@@ -8,6 +12,7 @@ transport 只 import agorad.core（R2）——access 件经 App 属性触达（s
 """
 import json
 import queue
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -464,11 +469,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def make_server(app, port: int = 0):
+def make_server(app, port: int = 0, gate_deadline=None):
     """单线程 HTTPServer（串行口径 §4.8）＋后台门队列（1 worker 串行）。
 
     装配即重排 done 残留（kill -9 门中崩溃）：重启后 verify 幂等重跑，
     pending-cancel 与门闩照常由门体结算（F-4）。
+    gate_deadline（P0-1，ag-9c4cbb）：门级看门狗硬顶注入缝（None＝缺省
+    max(4×生效 verify 预算, 600s)）——测试秒级跑。
     """
     q = queue.Queue()
     for tid, t in app.state.snapshot()["tasks"].items():
@@ -479,9 +486,16 @@ def make_server(app, port: int = 0):
         while True:
             tid = q.get()
             try:
-                app.gate.run(tid)
-            except Exception:  # 门体异常不杀 worker 线程：状态以快照行兜底
-                pass
+                app.gate.run_guarded(tid, deadline=gate_deadline)
+            except Exception as e:  # 门体崩溃留痕（P0-1：无痕 except pass 已废）
+                try:
+                    app.store.append_event({"ts": time.time(), "actor": "gate",
+                                            "event": "gate_crashed", "task": tid,
+                                            "note": str(e)[:200]})
+                except Exception:
+                    pass
+                print(f"agorad gate crashed on {tid}: {e}", file=sys.stderr,
+                      flush=True)
             finally:
                 q.task_done()
 

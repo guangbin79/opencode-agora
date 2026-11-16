@@ -25,7 +25,7 @@ from agorad.access.store import Store
 from agorad.core import report
 from agorad.core.app import App
 from agorad.core.auth import Auth
-from agorad.core.gate import Gate
+from agorad.core.gate import Gate, SpawnTracker
 from agorad.core.health import Health, send_email
 from agorad.core.msg import Router
 from agorad.core.peer import PeerBoard
@@ -160,7 +160,9 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     state = State(store)
     auth = Auth(store)
     oc = oc if oc is not None else Oc(oc_url, oc_password)
-    gitx = gitx if gitx is not None else Gitx(instance_id=instance_identity(home))
+    spawns = SpawnTracker()  # P0-1（ag-9c4cbb）：门运行期 spawn 登记簿——Gitx/Gate 同域
+    gitx = gitx if gitx is not None else Gitx(instance_id=instance_identity(home),
+                                              spawn_tracker=spawns)
     router = Router(store, state, oc,
                     same_lineage=auth.same_lineage,  # F16 血统链边（装配注入）
                     mail=lambda tid, text: send_email(  # F63 终态邮件必达（外呼缝同 Health）
@@ -191,7 +193,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 quick_max_files=quick_max_files,  # F65 quick 包络旋钮透传
                 quick_max_lines=quick_max_lines,
                 clean_ignore_env=clean_ignore_env,  # ag-f5aa4d 数据层豁免 env 面
-                page_writer=page_writer)  # ag-0f60fd：门段事件刷新任务页
+                page_writer=page_writer,  # ag-0f60fd：门段事件刷新任务页
+                spawn_tracker=spawns)  # P0-1：真 Gitx 同一登记簿（注入假 gitx 不登记）
     app.gate, app.health = gate, health
     return app
 

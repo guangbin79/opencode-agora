@@ -34,6 +34,7 @@ merged/closed、non_ff 换基重排重验≤3 次总尝试、failed 终局 block
 import os
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -71,6 +72,61 @@ _LOCK_POLL = 0.05
 # 串行面防死 origin 停摆——300s×N 全预算阻塞端口绑定且单例锁已持（终闸 B 册）；
 # 超时/网络病＝对账不可得，留门重排链路在其自身失败面内兜底，语义不变
 _RECOVER_FETCH_TIMEOUT = 15
+# P0-1 门级看门狗硬下限（ag-9c4cbb）：缺省 deadline=max(4×生效 verify 预算, 600s)
+_WATCHDOG_FLOOR = 600
+
+
+class SpawnTracker:
+    """P0-1 门运行期子进程组登记簿（ag-9c4cbb，串行门＝单活运行域）。
+
+    gate 路径全部 spawn（verify runner＋gitx._git）以 start_new_session 自立
+    进程组并登记 pgid；门看门狗到点 kill_all() 整组收杀——孤儿孙进程（ssh/
+    传输）不再持管道挂死串行门（2026-11-16 生产 wedge：ag-9e055d 门线程
+    blocked 1.5h）。activate() 认主线程：仅门线程内 spawn 入册，HTTP 线程
+    并发的 _git（dispatch 建 env 等）不误入本门收杀面。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pgids = set()
+        self._killed = False
+        self._owner = None
+
+    def activate(self):
+        """开域（run_guarded 起点）：清场＋认主。"""
+        with self._lock:
+            self._pgids.clear()
+            self._killed = False
+            self._owner = threading.get_ident()
+
+    def deactivate(self):
+        with self._lock:
+            self._pgids.clear()
+            self._owner = None
+
+    def add(self, pgid):
+        with self._lock:
+            if threading.get_ident() == self._owner:
+                self._pgids.add(pgid)
+
+    def discard(self, pgid):
+        with self._lock:
+            self._pgids.discard(pgid)
+
+    def killed(self):
+        """本门运行已被告警收杀（runner 据此让位 124 分类，不伪装质量败）。"""
+        with self._lock:
+            return self._killed
+
+    def kill_all(self):
+        """到点整组收杀：标记 killed＋SIGKILL 全部在册进程组。"""
+        with self._lock:
+            self._killed = True
+            pgids, self._pgids = list(self._pgids), set()
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # 与正常退出竞速：组已消失即无需补杀
 
 
 def _roster_from_file(path):
@@ -139,7 +195,8 @@ def _cmd_dead(rc, out):
     return rc in (126, 127) or (rc == 2 and "No such file or directory" in out)
 
 
-def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
+def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None,
+                       tracker=None):
     """真 runner：独立进程组跑 verify，F36 软硬双顶。
 
     软顶＝timeout：到点不杀，on_soft() 恰一次（None 跳过），继续等；硬顶＝ceiling
@@ -148,6 +205,8 @@ def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
     三枚服务自身态变量后以显式副本传子进程（不改 os.environ 本体）。输出管道显式
     UTF-8＋errors=replace 解码（ag-830b1b：子进程非 UTF-8 字节输出曾于 communicate
     内 UnicodeDecodeError 门崩——非法字节降级 U+FFFD，rc 与输出尾照常捕获）。
+    tracker（P0-1）：spawn 入 SpawnTracker 登记簿（门看门狗兜底收杀）；看门狗已
+    收杀（tracker.killed）即让位 124 分类，不把杀组伪装成质量败或普通退出。
     """
     ceiling = 4 * timeout if ceiling is None else ceiling
     child_env = {k: v for k, v in os.environ.items() if k not in _GATE_ENV_STRIP}
@@ -155,40 +214,49 @@ def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace",
                             start_new_session=True)
-    soft_fired, start = False, time.monotonic()
-    while True:
-        now = time.monotonic()
-        waits = [_VERIFY_POLL, ceiling - (now - start)]
-        if not soft_fired:
-            waits.append(timeout - (now - start))
-        try:
-            out, err = proc.communicate(timeout=max(min(waits), 0.001))
-            return proc.returncode, (out or "") + (err or "")
-        except subprocess.TimeoutExpired:
-            elapsed = time.monotonic() - start
-            if not soft_fired and elapsed >= timeout:
-                soft_fired = True  # 软顶拍不杀：提醒恰一次（进程已退则免提醒）
-                if proc.poll() is None and on_soft is not None:
+    if tracker is not None:
+        tracker.add(proc.pid)
+    try:
+        soft_fired, start = False, time.monotonic()
+        while True:
+            now = time.monotonic()
+            waits = [_VERIFY_POLL, ceiling - (now - start)]
+            if not soft_fired:
+                waits.append(timeout - (now - start))
+            try:
+                out, err = proc.communicate(timeout=max(min(waits), 0.001))
+                if tracker is not None and tracker.killed():
+                    return 124, ((out or "") + (err or "")
+                                 + "\nverify 进程组被门看门狗终止（gate_overrun）")
+                return proc.returncode, (out or "") + (err or "")
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - start
+                if not soft_fired and elapsed >= timeout:
+                    soft_fired = True  # 软顶拍不杀：提醒恰一次（进程已退则免提醒）
+                    if proc.poll() is None and on_soft is not None:
+                        try:
+                            on_soft()
+                        except Exception:  # 提醒链故障不废硬顶杀保证：杀分支必须可达
+                            pass
+                if elapsed >= ceiling:
                     try:
-                        on_soft()
-                    except Exception:  # 提醒链故障不废硬顶杀保证：杀分支必须可达
-                        pass
-            if elapsed >= ceiling:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass  # 超时与正常退出竞速：进程组已消失即无需补杀
-                try:  # 有限宽限收尾：逃逸后代持管道时弃读，防门线程挂死
-                    out, err = proc.communicate(timeout=2 * _VERIFY_POLL)
-                except subprocess.TimeoutExpired:
-                    for pipe in (proc.stdout, proc.stderr):
-                        if pipe:
-                            pipe.close()
-                    out, err = "", "（逃逸进程仍持有输出管道，已弃采）"
-                overrun = "" if soft_fired else f"（软顶 {timeout:g}s 未提醒：硬顶≤软顶）"
-                return 124, ((out or "") + (err or "") +
-                             f"\nverify 超硬顶（>{ceiling:g}s{overrun}）"
-                             "——已终止验证进程组；可用 AGORA_VERIFY_CEILING 调整上限")
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # 超时与正常退出竞速：进程组已消失即无需补杀
+                    try:  # 有限宽限收尾：逃逸后代持管道时弃读，防门线程挂死
+                        out, err = proc.communicate(timeout=2 * _VERIFY_POLL)
+                    except subprocess.TimeoutExpired:
+                        for pipe in (proc.stdout, proc.stderr):
+                            if pipe:
+                                pipe.close()
+                        out, err = "", "（逃逸进程仍持有输出管道，已弃采）"
+                    overrun = "" if soft_fired else f"（软顶 {timeout:g}s 未提醒：硬顶≤软顶）"
+                    return 124, ((out or "") + (err or "") +
+                                 f"\nverify 超硬顶（>{ceiling:g}s{overrun}）"
+                                 "——已终止验证进程组；可用 AGORA_VERIFY_CEILING 调整上限")
+    finally:
+        if tracker is not None:
+            tracker.discard(proc.pid)
 
 
 class Gate:
@@ -198,7 +266,7 @@ class Gate:
                  store, runner=None, verify_timeout=300, verify_ceiling=None,
                  on_blocked=None, roster_path=None, quick_max_files=3,
                  quick_max_lines=30, clean_ignore_env="",
-                 page_writer=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新
+                 page_writer=None, spawn_tracker=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
@@ -208,6 +276,10 @@ class Gate:
         self._verify_timeout, self._verify_ceiling = verify_timeout, verify_ceiling
         self._quick_max_files, self._quick_max_lines = quick_max_files, quick_max_lines
         self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
+        # P0-1（ag-9c4cbb）：门运行期 spawn 登记簿（与 Gitx 同实例注入＝门线程
+        # 内全部子进程组可被看门狗整组收杀）；killed 标记即 run() 异常路径的
+        # 让位判据（activate() 每轮复位——重派重跑的门内崩不被旧轮标记误吞）
+        self._spawns = spawn_tracker if spawn_tracker is not None else SpawnTracker()
 
     # ---- done 受理（前置六拒，拒收落审计并附动作指引） ----
 
@@ -405,6 +477,65 @@ class Gate:
 
     # ---- 门体（后台线程体） ----
 
+    def run_guarded(self, tid, deadline=None):
+        """P0-1 门级看门狗（ag-9c4cbb，httpd consume 唯一门入口）：整体硬顶包
+        run()。到点 kill_all 本门运行期登记的全部子进程组（杀组解链 communicate）
+        ＋审计 gate_overrun；run() 返回后终局 done→blocked（delivery failed，
+        error=gate_overrun——非质量败不弹 worker 不计连败，处置权在派发方），门
+        队列继续下一任务。deadline 缺省 max(4×生效 verify 预算, 600s)，注入即
+        测试秒级跑。shortcut: run() 卡在无子进程的纯 Python 环节（锁/死循环）时
+        看门狗只留痕不能解卡——恢复需重启；生产 wedge 形态（孤儿持管道）已由
+        P0-2 从源头消灭。"""
+        try:
+            t = self._state.get(tid)
+        except KeyError:
+            raise  # 崩溃归 httpd gate_crashed 留痕
+        if deadline is None:
+            budget = t["verify"].get("timeout") or self._verify_timeout
+            deadline = max(4 * budget, _WATCHDOG_FLOOR)
+        fired = threading.Event()
+
+        def _fire():
+            fired.set()
+            self._spawns.kill_all()
+            try:
+                self._audit(tid, "gate_overrun")
+            except Exception:
+                pass  # 审计面尽力而为：杀组解链不因留痕败而回退
+
+        self._spawns.activate()
+        timer = threading.Timer(deadline, _fire)
+        timer.daemon = True
+        try:
+            timer.start()
+            try:
+                self.run(tid)
+            finally:
+                timer.cancel()
+            try:
+                if fired.is_set() and self._state.get(tid)["state"] == "done":
+                    self._overrun_final(tid, deadline)
+            except Exception:  # 终局竞窗（任务已被处置/账面 I/O 病）：留痕已在，不强写
+                pass
+        finally:
+            self._spawns.deactivate()
+
+    def _overrun_final(self, tid, deadline):
+        """P0-1 overrun 终局：delivery failed(error=gate_overrun)＋done→blocked
+        （F98 交付失败同款专用边）。"""
+        t = self._state.get(tid)
+        d = dict(t.get("delivery") or {})
+        d.update(status="failed", error="gate_overrun")
+        self._state.set_fields(tid, delivery=d)
+        self._state.transition(tid, "blocked")
+        try:
+            self._router.notify_transition(
+                tid, "blocked",
+                body=f"任务 {tid} 看门狗超限（gate_overrun，>{deadline:g}s）——"
+                     "已 blocked（非质量败，不计连败）；进程组已终止，处置后重派或取消")
+        except Exception:  # 通知面尽力而为（F54 口径）——不逆转终局
+            pass
+
     def run(self, tid):
         t = self._state.get(tid)
         if t["state"] != "done":
@@ -422,7 +553,8 @@ class Gate:
         if runner is None:  # F36 默认 runner：软顶提醒闭包绑本任务＋生效预算
             runner = lambda env, cmd: _subprocess_runner(  # noqa: E731
                 env, cmd, timeout=budget, ceiling=ceiling,
-                on_soft=lambda: self._notify_verify_soft(tid, budget))
+                on_soft=lambda: self._notify_verify_soft(tid, budget),
+                tracker=self._spawns)
         else:  # F51：注入 runner 经 kwargs 观察生效预算（硬顶＝4×生效值单测缝）
             runner = lambda env, cmd: self._runner(env, cmd, timeout=budget,
                                                    ceiling=ceiling)
@@ -705,7 +837,9 @@ class Gate:
                     return
             self._succeed(tid, auto_ignored)
         except Exception as e:  # 门内崩（checkout 拒/分支失/脏工作区）：转 reopened 通知
-            if self._state.get(tid)["state"] == "done":
+            if self._spawns.killed():
+                pass  # P0-1 看门狗杀组解链（含 _git 阶段）：终局归 run_guarded（blocked/gate_overrun），不误弹 reopened
+            elif self._state.get(tid)["state"] == "done":
                 self._state.transition(tid, "reopened")
                 self._audit(tid, "reopened")
                 self._post(tid, f"门内异常：{e}——处理目标分支后重新 post(done, commit)")

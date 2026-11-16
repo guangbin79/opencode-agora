@@ -114,7 +114,7 @@ class TestAccessGitx(unittest.TestCase):
             def _git(self, args, cwd, check=True):
                 if "--is-ancestor" in args:
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
-                return Gitx._git(args, cwd, check)
+                return super()._git(args, cwd, check)
 
         env = BoomGitx().build_env(self.repo, "gt-f2b")
         self._commit(Path(env), {"src.py": "v1\ntask"}, "task work")
@@ -193,7 +193,7 @@ class TestAccessGitx(unittest.TestCase):
             def _git(self, args, cwd, check=True):
                 if "rebase" in args and "--onto" in args:
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
-                return Gitx._git(args, cwd, check)
+                return super()._git(args, cwd, check)
 
         env = BoomGitx().build_env(self.repo, "gt-f32c")
         self._commit(Path(env), {"src.py": "v1\ntask"}, "task work")
@@ -496,7 +496,7 @@ class TestAccessGitx(unittest.TestCase):
             def _git(self, args, cwd, check=True):
                 if "--check" in args:
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
-                return Gitx._git(args, cwd, check)
+                return super()._git(args, cwd, check)
 
         gx = BoomGitx()
         env = gx.build_env(self.repo, "gt-dc2")
@@ -732,7 +732,8 @@ class TestAccessGitx(unittest.TestCase):
 
     def test_push_timeout_kills_process_group(self):  # Req: F38
         """F-1：push 超时按进程组杀（start_new_session＋killpg）——ssh/传输孙进程
-        不孤儿泄漏；杀后有限宽限收尸，分类仍 failed。"""
+        不孤儿泄漏；杀后有限宽限收尸，分类仍 failed。P0-2 后 _git 亦走 Popen
+        （start_new_session）：origin 探针经 FakePopen 伪成功（argv 甄别）。"""
         origin = self.tmp / "origin.git"
         self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
         self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
@@ -746,24 +747,29 @@ class TestAccessGitx(unittest.TestCase):
 
             def __init__(self, argv, **kw):
                 popen_kw.append((argv, kw))
+                self.argv = argv
 
             def communicate(self, timeout=None):
+                if self.argv[1:3] == ["remote", "get-url"]:
+                    self.returncode = 0  # P0-2：_git 走 Popen——origin 在位
+                    return f"{str(origin)}\n", ""
                 if timeout is not None and not FakePopen.raised:
                     FakePopen.raised = True  # 首次（超时顶）抛，二次（收尸）成功返回
                     raise subprocess.TimeoutExpired("git", timeout)
                 FakePopen.returncode = -9
                 return "", ""
 
-        # shim 只换 Popen：_git 的 remote get-url 仍走真 run；killpg 打桩记录调用
         shim = SimpleNamespace(run=subprocess.run, Popen=FakePopen,
-                               PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired)
+                               PIPE=subprocess.PIPE,
+                               TimeoutExpired=subprocess.TimeoutExpired,
+                               CompletedProcess=subprocess.CompletedProcess)
         with mock.patch.object(gitx_mod, "subprocess", shim), \
              mock.patch.object(gitx_mod.os, "killpg",
                                side_effect=lambda pid, sig: killpg.append((pid, sig))):
             status, tail = self.gx.push(str(self.repo), "main")
         self.assertEqual(status, "failed")
         self.assertIn("超时", tail)
-        argv, kw = popen_kw[0]
+        argv, kw = popen_kw[1]  # [0]＝_git 的 remote get-url 探针，[1]＝push 本体
         self.assertEqual(argv[:3], ["git", "push", "origin"])
         self.assertTrue(kw.get("start_new_session"))  # 整组可杀的前提
         self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL（非仅直接子进程）
@@ -1022,7 +1028,7 @@ class TestAccessGitx(unittest.TestCase):
         class SpyGitx(Gitx):
             def _git(self, args, cwd, check=True, timeout=None):
                 calls.append(list(args))
-                return Gitx._git(args, cwd, check, timeout)
+                return super()._git(args, cwd, check, timeout)
 
         spy = SpyGitx(instance_id="host-9c96f96a")
         env = spy.build_env(self.repo, "gt-prune")
@@ -1057,7 +1063,7 @@ class TestAccessGitx(unittest.TestCase):
         class SpyGitx(Gitx):
             def _git(self, args, cwd, check=True, timeout=None):
                 calls.append(list(args))
-                return Gitx._git(args, cwd, check, timeout)
+                return super()._git(args, cwd, check, timeout)
 
         with self.assertRaises(ValueError):
             SpyGitx().build_env_at(self.repo, "gt-bad2", None, "nope")
@@ -1089,6 +1095,72 @@ class TestAccessGitx(unittest.TestCase):
         third = Gitx().delivery_lock(str(self.repo))
         self.assertTrue(third.acquire(blocking=False))  # 退出即释放
         third.release()
+
+
+class TestGitProcessGroup(unittest.TestCase):
+    """P0-2（ag-9c4cbb）：_git 组自治（start_new_session＋超时 killpg 全组——
+    孤儿孙进程不持管道挂死 communicate）＋门看门狗登记簿接线。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "proj"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo,
+                       capture_output=True, check=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_git_timeout_kills_process_group(self):
+        """超时 killpg 全组＋RuntimeError（gitx 失败契约），逃逸持管道时弃读。"""
+        popen_kw, killpg = [], []
+
+        class FakePopen:
+            pid = 4242
+            stdout = stderr = None
+            returncode = None
+
+            def __init__(self, argv, **kw):
+                popen_kw.append((argv, kw))
+
+            def communicate(self, timeout=None):
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired("git", timeout)
+                self.returncode = -9
+                return "", ""
+
+        shim = SimpleNamespace(Popen=FakePopen, PIPE=subprocess.PIPE,
+                               TimeoutExpired=subprocess.TimeoutExpired,
+                               CompletedProcess=subprocess.CompletedProcess)
+        with mock.patch.object(gitx_mod, "subprocess", shim), \
+             mock.patch.object(gitx_mod.os, "killpg",
+                               side_effect=lambda pid, sig: killpg.append((pid, sig))):
+            with self.assertRaises(RuntimeError) as cm:
+                Gitx()._git(["fetch", "origin"], cwd=self.repo, timeout=0.5)
+        argv, kw = popen_kw[0]
+        self.assertEqual(argv[:2], ["git", "fetch"])
+        self.assertTrue(kw.get("start_new_session"))  # 整组可杀的前提
+        self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL（非仅直接子进程）
+        self.assertIn("超时", str(cm.exception))
+
+    def test_git_registers_spawn_with_tracker(self):
+        """门路径 spawn 入 SpawnTracker 登记簿：spawn 即入册、完结即出册
+        （看门狗据此整组收杀 timeout=None 的挂死）。"""
+        added, discarded = [], []
+        tracker = SimpleNamespace(add=added.append, discard=discarded.append)
+        r = Gitx(spawn_tracker=tracker)._git(["rev-parse", "--git-dir"],
+                                             cwd=self.repo)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(added), 1)
+        self.assertEqual(discarded, added)
+
+    def test_git_success_contract_unchanged(self):
+        """Popen 化后 rc/stdout/stderr 契约与旧 subprocess.run 等价。"""
+        r = Gitx()._git(["rev-parse", "--show-toplevel"], cwd=self.repo)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), str(self.repo))
+        with self.assertRaises(RuntimeError):  # check 契约：非零抛
+            Gitx()._git(["rev-parse", "no-such-ref"], cwd=self.repo)
 
 
 class TestGateBaseline(unittest.TestCase):
