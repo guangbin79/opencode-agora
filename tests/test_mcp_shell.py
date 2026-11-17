@@ -36,6 +36,9 @@ class FakeGitx:
     def local_branch_sha(self, repo_dir, branch):  # Req: F100 本地权威定基
         return "c" * 40
 
+    def is_ancestor(self, repo_dir, base, commit):  # Req: F110 non_ff 预判（缺省真分叉）
+        return False
+
     def build_env_at(self, project_dir, tid, branch=None,
                      base_sha=None):  # Req: F100 委托同款 env 模型
         return self.build_env(project_dir, tid, branch)
@@ -45,9 +48,6 @@ class FakeGitx:
 
     def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
         return "b" * 40
-
-    def has_origin(self, repo_dir):  # Req: F98 本地仓模型（push 亦 none）——dispatch 走本地定基
-        return False
 
     def remove_env(self, env_dir):
         pass
@@ -399,7 +399,7 @@ class TestTaskDeliverMcp(McpShellTest):
         self.assertEqual(t["state"], "closed")
         self.assertEqual(t["delivery"]["status"], "delivered")
 
-    def test_non_ff_passthrough_requeued_flag(self):  # Req: F101
+    def test_non_ff_passthrough_diverged_terminal(self):  # Req: F110
         tid = self.result_of(self.call_tool(
             "task_create", {"_token": self.root, "goal": "外支2",
                             "project_dir": "/repo", "verify_cmd": "true",
@@ -411,11 +411,12 @@ class TestTaskDeliverMcp(McpShellTest):
                             "outcome": "non_ff", "commit": self.SHA_40,
                             "base": "d" * 40})
         out = self.result_of(r)
-        self.assertEqual((out["ok"], out["outcome"], out["requeued"]),
-                         (True, "non_ff", True))
+        self.assertEqual((out["ok"], out["outcome"], out["error"]),
+                         (True, "failed", "diverged"))
+        self.assertNotIn("requeued", out)  # F110：确认点终局，不进门队列
         d = self.app.state.get(tid)["delivery"]
-        self.assertEqual((d["status"], d["base"], d["attempt"]),
-                         ("pending", "d" * 40, 2))
+        self.assertEqual((d["status"], d["attempt"], d["commit"]),
+                         ("failed", 1, self.SHA_40))
 
     def test_worker_denied_and_stale_rejected(self):  # Req: F101
         tid = self.result_of(self.call_tool(

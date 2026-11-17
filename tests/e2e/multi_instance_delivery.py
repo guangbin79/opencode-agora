@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Req: F102/F108/F109 多实例交付端到端证明（F94-F101 交付栈全链真码；b/c/e
+"""Req: F102/F108/F109/F110 多实例交付端到端证明（F94-F101 交付栈全链真码；b/c/e
 场景为 F108 本地权威口径——managed 一律本地权威、origin 零接触；h 场景为
-ag-f12220 ff-only 分叉终局口径，F109 起全栈零网络）。
+F110 non_ff 确认点 diverged 预判口径，F109 起全栈零网络）。
 
 自包含脚本：python3 tests/e2e/multi_instance_delivery.py（零 pytest 依赖、零
 网络、零凭据——origin 一律本地 bare 仓）。并发场景（a/b/i）每场景起两个真实
@@ -21,8 +21,8 @@ agora 服务实例（assemble + make_server，各自 AGORA_HOME/端口/StubOpenc
   f 无 origin 本地权威——干净目标 CAS ff-only 推进 synced；脏目标保全终局失败；
   g external_branch 全 handoff——awaiting_external 驻留、不推 origin 不合默认支，
     task_deliver(delivered) 收口 closed、默认支 SHA 不变；
-  h external non_ff 换基真分叉——ff-only 终局 diverged/blocked（人工门），
-    blocked 后 ack 拒绝零改写、全程零推送零默认支改动（ag-f12220/F109）；
+  h external non_ff 换基真分叉——确认点祖先预判直接 diverged/blocked，
+    不进门队列不烧集成 verify，attempt 不轮转（F110/ag-f12220）；
   i 环境回收实例属主——一实例清理不注销他实例在册 worktree。
 
 断言面：delivery 投影（mode/status/commit/base/attempt/local_status/error）、
@@ -491,9 +491,9 @@ def scenario_g(tmp):
 
 
 def scenario_h(tmp):
-    """h external non_ff 换基（ag-f12220 ff-only 语义）：外部新基与 worker
-    线索真分叉时，重排不再自动变基——终局 diverged/blocked（人工门）；
-    确认面在 blocked 后拒绝任何 ack，全程零推送零默认支改动。"""
+    """h external non_ff 换基预判（Req: F110）：外部新基与 handoff 真分叉时，
+    task_deliver(non_ff) 在确认点一次本地祖先判定即终局 diverged/blocked——
+    不进门队列、不重排不烧集成 verify；attempt 不轮转，handoff commit 留投影。"""
     root = tmp / "h"
     origin, repo, base, ia, tid = _external_setup(root, "A")
     before_refs = remote_refs(repo)  # 快照在 handoff 前——全程不推不合
@@ -508,15 +508,16 @@ def scenario_h(tmp):
     git(["checkout", "main"], repo)
     st, r = ia.call("/task_deliver", {"task": tid, "outcome": "non_ff",
                                       "commit": c1, "base": b1})
-    check(st == 200 and r.get("requeued") and r.get("attempt") == 2,
-          f"h: non_ff 应答重排 {r}")
-    # ag-f12220：b1 与 c1 为兄弟提交（真分叉）——merge_ff 非 ff 即终局 diverged，
-    # 不再自动变基出新 handoff（废除了 F105 时代的换基重放语义）
-    row = wait_for(ia, tid, lambda x: x["delivery"]["status"] == "failed",
-                   what="diverged terminal")
+    # F110：b1 与 c1 为兄弟提交（真分叉）——non_ff 的数学含义即 base 非 handoff
+    # 祖先，换基后 merge_ff 必非 ff；确认点直接 failed/diverged，零重排零重验
+    check(st == 200 and r.get("outcome") == "failed"
+          and r.get("error") == "diverged", f"h: non_ff 应直接终局 {r}")
+    row = ia.row(tid)
     d = row["delivery"]
-    check(row["state"] == "blocked" and d["error"] == "diverged"
-          and d["attempt"] == 2, f"h: 分叉终局投影异常 {row}")
+    check(row["state"] == "blocked" and d["status"] == "failed"
+          and d["error"] == "diverged" and d["attempt"] == 1
+          and d["commit"] == c1,
+          f"h: diverged 终局投影异常（attempt 不轮转/handoff 留痕）{row}")
     # blocked 后任何交付确认一律拒绝（非 done＋awaiting_external 可确认态）
     st, r = ia.call("/task_deliver", {"task": tid, "outcome": "delivered",
                                       "commit": c1})

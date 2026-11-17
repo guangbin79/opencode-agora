@@ -17,7 +17,7 @@ external_branch 任务（Req: F101，外部开发分支交付）走 _deliver_ext
 钉死支 tip（或 task_deliver(non_ff) 携带的外部基）定基集成→rebase→集成 verify，
 绿即驻留 done＋delivery.status=awaiting_external——不合目标支、不推 origin、
 不回收 env/凭据，交付确认权在外部派发方（task_deliver：delivered 收口
-merged/closed、non_ff 换基重排重验≤3 次总尝试、failed 终局 blocked）。
+merged/closed、non_ff 经 F110 祖先预判直接 diverged 终局、failed 终局 blocked）。
 
 默认 runner 以独立进程组执行命令，双顶（F36）：软顶到点提醒派发方一次不杀继续
 跑，硬顶（缺省 4×软顶）到点杀全组返回 124；rc=124 分类路由派发方（不计 worker
@@ -991,7 +991,7 @@ class Gate:
         t = self._state.get(tid)
         d = dict(t.get("delivery") or {})
         d.update(status="delivered", commit=sha, local_status="synced",
-                 error=None, attempt=attempt)
+                 error=None, attempt=attempt, delivered_at=time.time())  # Req: F110 未出版超龄判据
         if base is not None:
             d["base"] = base
         self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
@@ -999,10 +999,16 @@ class Gate:
         self._state.transition(tid, "merged", commit=sha)
         extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
         self._audit(tid, "merged", commit=sha, **extra)
-        self._router.notify_transition(
-            tid, "merged",
-            f"@{sha[:7]} local=synced——沉淀: 聚本任务 note/task page "
-            "走 knowledge ingest")  # Req: F60
+        detail = (f"@{sha[:7]} local=synced——沉淀: 聚本任务 note/task page "
+                  "走 knowledge ingest")
+        try:  # Req: F110 出版对账：merged≠已推送 origin——ahead>0 随行提醒自推
+            pub = self._gitx.publication(t["project_dir"], branch)
+            if pub.get("ahead"):
+                detail += (f"——origin 未同步（ahead={pub['ahead']}），"
+                           "请派发方自推")
+        except Exception:  # 投影不可得降级省略，不阻塞交付通知（F54 口径）
+            pass
+        self._router.notify_transition(tid, "merged", detail)  # Req: F60/F110
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{sha}——本地目标支已交付，环境已回收")
@@ -1081,7 +1087,8 @@ class Gate:
         d = dict(t.get("delivery") or {})
         d.update(status="awaiting_external", commit=sha, base=base,
                  attempt=attempt, local_status="not_required", error=None,
-                 conflict_files=None)  # Req: F105 上轮终局清单残值必清（B1）
+                 conflict_files=None,  # Req: F105 上轮终局清单残值必清（B1）
+                 handoff_at=time.time())  # Req: F110 驻留超龄判据（health 扫）
         self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
         self._state.set_fields(tid, delivery=d)
         self._audit(tid, "awaiting_external", commit=sha, base=base,

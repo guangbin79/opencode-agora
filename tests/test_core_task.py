@@ -66,6 +66,13 @@ class FakeGitx:
         self.ondisk.add(env)
         return env
 
+    def is_ancestor(self, repo_dir, base, commit):  # Req: F110 non_ff 预判
+        self.ancestor_calls = getattr(self, "ancestor_calls", [])
+        self.ancestor_calls.append((repo_dir, base, commit))
+        if getattr(self, "ancestor_raise", False):
+            raise RuntimeError("git merge-base: fatal: bad object")
+        return getattr(self, "ancestor_result", False)
+
     def local_branch_sha(self, repo_dir, branch):  # Req: F100
         self.local_shas.append((repo_dir, branch))
         if self.local_sha_raise:
@@ -2179,26 +2186,47 @@ class TestTaskDeliver(TestCoreTask):
         self.assertEqual(self.state.get(tid)["delivery"]["error"],
                          "external_delivery_failed")
 
-    def test_non_ff_requeues_with_supplied_base_and_attempt(self):  # Req: F101
+    def test_non_ff_diverged_terminal_no_requeue(self):  # Req: F110
+        """non_ff 前置 diverged 预判：base 非 handoff 祖先（真实 non_ff 形态）
+        ＝结构性分叉——直接 failed/diverged 终局，不进门队列不烧集成 verify；
+        attempt 不轮转、handoff commit 留投影、blocked 留 env 现场。"""
         tid = self.seed_awaiting()
         r = self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=TIP_40)
-        self.assertTrue(r["requeued"])
-        self.assertEqual(r["attempt"], 2)
-        t = self.state.get(tid)
-        self.assertEqual(t["state"], "done")  # 仍驻留待门体重跑 handoff
-        d = t["delivery"]
-        self.assertEqual((d["status"], d["base"], d["attempt"], d["error"]),
-                         ("pending", TIP_40, 2, None))
-
-    def test_non_ff_fourth_attempt_retry_exhausted(self):  # Req: F101
-        tid = self.seed_awaiting(attempt=3)  # 3 次总尝试已用尽
-        r = self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=TIP_40)
-        self.assertFalse(r.get("requeued"))
-        self.assertEqual(r["error"], "retry_exhausted")
+        self.assertEqual(r, {"ok": True, "outcome": "failed", "error": "diverged"})
         t = self.state.get(tid)
         self.assertEqual(t["state"], "blocked")
-        self.assertEqual((t["delivery"]["status"], t["delivery"]["error"]),
-                         ("failed", "retry_exhausted"))
+        d = t["delivery"]
+        self.assertEqual((d["status"], d["error"], d["attempt"], d["commit"]),
+                         ("failed", "diverged", 1, SHA_40))
+        self.assertEqual(self.gitx.ancestor_calls, [("/repo", TIP_40, SHA_40)])
+        self.assertEqual(self.gitx.removed, [])  # blocked 留 env 现场
+        evs = [e["event"] for e in self.events_of(tid)]
+        self.assertNotIn("delivery_requeued", evs)  # 零重排队
+        self.assertNotIn("reopened", evs)  # 不弹回 worker
+
+    def test_non_ff_base_already_ancestor_rejected(self):  # Req: F110
+        """base 已是 handoff 祖先＝协议自相矛盾（推送本应 ff）：拒绝零状态改写，
+        引导核对 non_ff 来源与实际远端 tip。"""
+        tid = self.seed_awaiting()
+        self.gitx.ancestor_result = True
+        with self.assertRaises(Rejected) as cm:
+            self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=TIP_40)
+        self.assertIn("祖先", str(cm.exception))
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "done")  # 零状态改写
+        self.assertEqual(t["delivery"]["status"], "awaiting_external")
+
+    def test_non_ff_base_unresolvable_external_base(self):  # Req: F110
+        """base 对象本地不可解析（未 fetch/被改写）：预判不可得＝external_base
+        终局（不猜不进门），与门内 build_integration_at 失败口径一致。"""
+        tid = self.seed_awaiting()
+        self.gitx.ancestor_raise = True
+        r = self.svc.deliver(tid, self.root, "non_ff", SHA_40, base=TIP_40)
+        self.assertEqual(r, {"ok": True, "outcome": "failed",
+                             "error": "external_base"})
+        t = self.state.get(tid)
+        self.assertEqual(t["state"], "blocked")
+        self.assertEqual(t["delivery"]["error"], "external_base")
 
     def test_non_ff_requires_full_hex_base(self):  # Req: F101
         tid = self.seed_awaiting()

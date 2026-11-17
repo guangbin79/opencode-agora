@@ -328,7 +328,7 @@ class TaskService:
             self._state.set_fields(tid, delivery=dict(
                 t["delivery"], status="pending", error=None, attempt=0,
                 commit=None, base=None, local_status="pending",
-                conflict_files=None))  # Req: F105 冲突清单残值随重派重置
+                conflict_files=None, handoff_at=None))  # Req: F105/F110 残值随重派重置
         env = t.get("env_dir")
         env_base = t.get("env_base")
         # Req: F71 记录 env 不在盘（/tmp 清理/误删，ag-724152）＝无 env，重派全新建路自愈
@@ -700,9 +700,11 @@ class TaskService:
         local_status=not_required→done→merged→closed 全链＋凭据/env 回收。
         failed＝机器可读 error（空理由映射 external_delivery_failed）→done→blocked
         交付失败边（失败桶/不 reopen/不自动重派）。
-        non_ff＝携外部实际 tip（40-hex base）轮转 attempt 重排队：base 持久化、
-        响应 requeued=True 由 transport 投门队列按新基重排重验；3 次总尝试后
-        第 4 次即 failed/retry_exhausted 终局。
+        non_ff（Req: F110 换基重排废除）＝携外部实际 tip（40-hex base）先做
+        本地祖先预判：base 非 handoff 祖先＝结构性 diverged——直接 failed 终局
+        （不进门队列、不烧集成 verify）；base 已是 handoff 祖先＝协议自相矛盾
+        （推送本应 ff），拒绝零状态改写；base 对象本地不可解析＝external_base
+        终局。外部真分叉的处置＝重派 env 按新 tip 重建或人工调和。
         """
         t = self._state.get(tid)
         sid, _ = self._gate(actor_token, "task_deliver", tid, t,
@@ -741,19 +743,21 @@ class TaskService:
         if b is None:
             self._reject(tid, sid, f"base 须为纯 40 位十六进制完整 sha"
                                    f"（收到 {str(base)[:20]!r}）")
-        if d.get("attempt", 0) >= 3:  # 第 4 次总尝试＝预算耗尽终局
-            return self._deliver_ack_failed(
-                tid, sid, d, "retry_exhausted",
-                "3 次总尝试内外侧持续 non-ff")
-        nd = dict(d, status="pending", base=b, commit=None, error=None,
-                  attempt=d.get("attempt", 0) + 1,
-                  conflict_files=None)  # Req: F105 冲突清单残值不随重排队扩散
-        self._state.set_fields(tid, delivery=nd)
-        self._store.append_event({"ts": time.time(), "actor": sid,
-                                  "event": "delivery_requeued", "task": tid,
-                                  "base": b, "attempt": nd["attempt"]})
-        return {"ok": True, "outcome": "non_ff", "requeued": True,
-                "attempt": nd["attempt"]}
+        # Req: F110 non_ff 前置 diverged 预判：push 被拒 non-ff 的数学含义即
+        # 「外部 tip 非 handoff 祖先」——换基后 merge_ff 必非 ff（ag-f12220 无
+        # 自动变基），进门队列只会白烧一次全量集成 verify 后照撞 diverged。
+        # 确认点一次本地祖先判定替代整个无效重排：
+        try:
+            if self._gitx.is_ancestor(t["project_dir"], b, c):
+                self._reject(tid, sid, "non_ff 的 base 已是 handoff 祖先——"
+                                       "推送应可 fast-forward，请核对 non_ff 来源"
+                                       "与实际远端 tip（零状态改写）")
+        except RuntimeError as e:
+            return self._deliver_ack_failed(tid, sid, d, "external_base", str(e))
+        return self._deliver_ack_failed(
+            tid, sid, d, "diverged",
+            "外部基与 handoff 真分叉（F110 换基重排废除）——重派 env 按新 tip "
+            "重建或人工调和；不进门队列、不烧集成 verify")
 
     def _deliver_ack_delivered(self, tid, sid, d, commit, reason):  # Req: F101
         """delivered 终局：投影→merged→closed 全链＋凭据/env 回收＋通知尾

@@ -219,6 +219,12 @@ class FakeGitx:
         self.rebase_done = None  # 新 detached 基建：integration 头翻页复位（重试轮新基）
         return integration_dir
 
+    def publication(self, repo_dir, branch=None):  # Req: F110 出版对账
+        self.pub_calls = getattr(self, "pub_calls", [])
+        self.pub_calls.append((repo_dir, branch))
+        return getattr(self, "pub_result",
+                       {"branch": branch or "main", "ahead": 0})
+
     def delivery_lock(self, repo_dir):  # Req: F96
         self.lock_calls.append(repo_dir)
         return self.lock
@@ -2630,6 +2636,40 @@ class TestManagedLocalDelivery(TestCoreGate):
         self.assertEqual(len(self.runner.calls), 3)  # 集成 verify 重跑在重排结果上
 
 
+class TestOriginPublicationNote(TestCoreGate):
+    """Req: F110 managed 交付通知附 origin 未同步自推提醒（ahead>0 时）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.integration = str(self.env) + "__gate"
+        self.gx.local_sha_result = LOCAL_BASE
+
+    def test_merged_note_reminds_self_push_when_ahead(self):  # Req: F110
+        self.seed(tb="main")
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gx.head_shas[self.integration] = SHA  # ff 直通
+        self.gx.pub_result = {"branch": "main", "ahead": 3}
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        merged = [m["body"] for m in self.store.read_messages()
+                  if m["to"] == "disp1" and "local=synced" in m["body"]]
+        self.assertTrue(any("origin 未同步（ahead=3）" in b and "自推" in b
+                            for b in merged))
+        d = self.state.get("t1")["delivery"]
+        self.assertIsInstance(d.get("delivered_at"), float)  # 未出版超龄判据
+
+    def test_merged_note_silent_when_published(self):  # Req: F110
+        self.seed(tb="main")
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gx.head_shas[self.integration] = SHA
+        self.gate.run("t1")  # pub_result 缺省 ahead=0：不加提醒
+        merged = [m["body"] for m in self.store.read_messages()
+                  if m["to"] == "disp1" and "local=synced" in m["body"]]
+        self.assertTrue(all("origin 未同步" not in b for b in merged))
+
+
 class TestDeliveryRecovery(TestCoreGate):
     """Req: F100 启动恢复：managed 投影非终态崩溃收敛——权威已含补终态（零
     推送零推进）、未含交门重排恰一次、failed 绝不自动重试、legacy 零接触。"""
@@ -2792,6 +2832,7 @@ class TestExternalHandoff(TestCoreGate):
                           d["local_status"], d["error"]),
                          ("awaiting_external", SHA, LOCAL_BASE, 1,
                           "not_required", None))
+        self.assertIsInstance(d.get("handoff_at"), float)  # Req: F110 超龄判据在投影
         self.assertEqual(self.gx.build_at_calls,
                          [("/repo", self.integration, LOCAL_BASE)])  # 钉死支 tip 定基
         self.assertEqual(self.gx.advance_calls, [])  # 本地目标支零推进

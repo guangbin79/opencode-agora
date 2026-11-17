@@ -36,6 +36,8 @@ KIND_DISPATCHER_DEAD = "dispatcher-dead"
 KIND_STALLED = "stalled"
 KIND_ENV_GONE = "env-gone"
 KIND_VERIFY_DEAD = "verify-dead"
+KIND_EXT_STALE = "external-stale"  # Req: F110 external handoff 驻留超龄
+KIND_UNPUBLISHED = "unpublished"  # Req: F110 managed 已交付未出版
 
 _UNTRUSTED = "---- 不可信原文 ----"
 _RAW_MAX = 500
@@ -57,6 +59,10 @@ _KIND_NOTE = {
                    "项目仓已亡则 cancel 归档",
     KIND_VERIFY_DEAD: "verify 命令自身死（exit 126/127：命令不存在/不可执行）"
                       "——非活不达标，worker 无从自愈；请修正验收命令或取消",
+    KIND_EXT_STALE: "external handoff 驻留 awaiting_external 超龄（缺省 30min）"
+                    "——外部派发方未确认交付，可能派发链路断裂，请人工核对",
+    KIND_UNPUBLISHED: "managed 交付已 merged 但 origin 未同步（本地支领先未推）"
+                      "——请派发方尽快自推，防 origin 长期缺交付",
 }
 
 # F70/F73 共用提示：单源防 board 手动面与 health 自动面漂移
@@ -107,7 +113,8 @@ class Health:
 
     def __init__(self, state, oc, router, recover, app, store,
                  runner=None, stale_candidates=None, env_activity=None,
-                 draft_writer=None, gate_stale_after=1200.0):
+                 draft_writer=None, gate_stale_after=1200.0,
+                 gitx=None, ext_stale_after=1800.0, unpublished_after=3600.0):
         """app 按引用注入：main_sid 是活绑定（R25-A），escalate 每次取当前值。
 
         stale_candidates＝report.stale_candidates（core 禁兄弟 import，构造注入）；
@@ -123,6 +130,14 @@ class Health:
         self._env_activity = env_activity
         self._draft_writer = draft_writer
         self._gate_stale_after = gate_stale_after
+        # Req: F110 交付终局观测注入：gitx.publication（零网络 refs-only）；
+        # ext_stale_after＝awaiting_external 驻留超龄阈（缺省 30min）；
+        # unpublished_after＝managed delivered 未出版超龄阈（缺省 1h）
+        self._gitx = gitx
+        self._ext_stale_after = ext_stale_after
+        self._unpublished_after = unpublished_after
+        self._ext_esc = {}  # tid->(连拍次数 n, 末拍时刻)：external-stale 退避
+        self._unpub_esc = {}  # tid->(n, last)：unpublished 退避
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
@@ -159,6 +174,7 @@ class Health:
                     busy.add(tid)
         if not oc_down:
             self._stale_scan(tasks, busy)
+        self._delivery_watch(tasks)  # Req: F110 交付终局观测（与 oc 活性无关）
 
     def _stale_scan(self, tasks, busy):
         """边沿判僵（F5 决策记录 2026-10-28）＋重复升级退避（ag-0f537d）。
@@ -225,6 +241,55 @@ class Health:
                                if tasks.get(tid, {}).get("state") in _ACTIVE
                                and tasks[tid].get("env_dir")
                                and not Path(tasks[tid]["env_dir"]).is_dir()}
+
+    def _delivery_watch(self, tasks):
+        """Req: F110 交付终局观测：external handoff 超龄未确认＋managed 未出版。
+
+        与 worker 活性无关（done/merged/closed 也扫）——拍的是派发方：
+        external-stale＝done＋awaiting_external 且 handoff_at 超龄（issue-agent
+        等外部派发方失联的兜底告警）；unpublished＝managed delivered 且
+        publication ahead>0 且超龄（origin 长期缺交付的提醒）。重复升级按
+        _stale_gap 退避；确认/出版/除籍即出账，再犯再拍。"""
+        now = time.time()
+        for tid, t in tasks.items():
+            d = t.get("delivery") or {}
+            if t["state"] == "done" and d.get("status") == "awaiting_external":
+                ts = d.get("handoff_at")
+                if ts and now - ts > self._ext_stale_after:
+                    n, last = self._ext_esc.get(tid, (0, 0.0))
+                    if now - last >= self._stale_gap(n):
+                        self.escalate(KIND_EXT_STALE, tid, streak=n + 1,
+                                      raw=f"commit={d.get('commit')} "
+                                          f"age={int(now - ts)}s")
+                        self._ext_esc[tid] = (n + 1, now)
+            else:
+                self._ext_esc.pop(tid, None)
+            if (t["state"] in ("merged", "closed")
+                    and d.get("mode") == "managed"
+                    and d.get("status") == "delivered"
+                    and now - (d.get("delivered_at") or t.get("updated")
+                               or 0.0) > self._unpublished_after):
+                try:
+                    pub = (self._gitx.publication(t["project_dir"],
+                                                  t.get("target_branch"))
+                           if self._gitx else None)
+                except Exception:
+                    pub = None  # 投影不可得本轮免判（下轮重试）
+                if pub and pub.get("ahead"):
+                    n, last = self._unpub_esc.get(tid, (0, 0.0))
+                    if now - last >= self._stale_gap(n):
+                        self.escalate(KIND_UNPUBLISHED, tid, streak=n + 1,
+                                      raw=f"branch={pub.get('branch')} "
+                                          f"ahead={pub['ahead']}")
+                        self._unpub_esc[tid] = (n + 1, now)
+                else:
+                    self._unpub_esc.pop(tid, None)  # 已出版/无 origin：出账
+            else:
+                self._unpub_esc.pop(tid, None)
+        for book in (self._ext_esc, self._unpub_esc):
+            for tid in list(book):
+                if tid not in tasks:  # 除籍出账：防长驻 daemon 无界增长
+                    del book[tid]
 
     def repair_dispatcher_routes(self):
         """F75 存量错址修复：active 顶层任务 dispatcher_sid=='root' 且 root_sid
@@ -411,7 +476,8 @@ class Health:
         rt = self._state.get(root)
         self._store.append_event({"ts": time.time(), "actor": "health",
                                   "event": "escalate", "task": tid, "kind": kind})
-        quiet = kind in (KIND_STALLED, KIND_ENV_GONE, KIND_VERIFY_DEAD)
+        quiet = kind in (KIND_STALLED, KIND_ENV_GONE, KIND_VERIFY_DEAD,
+                         KIND_EXT_STALE, KIND_UNPUBLISHED)  # Req: F110 同走通知通道＋邮件
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
                           notify=quiet)  # stalled/env-gone/verify-dead 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F80 同款）
         if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F80：命令死需人工处置）

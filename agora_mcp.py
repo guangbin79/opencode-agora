@@ -110,15 +110,16 @@ _TOOLS = [
          "outcome": {"type": "string",
                      "enum": ["delivered", "non_ff", "failed"],
                      "description": "delivered=外部已交付（merged/closed 收口＋env 回收）；"
-                                    "non_ff=外部远端已前进（携 base 重排重验换新 handoff "
-                                    "commit，≤3 次总尝试，第 4 次终局 retry_exhausted）；"
+                                    "non_ff=外部远端已前进（F110 携 base 先祖先预判："
+                                    "非 handoff 祖先＝直接 diverged 终局不烧集成 verify；"
+                                    "已是祖先＝协议矛盾拒收零改写）；"
                                     "failed=外部交付失败（blocked 终局，error 机器可读）"},
          "commit": {"type": "string",
                     "description": "最新 awaiting_external delivery.commit（纯 40 位十六进制"
                                    "完整 sha；stale/late 确认拒绝且零状态改写）"},
          "base": {"type": "string",
                   "description": "non_ff 必携：外部派发方 fetch 实际远端后的 tip 完整 "
-                                 "40 位 sha——handoff 按此基重排重验"},
+                                 "40 位 sha——F110 仅作本地祖先预判，不再重排重验"},
          "reason": {"type": "string",
                     "description": "delivered＝外部证据留痕（入 delivery.reason）；"
                                    "failed＝机器可读错误（空则 external_delivery_failed）"}},

@@ -1215,3 +1215,107 @@ class TestF75RepairScan(TestCoreHealth):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeliveryWatch(TestCoreHealth):
+    """Req: F110 交付终局观测：external handoff 超龄未确认＋managed 未出版。
+    与 worker 活性无关（done/merged/closed 也扫），拍的是派发方。"""
+
+    class FakeGitx:
+        def __init__(self, ahead=0):
+            self.ahead = ahead
+            self.calls = []
+
+        def publication(self, repo_dir, branch=None):
+            self.calls.append((repo_dir, branch))
+            return {"branch": branch or "main", "ahead": self.ahead}
+
+    def mk_watch(self, gitx=None, ext_after=1800.0, unpub_after=3600.0):
+        return Health(self.state, self.oc, self.router, self.recover, self.app,
+                      store=self.store, stale_candidates=report.stale_candidates,
+                      gitx=gitx, ext_stale_after=ext_after,
+                      unpublished_after=unpub_after)
+
+    def seed_awaiting(self, tid="t1", age=4000.0):
+        self.seed(tid, state="done")
+        self.state.set_fields(tid, last_seen=time.time(),  # 非僵态：隔离 stalled 面
+                              delivery={"mode": "external_branch",
+                                        "status": "awaiting_external",
+                                        "commit": "c" * 40, "base": "b" * 40,
+                                        "attempt": 1,
+                                        "handoff_at": time.time() - age})
+        return tid
+
+    def seed_delivered(self, tid="t1", mode="managed", status="delivered",
+                       state="closed", updated_age=4000.0):
+        self.seed(tid, state=state)
+        self.state.set_fields(tid,
+                              delivery={"mode": mode, "status": status,
+                                        "commit": "c" * 40,
+                                        "delivered_at": time.time() - updated_age})
+        return tid
+
+    def kinds(self):
+        return [e.get("kind") for e in self.store.read_events()
+                if e.get("event") == "escalate"]
+
+    def test_external_stale_escalates_once_with_backoff(self):  # Req: F110
+        self.seed_awaiting(age=4000.0)  # handoff 超 30min 未确认
+        self.oc.liveness["s-w1"] = True
+        h = self.mk_watch()
+        h.tick()
+        self.assertIn("external-stale", self.kinds())
+        bodies = [m["body"] for m in self.main_msgs()
+                  if "external-stale" in m["body"]]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("commit=" + "c" * 40, bodies[0])  # handoff 事实随正文
+        h.tick()
+        self.assertEqual(self.kinds().count("external-stale"), 1)  # 退避不连拍
+
+    def test_external_fresh_and_confirmed_no_escalate(self):  # Req: F110
+        self.seed_awaiting(age=10.0)  # 未超龄：不拍
+        self.oc.liveness["s-w1"] = True
+        h = self.mk_watch()
+        h.tick()
+        self.assertNotIn("external-stale", self.kinds())
+        self.state.set_fields("t1", delivery={
+            "mode": "external_branch", "status": "delivered", "commit": "c" * 40})
+        self.seed_awaiting("t2", age=4000.0)
+        h.tick()
+        self.assertEqual(self.kinds().count("external-stale"), 1)  # 仅 t2
+        h.tick()  # t2 退避；t1 已确认永不出账重拍
+        self.assertEqual(self.kinds().count("external-stale"), 1)
+
+    def test_unpublished_escalates_and_published_prunes(self):  # Req: F110
+        gx = self.FakeGitx(ahead=3)
+        self.seed_delivered(updated_age=4000.0)  # merged>1h 且 ahead=3
+        h = self.mk_watch(gitx=gx)
+        h.tick()
+        self.assertIn("unpublished", self.kinds())
+        bodies = [m["body"] for m in self.main_msgs()
+                  if "unpublished" in m["body"]]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("ahead=3", bodies[0])
+        gx.ahead = 0  # 派发方自推后：出版出账
+        h.tick()
+        self.assertEqual(self.kinds().count("unpublished"), 1)
+        self.assertEqual(h._unpub_esc, {})
+
+    def test_unpublished_skips_external_and_pending(self):  # Req: F110
+        gx = self.FakeGitx(ahead=5)
+        self.seed_delivered(mode="external_branch")  # external 归 issue-agent 管：免拍
+        self.seed_delivered("t2", status="pending")  # 未交付：免拍
+        h = self.mk_watch(gitx=gx)
+        h.tick()
+        self.assertNotIn("unpublished", self.kinds())
+        self.assertEqual(gx.calls, [])  # 非 managed delivered 不取投影
+
+    def test_unpublished_projection_failure_skips_round(self):  # Req: F110
+        class SickGitx:
+            def publication(self, repo_dir, branch=None):
+                raise RuntimeError("local branch missing")
+
+        self.seed_delivered()
+        h = self.mk_watch(gitx=SickGitx())
+        h.tick()  # 投影病本轮免判，不拍不炸
+        self.assertNotIn("unpublished", self.kinds())

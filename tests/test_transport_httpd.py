@@ -1743,21 +1743,20 @@ class TestF101ExternalChain(HttpdTest):
         self.assertIn(self.app.state.get(tid)["env_dir"],
                       self.gitx.removed)  # 确认后回收
 
-    def test_non_ff_requeues_via_gate_and_rotates(self):  # Req: F101
+    def test_non_ff_diverged_terminal_without_gate_requeue(self):  # Req: F110
         tid = self.seed_awaiting_via_gate()
         tip = "d" * 40
         st, r = call(self.port, "POST", "/task_deliver",
                      {"task": tid, "outcome": "non_ff", "commit": SHA,
                       "base": tip}, self.root)
         self.assertEqual(st, 200)
-        self.assertTrue(r["requeued"])  # 响应面携带重排语义
-        # 后台门队列自动重跑 handoff：绿即换基驻留（attempt=2）
-        self.assertTrue(wait_until(lambda: (
-            self.app.state.get(tid).get("delivery") or {}
-        ).get("status") == "awaiting_external"
-            and self.app.state.get(tid)["delivery"]["base"] == tip))
-        d = self.app.state.get(tid)["delivery"]
-        self.assertEqual((d["base"], d["attempt"]), (tip, 2))
+        self.assertEqual((r["outcome"], r["error"]), ("failed", "diverged"))
+        self.assertNotIn("requeued", r)  # 确认点祖先预判终局，不投门队列
+        row = self.app.state.get(tid)
+        d = row["delivery"]
+        self.assertEqual(row["state"], "blocked")
+        self.assertEqual((d["status"], d["attempt"], d["commit"]),
+                         ("failed", 1, SHA))  # attempt 不轮转，handoff 留痕
 
     def test_stale_commit_403_without_mutation(self):  # Req: F101
         tid = self.seed_awaiting_via_gate()

@@ -223,7 +223,7 @@ class _Handler(BaseHTTPRequestHandler):
                                  body["commit"], base=body.get("base"),
                                  reason=body.get("reason", ""), actor_sid=sid)
             if r.get("requeued"):
-                self.gate_q.put(body["task"])  # non_ff：门体按外部基重排重验
+                self.gate_q.put(body["task"])  # F110 起 non_ff 不再 requeue（预判 diverged 终局）；reverify 仍走此面
             return r
         if name == "reverify":  # ag-d68faf：done 驻留重排（verify-dead 恢复边）
             r = app.task.reverify(body["task"], token, actor_sid=sid)

@@ -183,7 +183,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
                     env_activity=report._env_activity,  # F59 env 活性同口径（禁兄弟 import）
                     draft_writer=write_stalled_draft,  # F59 草稿页写面
-                    runner=mail_runner)  # 邮件外呼缝独立于 Gate runner：两契约不同
+                    runner=mail_runner,  # 邮件外呼缝独立于 Gate runner：两契约不同
+                    gitx=gitx)  # Req: F110 交付终局观测（publication 投影）
     gate = Gate(state, gitx, router, oc,
                 read_anchor or anchors.read_anchor, health, auth=auth,
                 store=store, runner=runner, verify_timeout=verify_timeout,
