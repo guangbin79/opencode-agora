@@ -9,6 +9,7 @@ import math
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -268,6 +269,33 @@ def _log_signal_exit(signum, _frame):
     raise SystemExit(128 + signum)
 
 
+def payload_drift_note(payload_dir=None):
+    """P2-13 版本漂移自检：载荷指纹（install.sh 写入 PAYLOAD_VERSION）对
+    源仓当前 HEAD——不一致＝源码已前进但未重装（重跑 install.sh＋重启
+    生效）。指纹缺失（源码树直跑/pkg 模式）静默跳过；一切读取/git 失败
+    静默（观测面不得拦启动）。返回提示文本或 None。"""
+    try:
+        vf = (Path(payload_dir) if payload_dir
+              else Path(__file__).resolve().parent) / "PAYLOAD_VERSION"
+        if not vf.is_file():
+            return None
+        repo, pinned = (ln.strip() for ln in
+                        vf.read_text(encoding="utf-8").splitlines()[:2])
+        if not repo or not pinned:
+            return None
+        r = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode != 0:
+            return None
+        head = r.stdout.strip()
+        if head and head != pinned:
+            return (f"版本漂移：运行载荷 {pinned[:8]} ≠ 源仓 HEAD "
+                    f"{head[:8]}（{repo} 已前进——重跑 install.sh＋重启生效）")
+    except Exception:
+        return None
+    return None
+
+
 def main():
     for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(_sig, _log_signal_exit)
@@ -288,6 +316,9 @@ def main():
     if not store.flock_singleton():
         print("agorad 已在运行", file=sys.stderr)
         return 1
+    note = payload_drift_note()  # P2-13：版本漂移自检（仅活体实例打日志）
+    if note:
+        print(f"WARNING: {note}", flush=True)
     app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store,
                    verify_timeout=verify_timeout, verify_ceiling=verify_ceiling,
                    quick_max_files=quick_files, quick_max_lines=quick_lines,

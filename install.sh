@@ -141,6 +141,9 @@ else
   cp -f "$REPO/board_tui.py" "$AGORA_HOME/.agora/"
   chmod +x "$AGORA_HOME/.agora/board_tui.py"
   ln -sf "$AGORA_HOME/.agora/board_tui.py" "$HOME/.local/bin/agora-board"
+  # P2-13 版本指纹：载荷=拷贝，「源码已前进未重装」由 daemon 启动自检发现
+  printf '%s\n%s\n' "$REPO" "$(git -C "$REPO" rev-parse HEAD)" \
+    > "$AGORA_HOME/.agora/agorad/PAYLOAD_VERSION"
 fi
 
 # ---- 4c) agora CLI（F14：wait 阻塞谓词；bin 目录 4b 已建）----

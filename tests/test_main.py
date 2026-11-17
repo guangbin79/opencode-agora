@@ -18,8 +18,8 @@ from unittest import mock
 from agorad.access.gitx import Gitx
 from agorad.access.store import Store
 from agorad.main import assemble, audit_root_poison, env_config, instance_identity, \
-    issue_root, load_env_file, main, migrate_root_poison, quick_limits_from_env, \
-    verify_ceiling_from_env, verify_timeout_from_env
+    issue_root, load_env_file, main, migrate_root_poison, payload_drift_note, \
+    quick_limits_from_env, verify_ceiling_from_env, verify_timeout_from_env
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -398,6 +398,55 @@ class TestStartupRouteRepair(unittest.TestCase):
             if p:
                 p.stdout.close()
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+
+class TestPayloadDriftNote(unittest.TestCase):
+    """Req: P2-13 版本指纹自检：载荷 PAYLOAD_VERSION 对源仓 HEAD。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self._git("init", "-q", "-b", "main")
+        self._git("-c", "user.email=t@t", "-c", "user.name=t",
+                  "commit", "-q", "--allow-empty", "-m", "init")
+        self.payload = self.tmp / "payload"
+        self.payload.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                              capture_output=True, text=True)
+
+    def _write_version(self, sha):
+        (self.payload / "PAYLOAD_VERSION").write_text(
+            f"{self.repo}\n{sha}\n", encoding="utf-8")
+
+    def test_missing_fingerprint_silent(self):  # 源码树直跑/pkg 模式
+        self.assertIsNone(payload_drift_note(self.payload))
+
+    def test_match_silent(self):
+        self._write_version(self._git("rev-parse", "HEAD").stdout.strip())
+        self.assertIsNone(payload_drift_note(self.payload))
+
+    def test_drift_warns(self):
+        pinned = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_version(pinned)
+        self._git("-c", "user.email=t@t", "-c", "user.name=t",
+                  "commit", "-q", "--allow-empty", "-m", "advance")
+        note = payload_drift_note(self.payload)
+        self.assertIn("版本漂移", note)
+        self.assertIn(pinned[:8], note)
+        self.assertIn("install.sh", note)
+
+    def test_git_failure_silent(self):  # 源仓消失/网络病不拦启动
+        self._write_version("0" * 40)
+        shutil.rmtree(self.repo)
+        self.assertIsNone(payload_drift_note(self.payload))
 
 
 if __name__ == "__main__":

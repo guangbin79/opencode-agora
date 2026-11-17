@@ -30,7 +30,9 @@ merged/closed、non_ff 经 F110 祖先预判直接 diverged 终局、failed 终�
 分支位均可跨重启收敛。
 
 全程 in-gate 门闩、pending-cancel 门尾原子结算、三连败 blocked 与事件审计保持
-不变。core 只 import stdlib，依赖全构造注入。
+不变。F112：门按仓分池——同仓任务经 per-repo 车道串行（交付锁本就仓级），
+跨仓任务并行进门（httpd 消费循环按 project_dir 分发车道）。core 只 import
+stdlib，依赖全构造注入。
 """
 import os
 import signal
@@ -74,56 +76,65 @@ _WATCHDOG_FLOOR = 600
 
 
 class SpawnTracker:
-    """P0-1 门运行期子进程组登记簿（ag-9c4cbb，串行门＝单活运行域）。
+    """P0-1 门运行期子进程组登记簿（ag-9c4cbb；F112 按 owner 线程分域）。
 
     gate 路径全部 spawn（verify runner＋gitx._git）以 start_new_session 自立
-    进程组并登记 pgid；门看门狗到点 kill_all() 整组收杀——孤儿孙进程（ssh/
-    传输）不再持管道挂死串行门（2026-11-16 生产 wedge：ag-9e055d 门线程
-    blocked 1.5h）。activate() 认主线程：仅门线程内 spawn 入册，HTTP 线程
-    并发的 _git（dispatch 建 env 等）不误入本门收杀面。"""
+    进程组并登记 pgid；门看门狗到点按域整组收杀——孤儿孙进程（ssh/传输）
+    不再持管道挂死门线程（2026-11-16 生产 wedge：ag-9e055d 门线程 blocked
+    1.5h）。F112（门按仓分池）起按 owner 线程分域：activate() 认主＝登记
+    当前线程域，add/killed 只认本线程域，kill_thread(ident) 收杀指定域
+    （看门狗定时器线程触发，owner 域精确收杀不波及并行车道）；kill_all()
+    收杀当前线程域（同线程调用兼容形态）。HTTP 线程并发的 _git（dispatch
+    建 env 等）不入册（其线程未开域）。"""
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._pgids = set()
-        self._killed = False
-        self._owner = None
+        self._by_thread = {}   # owner ident -> set(pgids)
+        self._killed = set()   # 已收杀的 owner ident
 
     def activate(self):
-        """开域（run_guarded 起点）：清场＋认主。"""
+        """开域（run_guarded 起点）：当前线程登记为 owner，清场复位。"""
         with self._lock:
-            self._pgids.clear()
-            self._killed = False
-            self._owner = threading.get_ident()
+            self._by_thread[threading.get_ident()] = set()
+            self._killed.discard(threading.get_ident())
+        return threading.get_ident()
 
     def deactivate(self):
         with self._lock:
-            self._pgids.clear()
-            self._owner = None
+            self._by_thread.pop(threading.get_ident(), None)
+            self._killed.discard(threading.get_ident())
 
     def add(self, pgid):
         with self._lock:
-            if threading.get_ident() == self._owner:
-                self._pgids.add(pgid)
+            dom = self._by_thread.get(threading.get_ident())
+            if dom is not None:
+                dom.add(pgid)
 
     def discard(self, pgid):
         with self._lock:
-            self._pgids.discard(pgid)
+            for dom in self._by_thread.values():
+                dom.discard(pgid)
 
     def killed(self):
-        """本门运行已被告警收杀（runner 据此让位 124 分类，不伪装质量败）。"""
+        """本线程域已被告警收杀（runner 据此让位 124 分类，不伪装质量败）。"""
         with self._lock:
-            return self._killed
+            return threading.get_ident() in self._killed
 
-    def kill_all(self):
-        """到点整组收杀：标记 killed＋SIGKILL 全部在册进程组。"""
+    def kill_thread(self, ident):
+        """到点收杀指定 owner 域：标记 killed＋SIGKILL 其全部在册进程组。"""
         with self._lock:
-            self._killed = True
-            pgids, self._pgids = list(self._pgids), set()
+            self._killed.add(ident)
+            pgids = list(self._by_thread.get(ident) or ())
+            self._by_thread[ident] = set()
         for pgid in pgids:
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass  # 与正常退出竞速：组已消失即无需补杀
+
+    def kill_all(self):
+        """同线程兼容形态：收杀当前线程域。"""
+        self.kill_thread(threading.get_ident())
 
 
 def _roster_from_file(path):
@@ -500,10 +511,11 @@ class Gate:
             budget = t["verify"].get("timeout") or self._verify_timeout
             deadline = max(4 * budget, _WATCHDOG_FLOOR)
         fired = threading.Event()
+        owner = threading.get_ident()  # F112：车道线程域——定时器线程收杀定向
 
         def _fire():
             fired.set()
-            self._spawns.kill_all()
+            self._spawns.kill_thread(owner)
             try:
                 self._audit(tid, "gate_overrun")
             except Exception:

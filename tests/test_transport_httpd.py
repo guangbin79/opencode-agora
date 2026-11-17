@@ -1331,6 +1331,65 @@ class TestAnchors(unittest.TestCase):
         self.assertIsNone(anchors.read_anchor(None))  # 未派发无环境
 
 
+class TestGateLanes(HttpdTest):
+    """Req: F112 门按仓分池：跨仓并行（A 仓门内挂起不堵 B 仓）、
+    同仓串行（同仓两任务依 FIFO 逐序过门）。"""
+
+    def setUp(self):
+        self.gate_release = threading.Event()
+        self.gate_calls = []
+        self.block_envs = []  # 挂起名单（env_dir 前缀命中即堵）
+        release, calls, block = (self.gate_release, self.gate_calls,
+                                 self.block_envs)
+
+        def lane_runner(cwd, cmd, timeout=None, ceiling=None):
+            calls.append(cwd)
+            if any(cwd.startswith(b) for b in block):
+                release.wait(timeout=10)  # 名单内 env 门内挂起
+            return 0, "pass"
+
+        self.gate_runner = lane_runner
+        super().setUp()
+
+    def _post_done(self, tid):
+        wsid = self.app.state.get(tid)["worker_sid"]
+        wtok = self.app.auth.token_for(wsid)
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "done", "body": SHA}, wtok)
+        self.assertEqual((st, r.get("result")), (200, "accepted"))
+
+    def test_cross_repo_parallel_same_repo_serial(self):  # Req: F112
+        ta = self.create_task({"goal": "A", "project_dir": "/repoA",
+                               "verify_cmd": "true", "verify_base_exempt": True})
+        tb = self.create_task({"goal": "B", "project_dir": "/repoB",
+                               "verify_cmd": "true", "verify_base_exempt": True})
+        tc = self.create_task({"goal": "A2", "project_dir": "/repoA",
+                               "verify_cmd": "true", "verify_base_exempt": True})
+        for tid in (ta, tb, tc):
+            self.dispatch_task(tid)
+        env_a = self.app.state.get(ta)["env_dir"]
+        self.block_envs.append(env_a)  # A 仓首任务门内挂起
+        self._post_done(ta)
+        # B 仓并行走完（A 仓门仍被 ta 占着）
+        self._post_done(tb)
+        self.assertTrue(wait_until(
+            lambda: self.app.state.get(tb)["state"] == "closed"),
+            "B 仓任务应不受 A 仓挂起影响")
+        self.assertNotEqual(self.app.state.get(ta)["state"], "closed")
+        # 同仓串行：tc 已受理入队（done）但 ta 门未放——不得 closed
+        self._post_done(tc)
+        self.assertEqual(self.app.state.get(tc)["state"], "done")
+        self.assertNotEqual(self.app.state.get(tc)["state"], "closed")
+        self.gate_release.set()  # 放行 A 仓
+        for tid in (ta, tc):
+            self.assertTrue(wait_until(
+                lambda tid=tid: self.app.state.get(tid)["state"] == "closed"))
+        # 同仓 FIFO：ta 的 env 先于 tc 的 env 进门
+        self.assertLess(self.gate_calls.index(env_a),
+                        self.gate_calls.index(
+                            self.app.state.get(tc)["env_dir"]))
+
+
 class TestPeerSurface(HttpdTest):
     """F22 同仓协作面全链：peer 写读/分区/权限/BOOT 契约行。"""
 

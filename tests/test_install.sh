@@ -71,6 +71,7 @@ chk ".bak 残牌无条件扫尾在位（AD_LOG 键，与 step6 同源防漂移�
 ADSESS=""
 [ -n "$GOT" ] && ADSESS="$(ps -o sess= -p "$adpid" 2>/dev/null | tr -d ' ')"
 chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"
+chk "P2-13 载荷指纹落盘且==源仓 HEAD" bash -c '[ "$(sed -n 1p "$1/.agora/agorad/PAYLOAD_VERSION")" = "$2" ] && [ "$(sed -n 2p "$1/.agora/agorad/PAYLOAD_VERSION")" = "$(git -C "$2" rev-parse HEAD)" ]' _ "$A1" "$REPO"
 
 # ---- 复用实例轮（agorad_alive→LOG 空）：cleanup 残牌扫尾实路径（task-bb4ad2）----
 # AD1 仍活着：此轮走复用分支不拉起，seed 的残 .bak 只能由 AGORA_HOME 键扫尾收敛

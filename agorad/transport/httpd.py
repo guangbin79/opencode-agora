@@ -491,9 +491,15 @@ def make_server(app, port: int = 0, gate_deadline=None):
         if t["state"] == "done":
             q.put(tid)
 
-    def consume():
+    # F112 门按仓分池：同仓任务经 per-repo 车道串行（仓级交付锁本就同仓
+    # 互斥），跨仓任务并行进门——verify 长任务不再堵死全部门流量。车道
+    # 懒建懒活（无仓无线程）；repo 数实践中有限，不设上限。
+    lanes = {}
+    lanes_guard = threading.Lock()
+
+    def lane_loop(rq, repo):
         while True:
-            tid = q.get()
+            tid = rq.get()
             try:
                 app.gate.run_guarded(tid, deadline=gate_deadline)
             except Exception as e:  # 门体崩溃留痕（P0-1：无痕 except pass 已废）
@@ -506,7 +512,32 @@ def make_server(app, port: int = 0, gate_deadline=None):
                 print(f"agorad gate crashed on {tid}: {e}", file=sys.stderr,
                       flush=True)
             finally:
+                rq.task_done()
+
+    def consume():
+        while True:
+            tid = q.get()
+            try:
+                repo = app.state.get(tid)["project_dir"]
+            except KeyError:  # 任务已除籍/毒丸：门无对象可跑——审计留痕同旧径
+                try:
+                    app.store.append_event({"ts": time.time(), "actor": "gate",
+                                            "event": "gate_crashed", "task": tid,
+                                            "note": "task not found"})
+                except Exception:
+                    pass
                 q.task_done()
+                continue
+            with lanes_guard:
+                rq = lanes.get(repo)
+                if rq is None:
+                    rq = queue.Queue()
+                    lanes[repo] = rq
+                    threading.Thread(target=lane_loop, args=(rq, repo),
+                                     daemon=True,
+                                     name=f"gate-{repo}").start()
+            rq.put(tid)
+            q.task_done()
 
     threading.Thread(target=consume, daemon=True, name="gate").start()
 

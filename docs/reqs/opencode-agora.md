@@ -638,3 +638,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：锚扩为双件——`.last-reviewed` 照旧单 sha（既有消费者零影响），新增姊妹件 `.review-loop/.review-base` 记评审链根：首轮＝本轮评审起点 sha（merge-base），续轮沿旧值不动（增量评审链的覆盖起点锚定）。agora `read_anchor` 两件齐全才认锚（旧单件锚的链根不可证→None 拒收，重建成本＝再跑一次评审环）；`accept_done` 与合并前重验新增校验：任务行有 `env_base` 时锚 base 必须等于 env_base——链根漂移/他链混入即拒（accept 拒收计连败／合并前 reopened 自愈）；`env_base` 缺席（升级前在飞任务）＝判据不可确立，带痕放行（F107 同款降级口径）。coding-gates `/review-loop` 命令与 module 同步：绿态提交后写 HEAD 锚并按「沿旧/首轮起点」维护链根。
 **落点**：agorad/access/anchors.py（双件读取）、agorad/core/gate.py（accept_done 链根校验＋合并前重验同款＋拒因文案）、docs/review-loop.md（契约双件化）、README.md/README.zh-CN.md（评审门段与最小评审器示例补链根）、coding-gates review-loop/command/review-loop.md（第 7 步维护链根）＋review-loop/module/review-loop.md（锚/链根语义）、tests/test_access_anchors.py（双件/旧单件拒/空链根拒）、tests/test_core_gate.py（env_base 用例锚带链根＋F111 四锚：漂移拒/匹配收/env_base 缺席放行/TOCTOU 漂移 reopened）、docs/reqs/opencode-agora.md（本条）。部署注记：本条改 agorad 自身与 coding-gates 命令文本，merged 后两侧均须重跑各自 install.sh（agora 重启服务、coding-gates 重链）方生效；升级期存量 env 的旧单件锚按拒收处理，worker 重跑评审环即重建双件锚。
 **验收**：`python3 -m pytest tests/ -q` 全绿；coding-gates `bash -n install.sh && bash tests/install_sandbox.sh` 通过；`req-check` 退出码 0。
+
+### F112 门按仓分池——同仓串行、跨仓并行（2026-11-18）
+**现状**：门队列单线程串行消费——verify/集成验证一单几十分钟时，后续任务（含他仓）全堵在队尾，看板表象=卡死；issue-agent max_parallel 提到 16 后排队墙成为主瓶颈。
+**裁定**：①httpd 门消费循环改「分发＋per-repo 车道」：总队列按 task.project_dir 懒建车道线程分发，同仓 FIFO 串行（仓级交付锁本就同仓互斥，线性历史语义不变），跨仓并行进门；车道懒建懒活、不设上限（启用仓数有限）。②SpawnTracker 多车道化：按 owner 线程分域（activate 认主＝登记当前线程域，add/killed 只认本域），看门狗定时器线程经 kill_thread(owner) 定向收杀本车道进程组——并行车道互不波及；HTTP 线程 spawn 不入册语义不变。毒丸 tid（除籍）gate_crashed 审计语义保持。
+**落点**：agorad/transport/httpd.py（consume 分发＋lane_loop 车道）、agorad/core/gate.py（SpawnTracker 分域＋run_guarded 定向收杀＋模块 docstring）、tests/test_gate_watchdog.py（既有六用例回归）、tests/test_transport_httpd.py（TestGateLanes 锚：A 仓挂起 B 仓照常 closed＋同仓 FIFO 串行＋放行后全收口）、README.md/README.zh-CN.md（verify 门段补一句）、docs/reqs/opencode-agora.md（本条）。部署注记：merged 后须重跑 ./install.sh 并重启服务方生效。
+**验收**：`python3 -m pytest tests/ -q` 全绿；`python3 tests/e2e/multi_instance_delivery.py` 九场景全 PASS；`req-check` 退出码 0。
+
+### F113 版本指纹自检——载荷漂移告警（2026-11-18）
+**现状**：插件与服务载荷是拷贝不是引用——源码升级后不重跑 install.sh＋重启即跑旧码（「以为修好实际旧码」），无机制发现错配；多实例混写禁令靠自觉。
+**裁定**：install.sh（repo 模式）在载荷内写 `PAYLOAD_VERSION`（源仓路径＋部署时 HEAD sha）；agorad 启动自检（flock 后、ready 前）：指纹缺失（源码树直跑/pkg 模式）静默跳过，源仓 HEAD≠指纹则打 WARNING 日志（不拦启动——观测面不得有否决权）；git 失败/超 2s 静默。
+**落点**：install.sh（指纹写入）、agorad/main.py（payload_drift_note＋main 挂接）、tests/test_main.py（TestPayloadDriftNote 四锚：缺指纹静默/一致静默/漂移告警/源仓消失静默）、tests/test_install.sh（指纹落盘且==源仓 HEAD 锚）、docs/reqs/opencode-agora.md（本条）。
+**验收**：`python3 -m pytest tests/test_main.py -q` 绿；`bash tests/test_install.sh` 通过（含新锚）。
