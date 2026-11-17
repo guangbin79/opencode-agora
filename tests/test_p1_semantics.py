@@ -25,6 +25,8 @@ class TestProbeRedOnDead(TestCoreGate):
     def probe_in_gate(self, streak=0):
         self.seed(streak=streak)
         self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": OTHER_SHA,
+                       "clean": True}  # F111：链根==任务起点
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
 
     def events(self):

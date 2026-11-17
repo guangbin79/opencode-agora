@@ -94,7 +94,7 @@ After install, your session gains two skills (agora-dispatch / agora-ops) and 14
 
 **Review gate** — an open standard, bring your own reviewer. The contract is one anchor file:
 
-- The last-reviewed anchor is checked at `done` — missing, stale, or not green rejects `done` back to the worker — and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window; a failed re-check auto-reopens the task, it never parks). A done with zero new commits over the target is rejected the same way — unless it is a valid delivery already landed there (env HEAD advanced past the task's start base, or the previously accepted commit is reachable on the target); a true zero-work done (HEAD still at the start base) is rejected — the worker reports no-op via post(kind=question) and the dispatcher cancels to archive.
+- The last-reviewed anchor is checked at `done` — missing, stale, not green, or a chain-root (`.review-base`) that differs from the task's start base (F111) rejects `done` back to the worker — and **re-checked immediately before merge** (closes the "reviewed, then sneaked a commit" window; a failed re-check auto-reopens the task, it never parks). A done with zero new commits over the target is rejected the same way — unless it is a valid delivery already landed there (env HEAD advanced past the task's start base, or the previously accepted commit is reachable on the target); a true zero-work done (HEAD still at the start base) is rejected — the worker reports no-op via post(kind=question) and the dispatcher cancels to archive.
 - Anchor green + verify green = automatic ff-only merge — a behind task branch is rebased onto the target in-gate first (clean sync self-heals; only sync conflicts reopen).
 - Phantom-merge guards — `merged` is booked only when the target branch actually contains the delivered commit: an empty rebase (no new commits on the env boot branch) or an idempotent-ff false success reopens the task instead of silently losing the delivery.
 - No `.review-loop/` directory? `done` is rejected with instructions to add one — auto-merge requires both gates. Autonomy is earned, not assumed.
@@ -110,6 +110,7 @@ base=$(git merge-base HEAD "${2:?}"); sha=$(git rev-parse HEAD)
 findings=$(your_reviewer "$(git diff "$base"..HEAD)")   # OCR / CodeRabbit / human list
 printf '%s\n' "$findings" | grep -qiE 'blocker|high' && { printf '%s\n' "$findings"; exit 1; }
 mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
+[ -s .review-loop/.review-base ] || printf '%s\n' "$base" > .review-loop/.review-base  # F111：链根（首轮起点，续轮沿旧）
 ```
 
 Full spec — contract details, worker protocol, threat model, idle auto-trigger design notes: [docs/review-loop.md](docs/review-loop.md) (Chinese).

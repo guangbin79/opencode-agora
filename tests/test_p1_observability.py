@@ -193,6 +193,8 @@ class TestPhaseAudits(TestCoreGate):
     def test_legacy_run_emits_four_phase_events_in_order(self):
         self.seed(tb="main")
         self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": OTHER_SHA,
+                       "clean": True}  # F111：链根==任务起点
         self.runner = FakeRunner((1, "base red"), (0, "pass"), (0, "pass"))
         self.mk_gate()
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")

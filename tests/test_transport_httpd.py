@@ -209,6 +209,7 @@ class HttpdTest(unittest.TestCase):
         self.app = assemble(self.tmp, oc_url=self.stub.base_url,
                             gitx=self.gitx,
                             read_anchor=lambda env: {"head": SHA,
+                                                     "base": "aaa111",  # F111：链根==FakeGitx 缺省 env_head（任务起点）
                                                      "clean": True},
                             runner=getattr(self, "gate_runner", ok_runner))
         self.root = self.app.auth.issue("main", "root")
@@ -1125,6 +1126,7 @@ class TestStartupRequeue(unittest.TestCase):
         try:
             app = assemble(tmp, oc=DeadInjectOc(), gitx=FakeGitx(tmp),
                            read_anchor=lambda env: {"head": SHA,
+                                                    "base": "aaa111",  # F111：链根==FakeGitx 缺省 env_head（任务起点）
                                                     "clean": True},
                            runner=ok_runner)
             app.state.add("t1", {
@@ -1157,6 +1159,7 @@ class TestGateTailCancel(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.app = assemble(self.tmp, oc=DeadInjectOc(), gitx=FakeGitx(self.tmp),
                             read_anchor=lambda env: {"head": SHA,
+                                                     "base": "aaa111",  # F111：链根==FakeGitx 缺省 env_head（任务起点）
                                                      "clean": True},
                             runner=fail_runner)
         self.root = self.app.auth.issue("main", "root")
@@ -1319,8 +1322,10 @@ class TestAnchors(unittest.TestCase):
         marker = repo / ".review-loop" / ".last-reviewed"
         marker.parent.mkdir()
         marker.write_text(sha, encoding="utf-8")
+        self.assertIsNone(anchors.read_anchor(str(repo)))  # F111：缺链根同拒
+        (marker.parent / ".review-base").write_text(sha, encoding="utf-8")
         self.assertEqual(anchors.read_anchor(str(repo)),
-                         {"head": sha, "clean": True})
+                         {"head": sha, "base": sha, "clean": True})
         marker.write_text("old", encoding="utf-8")  # 锚落后
         self.assertIsNone(anchors.read_anchor(str(repo)))
         self.assertIsNone(anchors.read_anchor(None))  # 未派发无环境

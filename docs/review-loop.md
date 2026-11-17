@@ -7,18 +7,22 @@ agora 的自动合并由两道质量闸把守：**verify 门**（测试由服务
 ## 1. 契约面
 
 - 锚门无条件生效：`done` 受理与合并前都要求锚绿。
-- 锚文件为 `.review-loop/.last-reviewed`，内容是完整 40 位十六进制 commit sha
-  （解析容许首尾空白）。服务在 env 内跑 `git rev-parse HEAD` 与文件内容比对；
-  格式的唯一权威实现是 `agorad/access/anchors.py` 的 `read_anchor`（经
-  `agorad/main.py` 的 `assemble` 注入 `Gate`，服务无 anchor 入参、自取锚）。
+- 锚为双件（F111）：`.review-loop/.last-reviewed`＝完整 40 位十六进制
+  commit sha（HEAD，解析容许首尾空白）；`.review-loop/.review-base`＝评审链根
+  sha（首轮＝评审范围 merge-base 起点，续轮沿旧值不动）。服务在 env 内跑
+  `git rev-parse HEAD` 与锚件内容比对；格式的唯一权威实现是
+  `agorad/access/anchors.py` 的 `read_anchor`（经 `agorad/main.py` 的
+  `assemble` 注入 `Gate`，服务无 anchor 入参、自取锚）。缺任一件＝锚缺失。
 - 锚绿 ＝ head 等于 env 分支当前 HEAD 且 clean=true，含义：**该提交已通过评审，
-  无 blocker/high 未决**。
+  无 blocker/high 未决**；F111 起另校验链根 `.review-base` 等于任务起点
+  `env_base`（任务行有 env_base 时）——评审范围必须自任务起点起覆盖全量
+  交付，链根漂移/他链混入即拒（env_base 缺席的升级前在飞任务带痕放行）。
 - 服务在两处读取锚（`agorad/core/gate.py`）：
 
 | 时机 | 行为 |
 | --- | --- |
-| `accept_done`（done 受理） | 无条件检查：缺锚/落后 → 拒 done（`anchor`）；head ≠ done body 的 sha → 拒；未绿 → 拒。均审计 `done_rejected` 并附修复指引，计入 fail_streak（3 连败 blocked） |
-| `run()`（合并前重验） | verify 绿后重读锚：缺失/落后/未绿 → 审计 `review_absent_no_merge`，任务自动 `reopened` 回 worker（计连败，通知面尽力而为） |
+| `accept_done`（done 受理） | 无条件检查：缺锚/落后 → 拒 done（`anchor`）；head ≠ done body 的 sha → 拒；未绿 → 拒；链根 ≠ 任务起点 → 拒（F111）。均审计 `done_rejected` 并附修复指引，计入 fail_streak（3 连败 blocked） |
+| `run()`（合并前重验） | verify 绿后重读锚：缺失/落后/未绿/链根漂移 → 审计 `review_absent_no_merge`，任务自动 `reopened` 回 worker（计连败，通知面尽力而为） |
 
 合并前重验堵住两个窗口：accept→run 之间锚被改动（TOCTOU）、done 之后偷提交。
 
@@ -51,13 +55,17 @@ if printf '%s\n' "$findings" | grep -qiE 'blocker|high'; then
 fi
 mkdir -p .review-loop
 printf '%s\n' "$sha" > .review-loop/.last-reviewed
+# F111：评审链根——已存在沿旧值（增量链覆盖起点不动），不存在写本轮起点
+[ -s .review-loop/.review-base ] || printf '%s\n' "$base" > .review-loop/.review-base
 ```
 
-脚本三步即契约全部：取任务 diff → 评审 → 绿则把 HEAD sha 写进锚。
+脚本四步即契约全部：取任务 diff → 评审 → 绿则把 HEAD sha 写进锚 → 维护
+评审链根（首轮＝merge-base 起点，续轮沿旧值）。
 
 ## 4. worker 行为契约
 
-每次提交后：重跑评审环使 `.review-loop/.last-reviewed` 锚追上 HEAD，然后
+每次提交后：重跑评审环使 `.review-loop/.last-reviewed` 锚追上 HEAD
+（`.review-base` 链根沿旧值/首轮起点，F111），然后
 `post(done, body=完整40位sha, 无附言)`；结论文本另发 `post(kind=note)`。
 （转述自 `agorad/core/task.py` `_boot` 下发给 worker 的开工须知。）
 

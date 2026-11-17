@@ -195,10 +195,16 @@ def worker_done(inst, tid, files, msg):
     """worker 侧全真流程：env 内真实提交→评审锚→HTTP done（六闸受理）。"""
     wtok = inst.worker_token(tid)
     env = Path(inst.row(tid)["env_dir"])
+    # F111 评审链根：首个 worker 提交前的 env HEAD＝任务起点（与生产
+    # review-loop 同构——已存在沿旧值，不存在写本轮起点）
+    env_base = git(["rev-parse", "HEAD"], env).stdout.strip()
     sha = commit(env, files, msg)
     anchor = env / ".review-loop" / ".last-reviewed"
     anchor.parent.mkdir(exist_ok=True)
     anchor.write_text(sha, encoding="utf-8")
+    base_file = env / ".review-loop" / ".review-base"  # F111 双件锚
+    if not base_file.exists():
+        base_file.write_text(env_base, encoding="utf-8")
     st, r = inst.call("/post", {"task": tid, "kind": "done", "body": sha},
                       wtok)
     assert st == 200 and r.get("result") == "accepted", r

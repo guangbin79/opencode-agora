@@ -415,6 +415,7 @@ class TestAcceptDone(TestCoreGate):
         env HEAD 相对起点 base 有前进——有效交付受理，不再 vacuous 误拒。"""
         self.seed(tb="main")
         self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": OTHER_SHA, "clean": True}  # F111
         self.gx.contains_result = True  # 目标基线已含 HEAD＝空集
         self.gx.ancestor_result = True  # base 为 HEAD 祖先＝env 有前进
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
@@ -426,6 +427,7 @@ class TestAcceptDone(TestCoreGate):
         成立，vacuous-done 照弹回（F69 护栏不破）。"""
         self.seed(tb="main")
         self.state.set_fields("t1", env_base=SHA)
+        self.anchor = {"head": SHA, "base": SHA, "clean": True}  # F111
         self.gx.contains_result = True
         r = self.gate.accept_done("t1", "s-w1", SHA)
         self.assertIn("rejected:vacuous-done", r)
@@ -443,6 +445,48 @@ class TestAcceptDone(TestCoreGate):
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
         self.assertEqual(self.gx.contains_calls, [("/repo", SHA, "main")])
         self.assertEqual(self.gx.ancestor_calls, [])
+
+    def test_reject_anchor_base_mismatch(self):  # Req: F111
+        """评审链根漂移（base ≠ 任务起点 env_base）＝评审范围未覆盖任务
+        全量交付——拒收并指引以任务起点为链根重建锚；计连败。"""
+        self.seed()
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": SHA, "clean": True}  # 链根≠起点
+        r = self.gate.accept_done("t1", "s-w1", SHA)
+        self.assertIn("rejected:anchor", r)
+        self.assertIn("评审链根", r)
+        self.assertEqual(self.state.get("t1")["state"], "running")
+
+    def test_accept_anchor_base_matches_env_base(self):  # Req: F111
+        self.seed()
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": OTHER_SHA, "clean": True}
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+
+    def test_accept_anchor_base_unverifiable_without_env_base(self):  # Req: F111
+        """env_base 缺席（升级前在飞任务）＝链根判据不可确立——带痕放行
+        （F107 同款降级口径），不误拒存量。"""
+        self.seed()  # 无 env_base
+        self.anchor = {"head": SHA, "base": SHA, "clean": True}
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+
+    def test_reopen_anchor_base_drift_at_merge_time(self):  # Req: F111
+        """TOCTOU：受理时链根一致、合并前锚被改写为漂移链根——合并前重验
+        同款拦截，自动 reopened 回 worker 自愈。"""
+        self.runner = FakeRunner((0, "pass"))
+        self.mk_gate()
+        self.seed()
+        self.state.set_fields("t1", env_base=OTHER_SHA,
+                              verify_base_exempt=True)  # 免 F107 探针直抵锚重验
+        self.anchor = {"head": SHA, "base": OTHER_SHA, "clean": True}
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.anchor = {"head": SHA, "base": SHA, "clean": True}  # accept→run 窗口漂移
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertIn("review_absent_no_merge",
+                      [e["event"] for e in self.store.read_events("t1")])
+        self.assertIn("链根漂移", self.worker_msgs()[-1]["body"])
 
     def test_accept_redone_prev_commit_probe(self):  # Req: ag-1ae0f1
         """空集放行判据 (b) 补探：重做 done 换新 sha、env_base 缺席（升级前
@@ -2266,6 +2310,8 @@ class TestBaseRedProbe(TestCoreGate):
     def in_gate_probe(self, streak=0, exempt=None, quick=False):
         self.seed(streak=streak, quick=quick)
         self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": OTHER_SHA,
+                       "clean": True}  # F111：链根==任务起点
         if exempt is not None:
             self.state.set_fields("t1", verify_base_exempt=exempt)
         self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")

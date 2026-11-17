@@ -319,12 +319,21 @@ class Gate:
         if a is None:
             return self._deny_anchor(
                 tid, f"任务 {tid} 合并前置失败：锚缺失/落后（.review-loop/"
-                ".last-reviewed 缺失或不等于分支 HEAD）——跑评审环重建锚"
-                "（==HEAD 且评审环绿）后重新 post(done, commit)")
+                ".last-reviewed 缺失或不等于分支 HEAD，或 .review-base 链根"
+                "缺失——F111 双件齐全才算在锚）——跑评审环重建锚（==HEAD 且"
+                "评审环绿）后重新 post(done, commit)")
         if a.get("head") != commit:
             return self._deny_anchor(
                 tid, f"任务 {tid} 合并前置失败：{commit} ≠ 分支 HEAD "
                 f"{a.get('head')}——以 env 内完整 HEAD sha 重新 post(done, commit)")
+        # Req: F111 评审链根绑定任务起点：锚 base 必须等于 env_base——链根
+        # 漂移/他链混入＝评审范围未覆盖任务全量交付；env_base 缺席（升级前
+        # 在飞任务）＝判据不可确立，带痕放行（F107 同款降级口径）
+        if t.get("env_base") and a.get("base") != t["env_base"]:
+            return self._deny_anchor(
+                tid, f"任务 {tid} 合并前置失败：评审链根 {a.get('base')} ≠ "
+                     f"任务起点 {t['env_base']}——评审范围未覆盖任务全量交付，"
+                     "以任务起点为链根重跑评审环后重新 post(done, commit)")
         try:  # Req: F69 vacuous-done；谓词病（锚伪造 sha/目标支被删）不拦受理：
             # F109：探针只查本地支 ref（零网络）——「reopen 期间人工上游合入」
             # 不在受理时识别，由集成段幻影守卫/外部树等价逃生门兜底
@@ -716,14 +725,16 @@ class Gate:
             # 锚比对对象＝rebased_from or commit（F32 裁定①）：崩溃重排的 done 任务
             # （commit=R、锚=E）重入门用留痕 E 判过，才能走到再 rebase，不死锁。
             if not a or a.get("head") != (t.get("rebased_from") or t.get("commit")) \
-                    or not a.get("clean"):
+                    or not a.get("clean") \
+                    or (t.get("env_base") and a.get("base") != t["env_base"]):
                 self._audit(tid, "review_absent_no_merge")
                 self._quality_fail(  # ag-084a22 B：自动 reopened 回 worker 自愈
                     tid, "reopened",  # （无出边的驻留 done 态封死）
-                    "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/未绿"
-                    "——重建锚（.review-loop/.last-reviewed ==HEAD 且评审环绿）后"
-                    "重新 post(done, commit)",
-                    reason="锚缺失/落后/未绿")
+                    "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/"
+                    "未绿/链根漂移（F111：.review-base ≠ 任务起点）——重建锚"
+                    "（.last-reviewed ==HEAD 且评审环绿且 .review-base == 任务"
+                    "起点）后重新 post(done, commit)",
+                    reason="锚缺失/落后/未绿/链根漂移")
                 return
             if managed:  # Req: F100 交付协议（ag-b5f2e9 一律本地权威）：集成基＝
                 # 本地钉死支 tip，主检出经 advance 守卫推进，origin 零接触
