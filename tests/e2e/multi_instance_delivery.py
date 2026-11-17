@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Req: F102/F108 多实例交付端到端证明（F94-F101 交付栈全链真码；b/c/e
-场景为 F108 本地权威口径——managed 一律本地权威、origin 零接触）。
+"""Req: F102/F108/F109 多实例交付端到端证明（F94-F101 交付栈全链真码；b/c/e
+场景为 F108 本地权威口径——managed 一律本地权威、origin 零接触；h 场景为
+ag-f12220 ff-only 分叉终局口径，F109 起全栈零网络）。
 
 自包含脚本：python3 tests/e2e/multi_instance_delivery.py（零 pytest 依赖、零
 网络、零凭据——origin 一律本地 bare 仓）。并发场景（a/b/i）每场景起两个真实
@@ -20,7 +21,8 @@ agora 服务实例（assemble + make_server，各自 AGORA_HOME/端口/StubOpenc
   f 无 origin 本地权威——干净目标 CAS ff-only 推进 synced；脏目标保全终局失败；
   g external_branch 全 handoff——awaiting_external 驻留、不推 origin 不合默认支，
     task_deliver(delivered) 收口 closed、默认支 SHA 不变；
-  h external non_ff 换基重排产生新 handoff commit，过期 ack 拒绝零改写；
+  h external non_ff 换基真分叉——ff-only 终局 diverged/blocked（人工门），
+    blocked 后 ack 拒绝零改写、全程零推送零默认支改动（ag-f12220/F109）；
   i 环境回收实例属主——一实例清理不注销他实例在册 worktree。
 
 断言面：delivery 投影（mode/status/commit/base/attempt/local_status/error）、
@@ -489,7 +491,9 @@ def scenario_g(tmp):
 
 
 def scenario_h(tmp):
-    """h external non_ff 换基：新 handoff commit；过期 ack 拒绝零改写。"""
+    """h external non_ff 换基（ag-f12220 ff-only 语义）：外部新基与 worker
+    线索真分叉时，重排不再自动变基——终局 diverged/blocked（人工门）；
+    确认面在 blocked 后拒绝任何 ack，全程零推送零默认支改动。"""
     root = tmp / "h"
     origin, repo, base, ia, tid = _external_setup(root, "A")
     before_refs = remote_refs(repo)  # 快照在 handoff 前——全程不推不合
@@ -506,28 +510,21 @@ def scenario_h(tmp):
                                       "commit": c1, "base": b1})
     check(st == 200 and r.get("requeued") and r.get("attempt") == 2,
           f"h: non_ff 应答重排 {r}")
-    row = wait_for(ia, tid, lambda x: x["delivery"]["status"]
-                   == "awaiting_external" and x["delivery"]["attempt"] == 2,
-                   what="re-handoff")
-    c2 = row["delivery"]["commit"]
+    # ag-f12220：b1 与 c1 为兄弟提交（真分叉）——merge_ff 非 ff 即终局 diverged，
+    # 不再自动变基出新 handoff（废除了 F105 时代的换基重放语义）
+    row = wait_for(ia, tid, lambda x: x["delivery"]["status"] == "failed",
+                   what="diverged terminal")
     d = row["delivery"]
-    check(c2 != c1 and d["base"] == b1 and d["local_status"] == "not_required",
-          f"h: 换基 handoff 投影异常 {d}")
-    check(git(["merge-base", "--is-ancestor", b1, c2], repo,
-              check=False).returncode == 0, "h: 新 handoff 须落在外部新基上")
-    # 过期 ack：旧 commit 确认→403 拒绝、状态零改写
+    check(row["state"] == "blocked" and d["error"] == "diverged"
+          and d["attempt"] == 2, f"h: 分叉终局投影异常 {row}")
+    # blocked 后任何交付确认一律拒绝（非 done＋awaiting_external 可确认态）
     st, r = ia.call("/task_deliver", {"task": tid, "outcome": "delivered",
                                       "commit": c1})
-    check(st == 403 and "过期" in r.get("error", ""), f"h: 过期确认应拒 {r}")
+    check(st == 403, f"h: blocked 后确认应拒 {r}")
     row2 = ia.row(tid)
-    check(row2["state"] == "done"
-          and row2["delivery"]["commit"] == c2
-          and row2["delivery"]["status"] == "awaiting_external",
+    check(row2["state"] == "blocked"
+          and row2["delivery"]["status"] == "failed",
           "h: 拒绝必须零状态改写")
-    st, r = ia.call("/task_deliver", {"task": tid, "outcome": "delivered",
-                                      "commit": c2})
-    check(st == 200, f"h: 新 commit 确认应受理 {r}")
-    wait_for(ia, tid, lambda x: x["state"] == "closed", what="closed")
     check(branch_sha(repo, "main") == before_main, "h: 默认支全程不变")
     check(remote_refs(repo) == before_refs,
           "h: 服务全程不推 origin（全部引用保持 handoff 前快照）")

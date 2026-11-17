@@ -32,12 +32,7 @@ class FakeGitx:
         self.default_branch_result = "main"  # ag-b5f2e9 仓默认支回退面
         self.default_branch_raise = None
         self.default_branch_calls = []
-        self.origin = False  # Req: F98 origin 在位注入
-        self.origin_raise = None  # Req: F98 仓亡注入（has_origin 抛 OSError 族）
-        self.fetch_raise = False
-        self.fetch_sha = "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4"
-        self.fetched, self.built_at = [], []
-        self.fetch_timeouts = []  # Req: F98 派发面短预算断言面
+        self.built_at = []
         self.local_sha = "c" * 40  # Req: F100 no-origin 本地定基面
         self.local_sha_raise = False
         self.local_shas = []
@@ -64,19 +59,6 @@ class FakeGitx:
         self.branches.append(branch)
         self.ondisk.add(env)
         return env
-
-    def has_origin(self, repo_dir):  # Req: F98
-        if self.origin_raise is not None:
-            raise self.origin_raise
-        return self.origin
-
-    def fetch_origin_branch(self, repo_dir, branch,
-                            timeout=None):  # Req: F98
-        self.fetched.append((repo_dir, branch))
-        self.fetch_timeouts.append(timeout)
-        if self.fetch_raise:
-            raise RuntimeError(f"git fetch origin {branch}: network down")
-        return self.fetch_sha
 
     def build_env_at(self, project_dir, tid, branch=None, base_sha=None):  # Req: F98
         self.built_at.append((project_dir, tid, branch, base_sha))
@@ -1967,45 +1949,29 @@ class TestDispatchManagedBase(TestCoreTask):
     定基废除）；legacy 行零变化。"""
 
     def test_managed_dispatch_with_origin_bases_on_local_tip(self):  # ag-b5f2e9
-        self.gitx.origin = True  # origin 在位：定基面不变
         tid = self.dispatchable()  # 建单钉支 main＋delivery mode=managed
         self.svc.dispatch(tid, self.root)
         self.assertEqual(self.gitx.local_shas, [("/repo", "main")])
         self.assertEqual(self.gitx.built_at,
                          [("/repo", tid, "main", self.gitx.local_sha)])
-        self.assertEqual(self.gitx.fetched, [])  # F98 远端定基废除：零 fetch
         self.assertEqual(self.gitx.built, [])  # 不走本地支 ref 起点
         self.assertEqual(self.state.get(tid)["env_base"], "b" * 40)  # head(env)
-
-    def test_managed_origin_probe_failure_never_breaks_dispatch(self):  # ag-b5f2e9
-        """managed 面零接触 has_origin——仓亡仿形（has_origin 抛）不拦派发，
-        定基败一律走 local_base 口径（原 F98 remote_base 拒因面废除）。"""
-        self.gitx.origin_raise = FileNotFoundError(
-            "[Errno 2] No such file or directory: '/repo'")
-        tid = self.dispatchable()
-        self.svc.dispatch(tid, self.root)  # 不拒：origin 探测不在 managed 面
-        self.assertEqual(self.gitx.fetched, [])
-        self.assertEqual(self.state.get(tid)["state"], "dispatched")
 
     def test_managed_without_origin_bases_on_local_tip(self):  # Req: F100
         """无 origin 的 managed 行不再走分支 ref 起点（F98 过渡期语义由 F100
         收编）：local_branch_sha 解析钉死本地目标支 tip 权威定基 build_env_at，
         env_base＝该本地 SHA。"""
-        self.gitx.origin = False
         tid = self.dispatchable()  # 建单钉支 main＋delivery mode=managed
         self.svc.dispatch(tid, self.root)
         self.assertEqual(self.gitx.local_shas, [("/repo", "main")])
         self.assertEqual(self.gitx.built_at,
                          [("/repo", tid, "main", self.gitx.local_sha)])
         self.assertEqual(self.gitx.built, [])  # 不走本地支 ref 起点
-        self.assertEqual(self.gitx.fetched, [])  # 无 origin 零 fetch
         self.assertEqual(self.state.get(tid)["env_base"], "b" * 40)
 
     def test_legacy_delivery_none_rows_never_fetch(self):  # Req: F98
-        self.gitx.origin = True  # 即便有 origin：legacy 行（delivery=None）不取远端基
         tid = self.seed("t-legacy", state="todo", disp="main")
         self.svc.dispatch(tid, self.root)
-        self.assertEqual(self.gitx.fetched, [])
         self.assertEqual(self.gitx.built, ["/envs/t-legacy"])
         self.assertEqual(self.gitx.built_at, [])
 
@@ -2013,7 +1979,6 @@ class TestDispatchManagedBase(TestCoreTask):
         """评审 D3：交付败 blocked 后重派开新交付轮——终局残值（status/error/
         attempt/commit/base/local_status）重置、mode/target_branch 身份字段不动，
         防后续质量类 3 连败 blocked 被报表误分「失败」桶。"""
-        self.gitx.origin = True
         tid = self.dispatchable()
         self.svc.dispatch(tid, self.root)
         self.state.transition(tid, "running")
@@ -2036,7 +2001,6 @@ class TestDispatchManagedBase(TestCoreTask):
     def test_redispatch_resets_stale_conflict_files(self):  # Req: F105
         """终闸 B1：重派开新交付轮清 conflict_files 残值——防上轮冲突清单
         泄漏进后续非冲突失败/成功投影（错误归因，评审 D3 同口径）。"""
-        self.gitx.origin = True
         tid = self.dispatchable()
         self.svc.dispatch(tid, self.root)
         self.state.transition(tid, "running")
@@ -2057,7 +2021,6 @@ class TestDispatchLocalBase(TestCoreTask):
     malformed 拒派报 local_base 点名钉死支，绝不回退仓默认支。"""
 
     def test_no_origin_missing_target_rejects_without_default_fallback(self):  # Req: F100
-        self.gitx.origin = False
         self.gitx.local_sha_raise = True  # 建单后被删/解析失败
         tid = self.dispatchable()  # 钉支 main
         with self.assertRaises(Rejected) as cm:
@@ -2070,7 +2033,6 @@ class TestDispatchLocalBase(TestCoreTask):
         self.assertEqual(self.state.get(tid)["state"], "todo")  # 拒绝零副作用
 
     def test_no_origin_legacy_rows_never_touch_local_sha(self):  # Req: F100
-        self.gitx.origin = False
         tid = self.seed("t-legacy", state="todo", disp="main")  # delivery=None
         self.svc.dispatch(tid, self.root)
         self.assertEqual(self.gitx.local_shas, [])  # legacy 行零接触新定基面
@@ -2105,16 +2067,13 @@ class TestF101ExternalDispatch(TestCoreTask):
         self.assertEqual(self.gitx.local_shas, [("/repo", "issue/7-fix")])
         self.assertEqual(self.gitx.built_at,
                          [("/repo", tid, "issue/7-fix", "c" * 40)])
-        self.assertEqual(self.gitx.fetched, [])  # 零 fetch（即便后续接 origin）
         t = self.state.get(tid)
         self.assertEqual(t["env_base"], "b" * 40)  # head(env) 记录起点
         self.assertEqual(t["state"], "dispatched")
 
     def test_external_never_fetches_even_with_origin(self):  # Req: F101
-        self.gitx.origin = True  # origin 在位也不得改变定基面
         tid = self.seed_external()
         self.svc.dispatch(tid, self.root)
-        self.assertEqual(self.gitx.fetched, [])  # 不 fetch：远端权在外部派发方
         self.assertEqual(self.gitx.local_shas, [("/repo", "issue/7-fix")])
 
     def test_external_missing_branch_rejects_without_default_fallback(self):  # Req: F101

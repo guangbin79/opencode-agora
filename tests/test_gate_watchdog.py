@@ -191,8 +191,7 @@ class TestGitPhaseOverrun(unittest.TestCase):
             def __init__(self, tracker):
                 self._tracker = tracker
 
-            def contains(self, repo_dir, commit, branch=None,
-                         fetch_timeout=None):
+            def contains(self, repo_dir, commit, branch=None):
                 return False
 
             def clean_ignore(self, repo_dir, env_value=""):

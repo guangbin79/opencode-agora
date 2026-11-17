@@ -64,9 +64,6 @@ class FakeGitx:
     def head(self, repo_dir, branch=None):  # ag-1ae0f1：env 起点 base 捕获
         return "b" * 40
 
-    def has_origin(self, repo_dir):  # Req: F98 本地仓模型（push 亦 none）——dispatch 走本地定基
-        return False
-
     def materialize_checkout(self, tree_dir, source_dir):  # Req: ag-0d2daa
         self.materials = getattr(self, "materials", [])
         self.materials.append((tree_dir, source_dir))
@@ -74,11 +71,6 @@ class FakeGitx:
 
     def symref(self, repo_dir):
         return "main"
-
-    def push(self, repo_dir, branch):
-        self.pushes = getattr(self, "pushes", [])
-        self.pushes.append((repo_dir, branch))
-        return "none", ""
 
     def remove_env(self, env_dir):
         self.removed.append(env_dir)
@@ -95,10 +87,7 @@ class FakeGitx:
         self.checkouts.append((repo_dir, branch))
         return True
 
-    def strictly_behind(self, repo_dir, branch):  # Req: F94 推前守卫面（假件恒不落后）
-        return False
-
-    def contains(self, repo_dir, commit, branch=None, fetch_timeout=None):
+    def contains(self, repo_dir, commit, branch=None):
         if self.landed:  # ag-54bd98：一次消费——最终推进落地恰由本门 merged 前终检
             self.landed = False  # 读取即还原：不跨任务/跨门泄漏给受理探针
             return True

@@ -21,8 +21,6 @@ _RAND = string.ascii_lowercase + string.digits
 # rmtree 撞写重试参数：worker 评审环进程合并后仍可能往 env/.review-loop/ 写文件
 _RMT_TRIES = 4
 _RMT_WAIT = 0.5
-# ag-0d2daa push 网络上界：服务侧同步不得挂死串行门（非 ff 拒/无凭据失败均秒级，300s 已宽）
-_PUSH_TIMEOUT = 300
 
 
 class DirtyWorktree(RuntimeError):
@@ -137,7 +135,7 @@ class Gitx:
         复跑先收敛 kill 窗口留下的目录/注册元数据；detached 避免与主检出争用分支。
         """
         target = Path(target_dir).resolve()
-        # 起基经 baseline()（ag-49312d）：本地支陈旧时落在真实远端头上，F32 自愈后 push 恒 ff
+        # 起基经 baseline()（F109 本地权威）：恒为本地支 ref，不 fetch、不以 origin 作基
         return self._build_integration(
             target, Path(integration_dir).resolve(),
             self.baseline(target, branch))
@@ -414,212 +412,6 @@ class Gitx:
                                f"head@{new_head} vs expected@{sha}: {detail}")
         return "ok"  # head==sha（目标支已在提交上）亦达此：幂等推进
 
-    def push(self, repo_dir: str, branch: str) -> tuple[str, str]:  # Req: ag-0d2daa
-        """ag-0d2daa 服务侧 origin 同步：推 refs/heads/<branch>（只此一引用，不 force）。
-
-        幂等（已同步＝up-to-date 仍 "ok"）；无 origin remote＝"none"（本地仓
-        静默）；被拒输出含 non-fast-forward/fetch first＝"non-ff"；其余失败
-        （含超时）＝"failed"。返回 (status, tail)——tail＝失败时 git 输出尾，
-        供调用方落审计与告警（同 verify 输出尾部惯例）；只报告不重试。
-        """
-        if self._git(["remote", "get-url", "origin"],
-                     cwd=repo_dir, check=False).returncode != 0:
-            return "none", ""
-        # F-1（Req: F38）：start_new_session 启动——超时 killpg 全组，ssh/传输孙进程
-        # 不孤儿泄漏（gate runner 同款形态）；分类语义与返回值不变。
-        proc = subprocess.Popen(["git", "push", "origin", f"refs/heads/{branch}"],
-                                cwd=str(repo_dir), stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True,
-                                encoding="utf-8", errors="replace",
-                                start_new_session=True)
-        try:
-            out, err = proc.communicate(timeout=_PUSH_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # 超时与正常退出竞速：进程组已消失即无需补杀
-            try:  # 有限宽限收尸；逃逸后代持管道时弃读，防线程挂死
-                proc.communicate(timeout=2)  # F49 S-1：输出不消费，仅收尸＋排空管道
-            except subprocess.TimeoutExpired:
-                for pipe in (proc.stdout, proc.stderr):
-                    if pipe:
-                        pipe.close()
-            return "failed", f"push 超时（>{_PUSH_TIMEOUT}s）"
-        if proc.returncode == 0:
-            return "ok", ""
-        out = ((err or "") + (out or "")).strip()
-        status = "non-ff" if ("non-fast-forward" in out
-                              or "fetch first" in out) else "failed"
-        return status, out
-
-    @staticmethod
-    def _net(args, cwd, timeout=None):
-        """网络面 git 原语（ag-0f60fd ls-remote/删除 push）：start_new_session＋
-        超时 killpg 全组（push 同款 F38 纪律——ssh/传输孙进程不孤儿泄漏）。返回
-        (rc, stdout, stderr) 三元——ls-remote tip 解析只吃 stdout（评审 R1：stderr
-        传输噪声如 ssh 首连告警不得混进 fields[0]）；超时 rc=124 带 stderr 文案。
-        timeout＝调用面短预算（None＝_PUSH_TIMEOUT 全预算；同步受理面防死 origin
-        停摆，baseline fetch_timeout 同口径）。"""
-        proc = subprocess.Popen(["git", *args], cwd=str(cwd),
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace",
-                                start_new_session=True)
-        tmo = timeout or _PUSH_TIMEOUT
-        try:
-            out, err = proc.communicate(timeout=tmo)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # 超时与正常退出竞速：进程组已消失即无需补杀
-            try:  # 有限宽限收尸；逃逸后代持管道时弃读，防线程挂死
-                proc.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
-                for pipe in (proc.stdout, proc.stderr):
-                    if pipe:
-                        pipe.close()
-            return 124, "", f"git {' '.join(args[:2])} 超时（>{tmo:g}s）"
-        return proc.returncode, (out or ""), (err or "")
-
-    def delete_branch(self, repo_dir: str, branch: str,
-                      target_branch: str) -> tuple[str, str]:  # Req: ag-0f60fd
-        """ag-0f60fd merged 终局删远端任务支（守卫删除）。
-
-        无 origin＝"none"（本地仓静默）；ls-remote 取 refs/heads/<branch> tip，
-        远端无此支＝"absent"（静默幂等）；tip 本地对象库不可达＝"skip"（无从
-        校验 ancestor，保守不删）；tip 不含于本地目标支＝"skip"（远端支有未并
-        内容，保守不删；ag-49312d：merge-base 直比既有本地 refs——不经
-        baseline()，其 best-effort fetch 违反本需求不 fetch 契约）；为真才
-        push origin --delete refs/heads/<branch>（只此一引用、不 force，带
-        --force-with-lease=<ref>:<tip> CAS——终闸 B1：守卫通过后远端支被第三
-        方推进则拒删，不丢未并提交唯一远端副本）。失败分类同 push：non-ff/
-        failed 带 git 输出尾（lease 拒含 stale info 归 failed 告警）；返回
-        (status, tail)，只报告不重试。
-        """
-        if self._git(["remote", "get-url", "origin"],
-                     cwd=repo_dir, check=False).returncode != 0:
-            return "none", ""
-        rc, out, err = self._net(["ls-remote", "origin", f"refs/heads/{branch}"],
-                                 repo_dir)
-        if rc != 0:
-            return "failed", " ".join(
-                x for x in (err.strip(), out.strip()) if x)
-        fields = out.split()  # 仅 stdout：stderr 传输噪声不得混入 tip 解析
-        if not fields:
-            return "absent", ""
-        tip = fields[0]
-        if self._git(["cat-file", "-e", f"{tip}^{{commit}}"],
-                     cwd=repo_dir, check=False).returncode != 0:
-            return "skip", ""  # tip 本地不可达：对象缺失无从校验，保守不删
-        # ag-49312d 直比既有本地 refs（目标支在 project_dir 本地已含合并）；
-        # 不经 baseline()——其缓存过期会 best-effort fetch，违反不 fetch 契约
-        anc = self._git(["merge-base", "--is-ancestor", tip, target_branch],
-                        cwd=repo_dir, check=False)
-        if anc.returncode != 0:
-            return "skip", ""  # 含未并内容/本地目标支缺失：保守不删
-        # lease CAS（终闸 B1）：远端支已非 ls-remote 所见 tip（被第三方推进）
-        # 则拒删——防丢未并提交唯一远端副本
-        rc, out, err = self._net(["push", "origin", "--delete",
-                                  f"--force-with-lease=refs/heads/{branch}:{tip}",
-                                  f"refs/heads/{branch}"], repo_dir)
-        if rc == 0:
-            return "ok", ""
-        out = " ".join(x for x in (err.strip(), out.strip()) if x)
-        status = "non-ff" if ("non-fast-forward" in out
-                              or "fetch first" in out) else "failed"
-        return status, out
-
-    def has_origin(self, repo_dir: str) -> bool:  # Req: F98
-        """origin remote 在位性（managed 远端优先交付的门槛判据）。"""
-        return self._git(["remote", "get-url", "origin"],
-                         cwd=repo_dir, check=False).returncode == 0
-
-    def fetch_origin_branch(self, repo_dir: str, branch: str,
-                            timeout: float = None) -> str:  # Req: F98
-        """真 fetch origin 支进远端跟踪引用，返回精确 40 位 tip SHA；失败如实抛。
-
-        显式 +refspec 强制刷新 refs/remotes/origin/<branch>（不依赖仓配 fetch
-        refspec 在位，远端回退也同步）；无该远端支/网络病＝RuntimeError，
-        绝不静默回退本地支（调用方按交付失败处置）。timeout＝同步受理面
-        （dispatch）短预算——缺省＝_PUSH_TIMEOUT 全预算（门体交付面）；短预算
-        超时与网络病同抛，语义不变。"""
-        rc, out, err = self._net(
-            ["fetch", "origin",
-             f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], repo_dir,
-            timeout=timeout)
-        if rc != 0:
-            raise RuntimeError(
-                f"git fetch origin {branch}: "
-                + " ".join(x for x in (err.strip(), out.strip()) if x))
-        sha = self._git(["rev-parse", f"refs/remotes/origin/{branch}"],
-                        cwd=repo_dir).stdout.strip().lower()
-        if not self._SHA40.fullmatch(sha):
-            raise RuntimeError(
-                f"git fetch origin {branch}: tip 非 40 位 SHA（{sha!r}）")
-        return sha
-
-    def push_commit(self, repo_dir: str, sha: str,
-                    branch: str) -> tuple[str, str]:  # Req: F98
-        """sha 级 ff-only 推送：恰推 <full-sha>:refs/heads/<branch>，绝不 force。
-
-        分类同 push：ok（含 already up-to-date）/non-ff（他写者已推进）/
-        failed（含超时与网络病）；无 origin＝none。返回 (status, tail)——
-        failed 后调用方先 remote_contains 对账（推成对账不可得不重推）。"""
-        if not self.has_origin(repo_dir):
-            return "none", ""
-        rc, out, err = self._net(["push", "origin", f"{sha}:refs/heads/{branch}"],
-                                 repo_dir)
-        if rc == 0:
-            return "ok", ""
-        tail = " ".join(x for x in (err.strip(), out.strip()) if x)
-        status = "non-ff" if ("non-fast-forward" in tail
-                              or "fetch first" in tail) else "failed"
-        return status, tail
-
-    def remote_contains(self, repo_dir: str, branch: str, commit: str,
-                        timeout: float = None) -> bool:  # Req: F98
-        """刷新远端后判 commit 是否 origin/<branch> tip 的祖先（含相等）。
-
-        交付权威判据：push 超时/网络败后的对账与崩溃窗口补终态都走此面；
-        fetch 失败如实抛——调用方按「对账不可得」处理，不猜。timeout＝恢复
-        面短预算透传（Req: F100，缺省 None＝_PUSH_TIMEOUT 全预算，门体口径
-        不变）。"""
-        tip = self.fetch_origin_branch(repo_dir, branch, timeout=timeout)
-        r = self._git(["merge-base", "--is-ancestor", commit, tip],
-                      cwd=repo_dir, check=False)
-        if r.returncode == 0:
-            return True
-        if r.returncode == 1:
-            return False
-        raise RuntimeError(
-            f"git merge-base --is-ancestor {commit} {tip}: {r.stderr.strip()}")
-
-    def sync_local_target(self, repo_dir: str, branch: str, sha: str,
-                          expected_old) -> str:  # Req: F98
-        """远端权威落地后的本地目标支尽力同步：仅当支未被任何 worktree 检出、
-        expected_old 仍匹配（CAS）且 sha 构成 fast-forward 才原子推进本地 ref；
-        任一守卫不过＝pending，不碰用户工作（脏/分叉本地不是交付失败，绝不清洗）。
-        expected_old=None＝本地无锚（缺支/未知）恒 pending。"""
-        if expected_old is None:
-            return "pending"
-        cur = self._git(["rev-parse", "--verify", "--quiet",
-                         f"refs/heads/{branch}"], cwd=repo_dir, check=False)
-        if cur.returncode != 0 or cur.stdout.strip().lower() != expected_old.lower():
-            return "pending"  # 缺支/CAS 不符：本地已被他人移动
-        out = self._git(["worktree", "list", "--porcelain"],
-                        cwd=repo_dir).stdout
-        for line in out.splitlines():
-            if line.strip() == f"branch refs/heads/{branch}":
-                return "pending"  # 检出面守卫：推进被检出 ref 会撕裂工作树
-        anc = self._git(["merge-base", "--is-ancestor", expected_old, sha],
-                        cwd=repo_dir, check=False)
-        if anc.returncode != 0:
-            return "pending"  # 分叉/环境病一律不碰（同步是尽力而为面）
-        r = self._git(["update-ref", f"refs/heads/{branch}", sha, expected_old],
-                      cwd=repo_dir, check=False)
-        return "synced" if r.returncode == 0 else "pending"  # CAS 原子收口
-
     def local_branch_sha(self, repo_dir: str, branch: str) -> str:  # Req: F100
         """本地钉死目标支 tip 解析（no-origin 权威定基）：refs/heads/<branch>
         精确 40 位 SHA；缺支/malformed 如实 RuntimeError——绝不静默回退仓默认支。"""
@@ -721,7 +513,7 @@ class Gitx:
 
     def _holding_worktree(self, repo_dir: str, branch: str):  # Req: F100
         """refs/heads/<branch> 被哪个 worktree 检出（None＝未检出）。porcelain
-        块归属：worktree 行开块、branch 行闭块（sync_local_target 同源判定）。"""
+        块归属：worktree 行开块、branch 行闭块（advance_local_target 同源判定）。"""
         out = self._git(["worktree", "list", "--porcelain"],
                         cwd=repo_dir).stdout
         cur = None
@@ -767,70 +559,20 @@ class Gitx:
                                f"rc={r.returncode}: {r.stderr.strip()}")
         return self._git(["rev-parse", "HEAD"], cwd=integration).stdout.strip()
 
-    def baseline(self, repo_dir: str, branch: str = None,
-                 fetch_timeout: float = None) -> str:
-        """门基线 ref（ag-49312d）：best-effort fetch 后，仅本地严格落后时以 origin 作基。
+    def baseline(self, repo_dir: str, branch: str = None) -> str:
+        """门基线 ref（F109 本地权威）：恒为本地支 ref——不 fetch、不以 origin 作基。
 
-        外部工作流（PR 网页合并）令主检出本地分支落后 origin：基线取远端——
-        contains 认得出已落库提交、_merge_base 不把他人改动扫进任务 diff、
-        build_integration 落在真实远端头上使 push 恒 ff。领先/分叉/无 origin 一律
-        原样返回本地 ref：禁吞未推送的本地提交，行为退回 fetch 前现状；
-        branch=None 先 symref 解析默认支（detached 主检出无从谈远端基线，原样 HEAD）。
-        fetch_timeout：同步受理面（F69 accept_done）短预算——缺省＝_PUSH_TIMEOUT，
-        超时降级本地 ref（同网络病口径），慢 origin 不冻单线程服务。
+        F108 起交付权威恒为本地钉死支，origin 同步是派发方职责；本地支落后
+        origin 属派发方侧状态，门体零感知零网络。branch=None 先 symref 解析
+        默认支（detached 主检出原样 HEAD）。
         """
         b = branch or self.symref(repo_dir)
-        if b == "HEAD":
-            return b
-        local = f"refs/heads/{b}"
-        cache = getattr(self, "_fetch_at", None)
-        if cache is None:  # 门跑三处共用本基线：60s 内只 fetch 一次（门入口一次语义）
-            cache = self._fetch_at = {}
-        key = f"{repo_dir}:{b}"
-        if time.time() - cache.get(key, 0) > 60:
-            cache[key] = time.time()  # 先记账：超时后同门跑不再重复等待
-            # "--" 防 symref 路径分支名 - 开头选项注入（显式 branch 已有 check_branch 前置）；
-            # F-1（Req: F38）同款：start_new_session——超时 killpg 全组，传输孙进程不孤儿泄漏。
-            # 直连 subprocess 不走 _git：网络面带超时且弃输出，不扩子类覆写的 _git 签名
-            proc = subprocess.Popen(["git", "fetch", "origin", "--", b],
-                                    cwd=str(repo_dir), stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, start_new_session=True)
-            try:
-                proc.wait(timeout=fetch_timeout or _PUSH_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass  # 超时与正常退出竞速：进程组已消失即无需补杀
-                try:  # 有界收尸防僵尸（push 同款惯例；DEVNULL 无管道可闭）
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
-                cache[key] = time.time()  # 超时也记账：同门跑不重复等待（300s 最坏只吃一次）
-                return local  # 网络病静默跳过，行为退回 fetch 前现状
-        if self.strictly_behind(repo_dir, b):
-            return f"refs/remotes/origin/{b}"  # 严格落后：基线取远端，他人已落库提交认得出
-        return local  # 领先/分叉：保持现行为
+        return "HEAD" if b == "HEAD" else f"refs/heads/{b}"
 
-    def strictly_behind(self, repo_dir: str, branch: str) -> bool:
-        """本地支是否严格落后 origin/<branch>（无远端/领先/分叉均 False）。
-        不 fetch，只比对既有 refs——push 前守卫（ag-49312d：推陈旧支必 non-ff 假警报）。"""
-        remote = f"refs/remotes/origin/{branch}"
-        r = self._git(["rev-parse", "--verify", "--quiet", remote],
-                      cwd=repo_dir, check=False)
-        if r.returncode != 0:
-            return False  # 无该远端分支
-        if self._git(["merge-base", "--is-ancestor", f"refs/heads/{branch}", remote],
-                     cwd=repo_dir, check=False).returncode != 0:
-            return False  # 领先/分叉
-        return r.stdout.strip() != self._git(
-            ["rev-parse", f"refs/heads/{branch}"], cwd=repo_dir).stdout.strip()
-
-    def contains(self, repo_dir: str, commit: str, branch: str = None,
-                 fetch_timeout: float = None) -> bool:
+    def contains(self, repo_dir: str, commit: str, branch: str = None) -> bool:
         """目标基线是否已含任务提交：崩溃重排时识别合并已落，禁止重复验收后假重开。
-        基线经 baseline()（ag-49312d）：本地支陈旧时认得 origin 上已落库提交。"""
-        target = self.baseline(repo_dir, branch, fetch_timeout=fetch_timeout)
+        基线经 baseline()（F109 本地权威）：恒查本地支 ref，零网络。"""
+        target = self.baseline(repo_dir, branch)
         r = self._git(["merge-base", "--is-ancestor", commit, target],
                       cwd=repo_dir, check=False)
         if r.returncode == 0:
@@ -945,8 +687,8 @@ class Gitx:
     def _merge_base(self, env: Path, branch: str = None,
                     main: Path = None) -> str:  # main 可注入：调用方已定位免重复子进程
         # 外部支起点：基点＝与目标支的分叉点，外部支自有提交不计入任务 diff；
-        # 目标支 ref 经 baseline()（ag-49312d）——本地陈旧时以 origin 作基，
-        # 他人 PR 改动不扫进任务 diff；branch=None 先 symref 解析默认支再套用
+        # 目标支 ref 经 baseline()（F109 本地权威）——恒为本地支 ref，零网络；
+        # branch=None 先 symref 解析默认支再套用
         main = main or self._main(env)
         return self._git(["merge-base", self.baseline(main, branch), env.name],
                          cwd=main).stdout.strip()

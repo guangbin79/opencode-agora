@@ -693,227 +693,6 @@ class TestAccessGitx(unittest.TestCase):
         env = self.gx.build_env(self.repo, "gt-s4")
         self.assertEqual(self.gx.materialize_checkout(env, self.repo), "")
 
-    def test_push_ok_advances_origin(self):  # Req: ag-0d2daa
-        origin = self.tmp / "origin.git"
-        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
-        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
-        self._commit(self.repo, {"src.py": "v2"}, "advance")
-        self.assertEqual(self.gx.push(str(self.repo), "main"), ("ok", ""))
-        self.assertEqual(self._head(origin), self._head(self.repo))
-        self.assertEqual(self.gx.push(str(self.repo), "main"), ("ok", ""))  # 幂等：已同步仍 ok
-
-    def test_push_non_ff_classified_not_forced(self):  # Req: ag-0d2daa
-        origin = self.tmp / "origin.git"
-        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
-        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
-        self._commit(self.repo, {"src.py": "v2"}, "advance")
-        self.assertEqual(self.gx.push(str(self.repo), "main"), ("ok", ""))
-        peer = self.tmp / "peer"
-        self._git(["clone", "-q", str(origin), str(peer)], cwd=self.tmp)
-        self._git(["config", "user.email", "t@t"], cwd=peer)
-        self._git(["config", "user.name", "t"], cwd=peer)
-        self._commit(peer, {"src.py": "v3"}, "peer advance")
-        self._git(["push", "-q", "origin", "main"], cwd=peer)  # 远端被第三方推进
-        local = self._commit(self.repo, {"src.py": "v2-local"}, "local advance")
-        status, tail = self.gx.push(str(self.repo), "main")
-        self.assertEqual(status, "non-ff")
-        self.assertRegex(tail, r"non-fast-forward|fetch first")  # 输出尾随分类外带
-        self.assertEqual(self._head(self.repo), local)  # 本地合并未被 force 回滚
-
-    def test_push_none_without_origin(self):  # Req: ag-0d2daa
-        self.assertEqual(self.gx.push(str(self.repo), "main"), ("none", ""))
-
-    def test_push_failure_classified(self):  # Req: ag-0d2daa
-        self._git(["remote", "add", "origin", str(self.tmp / "nope.git")],
-                  cwd=self.repo)
-        status, tail = self.gx.push(str(self.repo), "main")
-        self.assertEqual(status, "failed")
-        self.assertIn("nope.git", tail)  # 失败因随输出尾
-
-    def test_push_timeout_kills_process_group(self):  # Req: F38
-        """F-1：push 超时按进程组杀（start_new_session＋killpg）——ssh/传输孙进程
-        不孤儿泄漏；杀后有限宽限收尸，分类仍 failed。P0-2 后 _git 亦走 Popen
-        （start_new_session）：origin 探针经 FakePopen 伪成功（argv 甄别）。"""
-        origin = self.tmp / "origin.git"
-        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
-        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
-        popen_kw, killpg = [], []
-
-        class FakePopen:
-            pid = 4242
-            stdout = stderr = None
-            returncode = None
-            raised = False
-
-            def __init__(self, argv, **kw):
-                popen_kw.append((argv, kw))
-                self.argv = argv
-
-            def communicate(self, timeout=None):
-                if self.argv[1:3] == ["remote", "get-url"]:
-                    self.returncode = 0  # P0-2：_git 走 Popen——origin 在位
-                    return f"{str(origin)}\n", ""
-                if timeout is not None and not FakePopen.raised:
-                    FakePopen.raised = True  # 首次（超时顶）抛，二次（收尸）成功返回
-                    raise subprocess.TimeoutExpired("git", timeout)
-                FakePopen.returncode = -9
-                return "", ""
-
-        shim = SimpleNamespace(run=subprocess.run, Popen=FakePopen,
-                               PIPE=subprocess.PIPE,
-                               TimeoutExpired=subprocess.TimeoutExpired,
-                               CompletedProcess=subprocess.CompletedProcess)
-        with mock.patch.object(gitx_mod, "subprocess", shim), \
-             mock.patch.object(gitx_mod.os, "killpg",
-                               side_effect=lambda pid, sig: killpg.append((pid, sig))):
-            status, tail = self.gx.push(str(self.repo), "main")
-        self.assertEqual(status, "failed")
-        self.assertIn("超时", tail)
-        argv, kw = popen_kw[1]  # [0]＝_git 的 remote get-url 探针，[1]＝push 本体
-        self.assertEqual(argv[:3], ["git", "push", "origin"])
-        self.assertTrue(kw.get("start_new_session"))  # 整组可杀的前提
-        self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL（非仅直接子进程）
-        self.assertEqual(FakePopen.returncode, -9)  # 收尸已 reap
-
-    # ---- ag-0f60fd merged 终局删远端任务支（守卫删除） ----
-
-    def _origin_with_task_branch(self, suffix):
-        """origin＋已并任务支现场：main 提交后把 HEAD 推成任务支（tip 含于
-        main，镜像 merged 后形态）。返回 (branch, tip)。"""
-        origin = self.tmp / f"origin-{suffix}.git"
-        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
-        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
-        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
-        tip = self._commit(self.repo, {"src.py": "v2"}, "task work")
-        self._git(["push", "-q", "origin", f"HEAD:refs/heads/task-{suffix}"],
-                  cwd=self.repo)
-        return f"task-{suffix}", tip
-
-    def test_delete_branch_ok_when_tip_in_target(self):  # Req: ag-0f60fd
-        branch, tip = self._origin_with_task_branch("b1")
-        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
-                         ("ok", ""))
-        r = self._git(["ls-remote", "origin", f"refs/heads/{branch}"],
-                      cwd=self.repo)
-        self.assertEqual(r.stdout.strip(), "")  # 远端任务支已删
-        self.assertEqual(self._head(self.repo), tip)  # 目标支不动
-
-    def test_delete_branch_absent_when_remote_lacks_branch(self):  # Req: ag-0f60fd
-        origin = self.tmp / "origin-absent.git"
-        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
-        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
-        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
-        self.assertEqual(self.gx.delete_branch(str(self.repo), "nope-b", "main"),
-                         ("absent", ""))
-
-    def test_delete_branch_none_without_origin(self):  # Req: ag-0f60fd
-        self.assertEqual(self.gx.delete_branch(str(self.repo), "task-b4", "main"),
-                         ("none", ""))
-
-    def test_delete_branch_skip_when_tip_not_in_target(self):  # Req: ag-0f60fd
-        """任务支 tip 含未并提交（ancestor 假）：保守不删，远端支保留。"""
-        origin = self.tmp / "origin-unmerged.git"
-        self._git(["init", "--bare", "-b", "main", str(origin)], cwd=self.repo)
-        self._git(["remote", "add", "origin", str(origin)], cwd=self.repo)
-        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
-        self._git(["checkout", "-q", "-b", "task-unmerged"], cwd=self.repo)
-        tip = self._commit(self.repo, {"src.py": "v2"}, "unmerged work")
-        self._git(["push", "-q", "origin", "task-unmerged"], cwd=self.repo)
-        self._git(["checkout", "-q", "main"], cwd=self.repo)
-        self.assertEqual(
-            self.gx.delete_branch(str(self.repo), "task-unmerged", "main"),
-            ("skip", ""))
-        r = self._git(["ls-remote", "origin", "refs/heads/task-unmerged"],
-                      cwd=self.repo)
-        self.assertIn(tip, r.stdout)  # 远端支保留
-
-    def test_delete_branch_skip_when_tip_unreachable_locally(self):  # Req: ag-0f60fd
-        """远端任务支被第三方推进到本地对象库没有的提交：无从校验 ancestor，
-        保守不删。"""
-        branch, _ = self._origin_with_task_branch("b3")
-        peer = self.tmp / "peer3"
-        self._git(["clone", "-q", str(self.tmp / "origin-b3.git"), str(peer)],
-                  cwd=self.tmp)
-        self._git(["config", "user.email", "t@t"], cwd=peer)
-        self._git(["config", "user.name", "t"], cwd=peer)
-        self._git(["checkout", "-q", "-b", branch, f"origin/{branch}"], cwd=peer)
-        peer_tip = self._commit(peer, {"src.py": "v3"}, "third party advance")
-        self._git(["push", "-q", "origin", branch], cwd=peer)
-        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
-                         ("skip", ""))
-        r = self._git(["ls-remote", "origin", f"refs/heads/{branch}"],
-                      cwd=self.repo)
-        self.assertIn(peer_tip, r.stdout)  # 远端支保留
-
-    def test_delete_branch_failure_classified(self):  # Req: ag-0f60fd
-        self._git(["remote", "add", "origin", str(self.tmp / "nope2.git")],
-                  cwd=self.repo)
-        status, tail = self.gx.delete_branch(str(self.repo), "task-b5", "main")
-        self.assertEqual(status, "failed")
-        self.assertIn("nope2.git", tail)  # 失败因随输出尾
-
-    def test_delete_branch_stderr_noise_not_tip(self):  # Req: ag-0f60fd
-        """评审 R1：ls-remote 成功但 stderr 带 ssh 首连告警——tip 只解析
-        stdout，噪声不得混进 fields[0] 致误 skip（分支永久泄漏）。"""
-        branch, tip = self._origin_with_task_branch("b6")
-        calls = []
-
-        def fake_net(args, cwd):
-            calls.append(list(args))
-            if args[0] == "ls-remote":
-                return (0, f"{tip}\trefs/heads/{branch}",
-                        "Warning: Permanently added 'githost' (ED25519) "
-                        "to the list of known hosts.")
-            return (0, "", "")
-
-        self.gx._net = fake_net
-        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
-                         ("ok", ""))
-        self.assertEqual(calls[-1][:3], ["push", "origin", "--delete"])
-
-    def test_delete_branch_no_fetch(self):  # Req: ag-0f60fd
-        """终闸 A1：全程零 fetch argv——只比对既有本地 refs（ag-49312d），
-        不经 baseline() 的 best-effort fetch（冷缓存会在 merged 收尾阻塞网络）。"""
-        branch, _ = self._origin_with_task_branch("b7")
-        orig, seen = self.gx._git, []
-
-        def spy(args, **kw):
-            seen.append(list(args))
-            return orig(args, **kw)
-
-        self.gx._git = spy
-        self.assertEqual(self.gx.delete_branch(str(self.repo), branch, "main"),
-                         ("ok", ""))
-        self.assertFalse(any("fetch" in a for a in seen),
-                         f"出现 fetch argv: {seen}")
-
-    def test_delete_branch_cas_rejects_moved_tip(self):  # Req: ag-0f60fd
-        """终闸 B1 TOCTOU：守卫通过后远端任务支被第三方推进（ls-remote 仍见
-        旧 tip）——lease CAS 拒删，未并提交远端副本保留。"""
-        branch, tip = self._origin_with_task_branch("b8")
-        peer = self.tmp / "peer8"
-        self._git(["clone", "-q", str(self.tmp / "origin-b8.git"), str(peer)],
-                  cwd=self.tmp)
-        self._git(["config", "user.email", "t@t"], cwd=peer)
-        self._git(["config", "user.name", "t"], cwd=peer)
-        self._git(["checkout", "-q", "-b", branch, f"origin/{branch}"], cwd=peer)
-        self._git(["commit", "-q", "--allow-empty", "-m", "third party advance"],
-                  cwd=peer)
-        self._git(["push", "-q", "origin", branch], cwd=peer)
-
-        def fake_ls(args, cwd):
-            if args[0] == "ls-remote":  # 守卫已过、删除未落的窗口：仍见旧 tip
-                return (0, f"{tip}\trefs/heads/{branch}", "")
-            return type(self.gx)._net(args, cwd)
-
-        self.gx._net = fake_ls
-        status, tail = self.gx.delete_branch(str(self.repo), branch, "main")
-        self.assertIn(status, ("failed", "non-ff"))  # lease 拒：远端非预期 tip
-        self.assertTrue(tail)
-        r = self._git(["ls-remote", "origin", f"refs/heads/{branch}"],
-                      cwd=self.repo)
-        self.assertNotEqual(r.stdout.strip(), "")  # 远端支保留（含未并推进）
-
     # ---- LFS 实体物化（ag-c1aa63 同族：指针文件≠内容） ----
 
     def _init_lfs_repo(self):
@@ -1163,8 +942,9 @@ class TestGitProcessGroup(unittest.TestCase):
             Gitx()._git(["rev-parse", "no-such-ref"], cwd=self.repo)
 
 
-class TestGateBaseline(unittest.TestCase):
-    """门基线陈旧三景（ag-49312d）：best-effort fetch 后仅本地严格落后时以 origin 作基。"""
+class TestGateBaselineLocalOnly(unittest.TestCase):
+    """Req: F109 本地权威基线：baseline/contains 恒本地支 ref、零网络
+    （不 fetch/不 push/不 ls-remote）；网络原语面整体移除。"""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1174,6 +954,7 @@ class TestGateBaseline(unittest.TestCase):
         self._git(["init", "-b", "master"], cwd=self.repo)
         self._git(["config", "user.email", "t@t"], cwd=self.repo)
         self._git(["config", "user.name", "t"], cwd=self.repo)
+        self._git(["config", "core.excludesFile", "/dev/null"], cwd=self.repo)
         self._commit(self.repo, {"src.py": "v1"}, "init")
         self._git(["init", "--bare", "-b", "master", str(self.origin)])
         self._git(["remote", "add", "origin", str(self.origin)], cwd=self.repo)
@@ -1212,275 +993,66 @@ class TestGateBaseline(unittest.TestCase):
         self._commit(peer, {"other.cpp": "trailing  \n"}, "peer whitespace")
         self._git(["push", "-q", "origin", "master"], cwd=peer)
 
-    def test_stale_local_behind_origin_remote_baseline(self):  # Req: ag-49312d
-        """陈旧景①：本地 master 落后 origin（任务提交已落库＋他人空白提交）——
-        contains 判真、diff_check 空不误报、build 起基落在真实远端头上（push 恒 ff）。"""
-        env = self.gx.build_env(self.repo, "gt-b1")  # 从陈旧本地 master（=origin@init）起
-        task = self._commit(Path(env), {"src.py": "v2"}, "task")
-        self._git(["push", "-q", "origin", f"{Path(env).name}:master"],
-                  cwd=self.repo)  # 模拟网页合并落库：origin=init→task（ff）
-        self._peer_whitespace_advance()  # 他人再推一格：origin=init→task→W，本地支仍停在 init
-        self.assertTrue(self.gx.contains(str(self.repo), task, "master"))
-        self.assertEqual(self.gx.baseline(str(self.repo), "master"),
-                         "refs/remotes/origin/master")
-        self.assertEqual(self.gx.baseline(str(self.repo)),
-                         "refs/remotes/origin/master")  # branch=None 先解析默认支
-        self.assertEqual(self.gx.diff_check(env, "master"), "")
-        integration = str(self.repo) + "__gate"
-        self.gx.build_integration(str(self.repo), integration, "master")
-        self.assertEqual(self._head(Path(integration)), self._head(self.origin))
-
-    def test_stale_local_env_on_origin_side_diff_not_swept(self):  # Req: ag-49312d
-        """陈旧景②（事故误报复刻）：env 基于远端侧内容而本地支陈旧——
-        旧基线（本地 ref）把他人 PR 空白扫进任务 diff；以 origin 作基后只含任务改动。"""
-        self._peer_whitespace_advance()  # origin=init→W
-        self._git(["fetch", "-q", "origin"], cwd=self.repo)  # 远端跟踪已见 W，本地支仍未拉
-        env = self.tmp / "proj__wt-side"
-        # 分支名＝目录名（生产 build_env 同名约定，env.name 即 ref）
-        self._git(["worktree", "add", "-b", "proj__wt-side", str(env),
-                   "refs/remotes/origin/master"], cwd=self.repo)
-        self._commit(env, {"src.py": "v2"}, "task")
-        self.assertEqual(self.gx.diff_check(str(env), "master"), "")  # W 不进任务 diff
-
-    def test_local_ahead_keeps_local_ref(self):  # Req: ag-49312d
-        """本地领先景：基线仍用本地 ref，禁吞未推送的本地提交（现行为不变）。"""
-        self._commit(self.repo, {"src.py": "v2-local"}, "local only")
+    def test_baseline_local_ref_even_when_strictly_behind(self):  # Req: F109
+        """本地支严格落后 origin（peer 推进）也恒回本地 ref——不再 fetch 后以
+        origin 作基；origin 同步是派发方职责，门体零感知。"""
+        self._peer_whitespace_advance()
+        before = self._git(["rev-parse", "refs/remotes/origin/master"],
+                           cwd=self.repo).stdout.strip()
         self.assertEqual(self.gx.baseline(str(self.repo), "master"),
                          "refs/heads/master")
-        integration = str(self.repo) + "__gate"
-        self.gx.build_integration(str(self.repo), integration, "master")
-        self.assertEqual(self._head(Path(integration)), self._head(self.repo))
+        self.assertEqual(self.gx.baseline(str(self.repo)), "refs/heads/master")
+        after = self._git(["rev-parse", "refs/remotes/origin/master"],
+                          cwd=self.repo).stdout.strip()
+        self.assertEqual(before, after)  # 零 fetch：跟踪 ref 停在旧值
 
-    def test_no_origin_silent_local_behavior(self):  # Req: ag-49312d
-        """无远端景：fetch 静默跳过零异常，基线与 contains/build 行为同前。"""
-        bare = self.tmp / "bare"
-        bare.mkdir()
-        self._git(["init", "-b", "master"], cwd=bare)
-        self._git(["config", "user.email", "t@t"], cwd=bare)
-        self._git(["config", "user.name", "t"], cwd=bare)
-        self._git(["commit", "--allow-empty", "-m", "init"], cwd=bare)
-        self.assertEqual(self.gx.baseline(str(bare), "master"), "refs/heads/master")
-        self.assertTrue(self.gx.contains(str(bare), self._head(bare), "master"))
-        self._git(["checkout", "-q", "--detach"], cwd=bare)
-        self.assertEqual(self.gx.baseline(str(bare)), "HEAD")  # detached 无从谈远端基线
+    def test_baseline_detached_head_passthrough(self):  # Req: F109
+        self._git(["checkout", "--detach"], cwd=self.repo)
+        self.assertEqual(self.gx.baseline(str(self.repo)), "HEAD")
 
-    def test_strictly_behind_predicate_states(self):  # Req: ag-49312d
-        """严格落后判据四态：落后真、领先/分叉/无远端假（push 前守卫与基线共用）。"""
-        self.assertFalse(self.gx.strictly_behind(str(self.repo), "master"))  # 同步＝不落后
-        self._peer_whitespace_advance()  # origin=init→W，本地停在 init：落后
-        self._git(["fetch", "-q", "origin"], cwd=self.repo)  # 刷新远端跟踪引用（判据不 fetch）
-        self.assertTrue(self.gx.strictly_behind(str(self.repo), "master"))
-        self._commit(self.repo, {"src.py": "v2"}, "local only")  # 反超：领先
-        self.assertFalse(self.gx.strictly_behind(str(self.repo), "master"))
-        peer = self.tmp / "p2"
-        self._git(["clone", "-q", str(self.origin), str(peer)])
-        self._git(["config", "user.email", "t@t"], cwd=peer)
-        self._git(["config", "user.name", "t"], cwd=peer)
-        self._commit(peer, {"other.cpp": "x"}, "peer again")
-        self._git(["push", "-q", "origin", "master"], cwd=peer)  # 本地再落一格后分叉
-        self._commit(self.repo, {"src.py": "v3"}, "diverge")
-        self.assertFalse(self.gx.strictly_behind(str(self.repo), "master"))
+    def test_contains_local_only(self):  # Req: F109
+        """contains 恒查本地支 ref：本地已含→True；仅在 peer/远端提交而不在
+        本地支→False——origin 含≠本地含，绝不冒充已交付。"""
+        base = self._head(self.repo)
+        self.assertTrue(self.gx.contains(str(self.repo), base, "master"))
+        self._git(["checkout", "-b", "side"], cwd=self.repo)
+        side = self._commit(self.repo, {"side.py": "s"}, "side only")
+        self._git(["checkout", "master"], cwd=self.repo)
+        self.assertFalse(self.gx.contains(str(self.repo), side, "master"))
 
-    def test_fetch_timeout_kills_process_group(self):  # Req: ag-49312d
-        """fetch 超时 F-1 同款：killpg 全组＋静默退回本地基线（不拦门）。"""
-        popen_kw, killpg = [], []
+    def test_no_network_spawned_anywhere(self):  # Req: F109
+        """Popen 全记录：baseline/contains/build_env/build_integration/diff_check/
+        diff_stats/touches_gate 全链不 spawn fetch/push/ls-remote。"""
+        self._peer_whitespace_advance()  # 夹具先行：本地支严格落后 origin
+        real_popen = subprocess.Popen
+        with mock.patch.object(gitx_mod.subprocess, "Popen",
+                               wraps=real_popen) as pop:
+            env = self.gx.build_env(self.repo, "t-f109")
+            self.gx.baseline(str(self.repo), "master")
+            self.gx.contains(str(self.repo), self._head(self.repo), "master")
+            self._commit(Path(env), {"src.py": "v2"}, "task change")
+            self.gx.build_integration(self.repo, env + "__gate", "master")
+            self.gx.diff_check(env)
+            self.gx.diff_stats(env)
+            self.gx.touches_gate(env, ["*.py"])
+        argv = [c.args[0] for c in pop.call_args_list]
+        for args in argv:
+            for bad in ("fetch", "push", "ls-remote"):
+                self.assertNotIn(bad, args, f"network op spawned: {args}")
+        self.assertTrue(argv)  # 确有 git 调用被记录（非空断言防空转绿）
 
-        class FakePopen:
-            pid = 4242
-            returncode = None
-
-            def __init__(self, argv, **kw):
-                popen_kw.append((argv, kw))
-
-            def wait(self, timeout=None):
-                raise subprocess.TimeoutExpired("git", timeout)
-
-        shim = SimpleNamespace(run=subprocess.run, Popen=FakePopen,
-                               DEVNULL=subprocess.DEVNULL,
-                               TimeoutExpired=subprocess.TimeoutExpired)
-        with mock.patch.object(gitx_mod, "subprocess", shim), \
-             mock.patch.object(gitx_mod.os, "killpg",
-                               side_effect=lambda pid, sig: killpg.append((pid, sig))):
-            self.assertEqual(self.gx.baseline(str(self.repo), "master"),
-                             "refs/heads/master")  # 网络病退回本地基线
-        argv, kw = popen_kw[0]
-        self.assertEqual(argv[:4], ["git", "fetch", "origin", "--"])
-        self.assertTrue(kw.get("start_new_session"))  # 整组可杀的前提
-        self.assertEqual(killpg, [(4242, signal.SIGKILL)])  # 全组 SIGKILL
-
-
-class TestRemoteDelivery(unittest.TestCase):
-    """Req: F98 managed 远端原语：fetch_origin_branch/has_origin/push_commit/
-    remote_contains/sync_local_target（真 git＋bare origin 夹具）。"""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.repo = self.tmp / "proj"
-        self.origin = self.tmp / "origin.git"
-        self.repo.mkdir()
-        self._git(["init", "-b", "main"], cwd=self.repo)
-        self._git(["config", "user.email", "t@t"], cwd=self.repo)
-        self._git(["config", "user.name", "t"], cwd=self.repo)
-        self._commit(self.repo, {"src.py": "v1"}, "init")
-        self._git(["init", "--bare", "-b", "main", str(self.origin)])
-        self._git(["remote", "add", "origin", str(self.origin)], cwd=self.repo)
-        self._git(["push", "-q", "origin", "main"], cwd=self.repo)
-        self.gx = Gitx()
-        self.base = self._head(self.repo)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    @staticmethod
-    def _git(args, cwd=None, check=True):
-        r = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None,
-                           capture_output=True, text=True)
-        if check and r.returncode != 0:
-            raise AssertionError(f"git {args}: {r.stderr}")
-        return r
-
-    def _commit(self, cwd, files, msg):
-        for name, content in files.items():
-            path = Path(cwd) / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-        self._git(["add", "-A"], cwd=cwd)
-        self._git(["commit", "-m", msg], cwd=cwd)
-        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
-
-    def _head(self, cwd):
-        return self._git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
-
-    def _origin_tip(self):
-        return self._git(["rev-parse", "main"], cwd=self.origin).stdout.strip()
-
-    def _peer_advance(self, files, msg, name="peer"):
-        """第三方 clone 经 origin 推进一格，返回新远端 tip。"""
-        peer = self.tmp / name
-        self._git(["clone", "-q", str(self.origin), str(peer)])
-        self._git(["config", "user.email", "t@t"], cwd=peer)
-        self._git(["config", "user.name", "t"], cwd=peer)
-        sha = self._commit(peer, files, msg)
-        self._git(["push", "-q", "origin", "main"], cwd=peer)
-        return sha
-
-    def _detached_commit(self, name, files, msg, startpoint="main"):
-        """detached worktree 内造本地提交（不动 main 检出面），返回 sha。"""
-        wt = self.tmp / name
-        self._git(["worktree", "add", "--detach", "-q", str(wt), startpoint],
-                  cwd=self.repo)
-        return self._commit(wt, files, msg)
-
-    def test_has_origin(self):  # Req: F98
-        self.assertTrue(self.gx.has_origin(str(self.repo)))
-        lone = self.tmp / "lone"
-        lone.mkdir()
-        self._git(["init", "-b", "main"], cwd=lone)
-        self.assertFalse(self.gx.has_origin(str(lone)))
-
-    def test_fetch_origin_branch_returns_exact_remote_tip(self):  # Req: F98
-        tip = self._peer_advance({"other.txt": "x"}, "peer advance")
-        self.assertEqual(self.gx.fetch_origin_branch(str(self.repo), "main"), tip)
-        self.assertEqual(self._git(  # 远端跟踪引用同步刷新到同一 tip
-            ["rev-parse", "refs/remotes/origin/main"], cwd=self.repo
-        ).stdout.strip(), tip)
-        self.assertEqual(self._head(self.repo), self.base)  # 本地支不动
-
-    def test_fetch_origin_branch_timeout_passthrough(self):  # Req: F98
-        """评审 D4：短预算经 fetch_origin_branch 透传至 _net（派发面防死 origin
-        停摆串行门）；缺省 None＝_PUSH_TIMEOUT 全预算（门体交付面）。"""
-        seen = []
-        orig = type(self.gx)._net
-
-        def fake_net(args, cwd, timeout=None):
-            seen.append(timeout)
-            return orig(args, cwd, timeout)
-
-        self.gx._net = fake_net
-        self.gx.fetch_origin_branch(str(self.repo), "main", timeout=5)
-        self.gx.fetch_origin_branch(str(self.repo), "main")
-        self.assertEqual(seen, [5, None])
-
-    def test_fetch_failure_raises(self):  # Req: F98
-        with self.assertRaises(RuntimeError):
-            self.gx.fetch_origin_branch(str(self.repo), "ghost")
-        self._git(["remote", "set-url", "origin", str(self.tmp / "dead.git")],
-                  cwd=self.repo)
-        with self.assertRaises(RuntimeError):
-            self.gx.fetch_origin_branch(str(self.repo), "main")
-
-    def test_push_commit_ff_ok(self):  # Req: F98
-        sha = self._detached_commit("wt-a", {"src.py": "v2"}, "task")
-        r, tail = self.gx.push_commit(str(self.repo), sha, "main")
-        self.assertEqual((r, tail), ("ok", ""))
-        self.assertEqual(self._origin_tip(), sha)
-
-    def test_push_commit_non_ff_keeps_remote(self):  # Req: F98
-        tip = self._peer_advance({"other.txt": "x"}, "peer advance")
-        r, tail = self.gx.push_commit(str(self.repo), self.base, "main")
-        self.assertEqual(r, "non-ff")
-        self.assertTrue(tail)
-        self.assertEqual(self._origin_tip(), tip)  # 拒绝不改远端
-
-    def test_push_commit_failed_and_none(self):  # Req: F98
-        self._git(["remote", "set-url", "origin", str(self.tmp / "dead.git")],
-                  cwd=self.repo)
-        r, tail = self.gx.push_commit(str(self.repo), self.base, "main")
-        self.assertEqual(r, "failed")
-        self.assertTrue(tail)
-        lone = self.tmp / "lone"
-        lone.mkdir()
-        self._git(["init", "-b", "main"], cwd=lone)
-        self._git(["config", "user.email", "t@t"], cwd=lone)
-        self._git(["config", "user.name", "t"], cwd=lone)
-        self._git(["commit", "--allow-empty", "-m", "init"], cwd=lone)
-        self.assertEqual(
-            self.gx.push_commit(str(lone), self._head(lone), "main"), ("none", ""))
-
-    def test_remote_contains_ancestry(self):  # Req: F98
-        tip = self._peer_advance({"other.txt": "x"}, "peer advance")
-        self._git(["fetch", "-q", "origin"], cwd=self.repo)
-        self.assertTrue(self.gx.remote_contains(str(self.repo), "main", self.base))
-        local = self._detached_commit("wt-b", {"src.py": "v2"}, "unpushed",
-                                      startpoint=tip)
-        self.assertFalse(self.gx.remote_contains(str(self.repo), "main", local))
-        self._git(["push", "-q", "origin", f"{local}:main"], cwd=self.repo)
-        self.assertTrue(self.gx.remote_contains(str(self.repo), "main", local))
-
-    def test_sync_local_target_guards(self):  # Req: F98
-        sha = self._detached_commit("wt-c", {"src.py": "v2"}, "task")
-        self._git(["checkout", "-q", "--detach"], cwd=self.repo)  # main 无人检出
-        self.assertEqual(
-            self.gx.sync_local_target(str(self.repo), "main", sha, self.base),
-            "synced")
-        self.assertEqual(self._git(  # 本地支已 ff 到交付 sha
-            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha)
-        # 检出面守卫：main 被检出（主检出切回 main）＝不碰用户工作树
-        self._git(["checkout", "-q", "main"], cwd=self.repo)
-        sha2 = self._detached_commit("wt-d", {"src.py": "v3"}, "next")
-        self.assertEqual(
-            self.gx.sync_local_target(str(self.repo), "main", sha2, sha),
-            "pending")
-        self.assertEqual(self._git(
-            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha)
-        # CAS 守卫：expected_old 与现值不符（ref 已被他人移动）
-        self._git(["checkout", "-q", "--detach"], cwd=self.repo)
-        self._git(["update-ref", "refs/heads/main", sha2], cwd=self.repo)
-        self.assertEqual(
-            self.gx.sync_local_target(str(self.repo), "main", sha, self.base),
-            "pending")
-        self.assertEqual(self._git(
-            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha2)
-        # ff 守卫：本地支已含 sha 之外的分叉提交（CAS 对、非 ff）
-        self.assertEqual(
-            self.gx.sync_local_target(str(self.repo), "main", sha, sha2),
-            "pending")
-        self.assertEqual(self._git(
-            ["rev-parse", "main"], cwd=self.repo).stdout.strip(), sha2)
-        # 缺支守卫：本地无该分支＝pending
-        self.assertEqual(
-            self.gx.sync_local_target(str(self.repo), "ghost", sha, None),
-            "pending")
+    def test_network_primitives_removed(self):  # Req: F109
+        """网络原语面整体移除：方法不复存在，调用即 AttributeError——生产码
+        对 fetch/push 的任何引用都会在测试面确定性炸出。"""
+        for name in ("push", "push_commit", "delete_branch", "has_origin",
+                     "fetch_origin_branch", "remote_contains", "sync_local_target",
+                     "strictly_behind", "_net"):
+            self.assertFalse(hasattr(self.gx, name), name)
+        with self.assertRaises(TypeError):  # fetch_timeout 形参一并移除
+            self.gx.contains(str(self.repo), self._head(self.repo), "master",
+                             fetch_timeout=1)
+        with self.assertRaises(TypeError):
+            self.gx.baseline(str(self.repo), "master", fetch_timeout=1)
 
 
 class TestLocalDelivery(unittest.TestCase):

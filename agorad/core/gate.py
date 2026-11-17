@@ -11,8 +11,8 @@ managed 任务（Req: F100，delivery.mode=managed＋钉死目标支）一律走
 支 tip 定基＋锁内 advance_local_target CAS ff-only 推进，origin 在位不改变
 定基/交付面（零 fetch 零 push），脏/占用目标＝交付终局失败；交付败走
 delivery failed/blocked 专用终局（非质量口径）；启动恢复面 recover_managed
-收敛崩溃残留（failed 防重试、权威已含补终态——恢复面远端探针保留兼容
-F98 时代已推远端的崩窗残留）。
+收敛崩溃残留（failed 防重试、权威已含补终态——恢复探针 F109 起一律本地，
+零网络）。
 external_branch 任务（Req: F101，外部开发分支交付）走 _deliver_external：本地
 钉死支 tip（或 task_deliver(non_ff) 携带的外部基）定基集成→rebase→集成 verify，
 绿即驻留 done＋delivery.status=awaiting_external——不合目标支、不推 origin、
@@ -65,14 +65,10 @@ _PHANTOM_BOUNCE = ("合并前置失败：env 分支相对目标无新增提交�
 # AGORA_HOME 明示不剥：无事故面，夹具本就自设各自值。
 _GATE_ENV_STRIP = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD")
 
-# Req: F98 交付锁有界等待：数值对齐 gitx._PUSH_TIMEOUT 口径（core 只许 stdlib，
-# 不 import access 故同值异地声明）；等锁超时＝一次失败尝试，绝不无限阻塞串行门
+# Req: F98 交付锁有界等待：等锁超时＝一次失败尝试，绝不无限阻塞串行门
+# （数值沿用原 push 网络上界口径——F109 网络面已删，常量仅作交付锁等待上界）
 _LOCK_WAIT = 300
 _LOCK_POLL = 0.05
-# Req: F100 恢复面探针短预算（ag-b5f2e9 起与 task 派发面无耦合，值自治）：启动
-# 串行面防死 origin 停摆——300s×N 全预算阻塞端口绑定且单例锁已持（终闸 B 册）；
-# 超时/网络病＝对账不可得，留门重排链路在其自身失败面内兜底，语义不变
-_RECOVER_FETCH_TIMEOUT = 15
 # P0-1 门级看门狗硬下限（ag-9c4cbb）：缺省 deadline=max(4×生效 verify 预算, 600s)
 _WATCHDOG_FLOOR = 600
 
@@ -330,9 +326,10 @@ class Gate:
                 tid, f"任务 {tid} 合并前置失败：{commit} ≠ 分支 HEAD "
                 f"{a.get('head')}——以 env 内完整 HEAD sha 重新 post(done, commit)")
         try:  # Req: F69 vacuous-done；谓词病（锚伪造 sha/目标支被删）不拦受理：
+            # F109：探针只查本地支 ref（零网络）——「reopen 期间人工上游合入」
+            # 不在受理时识别，由集成段幻影守卫/外部树等价逃生门兜底
             vacuous = self._gitx.contains(t["project_dir"], commit,
-                                          t.get("target_branch"),
-                                          fetch_timeout=15)  # 同步受理面短 fetch 预算
+                                          t.get("target_branch"))
         except RuntimeError:  # gitx 失败契约（_git/contains 同款）；编程错误照崩不静默
             self._audit(tid, "zero_commit_probe_failed")  # 带痕放行：run() 同款异常面兜底
             vacuous = False
@@ -379,8 +376,7 @@ class Gate:
                     and self._gitx.is_ancestor(t["project_dir"], base, commit):
                 return True  # (a)
             if prev and self._gitx.contains(t["project_dir"], prev,
-                                            t.get("target_branch"),
-                                            fetch_timeout=15):
+                                            t.get("target_branch")):
                 return True  # (b)
         except RuntimeError:  # gitx 失败契约；编程错误照崩不静默
             self._audit(tid, "zero_commit_probe_failed")
@@ -632,9 +628,9 @@ class Gate:
                 return
             if managed:  # 崩溃窗口补终态：本地目标支已含任务 commit 即收尾，不重验不重推
                 # ag-b5f2e9 权威恒＝本地钉死支（origin 在位不问远端）。终闸 B 册：
-                # contains 经 baseline 在「本地支严格落后」时基线取 origin——origin
-                # 含≠本地支含；探针严格问 refs/heads/<branch>，origin 含而本地不含
-                # 交本地交付自愈（rebase 重放＋advance 真推进），绝不零推进谎报 synced
+                # 探针严格问 refs/heads/<branch>（F109 起 baseline 亦恒本地），
+                # origin 含而本地不含交本地交付自愈（rebase 重放＋advance 真推进），
+                # 绝不零推进谎报 synced
                 try:
                     landed = self._gitx.is_ancestor(
                         target, t["commit"], f"refs/heads/{branch}")
@@ -761,14 +757,10 @@ class Gate:
                     # ag-54bd98 G1 幻影形态②（ag-c3de0f/ag-e75d89）：空集重放
                     # R==onto＝env boot 分支零交付——原锚（run() 起点快照）不在
                     # 目标支即非崩溃窗口，禁以 set_fields(commit=R) 伪装推进。
-                    # ag-28f327：「已含交付」以远端目标支为准（env 外操作可污染
-                    # 本地 ref，ag-f77d90 worker 曾 ff 本地 master 旁路守卫致
-                    # merged@旧 tip 假终态）；无 origin 本地仓退化本地 ref——
-                    # 本无远端权威可对账。
-                    if self._gitx.has_origin(target):
-                        landed = self._gitx.remote_contains(target, branch, e)
-                    else:
-                        landed = self._gitx.contains(target, e, branch)
+                    # F109：对账以本地钉死支为准（零网络）。ag-f77d90 的「env 外
+                    # 操作污染本地 ref」面随 legacy 行消亡——worker 动共享分支属
+                    # 协议违反，插件闸＋审计兜底；新协议行本就走 is_ancestor 本地判定
+                    landed = self._gitx.contains(target, e, branch)
                     if not landed:
                         self._audit(tid, "empty_rebase_noop")
                         self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
@@ -887,45 +879,9 @@ class Gate:
         except Exception:  # 通知面尽力而为（F54 同口径）——不逆转终局
             pass
 
-    def _finish_delivered(self, tid, branch, sha, base, attempt,
-                          local_head):  # Req: F98
-        """远端权威交付落地后的唯一成功出口：投影落账→尽力本地同步（pending
-        不是失败、绝不清洗本地）→merged 终态与既有门尾回收链（凭据/env）。
-        base=None＝崩溃窗口补终态（保留在案基线与尝试计数）。"""
-        t = self._state.get(tid)
-        d = dict(t.get("delivery") or {})
-        d.update(status="delivered", commit=sha, local_status="pending",
-                 error=None, attempt=attempt)
-        if base is not None:
-            d["base"] = base
-        try:
-            d["local_status"] = self._gitx.sync_local_target(
-                t["project_dir"], branch, sha, local_head)
-        except RuntimeError as e:  # 同步病非交付失败：pending 留痕不清洗不回滚
-            self._audit(tid, "sync_local_failed", note=str(e)[:200])
-        self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
-        self._state.set_fields(tid, delivery=d)
-        self._state.transition(tid, "merged", commit=sha)
-        extra = {"rebased_from": t["rebased_from"]} if t.get("rebased_from") else {}
-        self._audit(tid, "merged", commit=sha, **extra)
-        self._router.notify_transition(
-            tid, "merged",
-            f"@{sha[:7]} local={d['local_status']}——沉淀: 聚本任务 note/task page "
-            "走 knowledge ingest")  # Req: F60
-        self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
-        self._gitx.remove_env(t["env_dir"])
-        self._post(tid, f"merged @{sha}——远端已交付，环境已回收"
-                        f"（local {d['local_status']}）")
-
-    def _local_head_safe(self, target, branch):  # Req: F98
-        try:
-            return self._gitx.head(target, branch)
-        except RuntimeError:  # 本地缺支＝同步无锚（pending）；交付不因此失败
-            return None
-
     def _acquire_delivery_lock(self, lock):  # Req: F98
         """有界等锁：非阻塞探测＋短步长轮询，到点让位＝一次失败尝试，
-        绝不无限阻塞串行门（F96 裁定对齐 _PUSH_TIMEOUT 口径）。"""
+        绝不无限阻塞串行门（等待上界沿用原 push 网络口径，F109 后纯本地）。"""
         deadline = time.monotonic() + _LOCK_WAIT
         while True:
             if lock.acquire(blocking=False):
@@ -1150,7 +1106,7 @@ class Gate:
         """启动恢复面：managed 交付投影非终态任务的崩溃收敛。
 
         failed＋done＝补 blocked 迁移，绝不自动重试（gate.run 同守卫双保险）；
-        pending＋done＋commit＝权威判定（origin 在位问远端、否则问本地目标支）：
+        pending＋done＋commit＝权威判定一律本地钉死支（F109 零网络）：
         已含即按已交付收口（零推送零推进）＋门尾结算；未含留给门重排队列
         （make_server done 残留恰一次）续跑既有交付——不发明 commit、不建
         重复工作；缺 commit/权威不可得＝审计留痕交门重排链路兜底，不猜。
@@ -1180,15 +1136,9 @@ class Gate:
                     continue
                 branch, commit = t["target_branch"], t["commit"]
                 try:
-                    remote = self._gitx.has_origin(t["project_dir"])
-                    if remote:
-                        landed = self._gitx.remote_contains(
-                            t["project_dir"], branch, commit,
-                            timeout=_RECOVER_FETCH_TIMEOUT)  # B 册终闸：短预算
-                    else:
-                        landed = self._gitx.contains(
-                            t["project_dir"], commit, branch,
-                            fetch_timeout=_RECOVER_FETCH_TIMEOUT)
+                    # F109：权威判定一律本地钉死支（零网络）——F98 时代「已推
+                    # 远端未落 merged」形态随远端权威废除消亡，不再向 origin 对账
+                    landed = self._gitx.contains(t["project_dir"], commit, branch)
                 except Exception as e:  # 权威不可得：留门重排链路兜底
                     self._audit(tid, "delivery_recover_probe_failed",
                                 note=str(e)[:200])
@@ -1197,14 +1147,8 @@ class Gate:
                     continue  # 门重排（make_server done 残留）续跑：不重复排队
                 self._audit(tid, "delivery_recovered")
                 finishing = True
-                if remote:
-                    self._finish_delivered(tid, branch, commit, None,
-                                           d.get("attempt", 0),
-                                           self._local_head_safe(t["project_dir"],
-                                                                 branch))
-                else:
-                    self._finish_local_delivered(tid, branch, commit, None,
-                                                 d.get("attempt", 0))
+                self._finish_local_delivered(tid, branch, commit, None,
+                                             d.get("attempt", 0))
                 self._tail(tid)  # merged→closed 终局结算（含 pending-cancel 消费）
             except Exception as e:  # 逐任务隔离：不拦后续任务收敛
                 try:
@@ -1244,73 +1188,7 @@ class Gate:
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
         self._gitx.remove_env(t["env_dir"])
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
-        push_st = self._push_after_merge(tid)
-        if push_st in ("non-ff", "failed"):
-            # 评审 R1：目标支未落 origin（push 被拒/失败）——任务支是已并提交
-            # 唯一远端副本，留作恢复源不删
-            self._audit(tid, "task_branch_delete_skipped_push_failed",
-                        note=push_st)
-        else:
-            self._delete_remote_task_branch(tid)
-
-    def _push_after_merge(self, tid):  # Req: ag-0d2daa
-        """ag-0d2daa 服务侧 origin 同步：merged 落账后推目标支（含缺省支）。
-
-        幂等（崩溃重排补终态路径也推，已同步静默）；非 ff 被拒/失败仅告警留痕
-        ——不 force、不回滚本地合并、不影响已落 merged 终态；无 origin 零动作。
-        本地支严格落后 origin 时零动作（ag-49312d：推之必 non-ff 假警报）。
-        全兜底：push 链任何异常不掩盖门结果。返回推送结果供 _succeed 决策删任务
-        支（ag-0f60fd）：ok/none/skip＝origin 已含或本无远端；non-ff/failed＝
-        未落 origin，删除跳过保恢复源；异常归 failed。
-        """
-        try:
-            t = self._state.get(tid)
-            branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
-            if self._gitx.strictly_behind(t["project_dir"], branch):
-                return "skip"  # 本地支已全含于 origin（ag-49312d 直通场景）：推陈旧支必 non-ff 假警报
-            r, tail = self._gitx.push(t["project_dir"], branch)
-            if r == "non-ff":
-                self._audit(tid, "push_rejected", branch=branch, note=tail[:200])
-                self._router.notify_dispatcher(
-                    tid, "result",
-                    f"origin push 被拒（non-ff）——本地合并保持不动、不 force，"
-                    f"请人工核对远端: refs/heads/{branch}"
-                    + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
-            elif r == "failed":
-                self._audit(tid, "push_failed", branch=branch, note=tail[:200])
-                self._router.notify_dispatcher(
-                    tid, "result",
-                    f"origin push 失败（不影响任务终态，本地合并保持不动）: "
-                    f"refs/heads/{branch}"
-                    + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
-            return r
-        except Exception as e:
-            self._audit(tid, "push_failed", note=str(e)[:200])
-            return "failed"  # 归 failed：_succeed 据此跳过删任务支（ag-0f60fd）
-
-    def _delete_remote_task_branch(self, tid):  # Req: ag-0f60fd
-        """ag-0f60fd merged 终局删远端任务支：支名＝env_dir basename，仅 merged
-        路径调用（_succeed 尾）；成功 audit task_branch_deleted；失败（non-ff/
-        failed）audit task_branch_delete_failed＋派发方告警；none/absent/skip
-        （无 origin/远端无支/守卫拒删）静默幂等。全兜底：任何异常不掩盖门结果
-        （_push_after_merge 同纪律）。"""
-        try:
-            t = self._state.get(tid)
-            branch = t.get("target_branch") or self._gitx.symref(t["project_dir"])
-            name = Path(t["env_dir"]).name
-            r, tail = self._gitx.delete_branch(t["project_dir"], name, branch)
-            if r == "ok":
-                self._audit(tid, "task_branch_deleted", branch=name)
-            elif r in ("non-ff", "failed"):
-                self._audit(tid, "task_branch_delete_failed", branch=name,
-                            note=tail[:200])
-                self._router.notify_dispatcher(
-                    tid, "result",
-                    f"远端任务支删除失败（不影响任务终态，本地合并保持不动）: "
-                    f"refs/heads/{name}"
-                    + (f"\n输出尾部:\n{tail[-_TAIL:]}" if tail else ""))
-        except Exception as e:
-            self._audit(tid, "task_branch_delete_failed", note=str(e)[:200])
+        # F109：origin 同步与远端任务支清理归派发方自理——门尾零网络
 
     def _non_ff(self, tid, branch, before, conflict=False, auto_ignored=()):
         """F32 同步冲突或最终推进窄竞态遇真 non-ff：重开不计质量连败，目标主检出保持不动。"""
