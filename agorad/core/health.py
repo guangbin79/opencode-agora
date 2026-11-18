@@ -274,11 +274,15 @@ class Health:
                     pub = (self._gitx.publication(t["project_dir"],
                                                   t.get("target_branch"))
                            if self._gitx else None)
-                    # 祖先对账（ag-6c673c 误报）：分支 ahead 可能来自无关提交，
-                    # 只有本任务交付 commit 真不在 origin 才拍
+                    # 祖先对账（ag-6c673c 误报）＋补丁等价对账（ag-4c6136
+                    # 误报）：分支 ahead 可能来自无关提交；交付 commit 也可能
+                    # 被派发方 rebase 改 sha 后出版——sha 与补丁均不在 origin
+                    # 才拍（cherry 对账空＝内容已出版）
                     unpublished = bool(
                         pub and pub.get("origin_ref") and d.get("commit")
                         and not self._gitx.published_on_origin(
+                            t["project_dir"], d["commit"], pub["branch"])
+                        and not self._gitx.patch_equivalent_on_origin(
                             t["project_dir"], d["commit"], pub["branch"]))
                 except Exception:
                     pub, unpublished = None, False  # 投影/对账不可得本轮免判（下轮重试）

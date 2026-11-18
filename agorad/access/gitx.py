@@ -476,6 +476,27 @@ class Gitx:
                 f"{anc.stderr.strip()}")
         return True
 
+    def patch_equivalent_on_origin(self, repo_dir: str, commit: str,
+                                   branch: str) -> bool:
+        """commit 的补丁是否已内容在场于 origin（零网络 refs-only，as of
+        last fetch）：git log --cherry-pick --right-only
+        origin/<branch>...commit 输出空＝交付补丁全部已出版（派发方 rebase
+        改 sha 后出版，ag-4c6136）→True；非空＝有补丁缺席→False；无跟踪
+        ref→False（出版无从证实）；其他非零如实 RuntimeError（调用方免判）。"""
+        commit = self._check_sha(commit)
+        ref = f"refs/remotes/origin/{branch}"
+        probe = self._git(["rev-parse", "--verify", "--quiet", ref],
+                          cwd=repo_dir, check=False)
+        if probe.returncode != 0:
+            return False
+        out = self._git(["log", "--cherry-pick", "--right-only",
+                         f"{ref}...{commit}"], cwd=repo_dir, check=False)
+        if out.returncode != 0:
+            raise RuntimeError(
+                f"git log --cherry-pick {ref}...{commit}: "
+                f"{out.stderr.strip()}")
+        return not out.stdout.strip()
+
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
         """本地权威目标支推进（调用方持仓级交付锁）：CAS＋ff-only 双守卫。
@@ -503,6 +524,18 @@ class Gitx:
         if anc.returncode != 0:
             return "failed"  # 环境病（对象损坏等）
         wt = self._holding_worktree(repo_dir, branch)
+        if wt is not None:
+            gd = self._git(["rev-parse", "--absolute-git-dir"], cwd=repo_dir,
+                           check=False)
+            if gd.returncode == 0 and os.path.realpath(wt) \
+                    == os.path.realpath(gd.stdout.strip()):
+                # ag-4c6136 repo-tool 伪 worktree：.git 符号链接布局下
+                # porcelain 把 gitdir 本身报为持支检出，gitdir 内 status/
+                # merge 必拒——解析真实检出替换之，双验不过保持 failed
+                cand = self._repo_tool_checkout(os.path.realpath(wt), tip)
+                if cand is None:
+                    return "failed"
+                wt = cand
         if wt is None:  # 未检出：ref 级原子 CAS 推进（不撕裂任何工作树）
             r = self._git(["update-ref", f"refs/heads/{branch}", sha,
                            expected_old], cwd=repo_dir, check=False)
@@ -545,6 +578,26 @@ class Gitx:
             elif cur and line.strip() == f"branch refs/heads/{branch}":
                 return cur
         return None
+
+    def _repo_tool_checkout(self, gitdir: str, tip: str):
+        """ag-4c6136 repo-tool 检出解析：gitdir 形如 <root>/.repo/projects/
+        <name>.git → 候选检出 <root>/<name>；仅当 readlink -f 候选/.git
+        实体即本 gitdir 且候选 HEAD 钉在 CAS 快照 tip 才接受；任何不匹配
+        返回 None（调用方保持 failed——不猜）。"""
+        marker = "/.repo/projects/"
+        i = gitdir.find(marker)
+        if i <= 0 or not gitdir.endswith(".git"):
+            return None
+        cand = gitdir[:i] + "/" + gitdir[i + len(marker):-len(".git")]
+        try:
+            if os.path.realpath(f"{cand}/.git") != gitdir:
+                return None
+        except OSError:
+            return None
+        head = self._git(["rev-parse", "HEAD"], cwd=cand, check=False)
+        if head.returncode != 0 or head.stdout.strip().lower() != tip:
+            return None
+        return cand
 
     def rebase_onto(self, env_dir: str, integration: str,
                     conflicts: list = None) -> str:

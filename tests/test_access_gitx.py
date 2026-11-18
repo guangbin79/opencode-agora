@@ -927,6 +927,124 @@ class TestPublishedOnOrigin(unittest.TestCase):
         self.assertFalse(self.gx.published_on_origin(str(self.repo),
                                                      delivery, "main"))
 
+    def test_patch_equivalent_true_after_rebase_drift(self):
+        # ag-4c6136：交付 commit 被改父基重放（rebase/cherry-pick 改 sha）后
+        # 出版——sha 不在 origin 但补丁等价：cherry 对账空 →True
+        self._git(["checkout", "-q", "-b", "work"])
+        recorded = self._commit({"src.py": "v2"}, "delivery")
+        self._git(["checkout", "-q", "main"])
+        self._commit({"other.py": "x"}, "parallel")  # 改父基：重放必得新 sha
+        self._git(["cherry-pick", "work"])
+        drifted = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        self.assertNotEqual(drifted, recorded)
+        self._set_origin(drifted)
+        self.assertFalse(self.gx.published_on_origin(str(self.repo),
+                                                     recorded, "main"))
+        self.assertTrue(self.gx.patch_equivalent_on_origin(
+            str(self.repo), recorded, "main"))
+
+    def test_patch_equivalent_false_when_patch_missing(self):
+        delivery = self._commit({"src.py": "v2"}, "work")
+        self._set_origin(self.base)  # origin 停在交付前：补丁真缺席
+        self.assertFalse(self.gx.patch_equivalent_on_origin(
+            str(self.repo), delivery, "main"))
+        self.assertFalse(self.gx.patch_equivalent_on_origin(
+            str(self.repo), delivery, "ghost"))  # 无跟踪 ref：无从证实
+
+
+class TestRepoToolWorktree(unittest.TestCase):
+    """ag-4c6136 repo-tool 伪 worktree：<root>/<name> 检出的 .git 是指向
+    <root>/.repo/projects/<name>.git 的符号链接——porcelain 把 gitdir 本身
+    报为持支 worktree，gitdir 内 merge 必 'must be run in a work tree' 拒。
+    advance_local_target 解析真实检出走 checked-out 推进；双验不过保持
+    failed（不猜）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "root"
+        (self.root / ".repo" / "projects").mkdir(parents=True)
+        self.proj = self.root / "foo"
+        self.proj.mkdir()
+        self._git(["init", "-b", "main"], cwd=self.proj)
+        self._git(["config", "user.email", "t@t"], cwd=self.proj)
+        self._git(["config", "user.name", "t"], cwd=self.proj)
+        self._commit({"src.py": "v1"}, "init")
+        self.base = self._head()
+        # repo-tool 布局：.git 移入 .repo/projects，检出处留符号链接
+        self.gitdir = self.root / ".repo" / "projects" / "foo.git"
+        shutil.move(str(self.proj / ".git"), str(self.gitdir))
+        (self.proj / ".git").symlink_to(self.gitdir)
+        self.gx = Gitx()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _git(self, args, cwd, check=True):
+        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                           text=True)
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def _commit(self, files, msg):
+        for name, content in files.items():
+            (self.proj / name).write_text(content)
+        self._git(["add", "-A"], cwd=self.proj)
+        self._git(["commit", "-m", msg], cwd=self.proj)
+        return self._head()
+
+    def _head(self):
+        return self._git(["rev-parse", "HEAD"], cwd=self.proj).stdout.strip()
+
+    def _ref(self, branch):
+        return self._git(["rev-parse", f"refs/heads/{branch}"],
+                         cwd=self.gitdir).stdout.strip()
+
+    def _tip(self):
+        env = Path(self.gx.build_env(self.proj, "gt-rt", branch="main"))
+        (env / "src.py").write_text("v2")
+        self._git(["add", "-A"], cwd=env)
+        self._git(["commit", "-m", "work"], cwd=env)
+        return self._git(["rev-parse", "HEAD"], cwd=env).stdout.strip()
+
+    def test_symlink_layout_resolves_and_ff_advances(self):
+        tip = self._tip()
+        self.assertEqual(  # repo_dir＝gitdir（伪 worktree 报出处）同样解析
+            self.gx.advance_local_target(str(self.gitdir), "main", tip,
+                                         self.base), "synced")
+        self.assertEqual(self._head(), tip)  # 真实检出内 ff 推进
+        self.assertEqual(self._ref("main"), tip)
+
+    def test_symlink_mismatch_keeps_failed(self):
+        tip = self._tip()
+        other = self.tmp / "other.git"  # 候选检出改指他处 gitdir：双验不过
+        self._git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        (self.proj / ".git").unlink()
+        (self.proj / ".git").symlink_to(other)
+        self.assertEqual(
+            self.gx.advance_local_target(str(self.gitdir), "main", tip,
+                                         self.base), "failed")
+        self.assertEqual(self._ref("main"), self.base)  # ref 不动
+
+    def test_head_mismatch_keeps_failed(self):
+        # 候选 HEAD 漂离 CAS 快照：symlink 布局下候选 HEAD≡gitdir HEAD，
+        # 静态夹具造不出分歧——建模真实形态＝推进途中他写者挪 ref
+        tip = self._tip()
+
+        class DriftGitx(Gitx):
+            def _git(self_, args, cwd, check=True, timeout=None):
+                r = super()._git(args, cwd, check, timeout)
+                if args[:2] == ["rev-parse", "--absolute-git-dir"]:
+                    super(DriftGitx, self_)._git(
+                        ["update-ref", "refs/heads/main", tip],
+                        cwd=str(self.gitdir))
+                return r
+
+        self.assertEqual(
+            DriftGitx().advance_local_target(str(self.gitdir), "main", tip,
+                                             self.base), "failed")
+        self.assertEqual(self._ref("main"), tip)  # 他写者推进保全不回滚
+
 
 class TestGitProcessGroup(unittest.TestCase):
     """P0-2（ag-9c4cbb）：_git 组自治（start_new_session＋超时 killpg 全组——

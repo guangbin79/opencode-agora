@@ -1222,10 +1222,12 @@ class TestDeliveryWatch(TestCoreHealth):
     与 worker 活性无关（done/merged/closed 也扫），拍的是派发方。"""
 
     class FakeGitx:
-        def __init__(self, ahead=0, published=True, origin_ref="o" * 40):
+        def __init__(self, ahead=0, published=True, origin_ref="o" * 40,
+                     patch_equiv=False):
             self.ahead = ahead
             self.published = published
             self.origin_ref = origin_ref
+            self.patch_equiv = patch_equiv
             self.calls = []
 
         def publication(self, repo_dir, branch=None):
@@ -1235,6 +1237,9 @@ class TestDeliveryWatch(TestCoreHealth):
 
         def published_on_origin(self, repo_dir, commit, branch):
             return self.published
+
+        def patch_equivalent_on_origin(self, repo_dir, commit, branch):
+            return self.patch_equiv
 
     def mk_watch(self, gitx=None, ext_after=1800.0, unpub_after=3600.0):
         return Health(self.state, self.oc, self.router, self.recover, self.app,
@@ -1315,6 +1320,16 @@ class TestDeliveryWatch(TestCoreHealth):
         h = self.mk_watch(gitx=gx)
         h.tick()
         self.assertNotIn("unpublished", self.kinds())
+
+    def test_unpublished_rebase_drift_patch_equivalent_no_escalate(self):
+        # ag-4c6136：交付 commit 被派发方 rebase 改 sha 后出版——sha 祖先
+        # 对账不在 origin 但补丁等价在场：视同已出版，不拍且出账
+        gx = self.FakeGitx(ahead=3, published=False, patch_equiv=True)
+        self.seed_delivered(updated_age=4000.0)
+        h = self.mk_watch(gitx=gx)
+        h.tick()
+        self.assertNotIn("unpublished", self.kinds())
+        self.assertEqual(h._unpub_esc, {})  # 视同已出版：watch 出账
 
     def test_unpublished_no_origin_ref_no_escalate(self):  # Req: F110
         gx = self.FakeGitx(ahead=0, published=False, origin_ref=None)
