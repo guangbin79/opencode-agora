@@ -659,6 +659,6 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 ### F115 看板派发会话分组层——board_tui 根层按会话分组（2026-11-18）
 **现状**：F45 广度分池后多派发会话并存，board 根层任务行（无父行任务）看不出是哪个会话派的（dispatcher_sid 已在 full_view 投影，服务端零改动）。
-**裁定**：≥2 派发会话才分组（单会话板面不变走既有路径）；会话头＝标题（session_titles 只读 opencode.db session_v2，失败/缺失降级退 sid 尾 8 位——板面优先于标题）＋可见根任务数（非总数，桶/过滤口径）；根任务 depth+1 挂头下，嵌套任务不重挂保持任务树；无可见根任务的会话整组不出头（子行照三闸显隐）；session 行同组头渲染（A_BOLD）不可操作（x/p/P/!/z 的 kind 守卫天然隔离）；0 键仓分组视图/明细页/doctor 页零变化；键位零改动。
+**裁定**：≥2 派发会话才分组（单会话板面不变走既有路径）；会话头＝标题（session_titles 只读 opencode.db session_v2，失败/缺失降级退 sid 尾 8 位——板面优先于标题）＋可见根任务数（非总数，桶/过滤口径）；根任务 depth+1 挂头下，嵌套任务不重挂保持任务树；无可见根任务的会话整组不出头（子行照三闸显隐）；session 行同组头渲染（A_BOLD）不可操作（x/p/P/!/z 的 kind 守卫天然隔离）；0 键仓分组视图/明细页/doctor 页零变化；键位零改动；合成派发名（非 ses_ 形态）整串显示，真实 sid 才尾 8（2026-11-18 修复，issue-agent 实证）。
 **落点**：board_tui.py（build_rows 尾参 titles＋sess_tids 会话块＋三闸谓词抽 _vis 单点＋_sname＋session_titles＋draw_board session 行＋run() titles 接线）、tests/test_board_tui.py（TestSessionLayer 七锚，Req: F115）、docs/reqs/opencode-agora.md（本条）。
 **验收**：`python3 -m pytest tests/test_board_tui.py -q -k TestSessionLayer` 绿；`python3 -m pytest tests/test_board_tui.py -q` 既有测试零回归（含 test_forest_multi_root_default_folded）；全量 `python3 -m pytest tests/ -q` 不回归。

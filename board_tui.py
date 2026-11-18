@@ -70,8 +70,13 @@ def _gkey(t):
 
 
 def _sname(sid, titles):
-    """会话显示名（F115）：titles 命中用标题；缺失退 sid 尾 8 位（"root" 原样命中）。"""
-    return (titles or {}).get(sid) or (sid or "?")[-8:]
+    """会话显示名（F115）：titles 命中用标题；真实 sid（ses_/ses- 前缀）退尾
+    8 位辨识段，合成派发名（issue-agent/root 等）整串；空 sid "?"。"""
+    hit = (titles or {}).get(sid)
+    if hit:
+        return hit
+    sid = sid or "?"
+    return sid[-8:] if sid.startswith(("ses_", "ses-")) else sid
 
 
 def rel_time(ts, now=None):

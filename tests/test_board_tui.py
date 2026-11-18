@@ -701,6 +701,22 @@ class TestSessionLayer(unittest.TestCase):
         self.assertTrue(heads[0].startswith("abcdefgh"))  # titles 缺失退 sid 尾 8 位
         self.assertTrue(heads[1].startswith("ijklmnop"))
 
+    def test_synth_name_shown_whole(self):  # Req: F115
+        self.assertEqual(board_tui._sname("issue-agent", {}), "issue-agent")
+        s = snap(S1=trow(disp="issue-agent"), S2=trow(disp="ses_yy_ijklmnop"))
+        heads = [r.title for r in build_rows(s, [], now=NOW)
+                 if r.kind == "session"]
+        self.assertTrue(heads[0].startswith("issue-agent"))  # 合成派发名整显
+        self.assertTrue(heads[1].startswith("ijklmnop"))
+
+    def test_synth_real_sid_still_tail8(self):  # Req: F115
+        self.assertEqual(board_tui._sname("ses_abcdefgh", {}), "abcdefgh")
+        self.assertEqual(board_tui._sname("ses-abcdefgh", {}), "abcdefgh")
+
+    def test_synth_title_hit_unchanged(self):  # Req: F115
+        self.assertEqual(board_tui._sname("issue-agent",
+                                         {"issue-agent": "标题"}), "标题")
+
     def _db_home(self, with_db):
         home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
