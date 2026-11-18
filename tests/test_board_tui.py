@@ -8,6 +8,7 @@ import os
 import pty
 import select
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -15,12 +16,14 @@ import threading
 import time
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import board_tui
 from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
                        detail_page, doctor_page, handle_key, load_board,
-                       rel_time, run, try_alarm, try_cancel, try_nudge)
+                       rel_time, run, session_titles, try_alarm, try_cancel,
+                       try_nudge)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -633,6 +636,98 @@ class TestGroupMode(unittest.TestCase):
         rows = build_rows(s, [], filt="r1", now=NOW, group=True)
         self.assertEqual([r.tid for r in task_rows(rows)], ["r1"])  # 文本穿透组折叠
         self.assertEqual(len([r for r in rows if r.kind == "group"]), 2)
+
+
+class TestSessionLayer(unittest.TestCase):
+    """F115 派发会话分组层：forest 根层 ≥2 派发会话按会话分组出头。
+
+    单会话不激活（现状形态）；titles 缺失退 sid 尾 8 位；session_titles
+    只读 opencode.db、任何失败降级 {}（板面优先于标题）。
+    """
+
+    def test_two_sessions_grouped_with_headers(self):  # Req: F115
+        s = {"tasks": {"A": trow(disp="main", worker="wa"),
+                       "A1": trow(disp="wa", worker="wa1"),
+                       "A2": trow(disp="wa1", worker="wa2"),
+                       "B": trow(disp="other", worker="wb")},
+             "chain": ["A", "A1", "A2", "B"]}
+        rows = build_rows(s, [], now=NOW, expanded={"A", "A1"},
+                          titles={"main": "主会话", "other": "外部池"})
+        heads = [r for r in rows if r.kind == "session"]
+        self.assertEqual([(h.tid, h.domain) for h in heads],
+                         [("main", "bucket"), ("other", "bucket")])  # 会话首现序
+        self.assertTrue(heads[0].title.startswith("主会话")
+                        and heads[0].title.endswith(" 1"))  # 名开头、可见根数结尾
+        self.assertEqual({r.tid: r.depth for r in task_rows(rows)},
+                         {"A": 1, "A1": 1, "A2": 2, "B": 1})
+        # 根 depth+1 挂头下；嵌套保持任务树原深不重挂会话头（A1/A2 不动）
+
+    def test_single_session_not_activated(self):  # Req: F115
+        s = snap(A=trow(disp="main", worker="wa"),
+                 A1=trow(disp="wa", worker="wa1"))
+        rows = build_rows(s, [], now=NOW, expanded={"A"},
+                          titles={"main": "主会话"})
+        self.assertEqual([r.kind for r in rows if r.kind == "session"], [])
+        self.assertEqual([(r.tid, r.depth) for r in task_rows(rows)],
+                         [("A", 0), ("A1", 1)])  # 现状形态：无头、根 depth 0
+
+    def test_bucket_view_no_visible_roots_no_header(self):  # Req: F115
+        s = {"tasks": {"A": trow("running", disp="main", worker="wa"),
+                       "A1": trow("merged", disp="wa", worker="wa1"),
+                       "B": trow("merged", disp="other", worker="wb")},
+             "chain": ["A", "A1", "B"]}
+        rows = build_rows(s, [], now=NOW, bucket="已合并")
+        self.assertEqual([r.tid for r in rows if r.kind == "session"],
+                         ["other"])  # 无可见根任务的会话整组不出头
+        self.assertEqual([r.tid for r in task_rows(rows)],
+                         ["A1", "B"])  # 子行照三闸显隐（桶穿透折叠）
+
+    def test_header_counts_visible_roots_not_total(self):  # Req: F115
+        s = {"tasks": {"A1": trow("running", disp="main", worker="wa"),
+                       "A2": trow("merged", disp="main", worker="wb"),
+                       "B": trow("running", disp="other", worker="wc")},
+             "chain": ["A1", "A2", "B"]}
+        full = build_rows(s, [], now=NOW, titles={"main": "主会话"})
+        self.assertTrue(next(r for r in full if r.kind == "session"
+                             and r.tid == "main").title.endswith(" 2"))
+        fly = build_rows(s, [], now=NOW, bucket="在飞", titles={"main": "主会话"})
+        self.assertTrue(next(r for r in fly if r.kind == "session"
+                             and r.tid == "main").title.endswith(" 1"))  # 命中其一计 1 非总数
+
+    def test_missing_title_falls_back_to_sid_tail(self):  # Req: F115
+        s = snap(S1=trow(disp="ses_xx_abcdefgh"), S2=trow(disp="ses_yy_ijklmnop"))
+        heads = [r.title for r in build_rows(s, [], now=NOW)
+                 if r.kind == "session"]
+        self.assertTrue(heads[0].startswith("abcdefgh"))  # titles 缺失退 sid 尾 8 位
+        self.assertTrue(heads[1].startswith("ijklmnop"))
+
+    def _db_home(self, with_db):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        if with_db:
+            db = home / "opencode" / "opencode.db"
+            db.parent.mkdir(parents=True)
+            con = sqlite3.connect(str(db))
+            con.execute("CREATE TABLE session_v2 (id TEXT PRIMARY KEY,"
+                        " title TEXT)")
+            con.executemany("INSERT INTO session_v2 VALUES (?, ?)",
+                            [("ses_a", "甲会话"), ("ses_b", ""), ("ses_c", None)])
+            con.commit()
+            con.close()
+        return home
+
+    def test_session_titles_reads_db_and_filters_empty(self):  # Req: F115
+        home = self._db_home(True)
+        with unittest.mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(home)}):
+            self.assertEqual(
+                session_titles({"ses_a", "ses_b", "ses_c", "nope"}),
+                {"ses_a": "甲会话"})  # 查得一、空/None 滤除、缺键不在
+
+    def test_session_titles_missing_db_and_empty_sids(self):  # Req: F115
+        home = self._db_home(False)
+        with unittest.mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(home)}):
+            self.assertEqual(session_titles({"ses_a"}), {})  # 库不存在返 {} 不抛
+            self.assertEqual(session_titles(set()), {})
 
 
 class TestDoctorPage(unittest.TestCase):

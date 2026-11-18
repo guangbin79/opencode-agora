@@ -69,6 +69,11 @@ def _gkey(t):
     return Path(t["project_dir"]).name if t.get("project_dir") else "?"
 
 
+def _sname(sid, titles):
+    """会话显示名（F115）：titles 命中用标题；缺失退 sid 尾 8 位（"root" 原样命中）。"""
+    return (titles or {}).get(sid) or (sid or "?")[-8:]
+
+
 def rel_time(ts, now=None):
     """last_seen 相对时间：- / 5s / 1m / 2h / 2d。"""
     if ts is None:
@@ -84,7 +89,7 @@ def rel_time(ts, now=None):
 
 
 def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
-               group=None, gexpanded=None):
+               group=None, gexpanded=None, titles=None):
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
@@ -101,6 +106,9 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
     （子代紧随父代，同层保持 chain 原序）；expanded＝展开集，任务行仅当全部
     严格祖先都在其中才显示（空集＝默认折叠只显根层），escalate 事件行随任务
     行同显隐；过滤非空时穿透折叠，命中行照常显示。
+    titles（F115）＝sid→会话标题映射：forest 根层 ≥2 派发会话时按派发会话
+    分组出头（会话名＋可见根任务数，根任务 depth+1 挂头下、嵌套不重挂），
+    单会话不激活板面不变。
     """
     now = time.time() if now is None else now
     expanded = expanded if expanded is not None else set()
@@ -206,15 +214,38 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
                 _emit(rows, tid)
         return rows
 
-    for tid in order:
+    def _vis(tid):
+        # 三闸单点（F115 抽谓词复用，禁两份漂移）：filt 子串/bucket 桶/_shown 折叠
         t = tasks[tid]
         if f and f not in f"{tid} {t.get('title', '')} {t['state']}".lower():
-            continue        # 过滤穿透折叠：命中行全部照常显示，不看 expanded
+            return False    # 过滤穿透折叠：命中行全部照常显示，不看 expanded
         if bucket is not None and _bucket(t["state"]) != bucket:
-            continue        # 桶视图同语义穿透折叠（口径与计数行同源）
-        if not f and bucket is None and not _shown(tid):
-            continue
-        _emit(rows, tid)
+            return False    # 桶视图同语义穿透折叠（口径与计数行同源）
+        return bool(f) or bucket is not None or _shown(tid)
+
+    sess_tids, cur = {}, None
+    for tid in order:       # 会话块（F115）：根开块（键＝dispatcher_sid）子归当前块
+        if parent[tid] is None:
+            cur = tasks[tid].get("dispatcher_sid")
+        sess_tids.setdefault(cur, []).append(tid)
+
+    if len(sess_tids) > 1:  # 多派发会话才分组；单会话走既有循环形态不变
+        for tid in order:
+            if parent[tid] is None:
+                depth[tid] += 1     # 根挂会话头下；嵌套保持任务树不重挂
+        for sid, block in sess_tids.items():
+            nroot = sum(1 for t in block if parent[t] is None and _vis(t))
+            if nroot:               # 无可见根任务（桶/过滤）的会话整组不出头
+                rows.append(Row("session", sid, domain="bucket",
+                                title=f"{_pad(_sname(sid, titles), 28)} {nroot}"))
+            for tid in block:
+                if _vis(tid):
+                    _emit(rows, tid)    # 子行照三闸显隐，与出头与否无关
+        return rows
+
+    for tid in order:
+        if _vis(tid):
+            _emit(rows, tid)
     return rows
 
 
@@ -478,6 +509,30 @@ def tail_session(sid, limit=40):
     return out or ["(no text messages)"]
 
 
+def session_titles(sids):
+    """F115 会话标题只读查询：opencode.db session_v2 表 id/title。
+
+    失败一律降级 {}（板面优先于标题）；空标题/None 滤除；任何情况不得抛。
+    """
+    sids = [s for s in sids if s]
+    if not sids:
+        return {}
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    p = Path(data_home) / "opencode" / "opencode.db"
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=2)
+        try:
+            found = con.execute(
+                f"SELECT id, title FROM session_v2"
+                f" WHERE id IN ({','.join('?' * len(sids))})",
+                sids).fetchall()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return {}
+    return {i: t for i, t in found if t}
+
+
 def detail_page(d):
     """明细页文本：全字段＋事件尾＋done 结论。"""
     t = d.get("task", {})
@@ -552,9 +607,10 @@ def draw_board(stdscr, m, status="", err=None):
                        _color(rows[i].domain) | curses.A_BOLD)
     for i, r in enumerate(rows[m["top"]:m["top"] + visible]):
         attr = _color(r.domain)
-        if r.kind in ("event", "group"):
+        if r.kind in ("event", "group", "session"):
             attr |= curses.A_BOLD
-        text = r.title if r.kind == "group" else _row_text(r)  # 组头＝桶行式短题
+        # 组/会话头＝桶行式短题（F115 会话头同组头渲染）
+        text = r.title if r.kind in ("group", "session") else _row_text(r)
         if m["top"] + i == m["sel"]:
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
@@ -595,7 +651,7 @@ def run(stdscr, base, token):
     m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set(),
          "bucket": None, "proj": False, "gexpanded": set(), "prompt": False,
-         "prompt_task": None, "tids": set(), "groups": set()}
+         "prompt_task": None, "tids": set(), "groups": set(), "titles": {}}
     details, snap, events = {}, None, None
     status, err, page = "loading…", None, []
 
@@ -604,6 +660,9 @@ def run(stdscr, base, token):
         nonlocal status, err, snap, events
         try:
             snap, events = load_board(base, token)
+            m["titles"] = session_titles(  # F115 会话头标题：只读降级，板面优先
+                {t.get("dispatcher_sid") for t in snap.get("tasks", {}).values()}
+                - {None, "root"})
             _rebuild()
             err = None                     # 仅新帧成功才清离线横幅；缓存重建不洗掉 err
         except Exception as e:                     # 离线/坏帧：保旧行＋报因
@@ -614,7 +673,7 @@ def run(stdscr, base, token):
         nonlocal status
         m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"],
                                bucket=m["bucket"], group=m["proj"],
-                               gexpanded=m["gexpanded"])
+                               gexpanded=m["gexpanded"], titles=m.get("titles"))
         m["tids"] = set(snap.get("tasks", {}))     # Z 全展宇宙：tid 与分组键全集
         m["groups"] = {_gkey(t) for t in snap.get("tasks", {}).values()}
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
