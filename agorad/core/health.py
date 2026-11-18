@@ -256,7 +256,8 @@ class Health:
             if t["state"] == "done" and d.get("status") == "awaiting_external":
                 ts = d.get("handoff_at")
                 if ts and now - ts > self._ext_stale_after:
-                    n, last = self._ext_esc.get(tid, (0, 0.0))
+                    n, last = self._esc_book(self._ext_esc, tid,
+                                             KIND_EXT_STALE)
                     if now - last >= self._stale_gap(n):
                         self.escalate(KIND_EXT_STALE, tid, streak=n + 1,
                                       raw=f"commit={d.get('commit')} "
@@ -273,14 +274,23 @@ class Health:
                     pub = (self._gitx.publication(t["project_dir"],
                                                   t.get("target_branch"))
                            if self._gitx else None)
+                    # 祖先对账（ag-6c673c 误报）：分支 ahead 可能来自无关提交，
+                    # 只有本任务交付 commit 真不在 origin 才拍
+                    unpublished = bool(
+                        pub and pub.get("origin_ref") and d.get("commit")
+                        and not self._gitx.published_on_origin(
+                            t["project_dir"], d["commit"], pub["branch"]))
                 except Exception:
-                    pub = None  # 投影不可得本轮免判（下轮重试）
-                if pub and pub.get("ahead"):
-                    n, last = self._unpub_esc.get(tid, (0, 0.0))
+                    pub, unpublished = None, False  # 投影/对账不可得本轮免判（下轮重试）
+                if unpublished:
+                    n, last = self._esc_book(self._unpub_esc, tid,
+                                             KIND_UNPUBLISHED)
                     if now - last >= self._stale_gap(n):
                         self.escalate(KIND_UNPUBLISHED, tid, streak=n + 1,
                                       raw=f"branch={pub.get('branch')} "
-                                          f"ahead={pub['ahead']}")
+                                          f"ahead={pub['ahead']} "
+                                          f"commit={d.get('commit')} "
+                                          f"origin_ref={pub.get('origin_ref')}")
                         self._unpub_esc[tid] = (n + 1, now)
                 else:
                     self._unpub_esc.pop(tid, None)  # 已出版/无 origin：出账
@@ -337,6 +347,21 @@ class Health:
             return bool(self._oc.inject(wsid, body))
         except Exception:
             return False
+
+    def _esc_book(self, book, tid, kind):
+        """退避账本查取（miss 时经事件面重建，agorad 重启退避续命）：
+        n=该 kind 历史升级次数、last=末次升级 ts；无事件记 (0, 0.0)。
+        仅在将要拍人的分支调用——出账路径不重建，防逐 tick 扫事件面。"""
+        ent = book.get(tid)
+        if ent is None:
+            try:
+                evs = [e for e in self._store.read_events(tid)
+                       if e.get("event") == "escalate" and e.get("kind") == kind]
+            except Exception:
+                evs = []  # 事件面读故障按首拍处理，不阻塞拍人（降级纪律同既有）
+            ent = (len(evs), evs[-1].get("ts", 0.0)) if evs else (0, 0.0)
+            book[tid] = ent
+        return ent
 
     def _stale_gap(self, count):
         """已连拍 count 次后的再拍退避窗（秒）：首档 1200s 逐档×4，封顶 24h。"""

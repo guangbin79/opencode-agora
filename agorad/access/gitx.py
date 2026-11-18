@@ -454,6 +454,28 @@ class Gitx:
             and c.returncode == 0 else 0
         return out
 
+    def published_on_origin(self, repo_dir: str, commit: str,
+                            branch: str) -> bool:
+        """commit 是否已出版到 origin（零网络 refs-only，as of last fetch）：
+        merge-base --is-ancestor <commit> refs/remotes/origin/<branch>。
+        rc=0 True、rc=1 False；无跟踪 ref→False（无法证实已出版，告警与否
+        归调用方）；其他非零如实 RuntimeError（调用方本轮免判）。"""
+        commit = self._check_sha(commit)  # malformed 在触 git 前拒（F96 同源）
+        ref = f"refs/remotes/origin/{branch}"
+        probe = self._git(["rev-parse", "--verify", "--quiet", ref],
+                          cwd=repo_dir, check=False)
+        if probe.returncode != 0:
+            return False  # 无跟踪 ref：出版无从证实
+        anc = self._git(["merge-base", "--is-ancestor", commit, ref],
+                        cwd=repo_dir, check=False)
+        if anc.returncode == 1:
+            return False
+        if anc.returncode != 0:
+            raise RuntimeError(
+                f"git merge-base --is-ancestor {commit} {ref}: "
+                f"{anc.stderr.strip()}")
+        return True
+
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
         """本地权威目标支推进（调用方持仓级交付锁）：CAS＋ff-only 双守卫。

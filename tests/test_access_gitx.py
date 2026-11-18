@@ -876,6 +876,58 @@ class TestAccessGitx(unittest.TestCase):
         third.release()
 
 
+class TestPublishedOnOrigin(unittest.TestCase):
+    """published_on_origin（ag-6c673c 误报修复）：交付 commit 祖先对账，
+    真 git、零网络（update-ref 伪造 origin 跟踪 ref）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "proj"
+        self.repo.mkdir()
+        self._git(["init", "-b", "main"], cwd=self.repo)
+        self._git(["config", "user.email", "t@t"], cwd=self.repo)
+        self._git(["config", "user.name", "t"], cwd=self.repo)
+        self.gx = Gitx()
+        self.base = self._commit({"src.py": "v1"}, "init")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _git(self, args, cwd=None, check=True):
+        r = subprocess.run(["git", *args], cwd=str(cwd or self.repo),
+                           capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {args}: {r.stderr}")
+        return r
+
+    def _commit(self, files, msg):
+        for name, content in files.items():
+            (self.repo / name).write_text(content)
+        self._git(["add", "-A"])
+        self._git(["commit", "-m", msg])
+        return self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+    def _set_origin(self, sha):
+        self._git(["update-ref", "refs/remotes/origin/main", sha])
+
+    def test_published_and_unpublished(self):
+        delivery = self._commit({"src.py": "v2"}, "work")
+        self._set_origin(delivery)  # 已出版：origin 含交付 commit
+        self.assertTrue(self.gx.published_on_origin(str(self.repo),
+                                                    delivery, "main"))
+        self._commit({"other.py": "x"}, "unrelated")  # 分支 ahead 来自无关提交
+        self.assertTrue(self.gx.published_on_origin(str(self.repo),
+                                                    delivery, "main"))
+        self._set_origin(self.base)  # origin 停在交付前：未出版
+        self.assertFalse(self.gx.published_on_origin(str(self.repo),
+                                                     delivery, "main"))
+
+    def test_no_tracking_ref_returns_false(self):
+        delivery = self._commit({"src.py": "v2"}, "work")
+        self.assertFalse(self.gx.published_on_origin(str(self.repo),
+                                                     delivery, "main"))
+
+
 class TestGitProcessGroup(unittest.TestCase):
     """P0-2（ag-9c4cbb）：_git 组自治（start_new_session＋超时 killpg 全组——
     孤儿孙进程不持管道挂死 communicate）＋门看门狗登记簿接线。"""

@@ -1222,13 +1222,19 @@ class TestDeliveryWatch(TestCoreHealth):
     与 worker 活性无关（done/merged/closed 也扫），拍的是派发方。"""
 
     class FakeGitx:
-        def __init__(self, ahead=0):
+        def __init__(self, ahead=0, published=True, origin_ref="o" * 40):
             self.ahead = ahead
+            self.published = published
+            self.origin_ref = origin_ref
             self.calls = []
 
         def publication(self, repo_dir, branch=None):
             self.calls.append((repo_dir, branch))
-            return {"branch": branch or "main", "ahead": self.ahead}
+            return {"branch": branch or "main", "ahead": self.ahead,
+                    "origin_ref": self.origin_ref}
+
+        def published_on_origin(self, repo_dir, commit, branch):
+            return self.published
 
     def mk_watch(self, gitx=None, ext_after=1800.0, unpub_after=3600.0):
         return Health(self.state, self.oc, self.router, self.recover, self.app,
@@ -1287,8 +1293,8 @@ class TestDeliveryWatch(TestCoreHealth):
         self.assertEqual(self.kinds().count("external-stale"), 1)
 
     def test_unpublished_escalates_and_published_prunes(self):  # Req: F110
-        gx = self.FakeGitx(ahead=3)
-        self.seed_delivered(updated_age=4000.0)  # merged>1h 且 ahead=3
+        gx = self.FakeGitx(ahead=3, published=False)  # 交付 commit 不在 origin
+        self.seed_delivered(updated_age=4000.0)  # merged>1h 且未出版
         h = self.mk_watch(gitx=gx)
         h.tick()
         self.assertIn("unpublished", self.kinds())
@@ -1296,10 +1302,37 @@ class TestDeliveryWatch(TestCoreHealth):
                   if "unpublished" in m["body"]]
         self.assertEqual(len(bodies), 1)
         self.assertIn("ahead=3", bodies[0])
-        gx.ahead = 0  # 派发方自推后：出版出账
+        self.assertIn("commit=" + "c" * 40, bodies[0])  # 交付事实随正文
+        gx.published = True  # 派发方自推后：出版出账
         h.tick()
         self.assertEqual(self.kinds().count("unpublished"), 1)
         self.assertEqual(h._unpub_esc, {})
+
+    def test_unpublished_ahead_but_commit_published_no_escalate(self):
+        # ag-6c673c 误报形态：分支 ahead 来自无关提交，交付 commit 已在 origin
+        gx = self.FakeGitx(ahead=1, published=True)
+        self.seed_delivered(updated_age=4000.0)
+        h = self.mk_watch(gitx=gx)
+        h.tick()
+        self.assertNotIn("unpublished", self.kinds())
+
+    def test_unpublished_no_origin_ref_no_escalate(self):  # Req: F110
+        gx = self.FakeGitx(ahead=0, published=False, origin_ref=None)
+        self.seed_delivered(updated_age=4000.0)  # 无跟踪 ref：出版无从证实，不拍
+        h = self.mk_watch(gitx=gx)
+        h.tick()
+        self.assertNotIn("unpublished", self.kinds())
+
+    def test_unpublished_backoff_survives_restart(self):  # 退避账本经事件面重建
+        gx = self.FakeGitx(ahead=3, published=False)
+        self.seed_delivered(updated_age=4000.0)
+        h1 = self.mk_watch(gitx=gx)
+        h1.tick()
+        self.assertEqual(self.kinds().count("unpublished"), 1)
+        h2 = self.mk_watch(gitx=gx)  # 模拟 agorad 重启：新实例同 store
+        self.assertEqual(h2._unpub_esc, {})  # 内存账已清零
+        h2.tick()  # 退避窗内（重建自 events.jsonl）：不重拍
+        self.assertEqual(self.kinds().count("unpublished"), 1)
 
     def test_unpublished_skips_external_and_pending(self):  # Req: F110
         gx = self.FakeGitx(ahead=5)
