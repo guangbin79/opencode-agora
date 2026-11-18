@@ -1438,6 +1438,129 @@ class TestGateRun(TestCoreGate):
         self.assertNotIn("pending_cancel", t)  # 不许悬挂
 
 
+class TestGateReview(TestCoreGate):
+    """Req: F114 门审：review_cmd 在案时锚申报面全免＋门亲自审＋连败解耦。"""
+
+    REVIEW = "echo review-ok"
+
+    def in_gate_review(self, streak=0):
+        self.seed(streak=streak, timeout=None)
+        self.state.set_fields("t1", review_cmd=self.REVIEW,
+                              env_base=LOCAL_BASE)
+        return self.gate.accept_done("t1", "s-w1", SHA)
+
+    def test_accept_done_skips_anchor_when_review_cmd(self):  # Req: F114
+        """门审任务无锚也受理：锚三检＋F111 链根全免——合并权威在门。"""
+        self.anchor = None  # 无锚：非门审任务此处即拒
+        self.assertEqual(self.in_gate_review(), "accepted")
+
+    def test_gate_review_green_closes_without_anchor(self):  # Req: F114
+        # 序列：F107 探针红 → env verify → 门审 → 集成 verify
+        self.runner = FakeRunner((1, "base red"), (0, "pass"),
+                                 (0, "review-ok"), (0, "pass"),
+                                 (0, "pass"), (0, "pass"))  # 二跑 env＋集成
+        self.mk_gate()
+        self.assertEqual(self.in_gate_review(), "accepted")
+        self.gx.head_shas[f"{self.env}__gate"] = SHA  # ff 直通
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("gate_reviewed", evs)
+        t = self.state.get("t1")
+        self.assertEqual(t["review_cache"]["cmd"], self.REVIEW)
+        self.assertEqual(t["review_fail_streak"], 0)
+
+    def test_gate_review_red_reopens_without_quality_streak(self):  # Req: F114
+        """评审红：reopened＋review_fail_streak 计数——质量 fail_streak 不动
+        （连败解耦：误报不烧穿 worker 三连败）。"""
+        self.runner = FakeRunner((1, "base red"), (0, "pass"),
+                                 (1, "FINDING blocker: x"))
+        self.mk_gate()
+        self.seed(streak=2)
+        self.state.set_fields("t1", review_cmd=self.REVIEW,
+                              env_base=LOCAL_BASE)
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "reopened")
+        self.assertEqual(t["review_fail_streak"], 1)
+        self.assertEqual(t["fail_streak"], 2)  # 质量连败未动
+        self.assertTrue(any("门审未通过" in m["body"]
+                            for m in self.worker_msgs()))
+
+    def test_gate_review_three_disagreements_block_and_escalate(self):  # Req: F114
+        """三轮分歧：blocked＋升级派发方（人工判读代码 vs 评审器）。"""
+        # 首轮含 F107 探针；探针结果缓存于任务行——续轮零探针只吃
+        # env verify＋门审两结果（Reopen 不清探针缓存，F107 契约）
+        self.runner = FakeRunner(
+            (1, "base red"), (0, "pass"), (1, "blocker"),
+            *[(0, "pass"), (1, "blocker")] * 2)
+        self.mk_gate()
+        self.seed(streak=0)
+        self.state.set_fields("t1", review_cmd=self.REVIEW,
+                              env_base=LOCAL_BASE)
+        for n in (1, 2, 3):
+            self.gate.accept_done("t1", "s-w1", SHA)
+            self.gate.run("t1")
+            t = self.state.get("t1")
+            if n < 3:
+                self.assertEqual(t["state"], "reopened", n)
+                self.assertEqual(t["review_fail_streak"], n)
+                self.state.set_fields("t1", state="running")  # 续轮
+            else:
+                self.assertEqual(t["state"], "blocked")
+                self.assertEqual(t["review_fail_streak"], 3)
+                self.assertTrue(any("review_disagreement" in m["body"]
+                                    for m in self.store.read_messages()
+                                    if m["to"] == "disp1"))
+
+    def test_gate_review_dead_parks_done_routes_dispatcher(self):  # Req: F114
+        """命令死（127）同 verify-dead 分类：驻留 done＋升级，不计连败。"""
+        self.runner = FakeRunner((1, "base red"), (0, "pass"),
+                                 (127, "ocr: not found"))
+        self.mk_gate()
+        self.assertEqual(self.in_gate_review(), "accepted")
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "done")  # 驻留：路由派发方
+        self.assertEqual(t.get("review_fail_streak", 0), 0)
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("review_dead", evs)
+
+    def test_gate_review_cache_skips_rerun(self):  # Req: F114
+        """缓存（cmd+HEAD 双键）：同 commit 重入门零评审开销。"""
+        self.runner = FakeRunner((1, "base red"), (0, "pass"),
+                                 (0, "review-ok"), (0, "pass"),
+                                 (0, "pass"), (0, "pass"))  # 二跑 env＋集成
+        self.mk_gate()
+        self.assertEqual(self.in_gate_review(), "accepted")
+        self.gx.head_shas[f"{self.env}__gate"] = SHA
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        # 崩溃重排同 commit：缓存命中，评审零重跑
+        self.state.set_fields("t1", state="done", in_gate=False)
+        self.gx.contains_result = False  # 复位粘滞：二跑走全链不直通补终态
+        self.gx.head_shas[f"{self.env}__gate"] = SHA
+        self.gate.run("t1")  # 重排：探针/评审双缓存命中，仅 verify 重跑
+        review_runs = sum(1 for _, c in self.runner.calls
+                          if "AGORA_REVIEW_BASE" in c)
+        self.assertEqual(review_runs, 1)  # 门审恰一次，缓存零重跑
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("gate_review_cached", evs)
+
+    def test_gate_review_env_base_missing_fail_open(self):  # Req: F114
+        self.runner = FakeRunner((0, "pass"), (0, "pass"))  # env＋集成 verify
+        self.mk_gate()
+        self.seed()
+        self.state.set_fields("t1", review_cmd=self.REVIEW)  # 无 env_base
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gx.head_shas[f"{self.env}__gate"] = SHA
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        evs = [e["event"] for e in self.store.read_events("t1")]
+        self.assertIn("review_base_unavailable", evs)
+
+
 class TestGateSupply(TestCoreGate):
     """ag-0d2daa gate env 供给：集成树依赖物化（merged 后服务侧 origin push 已于 F109 移除）。"""
 

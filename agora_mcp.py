@@ -50,6 +50,14 @@ _TOOLS = [
                                                "判别力探针（回归守卫型任务用；"
                                                "quick 自动豁免；仅 dispatcher/root"
                                                "——worker 拒，缺省继承父任务）"},
+         "review_cmd": {"type": "string",
+                        "description": "门审命令（F114）：verify 绿后由服务在任务 env "
+                                       "亲自执行（shell，env 注入 AGORA_REVIEW_BASE＝"
+                                       "任务起点 base）——rc==0 放行、rc!=0 弹回 worker "
+                                       "（独立连败，3 次分歧转 blocked 人工判读）；"
+                                       "在案时跳过 worker 锚申报面。仅 dispatcher/root，"
+                                       "worker 拒、缺省继承父任务；与 verify_cmd 同 "
+                                       "F99 卫生闸"},
          "deliverable": {"type": "string",
                           "enum": ["out_of_band", "external_branch"],  # Req: F94
                           "description": "交付契约：out_of_band＝零提交 review-only"

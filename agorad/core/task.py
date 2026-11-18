@@ -78,7 +78,8 @@ class TaskService:
                target_branch=None, verify_cmd=None, verify_pending=False,
                req_id=None, timeout=None, model=None, quick=False,
                deliverable=None, client_key=None, actor_sid=None,
-               verify_base_exempt=None):  # Req: F107
+               verify_base_exempt=None,  # Req: F107
+               review_cmd=None):  # Req: F114 门审命令（派发方/root 登记，门执行）
         sid, role = self._gate(actor_token, "task_create", None, None)
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
@@ -101,6 +102,10 @@ class TaskService:
             if verify_base_exempt is not None:  # Req: F107：显式传入即拒（含 False）
                 self._reject(tid, sid, "worker 不得设置 base-red 探针豁免旗"
                                        "（verify_base_exempt）——缺省继承父任务",
+                             ev=EV_DENIED)
+            if review_cmd is not None:  # Req: F114 门审命令与 verify 同权
+                self._reject(tid, sid, "worker 不得登记门审命令（review_cmd）"
+                                       "——主会话派发方或 root task_create 登记",
                              ev=EV_DENIED)
             if parent["verify"]["state"] == "pending":  # F46 H-1 fail-fast：探索父登记前
                 # 建子单必继承 pending 配置→dispatch 恒拒死单；登记后旗残留但配置已
@@ -126,6 +131,7 @@ class TaskService:
             model = parent.get("model")  # F55：缺省继承父任务
             deliverable = parent.get("deliverable")  # ag-af96bb②：缺省继承父任务
             verify_base_exempt = parent.get("verify_base_exempt")  # Req: F107 继承
+            review_cmd = parent.get("review_cmd")  # Req: F114 继承
         if verify_base_exempt is not None \
                 and not isinstance(verify_base_exempt, bool):
             self._reject(tid, sid, f"verify_base_exempt 须为布尔"
@@ -138,6 +144,11 @@ class TaskService:
             self._reject(tid, sid, "quick 与 verify_pending 互斥——二选一")
         if verify_cmd is not None:  # F99：卫生闸在归一/继承后、quick 解析与幂等命中前
             self._hygiene_gate(tid, sid, verify_cmd, project_dir)
+        if review_cmd is not None and not review_cmd.strip():  # Req: F114
+            self._reject(tid, sid, "review_cmd 为空——传非空命令或不传")
+        if review_cmd is not None:  # Req: F114：与 verify 同执行环境（env cwd）同卫生闸
+            self._hygiene_gate(tid, sid, review_cmd, project_dir,
+                               label="review_cmd")
         resolved = self._history_cmd(tid, sid, project_dir) if quick else None
         if verify_cmd is not None and not verify_cmd.strip():
             self._reject(tid, sid, "verify 命令为空——task_create 登记非空命令")
@@ -219,10 +230,11 @@ class TaskService:
                 x_id, x = hit
                 if ((x["goal"], self._repo_key(x["project_dir"]),
                      x["target_branch"], x.get("deliverable"), x.get("model"),
-                     x["verify"]["cmd"], bool(x.get("verify_base_exempt")))
+                     x["verify"]["cmd"], bool(x.get("verify_base_exempt")),
+                     x.get("review_cmd"))
                         != (goal, project_dir, target_branch, deliverable,
                             model, verify["cmd"],
-                            bool(verify_base_exempt))):
+                            bool(verify_base_exempt), review_cmd)):
                     self._reject(tid, sid, f"client_key {client_key!r} 已用"
                                            f"（任务 {x_id}）且载荷不同——同键"
                                            "载荷须逐字段一致")
@@ -250,6 +262,7 @@ class TaskService:
             "verify": verify, "verify_pending": bool(verify_pending),
             "quick": bool(quick),  # F65：quick 旗随行（快照/事件自然携带）
             "verify_base_exempt": bool(verify_base_exempt),  # Req: F107 旗 A
+            "review_cmd": review_cmd,  # Req: F114 门审命令（None＝协议锚路径）
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
             "root_sid": root_sid,
             "chain_depth": depth, "fail_streak": 0, "last_seen": None,
@@ -879,11 +892,12 @@ class TaskService:
         return next((f for f in self._verify_hygiene(cmd, project_dir)
                      if f["blocking"]), None)
 
-    def _hygiene_gate(self, tid, sid, cmd, project_dir):
-        """显式登记闸：blocking finding 即拒，报因含 code/fragment/hint（修复指引）。"""
+    def _hygiene_gate(self, tid, sid, cmd, project_dir, label="verify"):
+        """显式登记闸：blocking finding 即拒，报因含 code/fragment/hint（修复指引）。
+        label＝命令面名（verify/review，F114）——报因点名，指引同一份。"""
         hit = self._hygiene_block(cmd, project_dir)
         if hit is not None:
-            self._reject(tid, sid, f"verify 命令卫生未过（{hit['code']}: "
+            self._reject(tid, sid, f"{label} 命令卫生未过（{hit['code']}: "
                                    f"{hit['fragment']}）——{hit['hint']}",
                          ev=EV_VERIFY_HYGIENE_REJECTED)
 

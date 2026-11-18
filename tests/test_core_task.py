@@ -2051,6 +2051,50 @@ BASE_40 = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9"  # Req: F101 handoff 基线
 TIP_40 = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"  # Req: F101 外部新基
 
 
+class TestReviewCmdCreate(TestCoreTask):
+    """Req: F114 review_cmd 登记面：worker 拒/继承、空拒、卫生闸、幂等载荷。"""
+
+    def mk(self, **kw):
+        kw.setdefault("verify_cmd", "true")
+        return self.svc.create(kw.pop("goal", "g"), "/repo",
+                               kw.pop("after", None), self.root, **kw)
+
+    def test_root_registers_review_cmd(self):
+        tid = self.mk(review_cmd="ocr review --from $AGORA_REVIEW_BASE")
+        self.assertEqual(self.state.get(tid)["review_cmd"],
+                         "ocr review --from $AGORA_REVIEW_BASE")
+
+    def test_worker_denied_and_inherits(self):
+        parent = self.mk(review_cmd="ocr review --from $AGORA_REVIEW_BASE")
+        self.svc.dispatch(parent, self.root)
+        wtok = self.auth.token_for(self.state.get(parent)["worker_sid"])
+        with self.assertRaises(Rejected) as cm:
+            self.svc.create("g2", "/repo", None, wtok,
+                            review_cmd="echo x")
+        self.assertIn("review_cmd", str(cm.exception))
+        child = self.svc.create("g2", "/repo", None, wtok)
+        self.assertEqual(self.state.get(child)["review_cmd"],
+                         "ocr review --from $AGORA_REVIEW_BASE")  # 继承
+
+    def test_empty_review_cmd_rejected(self):
+        with self.assertRaises(Rejected) as cm:
+            self.mk(review_cmd="   ")
+        self.assertIn("review_cmd", str(cm.exception))
+
+    def test_hygiene_gate_applies(self):
+        with self.assertRaises(Rejected) as cm:
+            self.mk(review_cmd="cd /home/guangbin && ocr review")
+        self.assertIn("review_cmd", str(cm.exception))  # F99 同款绝对 cd 拒
+
+    def test_client_key_payload_includes_review_cmd(self):
+        tid = self.mk(client_key="k1", review_cmd="echo a")
+        tid2 = self.mk(client_key="k1", review_cmd="echo a")  # 全同＝幂等
+        self.assertEqual(tid2, tid)
+        with self.assertRaises(Rejected) as cm:
+            self.mk(client_key="k1", review_cmd="echo different")  # 异载荷拒
+        self.assertIn("载荷不同", str(cm.exception))
+
+
 class TestF101ExternalDispatch(TestCoreTask):
     """Req: F101 external_branch 派发定基：本地钉死支 tip 权威（外部派发方持有
     远端交付权——不 fetch 不 push，origin 在位不改变定基面）；缺支/缺钉死支

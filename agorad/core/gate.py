@@ -325,26 +325,32 @@ class Gate:
                 f"嵌套子任务未结案：{', '.join(sorted(open_children))}——"
                 "等待 result 回传，或由你取消子任务；成功/有意跳过后再 post(done)")
         # 锚检查＝合并前置（ag-084a22 A）：锚存在 ∧ 锚==done commit ∧ 评审环绿，
-        # 不满足即拒收（无条件——评审环缺失不再放行入门）——死锁驻留态不可达
-        a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
-        if a is None:
-            return self._deny_anchor(
-                tid, f"任务 {tid} 合并前置失败：锚缺失/落后（.review-loop/"
-                ".last-reviewed 缺失或不等于分支 HEAD，或 .review-base 链根"
-                "缺失——F111 双件齐全才算在锚）——跑评审环重建锚（==HEAD 且"
-                "评审环绿）后重新 post(done, commit)")
-        if a.get("head") != commit:
-            return self._deny_anchor(
-                tid, f"任务 {tid} 合并前置失败：{commit} ≠ 分支 HEAD "
-                f"{a.get('head')}——以 env 内完整 HEAD sha 重新 post(done, commit)")
-        # Req: F111 评审链根绑定任务起点：锚 base 必须等于 env_base——链根
-        # 漂移/他链混入＝评审范围未覆盖任务全量交付；env_base 缺席（升级前
-        # 在飞任务）＝判据不可确立，带痕放行（F107 同款降级口径）
-        if t.get("env_base") and a.get("base") != t["env_base"]:
-            return self._deny_anchor(
-                tid, f"任务 {tid} 合并前置失败：评审链根 {a.get('base')} ≠ "
-                     f"任务起点 {t['env_base']}——评审范围未覆盖任务全量交付，"
-                     "以任务起点为链根重跑评审环后重新 post(done, commit)")
+        # 不满足即拒收（无条件——评审环缺失不再放行入门）——死锁驻留态不可达。
+        # Req: F114 门审任务（review_cmd 在案）跳过整段锚申报面：合并权威＝
+        # 门亲自跑 review_cmd，worker 的「评审过」申报不再是被信任的输入。
+        if (t.get("review_cmd") or "").strip():
+            a = None  # F114：无锚路径——vacuous/子任务闸照常，锚三检＋链根全免
+        else:
+            a = self._read_anchor(t["env_dir"])  # 锚＝worktree 分支 HEAD 且无 blocker/high
+        if not (t.get("review_cmd") or "").strip():
+            if a is None:
+                return self._deny_anchor(
+                    tid, f"任务 {tid} 合并前置失败：锚缺失/落后（.review-loop/"
+                    ".last-reviewed 缺失或不等于分支 HEAD，或 .review-base 链根"
+                    "缺失——F111 双件齐全才算在锚）——跑评审环重建锚（==HEAD 且"
+                    "评审环绿）后重新 post(done, commit)")
+            if a.get("head") != commit:
+                return self._deny_anchor(
+                    tid, f"任务 {tid} 合并前置失败：{commit} ≠ 分支 HEAD "
+                    f"{a.get('head')}——以 env 内完整 HEAD sha 重新 post(done, commit)")
+            # Req: F111 评审链根绑定任务起点：锚 base 必须等于 env_base——链根
+            # 漂移/他链混入＝评审范围未覆盖任务全量交付；env_base 缺席（升级前
+            # 在飞任务）＝判据不可确立，带痕放行（F107 同款降级口径）
+            if t.get("env_base") and a.get("base") != t["env_base"]:
+                return self._deny_anchor(
+                    tid, f"任务 {tid} 合并前置失败：评审链根 {a.get('base')} ≠ "
+                         f"任务起点 {t['env_base']}——评审范围未覆盖任务全量交付，"
+                         "以任务起点为链根重跑评审环后重新 post(done, commit)")
         try:  # Req: F69 vacuous-done；谓词病（锚伪造 sha/目标支被删）不拦受理：
             # F109：探针只查本地支 ref（零网络）——「reopen 期间人工上游合入」
             # 不在受理时识别，由集成段幻影守卫/外部树等价逃生门兜底
@@ -359,7 +365,7 @@ class Gate:
                 "——若无需改动或活已被上游完成，post(kind=question, body=no-op "
                 "结论与证据) 申报——需派发方处置（cancel 归档/确认）；question "
                 "唤醒派发方、note 不唤醒勿用；勿空回填 done", tag="vacuous-done")
-        if not a.get("clean"):
+        if a is not None and not a.get("clean"):  # F114：门审任务 a=None 全免
             return self._deny_anchor(
                 tid, f"任务 {tid} 合并前置失败：评审环未绿——修复 blocker/high "
                 "后重新 post(done, commit)")
@@ -733,21 +739,25 @@ class Gate:
                                    f"verify 失败——修复后重新 post(done, commit)"
                                    f"\n输出尾部:\n{out[-_TAIL:]}")
                 return
-            a = self._read_anchor(env)  # 合并前锚重验：堵 accept→run 窗口 TOCTOU
-            # 锚比对对象＝rebased_from or commit（F32 裁定①）：崩溃重排的 done 任务
-            # （commit=R、锚=E）重入门用留痕 E 判过，才能走到再 rebase，不死锁。
-            if not a or a.get("head") != (t.get("rebased_from") or t.get("commit")) \
-                    or not a.get("clean") \
-                    or (t.get("env_base") and a.get("base") != t["env_base"]):
-                self._audit(tid, "review_absent_no_merge")
-                self._quality_fail(  # ag-084a22 B：自动 reopened 回 worker 自愈
-                    tid, "reopened",  # （无出边的驻留 done 态封死）
-                    "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/"
-                    "未绿/链根漂移（F111：.review-base ≠ 任务起点）——重建锚"
-                    "（.last-reviewed ==HEAD 且评审环绿且 .review-base == 任务"
-                    "起点）后重新 post(done, commit)",
-                    reason="锚缺失/落后/未绿/链根漂移")
-                return
+            if (t.get("review_cmd") or "").strip():  # Req: F114 门审路径
+                if not self._gate_review(tid, t, env, runner):
+                    return
+            else:
+                a = self._read_anchor(env)  # 合并前锚重验：堵 accept→run 窗口 TOCTOU
+                # 锚比对对象＝rebased_from or commit（F32 裁定①）：崩溃重排的 done 任务
+                # （commit=R、锚=E）重入门用留痕 E 判过，才能走到再 rebase，不死锁。
+                if not a or a.get("head") != (t.get("rebased_from") or t.get("commit")) \
+                        or not a.get("clean") \
+                        or (t.get("env_base") and a.get("base") != t["env_base"]):
+                    self._audit(tid, "review_absent_no_merge")
+                    self._quality_fail(  # ag-084a22 B：自动 reopened 回 worker 自愈
+                        tid, "reopened",  # （无出边的驻留 done 态封死）
+                        "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/"
+                        "未绿/链根漂移（F111：.review-base ≠ 任务起点）——重建锚"
+                        "（.last-reviewed ==HEAD 且评审环绿且 .review-base == 任务"
+                        "起点）后重新 post(done, commit)",
+                        reason="锚缺失/落后/未绿/链根漂移")
+                    return
             if managed:  # Req: F100 交付协议（ag-b5f2e9 一律本地权威）：集成基＝
                 # 本地钉死支 tip，主检出经 advance 守卫推进，origin 零接触
                 self._deliver_managed_local(tid, branch, env, integration,
@@ -1282,6 +1292,97 @@ class Gate:
                             "等待通知即可")
         except Exception:
             pass
+
+    def _gate_review(self, tid, t, env, runner):  # Req: F114
+        """门审：verify 绿后在任务 env 亲自跑 review_cmd——合并权威在服务，
+        worker 无「评审过」申报面。退出码契约与 verify 同构：rc==0＝绿
+        （结果缓存 cmd+HEAD 双键，幂等跳过重审）；rc!=0＝评审红——**独立
+        连败计数 review_fail_streak**（与质量 fail_streak 解耦：评审器误报
+        不烧穿 worker 三连败），弹回 worker 附输出尾；3 次分歧＝blocked＋
+        升级派发方人工判读（修代码或调 review_cmd——真代码问题与真误报
+        都不该由 worker 无限扛）。超硬顶/命令死同 verify 分类：驻留 done
+        路由派发方，不计任何连败。env_base 缺席（升级前在飞）＝评审范围
+        不可划定，带痕放行（F107 同款降级口径）。评审以 env HEAD（done
+        交付链）为准；legacy rebase 重放内容等价由集成 verify 重跑保障。"""
+        cmd = t["review_cmd"]
+        base = t.get("env_base")
+        if not base:
+            self._audit(tid, "review_base_unavailable")
+            return True
+        head = self._gitx.head(env)
+        cache = t.get("review_cache") or {}
+        if cache.get("cmd") == cmd and cache.get("commit") == head \
+                and cache.get("ok"):
+            self._audit(tid, "gate_review_cached")
+            return True
+        # 评审范围注入：AGORA_REVIEW_BASE 经 shell 前缀赋值只对本命令可见
+        # （runner 为 shell=True；登记文本保持干净，卫生闸查的是登记面）
+        self._phase(tid, "review")  # P1b 阶段审计
+        rc, out = runner(env, f"AGORA_REVIEW_BASE={base} {cmd}")
+        if rc == 124:
+            self._audit(tid, "review_overrun")
+            self._router.notify_dispatcher(
+                tid, "result",
+                f"任务 {tid} 门审超硬顶——进程组已终止（非质量败，无需 "
+                f"worker 重试）；输出尾部:\n{out[-_TAIL:]}")
+            return False
+        if _cmd_dead(rc, out):  # Req: F81/F82 同款分类：命令死≠评审红
+            self._audit(tid, "review_dead", rc=rc)
+            try:
+                self._health.escalate(
+                    KIND_VERIFY_DEAD, tid,
+                    raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}")
+            except Exception:
+                pass
+            try:
+                self._post(tid, f"门审命令自身死（exit {rc}：命令不存在/不可"
+                                "执行）——非活不达标，无需自愈重试；已升级"
+                                "派发方处置，等待通知即可")
+            except Exception:
+                pass
+            return False
+        if rc != 0:
+            self._review_fail(
+                tid, f"门审未通过——按评审发现修复后重新 post(done, commit)"
+                     f"\n输出尾部:\n{out[-_TAIL:]}")
+            return False
+        self._state.set_fields(
+            tid, review_cache={"cmd": cmd, "commit": head, "ok": True,
+                               "ran_at": time.time()},
+            review_fail_streak=0)  # 绿即复位（评审分歧是轮次态不是任务态）
+        self._audit(tid, "gate_reviewed", commit=head)
+        return True
+
+    def _review_fail(self, tid, body):  # Req: F114
+        """评审红弹回：review_fail_streak 独立计数——3 次分歧转 blocked＋
+        升级派发方（人工判读「代码问题 vs 评审器误报」），worker 不无限扛
+        评审分歧；未达阈值照常 reopened 回 worker 附发现。"""
+        t = self._state.get(tid)
+        n = (t.get("review_fail_streak") or 0) + 1
+        self._state.set_fields(tid, review_fail_streak=n)
+        if n >= 3:
+            self._state.transition(tid, "blocked")
+            self._audit(tid, "blocked", note="review_disagreement")
+            try:
+                self._health.escalate(KIND_QUALITY, tid)
+            except Exception:
+                pass
+            try:
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"任务 {tid} 门审与 worker 三轮分歧（review_disagreement）"
+                    "——已 blocked；人工判读：代码问题修代码，评审器误报调 "
+                    "review_cmd 或取消重派")
+            except Exception:
+                pass
+            try:
+                self._post(tid, body)
+            except Exception:
+                pass
+            return
+        self._state.transition(tid, "reopened")
+        self._audit(tid, "review_failed")
+        self._post(tid, body)
 
     def _base_probe(self, tid, t, target, integration, runner,
                     cmd):  # Req: F107
