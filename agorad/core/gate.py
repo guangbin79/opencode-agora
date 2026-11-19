@@ -31,8 +31,10 @@ merged/closed、non_ff 经 F110 祖先预判直接 diverged 终局、failed 终�
 
 全程 in-gate 门闩、pending-cancel 门尾原子结算、三连败 blocked 与事件审计保持
 不变。F112：门按仓分池——同仓任务经 per-repo 车道串行（交付锁本就仓级），
-跨仓任务并行进门（httpd 消费循环按 project_dir 分发车道）。core 只 import
-stdlib，依赖全构造注入。
+跨仓任务并行进门（httpd 消费循环按 project_dir 分发车道）。F116：门体全程
+再套跨进程资源闸（repo 锁＋AGORA_HOME 全局槽，access/gate_resources 经构造
+注入）——排队不占 verify/看门狗预算，waiting 投影与三类 gate_resource_* 事件
+可观测。core 只 import stdlib，依赖全构造注入。
 """
 import os
 import signal
@@ -274,7 +276,8 @@ class Gate:
                  store, runner=None, verify_timeout=300, verify_ceiling=None,
                  on_blocked=None, roster_path=None, quick_max_files=3,
                  quick_max_lines=30, clean_ignore_env="",
-                 page_writer=None, spawn_tracker=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新
+                 page_writer=None, spawn_tracker=None,
+                 resources=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新；F116 跨进程资源闸
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
@@ -284,6 +287,7 @@ class Gate:
         self._verify_timeout, self._verify_ceiling = verify_timeout, verify_ceiling
         self._quick_max_files, self._quick_max_lines = quick_max_files, quick_max_lines
         self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
+        self._resources = resources  # F116：None＝无跨进程闸（单测直构），assemble 恒注入
         # P0-1（ag-9c4cbb）：门运行期 spawn 登记簿（与 Gitx 同实例注入＝门线程
         # 内全部子进程组可被看门狗整组收杀）；killed 标记即 run() 异常路径的
         # 让位判据（activate() 每轮复位——重派重跑的门内崩不被旧轮标记误吞）
@@ -508,7 +512,8 @@ class Gate:
         队列继续下一任务。deadline 缺省 max(4×生效 verify 预算, 600s)，注入即
         测试秒级跑。shortcut: run() 卡在无子进程的纯 Python 环节（锁/死循环）时
         看门狗只留痕不能解卡——恢复需重启；生产 wedge 形态（孤儿持管道）已由
-        P0-2 从源头消灭。"""
+        P0-2 从源头消灭。F116：资源闸（repo 锁＋全局槽）在定时器起表前
+        获取——排队时间不计看门狗/verify 预算（软硬顶自获锁后起算）。"""
         try:
             t = self._state.get(tid)
         except KeyError:
@@ -527,22 +532,72 @@ class Gate:
             except Exception:
                 pass  # 审计面尽力而为：杀组解链不因留痕败而回退
 
-        self._spawns.activate()
-        timer = threading.Timer(deadline, _fire)
-        timer.daemon = True
+        res = self._acquire_resources(tid, t)  # F116：跨进程 repo 锁→全局槽
         try:
-            timer.start()
+            self._spawns.activate()
+            timer = threading.Timer(deadline, _fire)
+            timer.daemon = True
             try:
-                self.run(tid)
+                timer.start()
+                try:
+                    self.run(tid)
+                finally:
+                    timer.cancel()
+                try:
+                    if fired.is_set() and self._state.get(tid)["state"] == "done":
+                        self._overrun_final(tid, deadline)
+                except Exception:  # 终局竞窗（任务已被处置/账面 I/O 病）：留痕已在，不强写
+                    pass
             finally:
-                timer.cancel()
-            try:
-                if fired.is_set() and self._state.get(tid)["state"] == "done":
-                    self._overrun_final(tid, deadline)
-            except Exception:  # 终局竞窗（任务已被处置/账面 I/O 病）：留痕已在，不强写
-                pass
+                self._spawns.deactivate()
         finally:
-            self._spawns.deactivate()
+            self._release_resources(tid, res)
+
+    def _acquire_resources(self, tid, t):
+        """F116 跨进程资源闸：repo 锁→全局槽（恒此序，无环）。排队前先落
+        waiting 投影＋wait 事件（board 可观测），阻塞期间任务状态仍 done、
+        fail_streak 冻结；获锁即 acquire 事件＋投影翻转。闸面异常照崩走
+        httpd gate_crashed 留痕（不伪装质量败）。resources=None（单测直构）
+        ＝零闸直通。"""
+        if self._resources is None:
+            return None
+        repo, limit = t["project_dir"], self._resources.max_concurrent
+        self._state.set_gate_resource(tid, waiting=True, resource=repo,
+                                      limit=limit)
+        try:  # wait 审计入清理域：任何路径 waiting 都有翻转（不留幽灵排队）
+            self._audit(tid, "gate_resource_wait", repo=repo, limit=limit)
+            handle = self._resources.acquire(repo)
+        except BaseException:
+            self._state.set_gate_resource(
+                tid, waiting=False, resource=repo, limit=limit,
+                error="acquire_failed")
+            raise
+        self._state.set_gate_resource(
+            tid, waiting=False, resource=repo, limit=limit, slot=handle.slot,
+            acquired_at=handle.acquired_at, waited=round(handle.waited, 3))
+        try:  # 获锁观测尽力而为：败不丢 handle（调用方 finally 仍释放）
+            self._audit(tid, "gate_resource_acquire", repo=repo, limit=limit,
+                        slot=handle.slot, duration=round(handle.waited, 3))
+        except Exception:
+            pass
+        return handle
+
+    def _release_resources(self, tid, handle):
+        """F116 出队释放（finally 面）：取消/除籍/崩溃路径同款全释放——
+        flock 本就随进程死由内核回收，这里是正常路径与观测收口。"""
+        if handle is None:
+            return
+        handle.release()
+        held = time.monotonic() - (handle.acquired or time.monotonic())
+        try:  # 释放面观测尽力而为：败不掩 run() 原发异常（_fire 同口径）
+            self._state.set_gate_resource(
+                tid, waiting=False, resource=handle.repo, limit=handle.limit,
+                slot=handle.slot, acquired_at=handle.acquired_at,
+                released_at=time.time())
+            self._audit(tid, "gate_resource_release", repo=handle.repo,
+                        limit=handle.limit, duration=round(held, 3))
+        except Exception:
+            pass
 
     def _overrun_final(self, tid, deadline):
         """P0-1 overrun 终局：delivery failed(error=gate_overrun)＋done→blocked

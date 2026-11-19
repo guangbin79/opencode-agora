@@ -116,6 +116,7 @@ class State:
             r.setdefault("deliverable", None)
             r.setdefault("delivery", None)  # Req: F94 旧行无投影＝None（仅内存，不回写）
             r.setdefault("client_key", None)  # Req: F95 旧行无幂等键＝None（仅内存，不回写）
+            r.pop("gate_resource", None)  # F116 瞬态投影不落账本：渗漏旧行防御性剔除
             if "root_sid" not in r:
                 r["root_sid"] = r.get("dispatcher_sid")
             out[tid] = r
@@ -170,6 +171,15 @@ class State:
             t = self._tasks.get(tid)
             if t is not None:
                 t["last_seen"] = time.time()
+
+    def set_gate_resource(self, tid, **proj):
+        """F116 资源闸投影整块替换、只进内存（gt-a18ef6 写放大口径）：
+        排队/获锁是可重建瞬态（重启后 done 残留重排即重取重投影），
+        不随快照落盘；full_view 白名单投影 board 可观测 waiting。"""
+        with self._lock:
+            t = self._tasks.get(tid)
+            if t is not None:
+                t["gate_resource"] = proj
 
     def transition(self, tid, to, **fields):
         with self._lock:
@@ -286,4 +296,9 @@ class State:
                 "mail_read": dict(self._mail_read)}
 
     def _persist(self):
-        self._store.append_state(self._snap())  # 调用方持锁：迁移＋append 同临界区
+        snap = self._snap()
+        # F116 瞬态投影只进内存：落盘前整键剔除（_snap 全量 deepcopy 会把
+        # gate_resource 渗入账本——评审轮1锚；_normalize 同步剔除渗漏旧行）
+        for t in snap["tasks"].values():
+            t.pop("gate_resource", None)
+        self._store.append_state(snap)  # 调用方持锁：迁移＋append 同临界区

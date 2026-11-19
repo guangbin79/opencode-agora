@@ -211,7 +211,12 @@ class HttpdTest(unittest.TestCase):
                             read_anchor=lambda env: {"head": SHA,
                                                      "base": "aaa111",  # F111：链根==FakeGitx 缺省 env_head（任务起点）
                                                      "clean": True},
-                            runner=getattr(self, "gate_runner", ok_runner))
+                            runner=getattr(self, "gate_runner", ok_runner),
+                            # F116 全局槽缺省 1＝生产口径；TestGateLanes 显式
+                            # 抬高以证 F112 车道语义（跨仓并行受槽上限另测于
+                            # tests/test_gate_resource.py）
+                            gate_max_concurrent=getattr(
+                                self, "gate_max_concurrent", 1))
         self.root = self.app.auth.issue("main", "root")
         self.httpd = make_server(self.app)
         threading.Thread(target=self.httpd.serve_forever,
@@ -1333,10 +1338,14 @@ class TestAnchors(unittest.TestCase):
 
 class TestGateLanes(HttpdTest):
     """Req: F112 门按仓分池：跨仓并行（A 仓门内挂起不堵 B 仓）、
-    同仓串行（同仓两任务依 FIFO 逐序过门）。"""
+    同仓串行（同仓两任务依 FIFO 逐序过门）。
+
+    F116 起 assemble 缺省全局槽=1（跨仓并行另受 AGORA_GATE_MAX_CONCURRENT
+    上限）——本类抬高到 4 保持 F112 断言语义零回归（断言面不动）。"""
 
     def setUp(self):
         self.gate_release = threading.Event()
+        self.gate_max_concurrent = 4  # F116：给足跨仓并行槽，证车道而非证槽闸
         self.gate_calls = []
         self.block_envs = []  # 挂起名单（env_dir 前缀命中即堵）
         release, calls, block = (self.gate_release, self.gate_calls,

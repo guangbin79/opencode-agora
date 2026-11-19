@@ -19,6 +19,7 @@ if __package__ in (None, ""):  # 脚本直启（lift/T4 拉起形态）：补包
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agorad.access import anchors
+from agorad.access.gate_resources import GateResources
 from agorad.access.gitx import Gitx
 from agorad.access.oc import Oc, discover
 from agorad.access.pages import write_stalled_draft, write_task_page
@@ -144,6 +145,20 @@ def quick_limits_from_env():
     return tuple(limits)
 
 
+def gate_max_concurrent_from_env():
+    """F116 全局 gate 并行槽上限（同一 AGORA_HOME 下异仓 gate 并行数，正整数）；
+    缺省 1；坏值 fail-fast 同款文案风格（变量名＋原值可判读合法域）。"""
+    raw = os.environ.get("AGORA_GATE_MAX_CONCURRENT", "1")
+    try:
+        v = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"AGORA_GATE_MAX_CONCURRENT 须为正整数（收到 {raw!r}）") from None
+    if v <= 0:
+        raise ValueError(f"AGORA_GATE_MAX_CONCURRENT 须为正整数（收到 {raw!r}）")
+    return v
+
+
 def instance_identity(home):
     """F96 稳定实例身份：hostname + AGORA_HOME realpath 的 sha256 前 8 位——
     同机同 home 跨重启恒等、异机/异 home 互异；入 Gitx 属主化 env 命名。"""
@@ -155,7 +170,8 @@ def instance_identity(home):
 def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_anchor=None,
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
              verify_timeout=300, verify_ceiling=None, roster_path=None,
-             quick_max_files=3, quick_max_lines=30, clean_ignore_env=""):
+             quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
+             gate_max_concurrent=1):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -196,7 +212,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 quick_max_lines=quick_max_lines,
                 clean_ignore_env=clean_ignore_env,  # ag-f5aa4d 数据层豁免 env 面
                 page_writer=page_writer,  # ag-0f60fd：门段事件刷新任务页
-                spawn_tracker=spawns)  # P0-1：真 Gitx 同一登记簿（注入假 gitx 不登记）
+                spawn_tracker=spawns,  # P0-1：真 Gitx 同一登记簿（注入假 gitx 不登记）
+                resources=GateResources(home, gate_max_concurrent))  # F116 跨进程闸
     app.gate, app.health = gate, health
     return app
 
@@ -309,6 +326,7 @@ def main():
         verify_timeout = verify_timeout_from_env()
         verify_ceiling = verify_ceiling_from_env()
         quick_files, quick_lines = quick_limits_from_env()  # F65
+        gate_max = gate_max_concurrent_from_env()  # F116
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -322,7 +340,8 @@ def main():
     app = assemble(home, oc_url=oc_url, oc_password=oc_password, store=store,
                    verify_timeout=verify_timeout, verify_ceiling=verify_ceiling,
                    quick_max_files=quick_files, quick_max_lines=quick_lines,
-                   clean_ignore_env=os.environ.get("AGORA_CLEAN_IGNORE", ""))
+                   clean_ignore_env=os.environ.get("AGORA_CLEAN_IGNORE", ""),
+                   gate_max_concurrent=gate_max)
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）
