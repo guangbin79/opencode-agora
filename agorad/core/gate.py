@@ -1404,7 +1404,11 @@ class Gate:
                 error=str(error) if error is not None else None,
                 failure_kind=kind)
         except Exception:
-            self._audit(tid, "gate_artifact_write_failed", phase=phase)
+            try:  # 兜底审计自身尽力而为（OCR#2）：append_event 与 store 共享
+                # 失败域（磁盘满/权限），再抛会把 runner 已完成的执行变门级异常
+                self._audit(tid, "gate_artifact_write_failed", phase=phase)
+            except Exception:
+                pass
             return None
         try:
             self._state.set_fields(tid, gate_artifact={

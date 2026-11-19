@@ -42,7 +42,27 @@ class ArtifactStore:
         self._root = Path(root)
         self._keep = keep
         self._lock = threading.Lock()
-        self._seq = 0
+        # 重启续序（OCR#1）：不从 0 起步，防新产物排成「最旧」被自身 _prune
+        # 剪掉——任务行投影/事件/通知的 artifact= 路径随即悬空
+        self._seq = self._max_existing_seq()
+
+    def _max_existing_seq(self):
+        """扫描既有 artifact 目录尾缀取最大 seq；目录名尾缀即权威创建序。"""
+        mx = 0
+        try:
+            if not self._root.is_dir():
+                return 0
+            for tdir in self._root.iterdir():
+                if not tdir.is_dir():
+                    continue
+                for d in tdir.iterdir():
+                    if d.is_dir():
+                        s = d.name.rsplit("-", 1)[-1]
+                        if s.isdigit():
+                            mx = max(mx, int(s))
+        except OSError:
+            pass  # 扫描败按 0 起步：同秒撞名由 exist_ok=False 拒收兜底
+        return mx
 
     def record(self, tid, phase, env_dir, cmd, rc, output, started_at,
                ended_at, error=None, extra=None, failure_kind=None):
@@ -83,12 +103,14 @@ class ArtifactStore:
 
     def _prune(self, tdir):
         """keep 清理：tid 目录内 artifact 目录按尾缀 seq（全局单调，权威创建序
-        ——同秒跨 phase 时目录名字典序会乱序）留最新 N 个。"""
+        ——同秒跨 phase 时目录名字典序会乱序；数值键防 4 位补零越界后
+        "10000"<"9999" 错序，OCR#3）留最新 N 个。"""
         try:
             dirs = [d for d in tdir.iterdir() if d.is_dir()]
         except OSError:
             return
-        dirs.sort(key=lambda d: d.name.rsplit("-", 1)[-1])
+        dirs.sort(key=lambda d: int(d.name.rsplit("-", 1)[-1])
+                  if d.name.rsplit("-", 1)[-1].isdigit() else -1)
         for old in dirs[:max(0, len(dirs) - self._keep)]:
             try:
                 shutil.rmtree(old)

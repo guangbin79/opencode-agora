@@ -90,6 +90,33 @@ class TestArtifactStore(unittest.TestCase):
                 store.record(bad, "verify", "/e", "c", 0, "", 1.0, 2.0)
         self.assertFalse(self.root.exists())  # 非法 tid 零落盘（防路径逃逸）
 
+    def test_seq_seeded_on_restart(self):  # Req: F122 OCR#1
+        """重启续序：既有目录尾缀 seq 续序——新产物不被自身 _prune 当「最旧」
+        剪掉（0 起步时 0001 会排在高 seq 旧产物之前，投影/通知路径悬空）。"""
+        tdir = self.root / "ag-t1"
+        tdir.mkdir(parents=True)
+        for i in (1, 50):  # 旧产物尾缀 0001/0050
+            (tdir / f"20260101T0000{i:02d}-verify-{i:04d}").mkdir()
+        store = ArtifactStore(self.root, keep=2)  # 扫描续序→新目录 seq 0051
+        art = store.record("ag-t1", "verify", "/e", "c", 0, "new", 1.0, 2.0)
+        seqs = sorted(d.name.rsplit("-", 1)[-1] for d in tdir.iterdir())
+        self.assertEqual(seqs, ["0050", "0051"])  # 剪 0001，新产物在案
+        self.assertTrue((Path(art["path"]) / "output.log")
+                        .read_text(encoding="utf-8") == "new")
+
+    def test_prune_orders_seq_numerically(self):  # Req: F122 OCR#3
+        """排序键数值化：4 位补零越界后 "10000" 字典序小于 "9999"——字典序
+        会删新留旧；数值键恒留最新。"""
+        tdir = self.root / "ag-t1"
+        tdir.mkdir(parents=True)
+        (tdir / "20260101T000000-verify-9999").mkdir()
+        (tdir / "20260101T000001-verify-10000").mkdir()
+        store = ArtifactStore(self.root, keep=2)  # 续序→新目录 seq 10001
+        art = store.record("ag-t1", "verify", "/e", "c", 0, "new", 1.0, 2.0)
+        seqs = sorted(d.name.rsplit("-", 1)[-1] for d in tdir.iterdir())
+        self.assertEqual(seqs, ["10000", "10001"])  # 字典序会留 9999 剪新
+        self.assertTrue(Path(art["path"]).is_dir())
+
 
 class TestClassifyFailure(unittest.TestCase):
     """纯分型单源（gate.py 与 _cmd_dead 同居——core 禁兄弟 import）。"""
