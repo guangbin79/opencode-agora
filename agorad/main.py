@@ -180,10 +180,11 @@ _VERIFY_PROFILE_FIELDS = ("timeout", "note")
 
 def load_verify_profiles(home):
     """Req: F126 项目级 verify 预算画像：$home/.agora/verify-profiles.json →
-    {canonical 项目根: {timeout, note?}}；缺文件/坏字节＝空画像；
-    JSON/schema 非法 raise ValueError（报因含文件路径/key/字段名与原因）；
-    权限过宽 stderr WARNING 不阻断（不含密钥）。key realpath 归一、重复归一
-    拒；timeout 与 task_create.timeout 同域（task._bad_timeout 同判）。"""
+    {canonical 项目根: {timeout, note?}}；缺文件/坏字节＝空画像；读失败
+    （EACCES/EISDIR 等）与 JSON/schema 非法 raise ValueError（报因含文件
+    路径/key/字段名与原因）；权限过宽 stderr WARNING 不阻断（不含密钥）。
+    key realpath 归一、重复归一拒；timeout 与 task_create.timeout 同域
+    （task._bad_timeout 同判）。"""
     path = Path(home) / ".agora" / "verify-profiles.json"
     try:
         raw = path.read_text(encoding="utf-8")
