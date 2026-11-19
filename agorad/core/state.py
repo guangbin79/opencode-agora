@@ -116,6 +116,7 @@ class State:
             r.setdefault("deliverable", None)
             r.setdefault("delivery", None)  # Req: F94 旧行无投影＝None（仅内存，不回写）
             r.setdefault("client_key", None)  # Req: F95 旧行无幂等键＝None（仅内存，不回写）
+            r.setdefault("waiting_on", None)  # Req: F124 旧行无受控等待＝None
             r.pop("gate_resource", None)  # F116 瞬态投影不落账本：渗漏旧行防御性剔除
             if "root_sid" not in r:
                 r["root_sid"] = r.get("dispatcher_sid")

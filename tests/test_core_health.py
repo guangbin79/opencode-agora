@@ -1367,3 +1367,31 @@ class TestDeliveryWatch(TestCoreHealth):
         h = self.mk_watch(gitx=SickGitx())
         h.tick()  # 投影病本轮免判，不拍不炸
         self.assertNotIn("unpublished", self.kinds())
+
+
+class TestWaitingStallExempt(TestCoreHealth):
+    """Req: F124 受控等待 stalled 免判（health 边沿）＋依赖终态 tick 解析。"""
+
+    def escalates(self):
+        return [m for m in self.main_msgs() if m["kind"] == "escalate"]
+
+    def test_waiting_task_skips_stalled_then_recovers_after_resolve(self):  # Req: F124
+        self.seed("t-dep", worker="s-dep")
+        self.seed("t-a", worker="s-a")
+        old = time.time() - 3000  # 远超 _STALE_AFTER
+        self.state.set_fields("t-a", created=old)  # 基线久无活动
+        self.state.set_fields("t-a", waiting_on="t-dep")
+        self.oc.liveness.update({"s-a": True, "s-dep": True})
+        self.health.tick()  # 依赖未终态：不解析、不拍僵、不注自检
+        self.assertEqual(self.escalates(), [])
+        self.assertEqual(self.oc.inject_calls, [])
+        self.assertEqual(self.state.get("t-a")["waiting_on"], "t-dep")
+        # 依赖 merged → tick 解除等待：同一轮恢复活性口径，超龄基线即回候选拍僵
+        self.state.transition("t-dep", "done", commit="c" * 40)
+        self.state.transition("t-dep", "merged")
+        self.health.tick()
+        self.assertIsNone(self.state.get("t-a")["waiting_on"])
+        stalled = [e for e in self.escalates() if "失控[stalled]" in e["body"]]
+        self.assertEqual(len(stalled), 1)  # 解除后无活动：重新进候选拍僵
+
+

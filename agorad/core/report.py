@@ -185,8 +185,8 @@ def full_view(snap, store):
     """
     fields = ("state", "title", "worker_sid", "dispatcher_sid", "last_seen",
               "created", "project_dir", "in_gate",
-              "model", "usage", "delivery",
-              "review_fail_streak", "gate_resource", "gate_artifact")  # in_gate＝F54 验证中间态投影；model＝F55 派发决策投影；review_fail_streak＝F114 门审分歧计数；gate_resource＝F116 资源闸 waiting/limit 投影（内存态）；gate_artifact＝F122 最新执行产物投影（path/phase/rc/failure_kind/duration_s/bytes）；
+              "model", "usage", "delivery", "waiting_on",
+              "review_fail_streak", "gate_resource", "gate_artifact")  # in_gate＝F54 验证中间态投影；model＝F55 派发决策投影；waiting_on＝Req: F124 受控等待投影；review_fail_streak＝F114 门审分歧计数；gate_resource＝F116 资源闸 waiting/limit 投影（内存态）；gate_artifact＝F122 最新执行产物投影（path/phase/rc/failure_kind/duration_s/bytes）；
     # usage＝F57 经济性投影（行内 dict 原样带，缺席行不投影）；
     # delivery＝Req: F101 外部交付观测投影（awaiting_external/commit/base/attempt）
     raw_events = store.read_events()
@@ -255,6 +255,10 @@ def stale_candidates(snap, now, base=None):
     在飞口径状态（_STALE_STATES）且 now-_stale_baseline(t)>_STALE_AFTER，
     基线＝max(last_seen or created, env 文件活性)；health tick 构造注入复用同一口径。
     base＝doctor_view 预计算基线 map（评审环 round1：免同请求二遍全树 walk），缺省现算。
+    Req: F124 受控等待免判单一过滤点：waiting_on 非空即剔出候选（health
+    stalled 免拍、doctor/草稿候选、stalled 重派同口径共用本函数，不另建
+    第二套免判——test_task_waiting 的 stale 免判锚注明）；依赖终态由
+    Health.tick 解析清除，解除后自动恢复常规候选口径。
     """
     # P1b（ag-b49329）：done＋非门内＋他任务占门＝串行门排队（queued），不作
     # 候选——排队等待是正常态，旧口径 20min 必假拍；门闲时 done 滞留仍候选
@@ -267,7 +271,8 @@ def stale_candidates(snap, now, base=None):
                     for x in snap["tasks"].values())
     cand = []
     for tid, t in snap["tasks"].items():
-        if t["state"] in _STALE_STATES and not t.get("in_gate"):
+        if (t["state"] in _STALE_STATES and not t.get("in_gate")
+                and not t.get("waiting_on")):  # Req: F124 单一免判过滤点
             if gate_busy and t["state"] == "done":
                 continue
             b = base.get(tid) if base is not None else None

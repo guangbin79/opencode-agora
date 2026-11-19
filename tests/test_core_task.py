@@ -2384,5 +2384,28 @@ class TestTaskDeliver(TestCoreTask):
         self.assertEqual(self.gitx.removed, [])  # env 待门尾
 
 
+class TestTaskWaitCycle(TestCoreTask):
+    """Req: F124 等待边组环：与既有 after/waiting_on 组合成环拒绝并报路径。"""
+
+    def test_wait_cycle_with_after_edge_rejected_with_path(self):  # Req: F124
+        self.seed("t-a", worker="w-a")
+        self.seed("t-b", worker="w-b", state="running")
+        self.state.set_fields("t-b", after="t-a")  # B after 依赖 A
+        with self.assertRaises(Rejected) as c:  # A waiting_on B ＋ B after A＝环
+            self.svc.wait("t-a", self.root, "t-b")
+        self.assertIn("t-a → t-b → t-a", str(c.exception))
+        self.assertIsNone(self.state.get("t-a").get("waiting_on"))
+
+    def test_wait_cycle_over_waiting_chain_rejected(self):  # Req: F124
+        self.seed("t-a", worker="w-a")
+        self.seed("t-b", worker="w-b")
+        self.seed("t-c", worker="w-c")
+        self.state.set_fields("t-a", waiting_on="t-b")
+        self.state.set_fields("t-b", waiting_on="t-c")
+        with self.assertRaises(Rejected):  # C 等 A 闭合成环（纯 waiting 链）
+            self.svc.wait("t-c", self.root, "t-a")
+        self.assertIsNone(self.state.get("t-c").get("waiting_on"))
+
+
 if __name__ == "__main__":
     unittest.main()

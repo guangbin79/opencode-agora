@@ -138,7 +138,7 @@ class TestHandshakeAndList(McpShellTest):
 
     def test_tools_list_exactly_11_matching_httpd_routes(self):  # Req: F2
         names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
-        self.assertEqual(len(names), 15)  # 14 服务端 + 1 壳层本地 sleep（ag-d68faf 增 reverify）
+        self.assertEqual(len(names), 16)  # 15 服务端 + 1 壳层本地 sleep（Req: F124 增 task_wait）
         self.assertEqual(set(names) - {"sleep"}, set(_TOOLS))  # 服务端五族与 httpd 同集；sleep＝壳层本地
         for t in self.rpc("tools/list")["result"]["tools"]:
             self.assertTrue(t.get("description"))
@@ -434,6 +434,42 @@ class TestTaskDeliverMcp(McpShellTest):
                             "outcome": "delivered", "commit": "e" * 40})
         self.assertEqual(r["error"]["code"], agora_mcp.ERROR_CODES[403])
         self.assertIn("过期", r["error"]["message"])
+
+
+class TestTaskWaitMcp(McpShellTest):
+    """Req: F124 task_wait MCP 面：schema 契约＋全链透传＋worker 拒。"""
+
+    def make_running(self):
+        tid = self.result_of(self.call_tool(
+            "task_create", {"_token": self.root, "goal": "g",
+                            "project_dir": "/repo", "verify_cmd": "true"}))["task"]
+        self.call_tool("task_dispatch", {"_token": self.root, "task": tid})
+        wtok = self.app.auth.token_for(self.app.state.get(tid)["worker_sid"])
+        self.call_tool("post", {"_token": wtok, "task": tid,
+                                "kind": "note", "body": "开工"})
+        self.assertEqual(self.app.state.get(tid)["state"], "running")
+        return tid
+
+    def test_schema_contract(self):  # Req: F124
+        schema = {t["name"]: t for t in
+                  self.rpc("tools/list")["result"]["tools"]}
+        props = schema["task_wait"]["inputSchema"]["properties"]
+        self.assertEqual(props["wait_on"]["type"], "string")
+        self.assertEqual(schema["task_wait"]["inputSchema"]["required"],
+                         ["task"])
+
+    def test_full_chain_and_worker_rejected(self):  # Req: F124
+        dep = self.make_running()
+        tid = self.make_running()
+        r = self.result_of(self.call_tool(
+            "task_wait", {"_token": self.root, "task": tid, "wait_on": dep}))
+        self.assertEqual(r, {"ok": True, "waiting_on": dep})
+        self.assertEqual(self.app.state.get(tid)["waiting_on"], dep)
+        wtok = self.app.auth.token_for(self.app.state.get(tid)["worker_sid"])
+        resp = self.call_tool("task_wait",
+                              {"_token": wtok, "task": tid, "wait_on": dep})
+        self.assertEqual(resp["error"]["code"],
+                         agora_mcp.ERROR_CODES[403])  # 403→-32003 透传
 
 
 if __name__ == "__main__":

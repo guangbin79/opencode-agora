@@ -164,7 +164,8 @@ class Auth:
             return tool in WORKER_TOOLS
         if role == "dispatcher":
             if tool in ("task_update", "task_cancel", "task_deliver",
-                        "reverify"):  # Req: F101 外部交付确认；ag-d68faf 重排
+                        "reverify",
+                        "task_wait"):  # Req: F124 受控等待（worker 全局拒——需等待经 post(question) 请派发方）
                 return state is not None
             return tool in DISPATCHER_TOOLS
         return False

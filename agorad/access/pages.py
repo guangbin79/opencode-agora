@@ -70,6 +70,9 @@ def _relations(tid, snap, tasks, events) -> str:
                   if t.get("dispatcher_sid") == snap["worker_sid"]]
     if snap.get("after"):
         lines.append(f"- after: {snap['after']}")
+    if snap.get("waiting_on"):  # Req: F124 受控等待＋依赖状态（免查页即知卡点）
+        dep = tasks.get(snap["waiting_on"]) or {}
+        lines.append(f"- waiting_on: {snap['waiting_on']} {dep.get('state', '')}".rstrip())
     succ = sorted(k for k, t in tasks.items() if t.get("after") == tid)
     if succ:
         lines.append("- 后继: " + " ".join(succ))

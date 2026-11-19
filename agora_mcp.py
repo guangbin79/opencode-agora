@@ -3,7 +3,7 @@
 
 独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
 stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
-15 工具（14 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
+16 工具（15 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
 X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 `$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
 错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
@@ -137,6 +137,17 @@ _TOOLS = [
                                         "换命令后重跑门；全局 worker 角色永拒，ag-d68faf）",
      "inputSchema": {"type": "object", "properties": {"task": _TID},
                      "required": ["task"]}},
+    {"name": "task_wait", "description": "受控等待登记（Req: F124）：运行中任务登记等待"
+                                         "另一任务（任务派发方/root；worker 拒——worker 需"
+                                         "等待经 post(kind=question) 请派发方）；与 after 分工："
+                                         "after＝建单前派发阻塞依赖，task_wait＝运行中受控等待；"
+                                         "等待期间 health stalled 免判，依赖终态（merged/closed/"
+                                         "cancelled/blocked）由 health tick 自动清除并通知双方",
+     "inputSchema": {"type": "object", "properties": {
+         "task": _TID,
+         "wait_on": {"type": "string",
+                     "description": "依赖任务 id；空串/null/缺省＝清除等待（人工恢复）"}},
+         "required": ["task"]}},
     {"name": "post", "description": "链边发消息（方向服务按角色定）",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string",

@@ -150,6 +150,7 @@ class Health:
         """F75 错址修复扫描先行（启动＋每轮双触发），再探每个活动任务的直接
         下跳：死→自愈/上报；边沿判僵拍人＋F70 worker 自检提示，不处置。"""
         self.repair_dispatcher_routes()
+        self._wait_scan()  # Req: F124 受控等待解析先行——快照在解析后取（解除即恢复活性口径）
         tasks = self._state.snapshot()["tasks"]
         oc_down = False
         busy = set()  # updated>idle＝回合进行中：僵态本轮免判（doctor 口径减 busy 免决）
@@ -179,6 +180,30 @@ class Health:
         if not oc_down:
             self._stale_scan(tasks, busy)
         self._delivery_watch(tasks)  # Req: F110 交付终局观测（与 oc 活性无关）
+
+    def _wait_scan(self):
+        """Req: F124 受控等待解析：幂等扫描 waiting_on 任务（账本侧事实，
+        与 oc 活性无关）——依赖进入 merged/closed/cancelled/blocked 任一
+        终态即清 waiting_on＋审计 wait_resolved（附 dependency_state）＋
+        双通知（worker process/dispatcher result，Router.notify_wait_resolved
+        与 task 域登记即解析同源）。随既有 tick 驱动，不新建轮询线程；
+        解析后同轮判僵即恢复常规活性口径（等待时长不伪造 last_seen）。"""
+        for tid, t in self._state.snapshot()["tasks"].items():
+            dep = t.get("waiting_on")
+            if not dep:
+                continue
+            try:
+                dep_state = self._state.get(dep)["state"]
+            except KeyError:
+                continue  # 依赖不在册（task_wait 验存在，账面不可能）：免判
+            if dep_state in ("merged", "closed", "cancelled", "blocked"):
+                self._state.set_fields(tid, waiting_on=None)
+                self._store.append_event(
+                    {"ts": time.time(), "actor": "health",
+                     "event": "wait_resolved", "task": tid,
+                     "dependency": dep,
+                     "note": f"dependency_state={dep_state}"})
+                self._router.notify_wait_resolved(tid, dep, dep_state)
 
     def _stale_scan(self, tasks, busy):
         """边沿判僵（F5 决策记录 2026-10-28）＋重复升级退避（ag-0f537d）。

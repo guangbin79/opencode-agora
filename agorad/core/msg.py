@@ -79,6 +79,24 @@ class Router:
             raise NotChainEdge(f"{tid}: dispatcher 未登记")
         return self._deliver("agorad", to_sid, tid, kind, body)
 
+    def notify_wait_resolved(self, tid, dep_tid, dep_state):
+        """Req: F124 受控等待解除双通知（task 域登记即解析与 health tick
+        解析共用）：等待任务 worker 注入 process 通知（依赖已结束及结果，
+        可继续执行或按裁定处置——merged/closed＝成功；cancelled/blocked＝
+        需处置）＋dispatcher 一条简短 result。通知面尽力而为（F54 口径），
+        不抛、不阻塞解析面。"""
+        try:
+            t = self._state.get(tid)
+            verdict = ("成功——可继续执行" if dep_state in ("merged", "closed")
+                       else "未成功——需处置（按裁定继续或取消）")
+            text = (f"受控等待解除：任务 {tid} 等待的依赖 {dep_tid} 已结束"
+                    f"（{dep_state}，{verdict}）")
+            if t.get("worker_sid"):
+                self.post(t["dispatcher_sid"], ("down", tid), "process", text)
+            self.notify_dispatcher(tid, "result", text)
+        except Exception:
+            pass
+
     def notify_transition(self, tid, to, detail="", body=None):
         """生命周期迁移→dispatcher 实时单行（ag-acae3b）：终态（merged/closed/
         blocked/cancelled）与 reopened 拒因摘要。kind=result 走弹通道直投——

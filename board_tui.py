@@ -188,7 +188,9 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
                 f"@{(d.get('commit') or '')[:7]}" if d.get("commit") else "",
                 f"←{(d.get('base') or '')[:7]}" if d.get("base") else "",
                 f"#{d.get('attempt')}" if d.get("attempt") else ""]))
-        note = " ".join(esc.get(tid, [])) or handoff  # 升级标记优先，无则 handoff 事实
+        # Req: F124 受控等待入 note 列（状态列定宽 13 放不下 tid）；升级标记优先
+        wait = f"wait:{t['waiting_on']}" if t.get("waiting_on") else ""
+        note = " ".join(esc.get(tid, [])) or handoff or wait
         out.append(Row("task", tid, depth[tid], state, t.get("title", ""),
                        t.get("worker_sid"), rel_time(t.get("last_seen"), now),
                        note, _domain(t["state"]),

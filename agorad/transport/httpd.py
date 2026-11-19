@@ -1,4 +1,4 @@
-"""入向 JSON 口（B4）：14 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
+"""入向 JSON 口（B4）：15 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
 牌签发面）＋/view＋/health；单线程串行＋后台门队列。
 
 门队列消费经 gate.run_guarded（P0-1 看门狗，ag-9c4cbb）：门级硬顶到点杀本门
@@ -28,9 +28,9 @@ from agorad.core.task import Rejected
 from agorad.core.verify_hygiene import find_verify_hygiene_issues
 
 _TOOLS = frozenset({"task_create", "task_dispatch", "task_update", "task_cancel",
-                    "task_deliver", "post", "check_mail", "board", "doctor",
-                    "repo_board", "wiki_read", "wiki_write", "enforce",
-                    "reverify"})  # Req: F101 task_deliver；ag-d68faf reverify
+                    "task_deliver", "task_wait", "post", "check_mail", "board",
+                    "doctor", "repo_board", "wiki_read", "wiki_write", "enforce",
+                    "reverify"})  # Req: F101 task_deliver；ag-d68faf reverify；Req: F124 task_wait
 _POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
                "peer")
 _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
@@ -51,6 +51,7 @@ _STRING_FIELDS = {
     "task_cancel": ("task",),
     "task_deliver": ("task", "outcome", "commit", "base", "reason"),  # Req: F101
     "reverify": ("task",),
+    "task_wait": ("task",),  # Req: F124（wait_on 可 null＝清除，不入公共字符串面）
     "post": ("task", "kind", "body"),
     "board": ("task", "view"),
     "repo_board": ("repo",),
@@ -230,6 +231,13 @@ class _Handler(BaseHTTPRequestHandler):
             if r.get("requeued"):
                 self.gate_q.put(body["task"])  # 与 task_deliver non_ff 同款投门队列
             return r
+        if name == "task_wait":  # Req: F124 受控等待登记/清除
+            wo = body.get("wait_on")
+            if wo is None:
+                wo = ""  # null/缺省＝清除等待（人工恢复）
+            if not isinstance(wo, str):
+                raise ValueError("wait_on 须为字符串或 null")
+            return app.task.wait(body["task"], token, wo, actor_sid=sid)
         if name == "post":
             return self._post(sid, role, body)
         if name == "check_mail":

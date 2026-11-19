@@ -33,6 +33,10 @@ EV_DENIED = "auth_denied"
 EV_REJECTED = "dispatch_rejected"
 EV_REJECTED_VERIFY = "dispatch_rejected_verify_missing"
 EV_VERIFY_HYGIENE_REJECTED = "verify_hygiene_rejected"  # F99 卫生闸专属审计行
+EV_WAIT_SET = "wait_set"        # Req: F124 受控等待登记
+EV_WAIT_CLEARED = "wait_cleared"  # Req: F124 受控等待清除
+EV_WAIT_RESOLVED = "wait_resolved"  # Req: F124 依赖终态解析（登记即解析/tick 解析）
+_WAIT_DONE = {"merged", "closed", "cancelled", "blocked"}  # Req: F124 解析终态集（core 禁兄弟 import 故本地字面量，health 同款）
 
 
 def _bad_timeout(v):
@@ -260,6 +264,7 @@ class TaskService:
             "delivery": delivery,  # Req: F94 恒在键，out_of_band/旧行＝None
             "env_dir": None, "after": after,
             "verify": verify, "verify_pending": bool(verify_pending),
+            "waiting_on": None,  # Req: F124 受控等待（运行态元数据，非状态机）
             "quick": bool(quick),  # F65：quick 旗随行（快照/事件自然携带）
             "verify_base_exempt": bool(verify_base_exempt),  # Req: F107 旗 A
             "review_cmd": review_cmd,  # Req: F114 门审命令（None＝协议锚路径）
@@ -692,6 +697,79 @@ class TaskService:
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": "reverify", "task": tid})
         return {"ok": True, "requeued": True}
+
+    # ---- Req: F124 受控等待登记（task_wait） ----
+
+    def wait(self, tid, actor_token, wait_on, actor_sid=None):
+        """运行中任务受控等待登记/清除：waiting_on＝单依赖 tid 或 None
+        （运行态元数据，不改状态机、不新建 state）。
+
+        仅 root/本任务 dispatcher（worker 全局拒——worker 需等待经
+        post(kind=question) 请派发方）；wait_on 空串/null＝清除（人工恢复）。
+        依赖须存在且非自身；等待边不得与既有 after/waiting_on 组合成环
+        （沿双边下钻，报路径）；目标任务当前 state 须 running（done/
+        in_gate/终态拒）。依赖已终态（merged/closed/cancelled/blocked）时
+        立即 resolved——不落无效等待（无先设后清可见状态），双通知经
+        Router.notify_wait_resolved；运行期解析扫描归 Health.tick
+        （单一事实源，不新建轮询线程）。
+        """
+        t = self._state.get(tid)
+        sid, _ = self._gate(actor_token, "task_wait", tid, t,
+                            owner=t.get("dispatcher_sid"))
+        sid = actor_sid or sid  # 归属记对齐调用 sid（同建单/派发口径）
+        if t["state"] != "running":
+            self._reject(tid, sid, f"任务 {tid} 当前 {t['state']}——受控等待"
+                                   " 仅 running 任务可登记（不改状态机）")
+        if not wait_on:  # 空串/null＝清除
+            self._state.set_fields(tid, waiting_on=None)
+            self._store.append_event({"ts": time.time(), "actor": sid,
+                                      "event": EV_WAIT_CLEARED, "task": tid})
+            self._pages(self._store.home, tid, self._state.get(tid))
+            return {"ok": True, "waiting_on": None}
+        if wait_on == tid:
+            self._reject(tid, sid, "wait_on 不得为任务自身")
+        try:
+            dep = self._state.get(wait_on)
+        except KeyError:
+            self._reject(tid, sid, f"依赖任务 {wait_on} 不存在")
+        if dep["state"] in _WAIT_DONE:
+            # 登记时依赖已终态：立即 resolved，不制造一次无效等待
+            self._store.append_event({"ts": time.time(), "actor": sid,
+                                      "event": EV_WAIT_RESOLVED, "task": tid,
+                                      "dependency": wait_on,
+                                      "note": f"dependency_state={dep['state']}"})
+            self._router.notify_wait_resolved(tid, wait_on, dep["state"])
+            return {"ok": True, "resolved": True,
+                    "dependency_state": dep["state"]}
+        self._wait_cycle(tid, wait_on, sid)
+        self._state.set_fields(tid, waiting_on=wait_on)
+        self._store.append_event({"ts": time.time(), "actor": sid,
+                                  "event": EV_WAIT_SET, "task": tid,
+                                  "dependency": wait_on})
+        self._pages(self._store.home, tid, self._state.get(tid))
+        return {"ok": True, "waiting_on": wait_on}
+
+    def _wait_cycle(self, tid, wait_on, sid):
+        """等待边组环检测（含 after 链与 waiting_on 链）：自新边 wait_on 起
+        沿每节点 waiting_on+after 双边下钻，回到 tid 即成环报路径（显式栈
+        防深链递归引爆，同 W-2 dispatch 口径）。"""
+        tasks = self._state.snapshot()["tasks"]
+        seen = {tid}
+        stack = [(wait_on, [tid])]
+        while stack:
+            cur, path = stack.pop()
+            if cur == tid:
+                self._reject(tid, sid, f"wait: 依赖成环（"
+                             + " → ".join(path + [cur])
+                             + "）——修正等待/前驱后重试")
+            if cur in seen:
+                continue  # 已展开节点不再下钻（防旧环/共享链重走）
+            seen.add(cur)
+            row = tasks.get(cur) or {}
+            for nxt in (row.get("waiting_on"), row.get("after")):
+                if nxt:
+                    stack.append((nxt, path + [cur]))
+
 
     # ---- Req: F101 外部交付确认（task_deliver：dispatcher 归属/root 专用） ----
 

@@ -503,7 +503,8 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(sorted(r["tasks"][tid]),
                          ["created", "delivery", "dispatcher_sid", "last_seen",
                           "model", "project_dir", "state", "title",
-                          "worker_sid"])  # F55：model 恒在键，随白名单投影；delivery＝Req: F101
+                          "waiting_on",
+                          "worker_sid"])  # F55：model 恒在键，随白名单投影；delivery＝Req: F101；waiting_on＝Req: F124
         self.assertTrue(all(e.get("event") == "escalate" for e in r["events"]))
         st, top = call(self.port, "POST", "/board", {}, self.root)
         self.assertEqual(st, 200)
@@ -1854,6 +1855,64 @@ class TestF101ExternalChain(HttpdTest):
                      {"task": tid, "commit": SHA}, self.root)
         self.assertEqual(st, 400)  # 缺 outcome
         self.assertIn("outcome", r["error"])
+
+
+class TestTaskWaitHttp(HttpdTest):
+    """Req: F124 task_wait HTTP 面：登记/清除全链＋权限＋坏参数＋投影。"""
+
+    def running_task(self):
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        st, _ = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "note", "body": "开工"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(self.app.state.get(tid)["state"], "running")
+        return tid
+
+    def test_set_clear_and_projection(self):  # Req: F124
+        dep = self.running_task()
+        tid = self.running_task()
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": tid, "wait_on": dep}, self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(r, {"ok": True, "waiting_on": dep})
+        t = self.app.state.get(tid)
+        self.assertEqual(t["state"], "running")  # 不改状态机
+        self.assertEqual(t["waiting_on"], dep)
+        st, r = call(self.port, "POST", "/board", {"view": "full"}, self.root)
+        self.assertEqual(r["tasks"][tid]["waiting_on"], dep)  # full_view 投影
+        page = (self.app.store.home / "wiki" / "tasks" / f"{tid}.md"
+                ).read_text(encoding="utf-8")
+        self.assertIn(f"waiting_on: {dep}", page)  # 任务页（state 渲染面）
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": tid, "wait_on": None}, self.root)
+        self.assertEqual(st, 200)  # null＝清除
+        self.assertIsNone(self.app.state.get(tid)["waiting_on"])
+
+    def test_worker_rejected_and_bad_params(self):  # Req: F124
+        dep = self.running_task()
+        tid = self.running_task()
+        wtok = self.app.auth.token_for(self.app.state.get(tid)["worker_sid"])
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": tid, "wait_on": dep}, wtok)
+        self.assertEqual(st, 403)  # worker 全局拒
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": tid, "wait_on": 123}, self.root)
+        self.assertEqual(st, 400)  # 坏类型
+        self.assertIn("wait_on", r["error"])
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": "", "wait_on": dep}, self.root)
+        self.assertEqual(st, 404)  # 空 task
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"wait_on": dep}, self.root)
+        self.assertEqual(st, 400)  # 缺 task
+        self.assertIn("task", r["error"])
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": tid, "wait_on": tid}, self.root)
+        self.assertEqual(st, 403)  # 自身：域服务拒
+        st, r = call(self.port, "POST", "/task_wait",
+                     {"task": dep, "wait_on": "ag-nope"}, self.root)
+        self.assertEqual(st, 403)  # 依赖不存在：域服务拒
 
 
 if __name__ == "__main__":

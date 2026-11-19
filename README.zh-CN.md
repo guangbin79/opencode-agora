@@ -85,7 +85,7 @@ agora-install
 
 任务生命周期：`创建 → 派发 → worker 干活 → verify（服务真跑）→ 自动合并（ff-only）→ 关闭`
 
-装好后，你的会话获得两个 skill（agora-dispatch / agora-ops）与 14 个 MCP 工具。没有后台规划器：与你对话的模型**就是**编排者——建单、`after:` 链、取消、失控应答，全部是模型基于对话上下文的实时决策。agorad 只做状态权威：verify 执行者、合并门、消息路由、审计账本。
+装好后，你的会话获得两个 skill（agora-dispatch / agora-ops）与 15 个 MCP 工具。没有后台规划器：与你对话的模型**就是**编排者——建单、`after:` 链、取消、失控应答，全部是模型基于对话上下文的实时决策。agorad 只做状态权威：verify 执行者、合并门、消息路由、审计账本。
 
 ## 两道质量闸
 
@@ -130,6 +130,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 - **验证过的自治**——服务真跑测试＋评审锚绿才自动合并，且合并前重验锚
 - **强制隔离**——插件级闸拦截无任务凭据的 git 仓写入；worker 碰不到你的主检出。
 - **跨仓与嵌套编排**——`after:` 依赖链；worker 可创建并管理自己的子任务，结果回传后才允许父任务完成；链深（3）与并发（6）硬上限，叶子层 worker 无嵌套派发权（F41）
+- **运行中任务受控等待**——与 `after:` 分工：after＝建单前依赖（阻塞派发），`task_wait(task, wait_on)`＝运行中任务才出现的依赖登记（F124）。任务保持 `running`、行加 `waiting_on` 字段——不新建生命周期状态；仅派发方/root 可调（worker 需等待经 `post(kind=question)` 请派发方）；依赖须存在、非自身、不得与既有 after/waiting_on 组合成环；依赖已终态时登记立即 resolved。等待期间 health stalled 免判（不拍僵、不注自检、不进 stale/doctor 候选——等待时长不伪造 last_seen）；依赖进 merged/closed/cancelled/blocked 后 health tick 自动清等待、审计 `wait_resolved`，并通知双方（成功＝可继续；cancelled/blocked＝需处置）；`task_wait(wait_on=null)` 人工清除恢复
 - **角色分权**——root / dispatcher / worker 会话牌；worker 只能取消或登记自己子任务的 verify，不能管理父任务／他人任务或看板
 - **root 牌只属 daemon 身份**——签发目标恒为常量 `sid="root"`，永不落到客户端会话 sid；root 牌携 `X-Agora-Sid` 的调用零改绑：活会话只更新 `main_sid`，任务归属改记真实调用会话 sid（链边按记录值判定）。存量「root 牌落会话 sid」的账本条目由启动维护一次性归位 `sid="root"`（旧 sid 入血统留痕，幂等，worker 在飞牌不动）；启动审计保留作残留看门——只计数不撤销（root 牌常是唯一治理凭据）
 - **崩溃恢复**——任意时刻 `kill -9`；只追加状态＋worker 重启后凭原凭据重注入续跑
