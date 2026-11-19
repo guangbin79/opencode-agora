@@ -294,6 +294,23 @@ class TestGateArtifactFlow(TestCoreGate):
         self.assertEqual(self.ga_events(), [])
         self.assertIsNone(self.state.get("t1").get("gate_artifact"))
 
+    def test_f125_failure_notify_refs_within_240(self):  # Req: F125 §3
+        """长输出失败通知注入前 240 字符内 msg/artifact 可达：正文输出尾部
+        仍在其后允许截断——_artifact_line 不再是唯一路径出口。"""
+        self.runner = FakeRunner((1, "E" * (2 * _TAIL)))
+        self.mk_gate(artifact_store=self.artifacts)
+        self.seed(tb="main")
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "verify_failed")
+        texts = [t for _, t in self.oc.injected if "输出尾部" in t]
+        self.assertTrue(texts)
+        head = texts[0][:240]
+        self.assertIn("msg=state/messages/", head)
+        self.assertIn("artifact=", head)
+        self.assertTrue(head.index("artifact=") < head.index("输出尾部")
+                        if "输出尾部" in head else True)
+
 
 if __name__ == "__main__":
     unittest.main()

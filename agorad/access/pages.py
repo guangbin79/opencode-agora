@@ -18,6 +18,37 @@ _STALLED_TAIL = ("——草稿未经用户裁定；据此派发前须 dispatcher
 _DRAFT_N = re.compile(r"第 (\d+) 次升级")
 
 
+def _rel(home, path):
+    """Req: F125 页面引用同口径：路径相对 AGORA_HOME 优先；不在其下＝绝对。"""
+    try:
+        return str(Path(path).relative_to(home))
+    except ValueError:
+        return str(path)
+
+
+def _projection(home, tid, snap) -> str:
+    """Req: F125 状态投影段：gate_resource/gate_artifact 引用行（相对
+    AGORA_HOME）；无投影数据整段省略——消息全文永不入页（防写放大）。"""
+    gr, ga = snap.get("gate_resource"), snap.get("gate_artifact")
+    if not gr and not ga:
+        return ""
+    lines = [f"page=wiki/tasks/{tid}.md"]
+    if gr:
+        lines.append("gate_resource: " + " ".join(
+            f"{k}={gr[k]}" for k in ("waiting", "resource", "limit",
+                                     "slot", "acquired_at", "waited")
+            if gr.get(k) is not None))
+    if ga:
+        kv = " ".join(f"{k}={ga[k]}" for k in ("phase", "rc", "failure_kind",
+                                               "duration_s", "bytes")
+                      if ga.get(k) is not None)
+        p = ga.get("path")
+        if p:
+            kv += f" path={_rel(home, p)} output={_rel(home, p)}/output.log"
+        lines.append(f"gate_artifact: {kv}")
+    return "\n## 状态投影\n\n" + "\n".join(lines) + "\n"
+
+
 def write_task_page(home, tid, snap, tasks=None, events=None) -> Path:
     home = Path(home)
     page = home / "wiki" / "tasks" / f"{tid}.md"
@@ -29,6 +60,7 @@ def write_task_page(home, tid, snap, tasks=None, events=None) -> Path:
         vline += " - " + v["cmd"]
     body = ("---\n" + fm + "\n---\n\n# " + tid + "\n\ngoal: "
             + str(snap.get("goal", "")) + "\n\n" + vline + "\n")
+    body += _projection(home, tid, snap)  # Req: F125（_audit 单点刷新复用）
     rel = _relations(tid, snap, tasks or {}, events or [])
     if rel:
         body += "\n## 关联\n\n" + rel

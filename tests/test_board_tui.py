@@ -97,6 +97,28 @@ class TestBuildRows(unittest.TestCase):
         self.assertEqual(dom, {"t1": "fly", "t2": "fly", "t3": "fly",
                                "t4": "merged", "t5": "blocked", "t6": "gone"})
 
+    def test_f125_note_priority_escalate_wait_artifact(self):  # Req: F125 A7/H
+        """note 列最小产物观测：escalate > wait > art 优先；
+        gate artifact 显示 art:<phase>:<rc>（rc 必须保留）。"""
+        art = {"path": "state/gate-artifacts/t3/x", "phase": "verify", "rc": 1}
+        ga = dict(trow("done"), in_gate=True, gate_artifact=art)
+        s = snap(t1=dict(trow(), waiting_on="t9", gate_artifact=art),
+                 t2=dict(trow(), waiting_on="t9"),
+                 t3=ga)
+        ev = [{"event": "escalate", "task": "t1", "kind": "quality"}]
+        rows = {r.tid: r for r in task_rows(build_rows(s, ev, now=NOW))}
+        self.assertEqual(rows["t1"].note, "quality")  # escalate 最高
+        self.assertEqual(rows["t2"].note, "wait:t9")  # wait 压过 art
+        self.assertEqual(rows["t3"].note, "art:verify:1")
+        self.assertIn("art:verify:1", _row_text(rows["t3"]))  # rc 可见
+        # runner_exception 产物 rc=None：显示 '-' 不泄漏 Python None 字面量
+        none_rc = dict(trow("done"), in_gate=True,
+                       gate_artifact={"path": "p/a", "phase": "verify",
+                                      "rc": None})
+        rows = {r.tid: r for r in task_rows(
+            build_rows(snap(t4=none_rc), [], now=NOW))}
+        self.assertEqual(rows["t4"].note, "art:verify:-")
+
     def test_escalate_events_four_kinds_highlight(self):  # Req: F5
         ev = [{"event": "escalate", "task": "t1", "kind": "quality"},
               {"event": "escalate", "task": "t1", "kind": "dispatcher-dead"},

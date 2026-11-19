@@ -188,9 +188,15 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
                 f"@{(d.get('commit') or '')[:7]}" if d.get("commit") else "",
                 f"←{(d.get('base') or '')[:7]}" if d.get("base") else "",
                 f"#{d.get('attempt')}" if d.get("attempt") else ""]))
-        # Req: F124 受控等待入 note 列（状态列定宽 13 放不下 tid）；升级标记优先
+        # Req: F124 受控等待入 note 列（状态列定宽 13 放不下 tid）；升级标记优先；
+        # Req: F125 最小产物观测 art:<phase>:<rc> 兜底（escalate>handoff>wait>art）；
+        # rc=None（runner_exception 产物）显示 '-'，不泄漏 Python None 字面量
         wait = f"wait:{t['waiting_on']}" if t.get("waiting_on") else ""
-        note = " ".join(esc.get(tid, [])) or handoff or wait
+        ga = t.get("gate_artifact") or {}
+        rc = ga.get("rc")
+        art = (f"art:{ga.get('phase')}:{'-' if rc is None else rc}"
+               if ga.get("path") else "")
+        note = " ".join(esc.get(tid, [])) or handoff or wait or art
         out.append(Row("task", tid, depth[tid], state, t.get("title", ""),
                        t.get("worker_sid"), rel_time(t.get("last_seen"), now),
                        note, _domain(t["state"]),

@@ -70,6 +70,43 @@ class TestAccessPages(unittest.TestCase):
                             tasks={"ag-o": dict(ROW)}, events=[])
         self.assertNotIn("关联", p.read_text(encoding="utf-8"))  # 无关联不输出空标题
 
+    def test_f125_status_projection_section(self):  # Req: F125 A6
+        """状态投影段：gate_resource/gate_artifact 稳定引用（相对 AGORA_HOME）
+        ＋waiting_on 保留；消息全文永不入页。"""
+        art = str(self.tmp / "state/gate-artifacts/ag-g/20261120T000000-verify-0001")
+        row = dict(ROW, id="ag-g", waiting_on="ag-dep",
+                   gate_resource={"waiting": True, "resource": "/repo",
+                                  "limit": 1},
+                   gate_artifact={"path": art, "phase": "verify", "rc": 1,
+                                  "failure_kind": "content_failed",
+                                  "duration_s": 2.5, "bytes": 1234})
+        p = write_task_page(self.tmp, "ag-g", row,
+                            tasks={"ag-dep": {"state": "running"}}, events=[])
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("page=wiki/tasks/ag-g.md", text)
+        self.assertIn("gate_resource: waiting=True resource=/repo limit=1", text)
+        self.assertIn("gate_artifact: phase=verify rc=1"
+                      " failure_kind=content_failed duration_s=2.5"
+                      " bytes=1234", text)
+        self.assertIn(f"path=state/gate-artifacts/ag-g/"
+                      "20261120T000000-verify-0001", text)
+        self.assertIn("output=state/gate-artifacts/ag-g/"
+                      "20261120T000000-verify-0001/output.log", text)
+        self.assertIn("waiting_on: ag-dep", text)
+        self.assertNotIn("SENTINEL-MESSAGE-BODY", text)  # 不写消息全文
+
+    def test_f125_projection_relative_and_omission_rules(self):  # Req: F125 A6
+        """产物在 home 外＝绝对路径；无投影数据整段省略。"""
+        row = dict(ROW, id="ag-x",
+                   gate_artifact={"path": "/opt/elsewhere/a1", "phase": "review",
+                                  "rc": 2, "failure_kind": "content_failed",
+                                  "duration_s": 1.0, "bytes": 5})
+        text = write_task_page(self.tmp, "ag-x", row).read_text(encoding="utf-8")
+        self.assertIn("path=/opt/elsewhere/a1", text)
+        self.assertIn("output=/opt/elsewhere/a1/output.log", text)
+        bare = write_task_page(self.tmp, "ag-b", dict(ROW, id="ag-b"))
+        self.assertNotIn("状态投影", bare.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

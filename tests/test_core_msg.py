@@ -366,9 +366,12 @@ class TestF42NoteDigest(unittest.TestCase):
 
     def test_five_notes_one_silent_digest_with_all(self):  # Req: F42
         mids = [self._note(f"n{i}") for i in range(5)]
+        # Req: F125 digest 头部全文引用（home/msgs_dir/ids）先于 #id 前缀摘要
         self.assertEqual(self.oc.events,
                          [("silent", "d1",
-                           "[agora] 5 条过程消息（t1）\nn0\nn1\nn2\nn3\nn4")])
+                           f"[agora] 5 条过程消息（t1）\nhome={self.tmp}\n"
+                           "msgs_dir=state/messages\nids=1,2,3,4,5\n"
+                           "#1 n0\n#2 n1\n#3 n2\n#4 n3\n#5 n4")])
         self.assertEqual(self.oc.calls, [])  # 常规通道零触碰
         self.assertEqual(len(self.store.read_messages()), 5)  # 本体先行落库
         self.assertTrue(all(self.r.dedup_key(m) for m in mids))  # digest 达＝已投
@@ -379,7 +382,9 @@ class TestF42NoteDigest(unittest.TestCase):
         self._note("b")
         self.r.post("w1", ("up", "t1"), "result", "final")
         self.assertEqual(self.oc.events,
-                         [("silent", "d1", "[agora] 2 条过程消息（t1）\na\nb"),
+                         [("silent", "d1",
+                           f"[agora] 2 条过程消息（t1）\nhome={self.tmp}\n"
+                           "msgs_dir=state/messages\nids=1,2\n#1 a\n#2 b"),
                           ("inject", "d1",
                            "[agora] task t1 result from w1\nfinal")])
 
@@ -388,7 +393,9 @@ class TestF42NoteDigest(unittest.TestCase):
         self.now[0] += 121  # 假时钟：过龄待发在下次任一投递时惰性冲刷
         self._note("late")
         self.assertEqual(self.oc.events,
-                         [("silent", "d1", "[agora] 1 条过程消息（t1）\nearly")])
+                         [("silent", "d1",
+                           f"[agora] 1 条过程消息（t1）\nhome={self.tmp}\n"
+                           "msgs_dir=state/messages\nids=1\n#1 early")])
 
     def test_below_thresholds_zero_inject(self):  # Req: F42
         for i in range(4):
@@ -413,7 +420,10 @@ class TestF42NoteDigest(unittest.TestCase):
         for i in range(3):
             self._note(f"n{i}")  # 凑满阈值触发 flush
         self.assertEqual(self.oc.events,  # digest 只含后 3 条（已补拉 mid 对账剔除）
-                         [("silent", "d1", "[agora] 3 条过程消息（t1）\nn0\nn1\nn2")])
+                         [("silent", "d1",
+                           f"[agora] 3 条过程消息（t1）\nhome={self.tmp}\n"
+                           "msgs_dir=state/messages\nids=3,4,5\n"
+                           "#3 n0\n#4 n1\n#5 n2")])
 
     def test_down_note_stays_realtime(self):  # Req: F42
         self.r.post("d1", ("down", "t1"), "note", "hi")  # 下行 note 不分级
@@ -770,6 +780,27 @@ class TestF75Replay(TestCoreMsg):
         self.r = Router(self.store, self.state, self.oc)  # 服务重启形态
         self.assertEqual(self.r.replay_root_backlog("t1", "d1"), 0)
         self.assertEqual(len(self.store.read_messages()), n)  # 绝不重复生成
+
+
+class TestF125RefTrigger(TestCoreMsg):
+    """Req: F125 引用优先触发矩阵（长正文/关键 kind 标记/产物＋输出尾）——
+    详尽 A–I 锚在 tests/test_notification_refs.py，此处守 Router 契约面。"""
+
+    def test_long_body_triggers_refs(self):  # Req: F125 §1 触发①
+        self.r.post("w1", ("up", "t1"), "process", "y" * 241)
+        self.assertIn("msg=state/messages/", self.oc.calls[0][1])
+
+    def test_threshold_length_is_240(self):  # Req: F125 §1 阈值边界
+        self.r.post("w1", ("up", "t1"), "process", "y" * 240)
+        self.assertNotIn("home=", self.oc.calls[0][1])
+
+    def test_short_escalate_with_marker_triggers(self):  # Req: F125 §1 触发②
+        self.r.post("w1", ("up", "t1"), "escalate", "超时")
+        self.assertIn("msg=state/messages/", self.oc.calls[0][1])
+
+    def test_short_result_plain_text_no_refs(self):  # Req: F125 §1 触发②反面
+        self.r.post("w1", ("up", "t1"), "result", "done-ish")  # 无标记短正文
+        self.assertNotIn("home=", self.oc.calls[0][1])
 
 
 if __name__ == "__main__":

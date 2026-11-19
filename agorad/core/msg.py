@@ -24,15 +24,46 @@ F63 终态邮件必达：终态迁移经注入 mail 缝外呼公共 send_email�
 import math
 import threading
 import time
+from pathlib import Path
 
 _DIGEST_N = 5    # F42：阈值可调
 _DIGEST_T = 120  # F42：阈值可调
+
+_REF_LEN = 240  # Req: F125 引用触发长度阈值（超过即挂引用行）
+_REF_KINDS = frozenset({"result", "question", "escalate", "verify"})
+_REF_MARKS = ("输出尾部", "失败", "异常", "超时", "artifact=")
 
 _TERMINAL_MAIL = {"merged", "closed", "blocked", "cancelled"}  # F63 邮件终态集
 _MAIL_WINDOW = 60  # F63：窗去重秒数——只吞 merged→closed 门尾相邻对（见下）
 
 _SILENT_REPLAY = frozenset({"note"})  # F75 补交分级：silent 免弹窗面
 _NOTIFY_REPLAY = frozenset({"escalate"})  # ag-3016f1：escalate 补交走通知通道（唤醒）
+
+
+def _wants_refs(kind, body, task):
+    """Req: F125 引用优先触发：长正文／关键 kind 带诊断标记／产物在案带
+    输出尾。短 ack/milestone 零引用噪音。"""
+    if len(body) > _REF_LEN:
+        return True
+    if kind in _REF_KINDS and any(m in body for m in _REF_MARKS):
+        return True
+    return bool((task.get("gate_artifact") or {}).get("path")
+                and "输出尾部" in body)
+
+
+def _reference_lines(tid, mid, task, home):
+    """Req: F125 稳定引用行：外层截断不可控，完整内容的指针必须最先出现。
+    消息库 body 保持原文——引用只进注入文本。"""
+    lines = [f"home={home}", f"msg=state/messages/{mid:08d}.md",
+             f"page=wiki/tasks/{tid}.md"]
+    art = (task.get("gate_artifact") or {}).get("path")
+    if art:  # 相对 AGORA_HOME 优先；不在其下＝绝对原样
+        try:
+            art = str(Path(art).relative_to(home))
+        except ValueError:
+            pass
+        lines.append(f"artifact={art}")
+    return "\n".join(lines)
 
 
 class NotChainEdge(Exception):
@@ -157,7 +188,13 @@ class Router:
                 {"ts": time.time(), "task": tid, "kind": kind,
                  "from": from_sid, "to": to_sid}, body)
             self._inflight.add(mid)  # 可见即持交付权：check_mail 不抢交（F87）
-        text = f"[agora] task {tid} {kind} from {from_sid}\n{body}"
+        # Req: F125 引用优先——[agora] 头之后、正文之前插稳定引用行；短消息
+        # 不加（防噪音），消息库 body 与 check_mail 返回保持原文
+        task = self._state.get(tid)
+        text = f"[agora] task {tid} {kind} from {from_sid}\n"
+        if _wants_refs(kind, body, task):
+            text += _reference_lines(tid, mid, task, self._store.home) + "\n"
+        text += body
         try:
             # 取属性入 try：oc 缺对应通道时同落兜底网（评审环 B 册）；notify 优先于
             # silent（ag-3016f1 通知通道＝synthetic resume:true，二者互斥不叠加）
@@ -191,8 +228,15 @@ class Router:
             if not buf:
                 return
             self._inflight.update(m for m, _, _ in buf)  # 冲刷期不补拉（F87）
-            lines = [f"[agora] {len(buf)} 条过程消息（{tid}）"]
-            lines += [" ".join(b.split())[:120] for _, _, b in buf]  # 每条一行 ≤120 字符
+            # Req: F125 digest 头部全文引用优先：home/msgs_dir/ids 先于摘要
+            # （摘要仍可截断；#id 定位全文文件 state/messages/<id 补零8位>.md，
+            #  与 _reference_lines 的 msg= 行同口径——store 落盘即 {mid:08d}.md）
+            lines = [f"[agora] {len(buf)} 条过程消息（{tid}）",
+                     f"home={self._store.home}",
+                     "msgs_dir=state/messages",
+                     "ids=" + ",".join(str(m) for m, _, _ in buf)]
+            lines += [f"#{m} " + " ".join(b.split())[:120]
+                      for m, _, b in buf]  # 摘要体 ≤120 字符（另加 #id 前缀）
         try:  # 取属性入 try：oc 缺 inject_silent 时同落兜底网（评审环 B 册）
             ok = self._oc.inject_silent(to_sid, "\n".join(lines))
         except Exception:  # 同失败口径：不抛、不断链（T7 e2e 实测）
@@ -234,8 +278,14 @@ class Router:
                      "replay_of": m["id"]}, m.get("body", ""))
                 self._inflight.add(mid)
             n += 1
-            text = (f"[agora] task {tid} {m.get('kind')} from {m.get('from')}\n"
-                    + m.get("body", ""))
+            # Req: F125 补交注入同款引用优先格式（不复制 _deliver 投递状态面）
+            body = m.get("body", "")
+            task = self._state.get(tid)
+            text = f"[agora] task {tid} {m.get('kind')} from {m.get('from')}\n"
+            if _wants_refs(m.get("kind"), body, task):
+                text += _reference_lines(tid, mid, task,
+                                         self._store.home) + "\n"
+            text += body
             try:  # 取属性入 try：oc 缺对应通道时同落兜底网（_flush 口径）
                 inject = (self._oc.inject_notify
                           if m.get("kind") in _NOTIFY_REPLAY
