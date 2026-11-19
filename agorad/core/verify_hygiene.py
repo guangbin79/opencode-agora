@@ -119,8 +119,8 @@ def _safe_fragment(cmd, limit=80):
 def check_shell_syntax(cmd):
     """Req: F123 登记前无执行语法预检：/bin/sh -n -c 只解析不执行，与生产
     runner（Popen shell=True）同方言。返回 None＝通过；语法坏＝SHELL_SYNTAX
-    blocking finding；预检器自身 OSError/超时＝SHELL_SYNTAX_PRECHECK
-    blocking finding（fail-closed，不得静默放行）。"""
+    blocking finding；预检器自身 OSError/超时/ValueError（cmd 含 NUL 拒参）
+    ＝SHELL_SYNTAX_PRECHECK blocking finding（fail-closed，不得静默放行）。"""
     try:
         proc = subprocess.run(["/bin/sh", "-n", "-c", cmd],
                               capture_output=True, timeout=1)
