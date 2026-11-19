@@ -1393,5 +1393,3 @@ class TestWaitingStallExempt(TestCoreHealth):
         self.assertIsNone(self.state.get("t-a")["waiting_on"])
         stalled = [e for e in self.escalates() if "失控[stalled]" in e["body"]]
         self.assertEqual(len(stalled), 1)  # 解除后无活动：重新进候选拍僵
-
-
