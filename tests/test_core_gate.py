@@ -3249,12 +3249,13 @@ class TestIntegrationBaseInjection(TestCoreGate):
     def test_legacy_injects_baseline_head(self):  # Req: F123 A4
         """legacy integration：注入 build_integration 后的 baseline head。"""
         self.in_gate()
+        self.gx.head_shas[self.integration] = OTHER_SHA  # 独立预置基线头
         self.gate.run("t1")
         self.assertEqual(self.state.get("t1")["state"], "closed")
-        before = self.gx.head_shas.get(self.integration, self.gx.head_sha)
         self.assertEqual(self.runner.calls[1],
                          (self.integration,
-                          f"export AGORA_INTEGRATION_BASE={before}; pytest -q"))
+                          f"export AGORA_INTEGRATION_BASE={OTHER_SHA}; "
+                          "pytest -q"))
 
     def test_env_verify_and_base_probe_not_injected(self):  # Req: F123 A5
         """探针与 env verify 命令保持原文，不注入 integration base。"""

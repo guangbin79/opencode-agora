@@ -119,6 +119,14 @@ class SyntaxGateTest(unittest.TestCase):
                 self.assertIn("SHELL_SYNTAX_PRECHECK", msg)  # 预检器不可用
                 self.assertIn("预检器", msg)
 
+    def test_nul_byte_fail_closed_rejected(self):  # Req: F123 A3（评审修复）
+        """cmd 含 NUL（JSON \\u0000 可达）时 subprocess 抛 ValueError——
+        须归 fail-closed finding 干净拒绝（含审计行），不得裸崩 500。"""
+        msg = self.rejected(verify_cmd='echo "a\x00b"')
+        self.assertIn("SHELL_SYNTAX_PRECHECK", msg)
+        names = [e["event"] for e in self.events()]
+        self.assertEqual(names.count("verify_hygiene_rejected"), 1)
+
 
 class ShellSyntaxCheckerTest(unittest.TestCase):
     """纯检查器契约：SHELL_SYNTAX finding 形状＋静态检查语义与顺序保持。"""

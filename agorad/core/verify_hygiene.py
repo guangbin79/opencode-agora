@@ -110,8 +110,9 @@ def _classify(abs_path, project, home):
 
 
 def _safe_fragment(cmd, limit=80):
-    """F123 语法 finding 的安全截断：空白折叠保单行＋限长。"""
-    frag = " ".join(cmd.split())
+    """F123 语法 finding 的安全截断：控制字符剥离＋空白折叠保单行＋限长。"""
+    frag = re.sub(r"[\x00-\x1f\x7f]", "", cmd)
+    frag = " ".join(frag.split())
     return frag[:limit] + "…" if len(frag) > limit else frag
 
 
@@ -123,7 +124,9 @@ def check_shell_syntax(cmd):
     try:
         proc = subprocess.run(["/bin/sh", "-n", "-c", cmd],
                               capture_output=True, timeout=1)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # ValueError：cmd 含 NUL 时 fork_exec 拒参——预检器无法运行，同归
+        # fail-closed 面（评审修复：不得裸崩出登记面变 500）
         return {"code": "SHELL_SYNTAX_PRECHECK",
                 "fragment": _safe_fragment(cmd),
                 "hint": _HINTS["SHELL_SYNTAX_PRECHECK"], "blocking": True}
