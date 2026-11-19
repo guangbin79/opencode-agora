@@ -454,7 +454,7 @@ class TestTaskWaitMcp(McpShellTest):
         schema = {t["name"]: t for t in
                   self.rpc("tools/list")["result"]["tools"]}
         props = schema["task_wait"]["inputSchema"]["properties"]
-        self.assertEqual(props["wait_on"]["type"], "string")
+        self.assertEqual(props["wait_on"]["type"], ["string", "null"])  # null＝清除（与服务端契约一致）
         self.assertEqual(schema["task_wait"]["inputSchema"]["required"],
                          ["task"])
 

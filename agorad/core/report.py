@@ -272,7 +272,11 @@ def stale_candidates(snap, now, base=None):
     cand = []
     for tid, t in snap["tasks"].items():
         if (t["state"] in _STALE_STATES and not t.get("in_gate")
-                and not t.get("waiting_on")):  # Req: F124 单一免判过滤点
+                and not (t.get("waiting_on")
+                         and t["state"] == "running")):
+            # Req: F124 单一免判过滤点：仅运行中受控等待免判——等待任务自身
+            # 已离开 running（done/verify_failed/reopened/终态）时 waiting_on
+            # 只是残留历史，不扩大免判（评审环 round1 HIGH-2）
             if gate_busy and t["state"] == "done":
                 continue
             b = base.get(tid) if base is not None else None

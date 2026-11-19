@@ -145,7 +145,7 @@ _TOOLS = [
                                          "cancelled/blocked）由 health tick 自动清除并通知双方",
      "inputSchema": {"type": "object", "properties": {
          "task": _TID,
-         "wait_on": {"type": "string",
+         "wait_on": {"type": ["string", "null"],
                      "description": "依赖任务 id；空串/null/缺省＝清除等待（人工恢复）"}},
          "required": ["task"]}},
     {"name": "post", "description": "链边发消息（方向服务按角色定）",

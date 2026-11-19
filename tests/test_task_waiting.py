@@ -95,8 +95,9 @@ class TestTaskWaiting(unittest.TestCase):
         return tid
 
     def events(self, tid=None, name=None):
-        rows = [json.loads(x) for x in
-                self.tmp.joinpath("events.jsonl").read_text().splitlines() if x]
+        f = self.tmp / "events.jsonl"
+        rows = ([json.loads(x) for x in f.read_text().splitlines() if x]
+                if f.exists() else [])  # 零事件用例不落 events.jsonl（Store 惰性建）
         return [e for e in rows
                 if (tid is None or e.get("task") == tid)
                 and (name is None or e.get("event") == name)]
@@ -250,6 +251,40 @@ class TestTaskWaiting(unittest.TestCase):
         self.svc.wait("t-a", self.root, "t-dep")
         text = (self.tmp / "wiki" / "tasks" / "t-a.md").read_text(encoding="utf-8")
         self.assertIn("waiting_on: t-dep", text)
+
+    # ---- 评审环 round1：竞态 CAS＋残留范围 ----
+
+    def test_clear_waiting_on_if_cas_guards_concurrent_reregister(self):  # Req: F124
+        self.seed("t-a", worker="s-a")
+        self.state.set_fields("t-a", waiting_on="t-d1")
+        self.assertFalse(self.state.clear_waiting_on_if("t-a", "t-d2"))
+        self.assertEqual(self.state.get("t-a")["waiting_on"], "t-d1")  # 换登记不抹
+        self.assertTrue(self.state.clear_waiting_on_if("t-a", "t-d1"))
+        self.assertIsNone(self.state.get("t-a")["waiting_on"])
+
+    def test_terminal_waiter_keeps_waiting_on_as_history_silent(self):  # Req: F124
+        self.seed("t-dep", worker="s-dep")
+        self.seed("t-a", worker="s-a")
+        self.state.set_fields("t-a", waiting_on="t-dep")
+        self.state.transition("t-a", "done", commit="c" * 40)
+        self.state.transition("t-a", "merged")
+        self.state.transition("t-dep", "cancelled")
+        self.oc.liveness["s-a"] = True
+        self.health.tick()  # 等待任务自身已终态：留史不解析、不通知
+        self.assertEqual(self.state.get("t-a")["waiting_on"], "t-dep")
+        self.assertEqual(self.events("t-a", "wait_resolved"), [])
+        self.assertEqual(self.msgs(task="t-a", kind="process"), [])
+        self.assertEqual(self.msgs(task="t-a", kind="result"), [])
+
+    def test_waiting_residue_off_running_does_not_extend_exemption(self):  # Req: F124
+        self.seed("t-dep", worker="s-dep")
+        self.seed("t-a", worker="s-a")
+        old = time.time() - 3000
+        self.state.set_fields("t-a", created=old, waiting_on="t-dep")
+        self.state.transition("t-a", "done", commit="c" * 40)
+        self.state.transition("t-a", "verify_failed")  # 离开等待语义
+        self.assertIn("t-a", [c for c, _ in report.stale_candidates(
+            self.state.snapshot(), time.time())])  # 残留不扩大免判
 
 
 if __name__ == "__main__":

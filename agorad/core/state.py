@@ -173,6 +173,19 @@ class State:
             if t is not None:
                 t["last_seen"] = time.time()
 
+    def clear_waiting_on_if(self, tid, dep):
+        """Req: F124 条件清除（锁内复核）：waiting_on==dep 才清——防 health
+        tick 判定窗内 httpd task_wait 并发换登记被旧清除抹掉（活等待丢失，
+        评审环 round1 HIGH-1）。返回 False＝已被并发改写，调用方免审计免通知。"""
+        with self._lock:
+            t = self._tasks.get(tid)
+            if t is None or t.get("waiting_on") != dep:
+                return False
+            t["waiting_on"] = None
+            t["updated"] = time.time()
+            self._persist()
+            return True
+
     def set_gate_resource(self, tid, **proj):
         """F116 资源闸投影整块替换、只进内存（gt-a18ef6 写放大口径）：
         排队/获锁是可重建瞬态（重启后 done 残留重排即重取重投影），

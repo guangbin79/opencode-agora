@@ -187,17 +187,23 @@ class Health:
         终态即清 waiting_on＋审计 wait_resolved（附 dependency_state）＋
         双通知（worker process/dispatcher result，Router.notify_wait_resolved
         与 task 域登记即解析同源）。随既有 tick 驱动，不新建轮询线程；
-        解析后同轮判僵即恢复常规活性口径（等待时长不伪造 last_seen）。"""
+        解析后同轮判僵即恢复常规活性口径（等待时长不伪造 last_seen）。
+        等待任务自身已终态则跳过——字段保留作历史不再参与判定/通知；
+        清除经 State.clear_waiting_on_if 锁内复核，判定窗内的并发换登记
+        不被旧清除抹掉（评审环 round1 HIGH-1/HIGH-2）。"""
         for tid, t in self._state.snapshot()["tasks"].items():
             dep = t.get("waiting_on")
             if not dep:
                 continue
+            if t["state"] in ("merged", "closed", "cancelled", "blocked"):
+                continue  # 等待任务自身已终态：waiting_on 留作历史（Req: F124）
             try:
                 dep_state = self._state.get(dep)["state"]
             except KeyError:
                 continue  # 依赖不在册（task_wait 验存在，账面不可能）：免判
             if dep_state in ("merged", "closed", "cancelled", "blocked"):
-                self._state.set_fields(tid, waiting_on=None)
+                if not self._state.clear_waiting_on_if(tid, dep):
+                    continue  # 并发换登记：新等待不抹（下轮按新依赖重判）
                 self._store.append_event(
                     {"ts": time.time(), "actor": "health",
                      "event": "wait_resolved", "task": tid,
