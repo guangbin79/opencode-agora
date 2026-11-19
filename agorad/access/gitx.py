@@ -481,24 +481,32 @@ class Gitx:
     def patch_equivalent_on_origin(self, repo_dir: str, commit: str,
                                    branch: str) -> bool:
         """commit 自身补丁是否已内容在场于 origin（零网络 refs-only，as of
-        last fetch）：交付补丁号（diff-tree -p 经 patch-id --stable）∈ origin
-        窗口补丁集合→True。窗口＝merge-base..ref（无共同祖先退 ref 全史），
-        经 rev-list|diff-tree -p --stdin 收集——两侧同为 diff-tree 补丁面，
-        porcelain（log -p）的改名检测不对称与消息文本均不混入。只对账交付
-        自身补丁：范围级 cherry 对账会被祖先补丁变基后的 patch-id 漂移毒化
-        而整体误判未出版（ag-87bb0a 看门狗误报实证）；交付自身补丁变基漂移
-        则 patch-id 天然失效，属另案。空补丁＝无从内容验证保守 False；无
-        跟踪 ref→False（出版无从证实）；其他非零如实 RuntimeError（调用方
-        免判）。commit 已原样在 ref 上（ancestor）时窗口不含自身亦判
-        False——先经 published_on_origin 证真再谓本方法（health.py 现行
-        调用序）。"""
+        last fetch）——两层对账（F121）：①完整层＝交付补丁号（diff-tree -p
+        经 patch-id --stable）∈ origin 窗口补丁集合→True；②完整未命中时退
+        hunk 级全覆盖：交付 diff 拆 per-hunk 合成 patch（文件头+单 hunk），
+        其 patch-id 全部 ∈ 窗口 hunk 集合→True——交付补丁被拆进窗口多个
+        commit 出版（拆分/混合出版，ag-50ef74 双文件实证）不再误报未出版。
+        窗口＝merge-base..ref（无共同祖先退 ref 全史），经
+        rev-list|diff-tree -p --stdin 收集——两侧同为 diff-tree -p -r
+        --no-renames --root 补丁面，porcelain（log -p）的改名检测不对称
+        与消息文本均不混入。防假阳性：origin hunk 集只来自窗口内 commit；
+        交付 hunk 须全覆盖（禁 majority）；合成 patch 含文件路径头，无关
+        路径同内容 hunk 不互配。只对账交付自身补丁：范围级 cherry 对账会被
+        祖先补丁变基后的 patch-id 漂移毒化而整体误判未出版（ag-87bb0a 看门
+        狗误报实证）；交付自身补丁变基漂移则 patch-id 天然失效，属另案。
+        空补丁或无 hunk 面（空提交/合并提交/纯 mode change/二进制）＝无从
+        hunk 对账保守 False（完整 patch-id 命中除外）；无跟踪 ref→False
+        （出版无从证实）；其他非零如实 RuntimeError（调用方免判）。commit
+        已原样在 ref 上（ancestor）时窗口不含自身亦判 False——先经
+        published_on_origin 证真再谓本方法（health.py 现行调用序）。"""
         commit = self._check_sha(commit)
         ref = f"refs/remotes/origin/{branch}"
         probe = self._git(["rev-parse", "--verify", "--quiet", ref],
                           cwd=repo_dir, check=False)
         if probe.returncode != 0:
             return False
-        patch = self._git(["diff-tree", "-p", "--root", commit],
+        patch = self._git(["diff-tree", "-p", "-r", "--no-renames",
+                           "--root", commit],
                           cwd=repo_dir, check=False)
         if patch.returncode != 0:
             raise RuntimeError(
@@ -517,12 +525,18 @@ class Gitx:
             raise RuntimeError(f"git rev-list {window}: {revs.stderr.strip()}")
         # 窗口补丁流用 diff-tree（plumbing）而非 log -p（porcelain）：后者
         # 缺省改名检测会让改名交付的补丁面与交付侧不对称，永配不上对
-        win = self._git(["diff-tree", "-p", "--root", "--stdin"],
+        win = self._git(["diff-tree", "-p", "-r", "--no-renames",
+                         "--root", "--stdin"],
                         cwd=repo_dir, check=False, input_data=revs.stdout)
         if win.returncode != 0:
             raise RuntimeError(
                 f"git diff-tree -p --stdin: {win.stderr.strip()}")
-        return bool(mine & self._patch_ids(repo_dir, win.stdout))
+        if mine & self._patch_ids(repo_dir, win.stdout):
+            return True  # 完整 commit patch-id 命中（0b07cc9 语义优先）
+        hunks = self._split_hunk_patch_ids(repo_dir, patch.stdout)
+        if not hunks:  # 纯 mode change/二进制等无 hunk 面：无从 hunk 对账
+            return False
+        return hunks <= self._split_hunk_patch_ids(repo_dir, win.stdout)
 
     def _patch_ids(self, repo_dir: str, patch_text: str) -> set:
         """patch 文本流（diff-tree/log -p 输出）→ patch-id 集合（--stable）。"""
@@ -531,6 +545,49 @@ class Gitx:
         if r.returncode != 0:
             raise RuntimeError(f"git patch-id --stable: {r.stderr.strip()}")
         return {p[0] for ln in r.stdout.splitlines() if (p := ln.split())}
+
+    @staticmethod
+    def _hunk_patches(diff_text: str) -> list[str]:  # Req: F121
+        """diff-tree -p 输出 → per-hunk 合成 patch 列表（纯解析，零 git）。
+
+        合成 patch＝文件头（diff --git .. 首个 @@ 前：路径随 patch-id 入
+        哈希，无关路径同内容 hunk 不互配）+单 hunk 正文。diff-tree 的
+        commit sha 前言行与 index/mode 行不入 hunk；无 hunk 文件（纯 mode
+        change/二进制占位）不产出。hunk 只认 @@ - 起始行：正文行恒带
+        ' '/'+'/'-'/'\\' 前缀，不会与文件头/前言行混淆。
+        """
+        out, header, cur = [], None, None
+        for ln in diff_text.splitlines():
+            if ln.startswith("diff --git "):
+                if cur is not None:
+                    out.append("\n".join(header + cur))
+                header, cur = [ln], None
+            elif ln.startswith("@@ -"):
+                if cur is not None:
+                    out.append("\n".join(header + cur))
+                cur = [ln] if header is not None else None
+            elif header is None:
+                continue
+            elif cur is not None:
+                cur.append(ln)
+            else:
+                header.append(ln)
+        if cur is not None:
+            out.append("\n".join(header + cur))
+        return out
+
+    def _split_hunk_patch_ids(self, repo_dir: str, diff_text: str) -> set:
+        """diff 文本 → per-hunk patch-id 集（Req: F121）。单一稳定流一次
+        patch-id：每合成 patch 前置唯一 "commit <40hex>" 行作分段边界
+        （patch-id 按该前言行分段，不按 diff --git）——免每 hunk 一进程的
+        O(N×H) 洪泛；实证与逐 hunk 独立进程结果一致、index 行不入哈希
+        （hunk id 对 rebase 漂移稳定）。"""
+        patches = self._hunk_patches(diff_text)
+        if not patches:
+            return set()
+        stream = "".join(f"commit {i:040x}\n{p}\n"
+                         for i, p in enumerate(patches))
+        return self._patch_ids(repo_dir, stream)
 
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
