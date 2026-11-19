@@ -943,6 +943,36 @@ class TestPublishedOnOrigin(unittest.TestCase):
         self.assertTrue(self.gx.patch_equivalent_on_origin(
             str(self.repo), recorded, "main"))
 
+    def test_patch_equivalent_ancestor_noise_ignored(self):
+        # ag-87bb0a：祖先补丁变基漂移（patch-id 配不上对）不得把交付自身
+        # 已等价出版的补丁整体误判未出版——范围级 cherry 对账的盲区实爆
+        self._git(["checkout", "-q", "-b", "work"])
+        self._commit({"src.py": "v2"}, "A")  # 交付的祖先（他人改动 src.py）
+        d = self._commit({"new.py": "n1"}, "D")  # 交付 commit（新增文件）
+        self._git(["checkout", "-q", "main"])
+        self._commit({"src.py": "v2-drifted"}, "A'")  # 同意图不同内容＝漂移
+        self._git(["cherry-pick", d])  # D'：与 D 同补丁出版
+        self._set_origin(self._git(["rev-parse", "HEAD"]).stdout.strip())
+        self.assertFalse(self.gx.published_on_origin(str(self.repo), d,
+                                                     "main"))
+        self.assertTrue(self.gx.patch_equivalent_on_origin(str(self.repo),
+                                                           d, "main"))
+
+    def test_patch_equivalent_rename_symmetric(self):
+        # OCR 实证：porcelain log -p 缺省改名检测把 verbatim 重出版的改名
+        # 交付渲染成 rename diff，与交付侧 diff-tree 的 delete+add 补丁永
+        # 配不上对——窗口补丁流须同为 diff-tree（plumbing）补丁面
+        self._git(["checkout", "-q", "-b", "work"])
+        self._git(["mv", "src.py", "renamed.py"])
+        self._git(["commit", "-m", "D: rename"])
+        d = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        self._git(["checkout", "-q", "main"])
+        self._commit({"other.py": "x"}, "parallel")  # 改父基：D' sha 必异
+        self._git(["cherry-pick", d])  # D'：同改名补丁 verbatim 重出版
+        self._set_origin(self._git(["rev-parse", "HEAD"]).stdout.strip())
+        self.assertTrue(self.gx.patch_equivalent_on_origin(str(self.repo),
+                                                           d, "main"))
+
     def test_patch_equivalent_false_when_patch_missing(self):
         delivery = self._commit({"src.py": "v2"}, "work")
         self._set_origin(self.base)  # origin 停在交付前：补丁真缺席
@@ -1072,7 +1102,7 @@ class TestGitProcessGroup(unittest.TestCase):
             def __init__(self, argv, **kw):
                 popen_kw.append((argv, kw))
 
-            def communicate(self, timeout=None):
+            def communicate(self, timeout=None, input=None):
                 if timeout is not None:
                     raise subprocess.TimeoutExpired("git", timeout)
                 self.returncode = -9

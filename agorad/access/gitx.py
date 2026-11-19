@@ -51,13 +51,15 @@ class Gitx:
         s = re.sub(r"[\x00-\x20\x7f~^:?*\[\\]", "_", s)
         return re.sub(r"\.{2,}", ".", s).lstrip(".-") or "repo"
 
-    def _git(self, args, cwd, check=True, timeout=None):
+    def _git(self, args, cwd, check=True, timeout=None, input_data=None):
         """git plumbing 统一执行点。P0-2（ag-9c4cbb）：start_new_session 自立
         进程组＋超时 killpg 全组——孤儿孙进程（ssh/传输）不再持管道挂死
         communicate()（旧 subprocess.run(timeout=) 只杀直接子进程的 wedge 形态）；
         超时按 gitx 失败契约抛 RuntimeError。spawn_tracker 在位时登记 pgid，
         归门看门狗兜底收杀（timeout=None 的挂死亦可达）。"""
         proc = subprocess.Popen(["git", *args], cwd=str(cwd),
+                                stdin=subprocess.PIPE
+                                if input_data is not None else None,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace",
                                 start_new_session=True)
@@ -65,7 +67,7 @@ class Gitx:
             self._tracker.add(proc.pid)
         try:
             try:
-                out, err = proc.communicate(timeout=timeout)
+                out, err = proc.communicate(input=input_data, timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -478,24 +480,57 @@ class Gitx:
 
     def patch_equivalent_on_origin(self, repo_dir: str, commit: str,
                                    branch: str) -> bool:
-        """commit 的补丁是否已内容在场于 origin（零网络 refs-only，as of
-        last fetch）：git log --cherry-pick --right-only
-        origin/<branch>...commit 输出空＝交付补丁全部已出版（派发方 rebase
-        改 sha 后出版，ag-4c6136）→True；非空＝有补丁缺席→False；无跟踪
-        ref→False（出版无从证实）；其他非零如实 RuntimeError（调用方免判）。"""
+        """commit 自身补丁是否已内容在场于 origin（零网络 refs-only，as of
+        last fetch）：交付补丁号（diff-tree -p 经 patch-id --stable）∈ origin
+        窗口补丁集合→True。窗口＝merge-base..ref（无共同祖先退 ref 全史），
+        经 rev-list|diff-tree -p --stdin 收集——两侧同为 diff-tree 补丁面，
+        porcelain（log -p）的改名检测不对称与消息文本均不混入。只对账交付
+        自身补丁：范围级 cherry 对账会被祖先补丁变基后的 patch-id 漂移毒化
+        而整体误判未出版（ag-87bb0a 看门狗误报实证）；交付自身补丁变基漂移
+        则 patch-id 天然失效，属另案。空补丁＝无从内容验证保守 False；无
+        跟踪 ref→False（出版无从证实）；其他非零如实 RuntimeError（调用方
+        免判）。commit 已原样在 ref 上（ancestor）时窗口不含自身亦判
+        False——先经 published_on_origin 证真再谓本方法（health.py 现行
+        调用序）。"""
         commit = self._check_sha(commit)
         ref = f"refs/remotes/origin/{branch}"
         probe = self._git(["rev-parse", "--verify", "--quiet", ref],
                           cwd=repo_dir, check=False)
         if probe.returncode != 0:
             return False
-        out = self._git(["log", "--cherry-pick", "--right-only",
-                         f"{ref}...{commit}"], cwd=repo_dir, check=False)
-        if out.returncode != 0:
+        patch = self._git(["diff-tree", "-p", "--root", commit],
+                          cwd=repo_dir, check=False)
+        if patch.returncode != 0:
             raise RuntimeError(
-                f"git log --cherry-pick {ref}...{commit}: "
-                f"{out.stderr.strip()}")
-        return not out.stdout.strip()
+                f"git diff-tree -p {commit}: {patch.stderr.strip()}")
+        mine = self._patch_ids(repo_dir, patch.stdout)
+        if not mine:  # 空补丁（空提交/合并提交）：无内容可对账，保守未出版
+            return False
+        mb = self._git(["merge-base", commit, ref], cwd=repo_dir,
+                       check=False)
+        if mb.returncode not in (0, 1):  # rc=1＝无共同祖先；其余＝环境病如实抛
+            raise RuntimeError(
+                f"git merge-base {commit} {ref}: {mb.stderr.strip()}")
+        window = f"{mb.stdout.strip()}..{ref}" if mb.returncode == 0 else ref
+        revs = self._git(["rev-list", window], cwd=repo_dir, check=False)
+        if revs.returncode != 0:
+            raise RuntimeError(f"git rev-list {window}: {revs.stderr.strip()}")
+        # 窗口补丁流用 diff-tree（plumbing）而非 log -p（porcelain）：后者
+        # 缺省改名检测会让改名交付的补丁面与交付侧不对称，永配不上对
+        win = self._git(["diff-tree", "-p", "--root", "--stdin"],
+                        cwd=repo_dir, check=False, input_data=revs.stdout)
+        if win.returncode != 0:
+            raise RuntimeError(
+                f"git diff-tree -p --stdin: {win.stderr.strip()}")
+        return bool(mine & self._patch_ids(repo_dir, win.stdout))
+
+    def _patch_ids(self, repo_dir: str, patch_text: str) -> set:
+        """patch 文本流（diff-tree/log -p 输出）→ patch-id 集合（--stable）。"""
+        r = self._git(["patch-id", "--stable"], cwd=repo_dir, check=False,
+                      input_data=patch_text)
+        if r.returncode != 0:
+            raise RuntimeError(f"git patch-id --stable: {r.stderr.strip()}")
+        return {p[0] for ln in r.stdout.splitlines() if (p := ln.split())}
 
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
