@@ -195,8 +195,12 @@ def full_view(snap, store):
     for tid, t in snap["tasks"].items():  # Req: F126 预算三元组投影
         v = t.get("verify") or {}
         if v:
+            # source 回落与任务页同口径（R1）：legacy 行无 timeout_source 时按
+            # 既有 timeout 推断——两观测面不分裂
             budget = {"timeout": v.get("timeout"),
-                      "source": v.get("timeout_source")}
+                      "source": v.get("timeout_source") or (
+                          "task" if v.get("timeout") is not None
+                          else "default")}
             if v.get("note"):
                 budget["note"] = v["note"]
             tasks[tid]["verify_budget"] = budget

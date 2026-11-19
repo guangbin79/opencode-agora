@@ -1183,6 +1183,24 @@ class TestTaskVerifyProfile(TestCoreTask):
         self.assertEqual(v["timeout_source"], "profile")
         self.assertEqual(v["note"], "ASAN")
 
+    def test_worker_child_of_budgetless_parent_gets_profile(self):  # Req: F126
+        """父任务建于 profile 之前（无预算＝default），之后 profile 加入：
+        子任务是新任务，按「profile 只影响新建任务」命中 profile——
+        父行保持 default 快照不被重写（链内口径分裂是设计内快照语义）。"""
+        self.with_profiles({})  # 父建单时无画像
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true")
+        self.assertEqual(
+            self.state.get(parent)["verify"]["timeout_source"], "default")
+        wtok = self.svc.dispatch(parent, self.root)
+        self.with_profiles({"/repo": {"timeout": 5400}})  # 画像后加入
+        child = self.svc.create("child", None, None, wtok)
+        v = self.state.get(child)["verify"]
+        self.assertEqual(v["timeout"], 5400)
+        self.assertEqual(v["timeout_source"], "profile")
+        self.assertEqual(
+            self.state.get(parent)["verify"]["timeout_source"], "default")
+
     def test_update_verify_explicit_timeout_flips_source(self):  # Req: F126 A4
         self.with_profiles({"/repo": {"timeout": 5400, "note": "ASAN"}})
         tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
@@ -1200,6 +1218,25 @@ class TestTaskVerifyProfile(TestCoreTask):
         self.assertEqual(v["timeout"], 5400)  # 既有 timeout/source 不因后改重写
         self.assertEqual(v["timeout_source"], "profile")
         self.assertEqual(v["note"], "ASAN")
+
+    def test_update_verify_legacy_row_label_backfill(self):  # Req: F126 A4
+        """pre-F126 存量行（无 timeout_source）task_update 未携 timeout：
+        按既有 timeout 推断补正标签——有显式预算→task，无→default。"""
+        self.with_profiles({"/repo": {"timeout": 5400}})
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.state.set_fields(tid, verify={  # 播种 legacy 形状（无 source 键）
+            "cmd": "true", "state": "registered", "registered_by": "main",
+            "registered_at": 1.0, "timeout": 600})
+        self.svc.update_verify(tid, self.root, "pytest -q")
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["timeout"], 600)
+        self.assertEqual(v["timeout_source"], "task")
+        self.state.set_fields(tid, verify={
+            "cmd": "true", "state": "registered", "registered_by": "main",
+            "registered_at": 1.0, "timeout": None})
+        self.svc.update_verify(tid, self.root, "pytest -q")
+        self.assertEqual(self.state.get(tid)["verify"]["timeout_source"],
+                         "default")
 
 
 class TestBaseRedExemptFlag(TestCoreTask):

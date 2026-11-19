@@ -137,6 +137,37 @@ class TestLoadVerifyProfiles(unittest.TestCase):
         self.assertEqual(prof, {"/repo/hx": {"timeout": 5}})  # 不阻断
         self.assertIn("verify-profiles.json", err.getvalue())  # 有告警
 
+    def test_read_error_fail_fast_not_silent_empty(self):  # Req: F126（评审环 R1）
+        # 文件在但不可读（此处＝目录形态 EISDIR）：与「缺文件＝空」不同前提，
+        # 静默空画像会让全部预算无声回落 global——须 fail-fast 报路径
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.mkdir()
+        with self.assertRaises(ValueError) as cm:
+            load_verify_profiles(self.tmp)
+        self.assertIn(str(self.path), str(cm.exception))
+
+    def test_deeply_nested_json_fail_fast_with_path(self):  # Req: F126（评审环 R1）
+        # 深嵌套 JSON 使 json.loads 抛 RecursionError（非 ValueError 子类）——
+        # 不得逃出 ValueError 契约成裸 traceback
+        self.write("[" * 100000 + "]" * 100000)
+        with self.assertRaises(ValueError) as cm:
+            load_verify_profiles(self.tmp)
+        self.assertIn(str(self.path), str(cm.exception))
+
+    def test_nul_in_key_rejected_with_context(self):  # Req: F126（评审环 R1）
+        # key 内嵌 NUL：resolve 抛裸 ValueError 无路径语境——须按 schema 报因格式
+        self.write({"/tmp/\x00x": {"timeout": 5}})
+        with self.assertRaises(ValueError) as cm:
+            load_verify_profiles(self.tmp)
+        self.assertIn(str(self.path), str(cm.exception))
+
+    def test_note_control_chars_rejected(self):  # Req: F126（评审环 R1）
+        # 控制字符（NUL 等）不入任务页/投影——与 client_key isprintable 同口径
+        self.write({"/repo/hx": {"timeout": 5, "note": "a\x00b"}})
+        with self.assertRaises(ValueError) as cm:
+            load_verify_profiles(self.tmp)
+        self.assertIn("note", str(cm.exception))
+
 
 class TestGateProfileBudget(unittest.TestCase):
     """A7 Gate 生效预算＝profile 值：TaskService 建单（profile 命中写入

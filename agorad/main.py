@@ -187,11 +187,16 @@ def load_verify_profiles(home):
     path = Path(home) / ".agora" / "verify-profiles.json"
     try:
         raw = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
+    except UnicodeDecodeError:  # 坏字节＝空画像（文档契约）
+        return {}
+    except OSError as e:  # 评审环 R1：EACCES/EISDIR 等非缺席错误 fail-fast，
+        # 勿静默空画像——否则全部预算无声回落 global
+        raise ValueError(f"{path} 读取失败：{e}") from None
     try:
         data = json.loads(raw)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:  # R1：深嵌套抛 RecursionError
         raise ValueError(f"{path} JSON 解析失败：{e}") from None
     if not isinstance(data, dict):
         raise ValueError(f"{path} 顶层须为对象（收到 {type(data).__name__}）")
@@ -218,10 +223,15 @@ def load_verify_profiles(home):
             raise ValueError(f"{path} key {key!r} 字段 timeout "
                              f"须为正整数秒（收到 {timeout!r}）")
         note = val.get("note")
-        if note is not None and (not isinstance(note, str) or len(note) > 200):
+        if note is not None and (not isinstance(note, str) or len(note) > 200
+                                 or not note.isprintable()):  # R1：控制字符
+            # 不入任务页/投影（client_key isprintable 同口径）
             raise ValueError(f"{path} key {key!r} 字段 note 须为"
-                             f"≤200 字符的字符串（收到 {note!r}）")
-        canon = str(Path(key).resolve())
+                             f"≤200 字符的可打印字符串（收到 {note!r}）")
+        try:
+            canon = str(Path(key).resolve())
+        except ValueError as e:  # R1：内嵌 NUL 等——按 schema 报因格式带路径
+            raise ValueError(f"{path} key {key!r} 路径归一失败：{e}") from None
         if canon in out:
             raise ValueError(f"{path} 键归一后重复：{key!r} 与既有键同指 "
                              f"{canon!r}——合并为单条")

@@ -475,12 +475,21 @@ class TestReport(unittest.TestCase):
                             "timeout": 5400,
                             "timeout_source": "profile", "note": "ASAN"}
             t3 = row(state="todo", disp="d1", worker="w3")  # 无 verify 行
-            v = full_view(snap(t1=t1, t2=t2, t3=t3), st)
+            # legacy 行（pre-F126 无 timeout_source）：与任务页同款回落推断
+            t4 = row(state="todo", disp="d1", worker="w4")
+            t4["verify"] = {"cmd": "x", "state": "registered", "timeout": 300}
+            t5 = row(state="todo", disp="d1", worker="w5")
+            t5["verify"] = {"cmd": "x", "state": "registered", "timeout": None}
+            v = full_view(snap(t1=t1, t2=t2, t3=t3, t4=t4, t5=t5), st)
             self.assertEqual(v["tasks"]["t1"]["verify_budget"],
                              {"timeout": 600, "source": "task"})
             self.assertEqual(v["tasks"]["t2"]["verify_budget"],
                              {"timeout": 5400, "source": "profile",
                               "note": "ASAN"})
+            self.assertEqual(v["tasks"]["t4"]["verify_budget"],
+                             {"timeout": 300, "source": "task"})  # legacy 回落
+            self.assertEqual(v["tasks"]["t5"]["verify_budget"],
+                             {"timeout": None, "source": "default"})
             self.assertNotIn("verify_budget", v["tasks"]["t3"])
             self.assertNotIn("verify", v["tasks"]["t1"])  # cmd 不入投影
         finally:
@@ -517,6 +526,10 @@ class TestReport(unittest.TestCase):
                 "profiles": [{"path": "/repo/hx", "timeout": 5400,
                               "note": "ASAN"},
                              {"path": "/repo/other", "timeout": 60}]})
+            empty = doctor_view(s, tmp, verify_profiles={})  # 空画像（评审环 R1）
+            # 缺文件＝空画像也注入：count=0 让运维区分「没读到」与「读到但为空」
+            self.assertEqual(empty["verify_profiles"]["count"], 0)
+            self.assertEqual(empty["verify_profiles"]["profiles"], [])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
