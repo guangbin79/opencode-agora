@@ -165,10 +165,29 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 | `AGORA_QUICK_MAX_LINES` | `30` | quick 任务包络：累计增删行数上限，超限按 verify 红退回 worker |
 | `AGORA_GATE_ARTIFACT_KEEP` | `50` | 每任务保留的 gate 执行产物目录数（`$AGORA_HOME/state/gate-artifacts/<任务>/` 下最新 N 个）；正整数，坏值启动即拒 |
 | `$AGORA_HOME/.agora/agorad.env` | — | 旋钮缺省文件（`KEY=VALUE` 逐行、`#` 注释）；显式 env 优先，daemon 重启不丢 |
+| `$AGORA_HOME/.agora/verify-profiles.json` | 空 | 项目级 verify 预算画像（F126）：`{"<项目仓根绝对路径>": {"timeout": 秒, "note": "可选 ≤200 字"}}`；优先级 task_create 显式 timeout > profile > `AGORA_VERIFY_TIMEOUT`；JSON/schema 非法启动即拒（报因含路径/key/字段）；重启生效 |
 | `enforce` | on | 强制闸总开关（仅 root，开关留审计） |
 | `$AGORA_HOME/.agora/email.json` | 关 | 僵态任务邮件提醒（`{"to","command"}`） |
 
 注：install.sh 在 `$AGORA_HOME/.agora/agorad.env` 种 `AGORA_VERIFY_TIMEOUT=3600`——代码/README 缺省 300（软顶仅提醒不杀）；安装面放宽，长构建仓实测 300s 不够。
+
+### 项目级 verify 预算画像（F126）
+
+服务级 `AGORA_VERIFY_TIMEOUT` 是全局缺省，表达不了「HXNativeApp check ASAN 冷构建 35-60 分钟 vs 轻量仓 pytest 数秒」的差异。画像让每个项目仓有自己的默认预算，dispatcher 忘传 `task_create.timeout` 时长检查任务不再沿用全局预算：
+
+```json
+{
+  "/home/guangbin/Documents/HXAppPlatform/HXNativeApp": {
+    "timeout": 5400,
+    "note": "check ASAN --with-tests cold build 35-60min"
+  }
+}
+```
+
+- 优先级：任务显式 `timeout` > 项目 profile > `AGORA_VERIFY_TIMEOUT` 全局缺省；生效预算与来源（task/profile/default）入账，task page/detail/board full_view/doctor 可观测；Gate 硬顶＝4× 生效预算（F51 语义不动）
+- 画像是**服务侧配置**：worker 与仓库内配置不影响验收预算；只影响新建任务，已建任务不因 profile 后改而重写
+- key＝项目仓根绝对路径（realpath 归一，symlink/尾斜杠等价）；重复归一后冲突、非正整数 timeout、note >200 字符、额外字段——启动 fail-fast
+- 校准流程（人工，基于 F122 gate artifacts）：①查最近任务 artifacts 的 `duration_s`；②profile timeout 取稳定冷构建/验证时长的 1.5-2 倍；③改 `verify-profiles.json` 后重启 agorad 生效
 
 ## 安全模型
 

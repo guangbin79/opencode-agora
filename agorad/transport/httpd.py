@@ -260,6 +260,7 @@ class _Handler(BaseHTTPRequestHandler):
                 models = None
             return report.doctor_view(app.state.snapshot(), app.store.home,
                                       models=models,
+                                      verify_profiles=app.verify_profiles or None,  # Req: F126 画像摘要
                                       verify_hygiene=find_verify_hygiene_issues)  # F99 审计接线（core 禁兄弟 import，transport 注入）
         if name == "repo_board":  # F22：worker 按己任务仓分区；root/dispatcher 可传 repo 诊断
             snap = app.state.snapshot()

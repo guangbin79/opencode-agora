@@ -166,10 +166,29 @@ Deployment note: the plugin and service payloads are copies — after upgrading 
 | `AGORA_QUICK_MAX_LINES` | `30` | Quick-task envelope: cumulative added+deleted lines cap, same red path |
 | `AGORA_GATE_ARTIFACT_KEEP` | `50` | Gate execution artifacts kept per task (newest N dirs under `$AGORA_HOME/state/gate-artifacts/<task>/`); positive integer, bad values fail fast |
 | `$AGORA_HOME/.agora/agorad.env` | — | Knob defaults file (`KEY=VALUE`, `#` comments); explicit process env takes precedence, survives daemon restarts |
+| `$AGORA_HOME/.agora/verify-profiles.json` | empty | Per-project verify budget profiles (F126): `{"<absolute repo root>": {"timeout": seconds, "note": "optional, ≤200 chars"}}`; priority: explicit `task_create.timeout` > profile > `AGORA_VERIFY_TIMEOUT`; invalid JSON/schema fails fast at startup (error names the path/key/field); takes effect on restart |
 | `enforce` | on | Global gate switch (root only, audited) |
 | `$AGORA_HOME/.agora/email.json` | off | Stuck-task email alerts (`{"to","command"}`) |
 
 Note: `install.sh` seeds `AGORA_VERIFY_TIMEOUT=3600` into `$AGORA_HOME/.agora/agorad.env` — the code/README default is 300 (soft top notifies, never kills); the installer widens it because long-build repos measurably outgrow 300s.
+
+### Per-project verify budget profiles (F126)
+
+The service-level `AGORA_VERIFY_TIMEOUT` is a global default — it cannot express "HXNativeApp check ASAN cold build takes 35-60 min while a light repo's pytest finishes in seconds". Profiles give each project repo its own default budget, so a long-check task no longer inherits the global budget when the dispatcher omits `task_create.timeout`:
+
+```json
+{
+  "/home/guangbin/Documents/HXAppPlatform/HXNativeApp": {
+    "timeout": 5400,
+    "note": "check ASAN --with-tests cold build 35-60min"
+  }
+}
+```
+
+- Priority: explicit task `timeout` > project profile > `AGORA_VERIFY_TIMEOUT` global default; the effective budget and its source (task/profile/default) are recorded on the task row and visible in task page/detail/board full_view/doctor; the Gate hard top stays 4× the effective budget (F51 semantics unchanged)
+- Profiles are **server-side config**: workers and in-repo config cannot influence acceptance budgets; only new tasks are affected — existing tasks are never rewritten by later profile edits
+- Keys are absolute repo roots (realpath-normalized; symlinks and trailing slashes are equivalent); duplicate keys after normalization, non-positive-integer timeouts, notes over 200 chars, or extra fields fail fast at startup
+- Calibration flow (manual, from F122 gate artifacts): ① check recent task artifacts' `duration_s`; ② set the profile timeout to 1.5-2× the stable cold-build/verify duration; ③ edit `verify-profiles.json` and restart agorad to apply
 
 ## Safety Model
 

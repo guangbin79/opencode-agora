@@ -503,8 +503,8 @@ class TestHttpSmoke(HttpdTest):
         self.assertEqual(sorted(r["tasks"][tid]),
                          ["created", "delivery", "dispatcher_sid", "last_seen",
                           "model", "project_dir", "state", "title",
-                          "waiting_on",
-                          "worker_sid"])  # F55：model 恒在键，随白名单投影；delivery＝Req: F101；waiting_on＝Req: F124
+                          "verify_budget", "waiting_on",
+                          "worker_sid"])  # F55：model 恒在键，随白名单投影；delivery＝Req: F101；waiting_on＝Req: F124；verify_budget＝Req: F126 预算三元组
         self.assertTrue(all(e.get("event") == "escalate" for e in r["events"]))
         st, top = call(self.port, "POST", "/board", {}, self.root)
         self.assertEqual(st, 200)

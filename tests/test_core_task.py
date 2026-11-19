@@ -1120,6 +1120,88 @@ class TestTaskVerifyTimeout(TestCoreTask):
         self.assertIsNone(v["timeout"])
 
 
+class TestTaskVerifyProfile(TestCoreTask):
+    """Req: F126 项目级 verify 预算画像：优先级 task > profile > global；
+    profile 是服务侧配置注入（TaskService 构造缝），有效预算恒存
+    verify.timeout，来源存 verify.timeout_source（Gate 取值零改动）。"""
+
+    def with_profiles(self, profiles):
+        self.svc = TaskService(self.state, self.auth, self.gitx, self.oc,
+                               self.store, self.router, write_task_page,
+                               verify_hygiene=find_verify_hygiene_issues,
+                               verify_profiles=profiles)
+        return self.svc
+
+    def test_explicit_timeout_wins_over_profile(self):  # Req: F126 A2
+        self.with_profiles({"/repo": {"timeout": 5400, "note": "ASAN"}})
+        tid = self.svc.create("g", "/repo", None, self.root,
+                              verify_cmd="true", timeout=600)
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["timeout"], 600)  # 显式值优先
+        self.assertEqual(v["timeout_source"], "task")
+        self.assertNotIn("note", v)  # 显式预算下画像 note 不随行
+
+    def test_profile_hit_sets_budget_and_source(self):  # Req: F126 A2
+        self.with_profiles({"/repo": {"timeout": 5400, "note": "ASAN"}})
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["timeout"], 5400)  # 有效预算＝profile 值
+        self.assertEqual(v["timeout_source"], "profile")
+        self.assertEqual(v["note"], "ASAN")  # note 建单快照随行
+
+    def test_no_profile_defaults_source(self):  # Req: F126 A2
+        self.with_profiles({"/other": {"timeout": 5400}})
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        v = self.state.get(tid)["verify"]
+        self.assertIsNone(v["timeout"])  # 全局缺省＝None（Gate 回落服务值）
+        self.assertEqual(v["timeout_source"], "default")
+
+    def test_profile_realpath_match(self):  # Req: F126 A3
+        import os
+
+        repo = self.tmp / "proj"
+        repo.mkdir()
+        link = self.tmp / "plink"
+        os.symlink(repo, link)
+        self.with_profiles({str(repo): {"timeout": 5400}})
+        tid = self.svc.create("g", str(link) + "/", None, self.root,
+                              verify_cmd="true")  # symlink＋尾斜杠别名
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["timeout"], 5400)
+        self.assertEqual(v["timeout_source"], "profile")
+
+    def test_worker_child_inherits_profile_budget(self):  # Req: F126
+        """worker 建单继承父 verify 字典：profile 命中的预算/source/note
+        随字典下发，不被改写。"""
+        self.with_profiles({"/repo": {"timeout": 5400, "note": "ASAN"}})
+        parent = self.svc.create("parent", "/repo", None, self.root,
+                                 verify_cmd="true")
+        wtok = self.svc.dispatch(parent, self.root)
+        child = self.svc.create("child", None, None, wtok)
+        v = self.state.get(child)["verify"]
+        self.assertEqual(v["timeout"], 5400)
+        self.assertEqual(v["timeout_source"], "profile")
+        self.assertEqual(v["note"], "ASAN")
+
+    def test_update_verify_explicit_timeout_flips_source(self):  # Req: F126 A4
+        self.with_profiles({"/repo": {"timeout": 5400, "note": "ASAN"}})
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.svc.update_verify(tid, self.root, "pytest -q", timeout=1200)
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["timeout"], 1200)
+        self.assertEqual(v["timeout_source"], "task")
+        self.assertNotIn("note", v)  # 生效预算不再是画像，note 不再描述
+
+    def test_update_verify_keeps_profile_budget(self):  # Req: F126 A4
+        self.with_profiles({"/repo": {"timeout": 5400, "note": "ASAN"}})
+        tid = self.svc.create("g", "/repo", None, self.root, verify_cmd="true")
+        self.svc.update_verify(tid, self.root, "pytest -q")  # 未携 timeout
+        v = self.state.get(tid)["verify"]
+        self.assertEqual(v["timeout"], 5400)  # 既有 timeout/source 不因后改重写
+        self.assertEqual(v["timeout_source"], "profile")
+        self.assertEqual(v["note"], "ASAN")
+
+
 class TestBaseRedExemptFlag(TestCoreTask):
     """Req: F107 建单豁免旗 verify_base_exempt：权限面同 verify_cmd——仅
     dispatcher/root 显式设；worker 显式传拒、缺省继承父任务。"""

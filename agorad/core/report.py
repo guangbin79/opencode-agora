@@ -190,9 +190,18 @@ def full_view(snap, store):
     # usage＝F57 经济性投影（行内 dict 原样带，缺席行不投影）；
     # delivery＝Req: F101 外部交付观测投影（awaiting_external/commit/base/attempt）
     raw_events = store.read_events()
+    tasks = {tid: {k: t[k] for k in fields if k in t}
+             for tid, t in snap["tasks"].items()}
+    for tid, t in snap["tasks"].items():  # Req: F126 预算三元组投影
+        v = t.get("verify") or {}
+        if v:
+            budget = {"timeout": v.get("timeout"),
+                      "source": v.get("timeout_source")}
+            if v.get("note"):
+                budget["note"] = v["note"]
+            tasks[tid]["verify_budget"] = budget
     return {"buckets": buckets(snap), "forest": forest_view(snap),
-            "tasks": {tid: {k: t[k] for k in fields if k in t}
-                      for tid, t in snap["tasks"].items()},
+            "tasks": tasks,
             "events": [e for e in raw_events
                        if e.get("event") == "escalate"],
             "stats": _model_stats(snap["tasks"], raw_events)}
@@ -313,7 +322,8 @@ def _verify_hygiene_findings(tasks, verify_hygiene):
     return out
 
 
-def doctor_view(snap, store_home, now=None, models=None, verify_hygiene=None):
+def doctor_view(snap, store_home, now=None, models=None, verify_hygiene=None,
+                verify_profiles=None):
     """账本侧事实：任务年龄/最后活动排行＋僵态候选＋env_dir 在盘性（盘上孤儿扫描属②期）。
 
     排行活性基线（F15）：age_rank/last_seen_rank 同取 _stale_baseline（与
@@ -323,6 +333,7 @@ def doctor_view(snap, store_home, now=None, models=None, verify_hygiene=None):
     oc 不可达由调用方降级传 None＝键缺席（core 勿 import access，oc 调用归 transport）。
     F99 verify_hygiene_findings：非终态任务 verify 命令静态卫生审计（只读），
     检查器由调用方注入（core 禁兄弟 import），未注入＝空发现。
+    Req: F126 verify_profiles 非 None 时回体加画像摘要（count/配置路径/清单）。
     """
     now = time.time() if now is None else now
     home, tasks = Path(store_home), snap["tasks"]
@@ -346,6 +357,12 @@ def doctor_view(snap, store_home, now=None, models=None, verify_hygiene=None):
     if models is not None:
         out["models"] = models
         out["models_note"] = _MODELS_NOTE
+    if verify_profiles is not None:  # Req: F126 画像摘要（只读）
+        out["verify_profiles"] = {
+            "count": len(verify_profiles),
+            "path": str(home / ".agora" / "verify-profiles.json"),
+            "profiles": [{"path": k, **verify_profiles[k]}
+                         for k in sorted(verify_profiles)]}
     return out
 
 

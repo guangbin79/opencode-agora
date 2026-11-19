@@ -195,6 +195,34 @@ class TestAssembleWiring(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_assemble_wires_verify_profiles(self):  # Req: F126
+        tmp = tempfile.mkdtemp()
+        try:
+            prof = {"/repo": {"timeout": 5400, "note": "ASAN"}}
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw",
+                           verify_profiles=prof)
+            self.assertEqual(app.task._verify_profiles, prof)  # TaskService 装配缝
+            self.assertEqual(app.verify_profiles, prof)  # doctor 注入面
+            app2 = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw")
+            self.assertEqual(app2.task._verify_profiles, {})  # 未注入＝空画像
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_main_fail_fast_on_bad_profile_file(self):  # Req: F126
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"AGORA_HOME": tmp}, clear=True), \
+             mock.patch("agorad.main.discover",
+                        return_value=("http://127.0.0.1:9", "pw")):
+            (Path(tmp) / ".agora").mkdir(parents=True)
+            (Path(tmp) / ".agora" / "verify-profiles.json").write_text(
+                "{bad json")
+            import io
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                rc = main()
+        self.assertEqual(rc, 2)
+        self.assertIn("verify-profiles.json", err.getvalue())  # 报因含文件路径
+
 
 class TestIssueRoot(unittest.TestCase):
     """ag-588eb8：启动 root 签发面收窄（裁决 A·新装防御）——root 牌只属 daemon

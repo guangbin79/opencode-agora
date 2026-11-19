@@ -461,6 +461,65 @@ class TestReport(unittest.TestCase):
             "error": "retry_exhausted"}))
         self.assertEqual(buckets(s)["失败"], ["t1"])
 
+    def test_full_view_verify_budget_projection(self):  # Req: F126 A5
+        """verify_budget 三元组投影：只投 timeout/source/note（不投 cmd）；
+        note 缺席省略；无 verify 行不投影。"""
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            t1 = row(disp="d1", worker="w1")
+            t1["verify"] = {"cmd": "secret-cmd", "state": "registered",
+                            "timeout": 600, "timeout_source": "task"}
+            t2 = row(state="todo", disp="d1", worker="w2")
+            t2["verify"] = {"cmd": "x", "state": "registered",
+                            "timeout": 5400,
+                            "timeout_source": "profile", "note": "ASAN"}
+            t3 = row(state="todo", disp="d1", worker="w3")  # 无 verify 行
+            v = full_view(snap(t1=t1, t2=t2, t3=t3), st)
+            self.assertEqual(v["tasks"]["t1"]["verify_budget"],
+                             {"timeout": 600, "source": "task"})
+            self.assertEqual(v["tasks"]["t2"]["verify_budget"],
+                             {"timeout": 5400, "source": "profile",
+                              "note": "ASAN"})
+            self.assertNotIn("verify_budget", v["tasks"]["t3"])
+            self.assertNotIn("verify", v["tasks"]["t1"])  # cmd 不入投影
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_detail_carries_verify_budget_fields(self):  # Req: F126 A5
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            st = Store(tmp)
+            t1 = row(disp="d1", worker="w1")
+            t1["verify"] = {"cmd": "pytest -q", "state": "registered",
+                            "timeout": 5400, "timeout_source": "profile",
+                            "note": "ASAN"}
+            out = detail(snap(t1=t1), st, "t1")
+            self.assertEqual(out["task"]["verify"]["timeout"], 5400)
+            self.assertEqual(out["task"]["verify"]["timeout_source"],
+                             "profile")
+            self.assertEqual(out["task"]["verify"]["note"], "ASAN")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_doctor_view_verify_profiles_summary(self):  # Req: F126 A6
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            s = snap(t1=row("running"))
+            base = doctor_view(s, tmp)  # 未注入＝键缺席（models 同款）
+            self.assertNotIn("verify_profiles", base)
+            v = doctor_view(s, tmp, verify_profiles={
+                "/repo/hx": {"timeout": 5400, "note": "ASAN"},
+                "/repo/other": {"timeout": 60}})
+            self.assertEqual(v["verify_profiles"], {
+                "count": 2,
+                "path": str(Path(tmp) / ".agora" / "verify-profiles.json"),
+                "profiles": [{"path": "/repo/hx", "timeout": 5400,
+                              "note": "ASAN"},
+                             {"path": "/repo/other", "timeout": 60}]})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

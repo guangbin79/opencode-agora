@@ -107,6 +107,26 @@ class TestAccessPages(unittest.TestCase):
         bare = write_task_page(self.tmp, "ag-b", dict(ROW, id="ag-b"))
         self.assertNotIn("状态投影", bare.read_text(encoding="utf-8"))
 
+    def test_verify_budget_line_on_page(self):  # Req: F126 A5
+        """verify 行追加 timeout=<N>s source=<task|profile|default>；
+        profile note 另起一行；无预算（legacy/缺省）回落 global 显示。"""
+        task_row = dict(ROW, verify={"cmd": "pytest -q", "state": "registered",
+                                     "timeout": 600, "timeout_source": "task"})
+        text = write_task_page(self.tmp, "ag-t1", task_row).read_text(
+            encoding="utf-8")
+        self.assertIn("timeout=600s source=task", text)
+        prof_row = dict(ROW, verify={"cmd": "pytest -q", "state": "registered",
+                                     "timeout": 5400,
+                                     "timeout_source": "profile",
+                                     "note": "check ASAN cold build"})
+        text = write_task_page(self.tmp, "ag-t2", prof_row).read_text(
+            encoding="utf-8")
+        self.assertIn("timeout=5400s source=profile", text)
+        self.assertIn("\nverify note: check ASAN cold build", text)  # note 独立成行
+        legacy = write_task_page(self.tmp, "ag-t3", ROW).read_text(
+            encoding="utf-8")
+        self.assertIn("timeout=global source=default", legacy)
+
 
 if __name__ == "__main__":
     unittest.main()

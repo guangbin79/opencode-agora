@@ -57,11 +57,33 @@ class TaskService:
     口径同 Health 消息写面）；无锁无线程。"""
 
     def __init__(self, state, auth, gitx, oc, store, router, pages,
-                 stale_candidates=None, verify_hygiene=None):
+                 stale_candidates=None, verify_hygiene=None,
+                 verify_profiles=None):
         self._state, self._auth, self._gitx, self._oc = state, auth, gitx, oc
         self._store, self._router, self._pages = store, router, pages
         self._stale_candidates = stale_candidates  # ag-d1d8c1：僵态口径单一事实源
         self._verify_hygiene = verify_hygiene  # F99：纯函数检查器构造注入（core 禁兄弟 import）
+        self._verify_profiles = verify_profiles or {}  # Req: F126 项目级预算画像（服务侧配置）
+
+    def _budget(self, project_dir, verify, timeout):
+        """Req: F126 effective timeout/source 解析：task > profile > global。
+        有效预算恒存 verify.timeout（Gate 两级取值零改动）；来源存
+        verify.timeout_source；profile 命中 note 随行快照（建单后 profile
+        改动不重写既有行，task_update 同款）。继承/legacy 显式预算不重解析。"""
+        if timeout is not None:
+            verify["timeout_source"] = "task"
+        elif verify.get("timeout") is not None:
+            verify.setdefault("timeout_source", "task")  # legacy 显式预算补正
+        else:
+            prof = self._verify_profiles.get(project_dir)
+            if prof is not None:
+                verify = dict(verify, timeout=prof["timeout"],
+                              timeout_source="profile")
+                if prof.get("note"):
+                    verify["note"] = prof["note"]
+            else:
+                verify["timeout_source"] = "default"
+        return verify
 
     @staticmethod
     def _repo_key(path: str) -> str:
@@ -219,6 +241,7 @@ class TaskService:
                       "timeout": timeout}
         elif role == "worker":  # F37 缺省继承：验证配置随父任务（registered 才过闸）
             verify = dict(parent["verify"])
+        verify = self._budget(project_dir, verify, timeout)  # Req: F126
         root_sid = sid if role != "worker" else (
             parent.get("root_sid") or parent["dispatcher_sid"])  # F45 一次性定死：worker 继承父池
         delivery = None  # Req: F94 out_of_band 走旧门协议：不建 delivery 投影
@@ -655,11 +678,19 @@ class TaskService:
         if timeout is not None and _bad_timeout(timeout):  # F51：坏值 fail-fast，同款文案
             self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
         self._hygiene_gate(tid, sid, cmd, t["project_dir"])  # F99：set_fields 前卫生闸
-        self._state.set_fields(tid, verify={
-            "cmd": cmd, "state": "registered", "registered_by": sid,
-            "registered_at": time.time(),
-            "timeout": timeout if timeout is not None
-            else t["verify"].get("timeout")})  # 未携 timeout 不清既有预算
+        old = t["verify"]
+        verify = {"cmd": cmd, "state": "registered", "registered_by": sid,
+                  "registered_at": time.time(),
+                  "timeout": timeout if timeout is not None
+                  else old.get("timeout")}  # 未携 timeout 不清既有预算
+        if timeout is not None:  # Req: F126 显式预算改写来源＝task
+            verify["timeout_source"] = "task"  # note 不再描述生效预算，不随行
+        else:  # 未传 timeout 保持既有 source/note，不因 profile 后改而重写
+            verify["timeout_source"] = old.get("timeout_source") or (
+                "task" if old.get("timeout") is not None else "default")
+            if verify["timeout_source"] == "profile" and old.get("note"):
+                verify["note"] = old["note"]
+        self._state.set_fields(tid, verify=verify)
         self._store.append_event({"ts": time.time(), "actor": sid, "event": EV_VERIFY,
                                   "task": tid})
         # 推送通知 worker：verify 已登记，消除轮询等待（狗粮摩擦 #1）

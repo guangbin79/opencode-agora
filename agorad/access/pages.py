@@ -58,6 +58,14 @@ def write_task_page(home, tid, snap, tasks=None, events=None) -> Path:
     vline = "verify: " + v.get("state", "pending")
     if v.get("cmd"):
         vline += " - " + v["cmd"]
+    # Req: F126 预算行：timeout=<N>s source=<task|profile|default>；
+    # 无预算（缺省/legacy）回落 global 显示；profile note 另起一行
+    src = v.get("timeout_source") or ("task" if v.get("timeout") is not None
+                                      else "default")
+    vline += (f" timeout={v['timeout']}s" if v.get("timeout") is not None
+              else " timeout=global") + f" source={src}"
+    if v.get("note"):
+        vline += "\nverify note: " + v["note"]
     body = ("---\n" + fm + "\n---\n\n# " + tid + "\n\ngoal: "
             + str(snap.get("goal", "")) + "\n\n" + vline + "\n")
     body += _projection(home, tid, snap)  # Req: F125（_audit 单点刷新复用）

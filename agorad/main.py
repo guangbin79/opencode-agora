@@ -5,6 +5,7 @@ service.json（$AGORA_HOME/.agora/ 下，pid/port/started/version/oc_version）�
 health 后台定时线程（默认 300s，AGORA_HEALTH_INTERVAL 可配）→serve_forever。
 """
 import hashlib
+import json
 import math
 import os
 import signal
@@ -34,7 +35,7 @@ from agorad.core.msg import Router
 from agorad.core.peer import PeerBoard
 from agorad.core.recover import Recover
 from agorad.core.state import State
-from agorad.core.task import TaskService
+from agorad.core.task import TaskService, _bad_timeout
 from agorad.core.verify_hygiene import find_verify_hygiene_issues
 from agorad.transport.httpd import make_server
 
@@ -174,6 +175,63 @@ def gate_artifact_keep_from_env():
     return v
 
 
+_VERIFY_PROFILE_FIELDS = ("timeout", "note")
+
+
+def load_verify_profiles(home):
+    """Req: F126 项目级 verify 预算画像：$home/.agora/verify-profiles.json →
+    {canonical 项目根: {timeout, note?}}；缺文件/坏字节＝空画像；
+    JSON/schema 非法 raise ValueError（报因含文件路径/key/字段名与原因）；
+    权限过宽 stderr WARNING 不阻断（不含密钥）。key realpath 归一、重复归一
+    拒；timeout 与 task_create.timeout 同域（task._bad_timeout 同判）。"""
+    path = Path(home) / ".agora" / "verify-profiles.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise ValueError(f"{path} JSON 解析失败：{e}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} 顶层须为对象（收到 {type(data).__name__}）")
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        mode = None
+    if mode is not None and mode & 0o077:
+        print(f"WARNING: {path} 权限过宽（{oct(mode & 0o777)}）——"
+              "建议 0600（不含密钥，不阻断）", file=sys.stderr)
+    out = {}
+    for key, val in data.items():
+        if not isinstance(key, str) or not os.path.isabs(key):
+            raise ValueError(f"{path} key {key!r} 须为绝对路径（项目仓根）")
+        if not isinstance(val, dict):
+            raise ValueError(f"{path} key {key!r} 须为对象"
+                             f"（{_VERIFY_PROFILE_FIELDS}）")
+        extra = sorted(set(val) - set(_VERIFY_PROFILE_FIELDS))
+        if extra:
+            raise ValueError(f"{path} key {key!r} 含未知字段 {extra}"
+                             f"（仅支持 {_VERIFY_PROFILE_FIELDS}）")
+        timeout = val.get("timeout")
+        if _bad_timeout(timeout):
+            raise ValueError(f"{path} key {key!r} 字段 timeout "
+                             f"须为正整数秒（收到 {timeout!r}）")
+        note = val.get("note")
+        if note is not None and (not isinstance(note, str) or len(note) > 200):
+            raise ValueError(f"{path} key {key!r} 字段 note 须为"
+                             f"≤200 字符的字符串（收到 {note!r}）")
+        canon = str(Path(key).resolve())
+        if canon in out:
+            raise ValueError(f"{path} 键归一后重复：{key!r} 与既有键同指 "
+                             f"{canon!r}——合并为单条")
+        prof = {"timeout": timeout}
+        if note is not None:
+            prof["note"] = note
+        out[canon] = prof
+    return out
+
+
 def instance_identity(home):
     """F96 稳定实例身份：hostname + AGORA_HOME realpath 的 sha256 前 8 位——
     同机同 home 跨重启恒等、异机/异 home 互异；入 Gitx 属主化 env 命名。"""
@@ -186,7 +244,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
              verify_timeout=300, verify_ceiling=None, roster_path=None,
              quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
-             gate_max_concurrent=1, gate_artifact_keep=50):
+             gate_max_concurrent=1, gate_artifact_keep=50,
+             verify_profiles=None):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -205,12 +264,14 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     task = TaskService(
         state, auth, gitx, oc, store, router, page_writer,
         stale_candidates=report.stale_candidates,  # ag-d1d8c1：僵态同口径
-        verify_hygiene=find_verify_hygiene_issues)  # F99：登记面卫生闸
+        verify_hygiene=find_verify_hygiene_issues,  # F99：登记面卫生闸
+        verify_profiles=verify_profiles)  # Req: F126 项目级预算画像
     peer = PeerBoard(store, state)  # F22 同仓协作面（写面权限归 httpd 角色判定）
     recover = Recover(state, oc, gitx, store, auth, router=router)
     app = App(store=store, state=state, auth=auth, router=router, task=task,
               peer=peer, gate=None, health=None, recover=recover, report=report,
-              oc=oc, gitx=gitx, main_sid=main_sid, page_writer=page_writer)
+              oc=oc, gitx=gitx, main_sid=main_sid, page_writer=page_writer,
+              verify_profiles=verify_profiles)  # Req: F126 doctor 注入面
     health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
                     env_activity=report._env_activity,  # F59 env 活性同口径（禁兄弟 import）
@@ -349,6 +410,11 @@ def main():
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
+    try:  # Req: F126 项目级 verify 预算画像（缺文件＝空；schema 非法 fail-fast）
+        verify_profiles = load_verify_profiles(home)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     store = Store(Path(home))
     if not store.flock_singleton():
         print("agorad 已在运行", file=sys.stderr)
@@ -361,7 +427,8 @@ def main():
                    quick_max_files=quick_files, quick_max_lines=quick_lines,
                    clean_ignore_env=os.environ.get("AGORA_CLEAN_IGNORE", ""),
                    gate_max_concurrent=gate_max,
-                   gate_artifact_keep=ga_keep)  # Req: F122
+                   gate_artifact_keep=ga_keep,  # Req: F122
+                   verify_profiles=verify_profiles)  # Req: F126
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）
