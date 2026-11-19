@@ -3,6 +3,7 @@
 真 Store/State/Router＋假 oc/gitx/health/read_anchor/runner 全注入；
 门体 run 同步调用（后台线程包装归 httpd 装配）。
 """
+import json
 import os
 import shlex
 import shutil
@@ -20,6 +21,7 @@ from agorad.access.pages import write_task_page
 from agorad.access.store import Store
 from agorad.core.auth import Auth
 from agorad.core.gate import Gate, _cmd_dead, _subprocess_runner
+from agorad.core.gate_artifacts import ArtifactStore
 from agorad.core.msg import Router
 from agorad.core.state import State
 from agorad.core.task import TaskService
@@ -948,7 +950,9 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.removed, [str(self.env)])  # 环境即回收
         self.assertEqual(self.runner.calls,  # env verify→detached 集成环境 verify
-                         [(str(self.env), "pytest -q"), (integration, "pytest -q")])
+                         [(str(self.env), "pytest -q"),
+                          (integration, f"export AGORA_INTEGRATION_BASE="
+                           f"{self.gx.head_sha}; pytest -q")])  # Req: F123
         self.assertEqual(self.gx.clean_calls, ["/repo", "/repo"])  # 开始前＋最终推进前复查
         self.assertEqual(self.gx.integration_removed, [(integration, "/repo")])
         self.assertIsNone(t.get("gate_env"))
@@ -1106,7 +1110,10 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.gx.merge_calls, [])
         self.assertEqual(self.gx.removed, [str(self.env)])
         self.assertEqual(self.runner.calls,  # 集成 verify 跑在 R 上（重测不重审）
-                         [(str(self.env), "pytest -q"), (f"{self.env}__gate", "pytest -q")])
+                         [(str(self.env), "pytest -q"),
+                          (f"{self.env}__gate",
+                           f"export AGORA_INTEGRATION_BASE={self.gx.head_sha}; "
+                           "pytest -q")])  # Req: F123
         evs = self.store.read_events("t1")
         rebased = next(e for e in evs if e["event"] == "rebased")
         self.assertEqual(rebased["from"], SHA)
@@ -1202,7 +1209,10 @@ class TestGateRun(TestCoreGate):
         self.assertEqual(self.gx.ff_sha_calls,
                          [(integration, SHA, None), ("/repo", SHA, "main")])
         self.assertEqual(self.runner.calls,  # 集成 verify 跑在交付（done sha）上
-                         [(str(self.env), "pytest -q"), (integration, "pytest -q")])
+                         [(str(self.env), "pytest -q"),
+                          (integration,
+                           f"export AGORA_INTEGRATION_BASE={self.gx.head_sha}; "
+                           "pytest -q")])  # Req: F123
 
     def test_gate_empty_rebase_local_probe_phantom_bounce(self):  # Req: ag-28f327/F109
         """空集重放＋本地支不含交付 commit＝幻影：弹回 reopened 自愈——F109 起
@@ -2410,7 +2420,9 @@ class TestQuickEnvelope(TestCoreGate):
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 全链照常
         self.assertEqual(self.runner.calls,
                          [(str(self.env), "pytest -q"),
-                          (self.gx.integration_builds[-1][1], "pytest -q")])
+                          (self.gx.integration_builds[-1][1],
+                           f"export AGORA_INTEGRATION_BASE={self.gx.head_sha}; "
+                           "pytest -q")])  # Req: F123
 
     def test_knobs_override_tighten_envelope(self):  # Req: F65
         self.mk_gate(quick_max_files=1, quick_max_lines=1)
@@ -2453,9 +2465,10 @@ class TestBaseRedProbe(TestCoreGate):
         self.assertEqual(t["state"], "closed")  # 红＝探针通过，门流程零变化
         self.assertEqual(self.gx.build_at_calls,
                          [("/repo", integ, OTHER_SHA)])  # env_base 定基
-        self.assertEqual(self.runner.calls,  # 探针→env→集成
+        self.assertEqual(self.runner.calls,  # 探针→env→集成（Req: F123 注入）
                          [(integ, "pytest -q"), (str(self.env), "pytest -q"),
-                          (integ, "pytest -q")])
+                          (integ, f"export AGORA_INTEGRATION_BASE="
+                           f"{self.gx.head_sha}; pytest -q")])
         self.assertEqual(t["probe"]["result"], "red")  # 结果缓存落行
         self.assertIn("base_probe_red", self.events())
 
@@ -2484,7 +2497,9 @@ class TestBaseRedProbe(TestCoreGate):
         self.assertEqual(self.gx.build_at_calls, [])  # 零探针机械
         self.assertEqual(self.runner.calls,
                          [(str(self.env), "pytest -q"),
-                          (f"{self.env}__gate", "pytest -q")])
+                          (f"{self.env}__gate",
+                           f"export AGORA_INTEGRATION_BASE={self.gx.head_sha}; "
+                           "pytest -q")])  # Req: F123
 
     def test_quick_auto_exempt_skips_probe(self):  # Req: F107（裁决③）
         self.in_gate_probe(quick=True)
@@ -2578,7 +2593,8 @@ class TestBaseRedProbe(TestCoreGate):
         self.assertEqual(self.state.get("t1")["state"], "closed")  # 新命令重探红
         self.assertEqual([c[1] for c in self.runner.calls],
                          ["pytest -q", "pytest -q new", "pytest -q new",
-                          "pytest -q new"])
+                          f"export AGORA_INTEGRATION_BASE={self.gx.head_sha}; "
+                          "pytest -q new"])  # Req: F123 集成阶段注入
 
     def test_env_base_absent_skips_probe(self):  # Req: F107
         """legacy 在飞行（env_base 缺席）＝探针不可确立 fail-open：门流程零变化。"""
@@ -3171,6 +3187,164 @@ class TestExternalHandoff(TestCoreGate):
         t = self.state.get("t1")
         self.assertEqual(t["state"], "done")  # 驻留不被逆转
         self.assertEqual(self.delivery()["status"], "awaiting_external")
+
+
+class TestIntegrationBaseInjection(TestCoreGate):
+    """Req: F123 AGORA_INTEGRATION_BASE 注入：integration verify 经 export
+    前缀拿到本轮集成基线（登记命令文本不改写）；env verify/base_probe 不注入；
+    artifact meta 记录有效命令＋extra=integration_base。"""
+
+    def setUp(self):
+        super().setUp()
+        self.integration = str(self.env) + "__gate"
+        self.gx.local_sha_result = LOCAL_BASE
+
+    def test_managed_injects_attempt_base(self):  # Req: F123 A4/B1
+        self.seed(tb="main")
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gx.head_shas[self.integration] = SHA  # ff 直通
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        # env verify 原文；integration verify 注入当轮 attempt base
+        self.assertEqual(self.runner.calls[0],
+                         (str(self.env), "pytest -q"))
+        self.assertEqual(self.runner.calls[1],
+                         (self.integration,
+                          f"export AGORA_INTEGRATION_BASE={LOCAL_BASE}; "
+                          "pytest -q"))
+        # 任务行登记文本不被改写
+        self.assertEqual(self.state.get("t1")["verify"]["cmd"], "pytest -q")
+
+    def test_managed_tip_race_updates_injected_base(self):  # Req: F123 A6
+        """target tip 前进触发第二次 attempt：注入值随动新 base。"""
+        self.seed(tb="main")
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gx.merge_result = "non-ff"
+        self.gx.rebase_result = "sha"
+        self.gx.rebase_new_head = R_SHA
+        self.gx.local_sha_results = [LOCAL_BASE, TIP_SHA,  # 读基＋锁内重读
+                                     TIP_SHA, TIP_SHA]     # 重取基＋锁内复核
+        self.runner.results = [(0, "p")] * 3
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        injected = [c[1] for c in self.runner.calls
+                    if "AGORA_INTEGRATION_BASE" in c[1]]
+        self.assertEqual(injected, [
+            f"export AGORA_INTEGRATION_BASE={LOCAL_BASE}; pytest -q",
+            f"export AGORA_INTEGRATION_BASE={TIP_SHA}; pytest -q"])
+
+    def test_external_injects_base(self):  # Req: F123 A4
+        self.seed(tb="main")
+        self.state.set_fields("t1", delivery=dict(EXTERNAL_DELIVERY))
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gx.head_shas[self.integration] = SHA
+        self.gate.run("t1")
+        self.assertEqual(self.runner.calls[1],
+                         (self.integration,
+                          f"export AGORA_INTEGRATION_BASE={LOCAL_BASE}; "
+                          "pytest -q"))
+
+    def test_legacy_injects_baseline_head(self):  # Req: F123 A4
+        """legacy integration：注入 build_integration 后的 baseline head。"""
+        self.in_gate()
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        before = self.gx.head_shas.get(self.integration, self.gx.head_sha)
+        self.assertEqual(self.runner.calls[1],
+                         (self.integration,
+                          f"export AGORA_INTEGRATION_BASE={before}; pytest -q"))
+
+    def test_env_verify_and_base_probe_not_injected(self):  # Req: F123 A5
+        """探针与 env verify 命令保持原文，不注入 integration base。"""
+        self.runner = FakeRunner((1, "base red"), (0, "pass"), (0, "pass"))
+        self.mk_gate()
+        self.seed()
+        self.state.set_fields("t1", env_base=OTHER_SHA)
+        self.anchor = {"head": SHA, "base": OTHER_SHA, "clean": True}
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        # base_probe（integration cwd）与 env verify 均原文
+        self.assertEqual(self.runner.calls[0][1], "pytest -q")
+        self.assertEqual(self.runner.calls[1][1], "pytest -q")
+        self.assertIn("AGORA_INTEGRATION_BASE", self.runner.calls[2][1])
+
+
+class TestBaseInjectionArtifact(TestCoreGate):
+    """Req: F123 A8：注入后的有效命令进 artifact meta；extra 记录
+    integration_base/review_base（不读命令也可机器判读）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.ga_root = self.tmp / "gate-artifacts"
+        self.artifacts = ArtifactStore(self.ga_root)
+        self.mk_gate(artifact_store=self.artifacts)
+        self.integration = f"{self.env}__gate"
+
+    def metas(self):
+        dirs = sorted((self.ga_root / "t1").iterdir(),
+                      key=lambda d: d.name.rsplit("-", 1)[-1])
+        return [json.loads((d / "meta.json").read_text(encoding="utf-8"))
+                for d in dirs]
+
+    def test_integration_meta_records_effective_cmd_and_extra(self):  # Req: F123
+        self.seed(tb="main")
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gx.head_shas[self.integration] = SHA
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        m = {x["phase"]: x for x in self.metas()}
+        before = self.gx.head_shas.get(self.integration, self.gx.head_sha)
+        self.assertEqual(m["verify"]["cmd"], "pytest -q")  # 原文
+        self.assertEqual(m["integration_verify"]["cmd"],
+                         f"export AGORA_INTEGRATION_BASE={before}; pytest -q")
+        self.assertEqual(m["integration_verify"]["extra"],
+                         {"integration_base": before})
+        self.assertIsNone(m["verify"]["extra"])
+
+    def test_review_meta_extra_review_base(self):  # Req: F123 A7/A8
+        self.runner = FakeRunner((0, "p"), (0, "review-ok"), (0, "p"))
+        self.mk_gate(artifact_store=self.artifacts)
+        self.seed()
+        self.state.set_fields("t1", review_cmd="true", env_base=OTHER_SHA,
+                              verify_base_exempt=True)
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gx.head_shas[self.integration] = SHA
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        m = {x["phase"]: x for x in self.metas()}
+        self.assertEqual(m["review"]["cmd"],
+                         f"export AGORA_REVIEW_BASE={OTHER_SHA}; true")
+        self.assertEqual(m["review"]["extra"], {"review_base": OTHER_SHA})
+        # 任务行登记文本保持用户原值
+        self.assertEqual(self.state.get("t1")["review_cmd"], "true")
+
+
+class TestGateReviewExportInjection(TestCoreGate):
+    """Req: F123 A7：AGORA_REVIEW_BASE 改 export 全链生效（VAR=x cmd 前缀
+    赋值只作用于首条命令——`cd x && pytest` 形态下 pytest 读不到）。"""
+
+    REVIEW = 'cd sub && printf %s "$AGORA_REVIEW_BASE"'
+
+    def test_review_effective_cmd_is_export_chain(self):  # Req: F123 A7
+        self.runner = FakeRunner((1, "base red"), (0, "pass"),
+                                 (0, "rb"), (0, "pass"))
+        self.mk_gate()
+        self.seed()
+        self.state.set_fields("t1", review_cmd=self.REVIEW,
+                              env_base=LOCAL_BASE)
+        self.gate.accept_done("t1", "s-w1", SHA)
+        self.gx.head_shas[f"{self.env}__gate"] = SHA
+        self.gate.run("t1")
+        self.assertEqual(self.state.get("t1")["state"], "closed")
+        review_calls = [c[1] for c in self.runner.calls
+                        if "AGORA_REVIEW_BASE" in c[1]]
+        self.assertEqual(review_calls, [
+            f"export AGORA_REVIEW_BASE={LOCAL_BASE}; {self.REVIEW}"])
+        # 登记文本不被改写（卫生闸查的是登记面）
+        self.assertEqual(self.state.get("t1")["review_cmd"], self.REVIEW)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,8 @@ _verify_infra（驻留 done、不计连败、路由派发方）——非质量�
 core 只 import stdlib，依赖全构造注入。
 """
 import os
+import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -227,6 +229,28 @@ def classify_failure(rc, out="", error=None):  # Req: F122
     if rc < 0 or 129 <= rc <= 165:
         return "signal"
     return "content_failed"
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # Req: F123 export 注入键
+
+
+def _with_shell_exports(cmd, env):
+    """Req: F123 环境变量 export 前缀注入：`export K=V ...; <cmd>`——对整条
+    shell 命令链生效。禁用 `VAR=x cmd` 前缀赋值：只作用于首条命令
+    （`cd x && pytest` 形态下 pytest 读不到）。KEY/VALUE 安全校验＋
+    shlex.quote（禁换行/分号注入），坏值抛 ValueError（调用方全为内部
+    定值：变量名常量＋git sha 值）。"""
+    if not env:
+        return cmd
+    parts = []
+    for key, value in env.items():
+        value = str(value)
+        if not _ENV_NAME_RE.fullmatch(key):
+            raise ValueError(f"export 注入变量名非法: {key!r}")
+        if not value or re.search(r"[\s\n\r;`$\"'\\]", value):
+            raise ValueError(f"export 注入值非法: {key}")
+        parts.append(f"{key}={shlex.quote(value)}")
+    return f"export {' '.join(parts)}; {cmd}"
 
 
 def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None,
@@ -901,9 +925,10 @@ class Gate:
             report = self._gitx.materialize_checkout(integration, target)  # Req: ag-0d2daa
             if report:  # 检出后依赖物化：推进后按任务 pin 预置（含 gitlink bump 的任务 pin）
                 self._audit(tid, "checkout_materialize", note=report)
-            irc, iout = self._run_with_artifact(tid, "integration_verify",
-                                                integration, cmd,
-                                                runner)  # Req: F122
+            irc, iout = self._run_with_artifact(
+                tid, "integration_verify", integration,
+                _with_shell_exports(cmd, {"AGORA_INTEGRATION_BASE": before}),
+                runner, extra={"integration_base": before})  # Req: F122/F123
             if irc == 124:  # F36 集成超硬顶：同款分类路由，目标分支未改动
                 self._audit(tid, "verify_overrun")
                 self._router.notify_dispatcher(
@@ -1060,9 +1085,10 @@ class Gate:
             report = self._gitx.materialize_checkout(integration, target)
             if report:
                 self._audit(tid, "checkout_materialize", note=report)
-            irc, iout = self._run_with_artifact(tid, "integration_verify",
-                                                integration, cmd,
-                                                runner)  # Req: F122
+            irc, iout = self._run_with_artifact(
+                tid, "integration_verify", integration,
+                _with_shell_exports(cmd, {"AGORA_INTEGRATION_BASE": base}),
+                runner, extra={"integration_base": base})  # Req: F122/F123
             if irc == 124:  # F36 集成超硬顶：同款分类路由，目标支未动
                 self._audit(tid, "verify_overrun")
                 self._router.notify_dispatcher(
@@ -1194,9 +1220,10 @@ class Gate:
         report = self._gitx.materialize_checkout(integration, target)
         if report:
             self._audit(tid, "checkout_materialize", note=report)
-        irc, iout = self._run_with_artifact(tid, "integration_verify",
-                                            integration, cmd,
-                                            runner)  # Req: F122
+        irc, iout = self._run_with_artifact(
+            tid, "integration_verify", integration,
+            _with_shell_exports(cmd, {"AGORA_INTEGRATION_BASE": base}),
+            runner, extra={"integration_base": base})  # Req: F122/F123
         if irc == 124:  # F36 集成超硬顶：同款分类路由，目标支未动
             self._audit(tid, "verify_overrun")
             self._router.notify_dispatcher(
@@ -1374,11 +1401,13 @@ class Gate:
             f"任务 {tid} verify 超软顶（>{timeout:g}s）——仍在跑、"
             "无需操作、确认挂死才 cancel")
 
-    def _run_with_artifact(self, tid, phase, env_dir, cmd, runner):  # F122
+    def _run_with_artifact(self, tid, phase, env_dir, cmd, runner,
+                           extra=None):  # F122；extra Req: F123
         """统一执行面：runner 结果无论 rc 多少全量落 artifact（完整 output＋
         meta）；runner 抛异常也先落 runner_exception 再原样上抛（不得伪装
         content failed）。store=None＝直通。返回 (rc, out) 原样——调用方契约
-        与既有分类路由零改动。"""
+        与既有分类路由零改动。extra 透传 meta（integration/review base 等
+        机器判读面）。"""
         if self._artifacts is None:
             return runner(env_dir, cmd)
         started = time.time()
@@ -1386,13 +1415,14 @@ class Gate:
             rc, out = runner(env_dir, cmd)
         except Exception as e:
             self._record_artifact(tid, phase, env_dir, cmd, None, "",
-                                  started, error=e)
+                                  started, error=e, extra=extra)
             raise
-        self._record_artifact(tid, phase, env_dir, cmd, rc, out, started)
+        self._record_artifact(tid, phase, env_dir, cmd, rc, out, started,
+                              extra=extra)
         return rc, out
 
     def _record_artifact(self, tid, phase, env_dir, cmd, rc, out, started,
-                         error=None):  # F122
+                         error=None, extra=None):  # F122；extra Req: F123
         """落盘＋任务行 gate_artifact 投影（只存最新一条）＋gate_artifact_written
         事件。best-effort 三段逐段隔离：store 写败审计 gate_artifact_write_failed
         不改门状态机（投影缺席即通知面 artifact unavailable 语义）。"""
@@ -1402,7 +1432,7 @@ class Gate:
             art = self._artifacts.record(
                 tid, phase, env_dir, cmd, rc, text, started, time.time(),
                 error=str(error) if error is not None else None,
-                failure_kind=kind)
+                extra=extra, failure_kind=kind)
         except Exception:
             try:  # 兜底审计自身尽力而为（OCR#2）：append_event 与 store 共享
                 # 失败域（磁盘满/权限），再抛会把 runner 已完成的执行变门级异常
@@ -1514,12 +1544,14 @@ class Gate:
                 and cache.get("ok"):
             self._audit(tid, "gate_review_cached")
             return True
-        # 评审范围注入：AGORA_REVIEW_BASE 经 shell 前缀赋值只对本命令可见
-        # （runner 为 shell=True；登记文本保持干净，卫生闸查的是登记面）
+        # 评审范围注入：AGORA_REVIEW_BASE 经 export 前缀对整条命令链生效
+        # （Req: F123——VAR=x cmd 前缀赋值只作用首条，`cd x && pytest` 形态
+        # 下 pytest 读不到）；登记文本保持干净，卫生闸查的是登记面。
         self._phase(tid, "review")  # P1b 阶段审计
         rc, out = self._run_with_artifact(
-            tid, "review", env, f"AGORA_REVIEW_BASE={base} {cmd}",
-            runner)  # Req: F122
+            tid, "review", env,
+            _with_shell_exports(cmd, {"AGORA_REVIEW_BASE": base}),
+            runner, extra={"review_base": base})  # Req: F122/F123
         if rc == 124:
             self._audit(tid, "review_overrun")
             self._router.notify_dispatcher(

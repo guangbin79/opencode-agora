@@ -1797,6 +1797,16 @@ class TestQuickHygiene(TestCoreTask):
             tid = self.svc.create("g", "/repo", None, self.root, quick=True)
         self.assertEqual(self.state.get(tid)["verify"]["cmd"], cmd)
 
+    def test_quick_skips_syntax_bad_history(self):  # Req: F123
+        """quick 历史投票同样过滤语法坏命令（SHELL_SYNTAX blocking 不计票）。"""
+        for i in range(3):
+            self.hist(f"syn{i}", 'echo "open')  # 高频语法坏命令出局
+        self.hist("g1", "python3 -m unittest")
+        self.hist("g2", "python3 -m unittest")
+        tid = self.svc.create("g", "/repo", None, self.root, quick=True)
+        self.assertEqual(self.state.get(tid)["verify"]["cmd"],
+                         "python3 -m unittest")
+
 
 class TestF75RouteGuard(TestCoreTask):
     """Req: F75 派发归属守卫：root 经无 X-Agora-Sid 的 CLI 派发（sid=='root'）
