@@ -186,7 +186,7 @@ def full_view(snap, store):
     fields = ("state", "title", "worker_sid", "dispatcher_sid", "last_seen",
               "created", "project_dir", "in_gate",
               "model", "usage", "delivery",
-              "review_fail_streak", "gate_resource")  # in_gate＝F54 验证中间态投影；model＝F55 派发决策投影；review_fail_streak＝F114 门审分歧计数；gate_resource＝F116 资源闸 waiting/limit 投影（内存态）；
+              "review_fail_streak", "gate_resource", "gate_artifact")  # in_gate＝F54 验证中间态投影；model＝F55 派发决策投影；review_fail_streak＝F114 门审分歧计数；gate_resource＝F116 资源闸 waiting/limit 投影（内存态）；gate_artifact＝F122 最新执行产物投影（path/phase/rc/failure_kind/duration_s/bytes）；
     # usage＝F57 经济性投影（行内 dict 原样带，缺席行不投影）；
     # delivery＝Req: F101 外部交付观测投影（awaiting_external/commit/base/attempt）
     raw_events = store.read_events()

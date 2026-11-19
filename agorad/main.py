@@ -28,6 +28,7 @@ from agorad.core import report
 from agorad.core.app import App
 from agorad.core.auth import Auth
 from agorad.core.gate import Gate, SpawnTracker
+from agorad.core.gate_artifacts import ArtifactStore  # Req: F122
 from agorad.core.health import Health, send_email
 from agorad.core.msg import Router
 from agorad.core.peer import PeerBoard
@@ -159,6 +160,20 @@ def gate_max_concurrent_from_env():
     return v
 
 
+def gate_artifact_keep_from_env():
+    """F122 gate 执行产物保留数（每任务 artifact 目录数，正整数）；缺省 50；
+    坏值 fail-fast 同款文案风格（变量名＋原值可判读合法域）。"""
+    raw = os.environ.get("AGORA_GATE_ARTIFACT_KEEP", "50")
+    try:
+        v = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"AGORA_GATE_ARTIFACT_KEEP 须为正整数（收到 {raw!r}）") from None
+    if v <= 0:
+        raise ValueError(f"AGORA_GATE_ARTIFACT_KEEP 须为正整数（收到 {raw!r}）")
+    return v
+
+
 def instance_identity(home):
     """F96 稳定实例身份：hostname + AGORA_HOME realpath 的 sha256 前 8 位——
     同机同 home 跨重启恒等、异机/异 home 互异；入 Gitx 属主化 env 命名。"""
@@ -171,7 +186,7 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
              runner=None, mail_runner=None, main_sid=_MAIN_SID, store=None,
              verify_timeout=300, verify_ceiling=None, roster_path=None,
              quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
-             gate_max_concurrent=1):
+             gate_max_concurrent=1, gate_artifact_keep=50):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
@@ -213,7 +228,10 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 clean_ignore_env=clean_ignore_env,  # ag-f5aa4d 数据层豁免 env 面
                 page_writer=page_writer,  # ag-0f60fd：门段事件刷新任务页
                 spawn_tracker=spawns,  # P0-1：真 Gitx 同一登记簿（注入假 gitx 不登记）
-                resources=GateResources(home, gate_max_concurrent))  # F116 跨进程闸
+                resources=GateResources(home, gate_max_concurrent),  # F116 跨进程闸
+                artifact_store=ArtifactStore(  # Req: F122 执行产物存储
+                    Path(home) / "state" / "gate-artifacts",
+                    keep=gate_artifact_keep))
     app.gate, app.health = gate, health
     return app
 
@@ -327,6 +345,7 @@ def main():
         verify_ceiling = verify_ceiling_from_env()
         quick_files, quick_lines = quick_limits_from_env()  # F65
         gate_max = gate_max_concurrent_from_env()  # F116
+        ga_keep = gate_artifact_keep_from_env()  # F122
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -341,7 +360,8 @@ def main():
                    verify_timeout=verify_timeout, verify_ceiling=verify_ceiling,
                    quick_max_files=quick_files, quick_max_lines=quick_lines,
                    clean_ignore_env=os.environ.get("AGORA_CLEAN_IGNORE", ""),
-                   gate_max_concurrent=gate_max)
+                   gate_max_concurrent=gate_max,
+                   gate_artifact_keep=ga_keep)  # Req: F122
     tok = issue_root(app)
     if tok:
         print(f"AGORA_ROOT_TOKEN: {tok}", flush=True)  # R20 固定前缀（T4 捕获解析）

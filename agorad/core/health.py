@@ -36,6 +36,7 @@ KIND_DISPATCHER_DEAD = "dispatcher-dead"
 KIND_STALLED = "stalled"
 KIND_ENV_GONE = "env-gone"
 KIND_VERIFY_DEAD = "verify-dead"
+KIND_VERIFY_INFRA = "verify-infra"  # Req: F122 signal 类机械失败（非质量败）
 KIND_EXT_STALE = "external-stale"  # Req: F110 external handoff 驻留超龄
 KIND_UNPUBLISHED = "unpublished"  # Req: F110 managed 已交付未出版
 
@@ -59,6 +60,9 @@ _KIND_NOTE = {
                    "项目仓已亡则 cancel 归档",
     KIND_VERIFY_DEAD: "verify 命令自身死（exit 126/127：命令不存在/不可执行）"
                       "——非活不达标，worker 无从自愈；请修正验收命令或取消",
+    KIND_VERIFY_INFRA: "verify 机械失败（signal 类：SIGKILL/SIGSEGV 等，疑似"
+                       " OOM/基础设施）——非质量败不计连败，完整产物在 "
+                       "gate_artifact 投影指向目录；请核对基础设施后重派或取消",
     KIND_EXT_STALE: "external handoff 驻留 awaiting_external 超龄（缺省 30min）"
                     "——外部派发方未确认交付，可能派发链路断裂，请人工核对",
     KIND_UNPUBLISHED: "managed 交付已 merged 但 origin 未同步（本地支领先未推）"
@@ -506,10 +510,11 @@ class Health:
         self._store.append_event({"ts": time.time(), "actor": "health",
                                   "event": "escalate", "task": tid, "kind": kind})
         quiet = kind in (KIND_STALLED, KIND_ENV_GONE, KIND_VERIFY_DEAD,
+                         KIND_VERIFY_INFRA,  # Req: F122 signal 类同走通知通道
                          KIND_EXT_STALE, KIND_UNPUBLISHED)  # Req: F110 同走通知通道＋邮件
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
-                          notify=quiet)  # stalled/env-gone/verify-dead 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F80 同款）
-        if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F80：命令死需人工处置）
+                          notify=quiet)  # stalled/env-gone/verify-dead/verify-infra 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F80/F122 同款）
+        if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F80：命令死需人工处置）＋verify-infra（F122 同款）
             send_email(self._store, tid, body, runner=self._runner)
 
     def _root(self, tid):

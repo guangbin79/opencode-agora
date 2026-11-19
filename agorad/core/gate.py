@@ -34,7 +34,10 @@ merged/closed、non_ff 经 F110 祖先预判直接 diverged 终局、failed 终�
 跨仓任务并行进门（httpd 消费循环按 project_dir 分发车道）。F116：门体全程
 再套跨进程资源闸（repo 锁＋AGORA_HOME 全局槽，access/gate_resources 经构造
 注入）——排队不占 verify/看门狗预算，waiting 投影与三类 gate_resource_* 事件
-可观测。core 只 import stdlib，依赖全构造注入。
+可观测。F122：全部 runner 执行点经 _run_with_artifact 落完整执行产物
+（ArtifactStore 构造注入），rc<0 或 rc∈[129,165] 的 signal 类机械失败走
+_verify_infra（驻留 done、不计连败、路由派发方）——非质量败不烧连败。
+core 只 import stdlib，依赖全构造注入。
 """
 import os
 import signal
@@ -47,6 +50,7 @@ from pathlib import Path
 KIND_QUALITY = "quality"
 KIND_GATEFILES = "gatefiles"
 KIND_VERIFY_DEAD = "verify-dead"
+KIND_VERIFY_INFRA = "verify-infra"  # Req: F122 signal 类机械失败升级渠道
 
 _TAIL = 2000
 _VERIFY_DEAD_RAW_TAIL = 400  # health 头截 500：先取尾并留 exit= 前缀/拍平余量
@@ -205,6 +209,26 @@ def _cmd_dead(rc, out):
     return rc in (126, 127) or (rc == 2 and "No such file or directory" in out)
 
 
+def classify_failure(rc, out="", error=None):  # Req: F122
+    """机械失败分型纯单源（路由与 artifact meta 共用；与 _cmd_dead 同居本模块
+    ——core 禁兄弟 import）：runner 异常→runner_exception；rc==0→green；
+    rc==124→overrun（F36 硬顶）；_cmd_dead 语义→command_dead（F81/F82 复用
+    同函数）；rc<0 或 rc∈[129,165]→signal（subprocess 负值＝真信号死、
+    shell 128+n 形态：137 SIGKILL/139 SIGSEGV/134 SIGABRT；128 与 255 歧义大
+    仍归 content）；其余非零→content_failed。"""
+    if error is not None:
+        return "runner_exception"
+    if rc == 0:
+        return "green"
+    if rc == 124:
+        return "overrun"
+    if _cmd_dead(rc, out):
+        return "command_dead"
+    if rc < 0 or 129 <= rc <= 165:
+        return "signal"
+    return "content_failed"
+
+
 def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None,
                        tracker=None):
     """真 runner：独立进程组跑 verify，F36 软硬双顶。
@@ -277,7 +301,7 @@ class Gate:
                  on_blocked=None, roster_path=None, quick_max_files=3,
                  quick_max_lines=30, clean_ignore_env="",
                  page_writer=None, spawn_tracker=None,
-                 resources=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新；F116 跨进程资源闸
+                 resources=None, artifact_store=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新；F116 跨进程资源闸；F122 执行产物存储
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
@@ -288,6 +312,7 @@ class Gate:
         self._quick_max_files, self._quick_max_lines = quick_max_files, quick_max_lines
         self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
         self._resources = resources  # F116：None＝无跨进程闸（单测直构），assemble 恒注入
+        self._artifacts = artifact_store  # Req: F122：None＝单测直构直通零落盘，main 生产注入
         # P0-1（ag-9c4cbb）：门运行期 spawn 登记簿（与 Gitx 同实例注入＝门线程
         # 内全部子进程组可被看门狗整组收杀）；killed 标记即 run() 异常路径的
         # 让位判据（activate() 每轮复位——重派重跑的门内崩不被旧轮标记误吞）
@@ -654,17 +679,22 @@ class Gate:
                                         runner, cmd):  # Req: F107 探针不豁免 review-only
                     return
                 self._phase(tid, "verify")  # P1b 阶段审计
-                rc, out = runner(env, cmd)
+                rc, out = self._run_with_artifact(tid, "verify", env, cmd,
+                                                  runner)  # Req: F122
                 if rc == 124:
                     self._verify_overrun(tid, out, budget, ceiling)
                     return
                 if _cmd_dead(rc, out):  # Req: F81/F82 命令自身死：分类路由，不弹 worker
                     self._verify_dead(tid, rc, out)
                     return
+                if classify_failure(rc, out) == "signal":  # Req: F122
+                    self._verify_infra(tid, rc, out)
+                    return
                 if rc != 0:
                     self._quality_fail(tid, "verify_failed",
                                        "verify 失败——修复后重新 post(done, "
-                                       f"交付物引用)\n输出尾部:\n{out[-_TAIL:]}")
+                                       f"交付物引用)\n输出尾部:\n{out[-_TAIL:]}"
+                                       f"{self._artifact_line(tid)}")
                     return
                 self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
                 self._state.transition(tid, "merged")  # 复用门尾 merged→closed 结算链
@@ -782,17 +812,22 @@ class Gate:
                                     runner, cmd):  # Req: F107 base-red 探针
                 return
             self._phase(tid, "verify")  # P1b 阶段审计
-            rc, out = runner(env, cmd)
+            rc, out = self._run_with_artifact(tid, "verify", env, cmd,
+                                              runner)  # Req: F122
             if rc == 124:  # F36 超硬顶：分类路由派发方，不 transition、不弹 worker、不计连败
                 self._verify_overrun(tid, out, budget, ceiling)
                 return
             if _cmd_dead(rc, out):  # Req: F81/F82 命令自身死（不存在/不可执行/缺文件）≠活不达标
                 self._verify_dead(tid, rc, out)
                 return
+            if classify_failure(rc, out) == "signal":  # Req: F122
+                self._verify_infra(tid, rc, out)
+                return
             if rc != 0:
                 self._quality_fail(tid, "verify_failed",
                                    f"verify 失败——修复后重新 post(done, commit)"
-                                   f"\n输出尾部:\n{out[-_TAIL:]}")
+                                   f"\n输出尾部:\n{out[-_TAIL:]}"
+                                   f"{self._artifact_line(tid)}")
                 return
             if (t.get("review_cmd") or "").strip():  # Req: F114 门审路径
                 if not self._gate_review(tid, t, env, runner):
@@ -866,23 +901,30 @@ class Gate:
             report = self._gitx.materialize_checkout(integration, target)  # Req: ag-0d2daa
             if report:  # 检出后依赖物化：推进后按任务 pin 预置（含 gitlink bump 的任务 pin）
                 self._audit(tid, "checkout_materialize", note=report)
-            irc, iout = runner(integration, cmd)
+            irc, iout = self._run_with_artifact(tid, "integration_verify",
+                                                integration, cmd,
+                                                runner)  # Req: F122
             if irc == 124:  # F36 集成超硬顶：同款分类路由，目标分支未改动
                 self._audit(tid, "verify_overrun")
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"集成 verify 超硬顶，目标分支未改动——进程组已终止"
                     f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
-                    f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
+                    f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}"
+                    f"{self._artifact_line(tid)}")
                 return
             if _cmd_dead(irc, iout):  # Req: F81/F82 集成阶段命令死：同款分类路由
                 self._verify_dead(tid, irc, iout)
+                return
+            if classify_failure(irc, iout) == "signal":  # Req: F122
+                self._verify_infra(tid, irc, iout)
                 return
             if irc != 0:
                 where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
                 self._quality_fail(tid, "reopened",
                                    f"{where}，目标分支未改动——修复后重新"
-                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
+                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}"
+                                   f"{self._artifact_line(tid)}",
                                    reason=where)
                 return
             # 集成验证可能耗时较长，最终推进前复查，关闭“开始干净、结束时变脏”窗口。
@@ -1018,23 +1060,30 @@ class Gate:
             report = self._gitx.materialize_checkout(integration, target)
             if report:
                 self._audit(tid, "checkout_materialize", note=report)
-            irc, iout = runner(integration, cmd)
+            irc, iout = self._run_with_artifact(tid, "integration_verify",
+                                                integration, cmd,
+                                                runner)  # Req: F122
             if irc == 124:  # F36 集成超硬顶：同款分类路由，目标支未动
                 self._audit(tid, "verify_overrun")
                 self._router.notify_dispatcher(
                     tid, "result",
                     f"集成 verify 超硬顶，本地目标支未动——进程组已终止"
                     f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
-                    f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
+                    f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}"
+                    f"{self._artifact_line(tid)}")
                 return
             if _cmd_dead(irc, iout):
                 self._verify_dead(tid, irc, iout)
+                return
+            if classify_failure(irc, iout) == "signal":  # Req: F122
+                self._verify_infra(tid, irc, iout)
                 return
             if irc != 0:
                 where = "rebase 后集成 verify 失败" if r else "集成 verify 失败"
                 self._quality_fail(tid, "reopened",
                                    f"{where}，本地目标支未动——修复后重新"
-                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
+                                   f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}"
+                                   f"{self._artifact_line(tid)}",
                                    reason=where)
                 return
             # 发布：仓级交付锁＋有界等待（F96/F98 同口径）
@@ -1145,22 +1194,29 @@ class Gate:
         report = self._gitx.materialize_checkout(integration, target)
         if report:
             self._audit(tid, "checkout_materialize", note=report)
-        irc, iout = runner(integration, cmd)
+        irc, iout = self._run_with_artifact(tid, "integration_verify",
+                                            integration, cmd,
+                                            runner)  # Req: F122
         if irc == 124:  # F36 集成超硬顶：同款分类路由，目标支未动
             self._audit(tid, "verify_overrun")
             self._router.notify_dispatcher(
                 tid, "result",
                 f"集成 verify 超硬顶，目标支未动——进程组已终止"
                 f"（非质量败，无需 worker 重试）；生效预算 {budget:g}s"
-                f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}")
+                f"（硬顶 {ceiling:g}s）；输出尾部:\n{iout[-_TAIL:]}"
+                f"{self._artifact_line(tid)}")
             return
         if _cmd_dead(irc, iout):
             self._verify_dead(tid, irc, iout)
             return
+        if classify_failure(irc, iout) == "signal":  # Req: F122
+            self._verify_infra(tid, irc, iout)
+            return
         if irc != 0:
             self._quality_fail(tid, "reopened",
                                f"集成 verify 失败，目标支未动——修复后重新"
-                               f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}",
+                               f" post(done, commit)\n输出尾部:\n{iout[-_TAIL:]}"
+                               f"{self._artifact_line(tid)}",
                                reason="集成 verify 失败")
             return
         self._phase(tid, "publish", attempt=attempt)  # P1b 阶段审计：handoff 即外部交付发布
@@ -1318,6 +1374,58 @@ class Gate:
             f"任务 {tid} verify 超软顶（>{timeout:g}s）——仍在跑、"
             "无需操作、确认挂死才 cancel")
 
+    def _run_with_artifact(self, tid, phase, env_dir, cmd, runner):  # F122
+        """统一执行面：runner 结果无论 rc 多少全量落 artifact（完整 output＋
+        meta）；runner 抛异常也先落 runner_exception 再原样上抛（不得伪装
+        content failed）。store=None＝直通。返回 (rc, out) 原样——调用方契约
+        与既有分类路由零改动。"""
+        if self._artifacts is None:
+            return runner(env_dir, cmd)
+        started = time.time()
+        try:
+            rc, out = runner(env_dir, cmd)
+        except Exception as e:
+            self._record_artifact(tid, phase, env_dir, cmd, None, "",
+                                  started, error=e)
+            raise
+        self._record_artifact(tid, phase, env_dir, cmd, rc, out, started)
+        return rc, out
+
+    def _record_artifact(self, tid, phase, env_dir, cmd, rc, out, started,
+                         error=None):  # F122
+        """落盘＋任务行 gate_artifact 投影（只存最新一条）＋gate_artifact_written
+        事件。best-effort 三段逐段隔离：store 写败审计 gate_artifact_write_failed
+        不改门状态机（投影缺席即通知面 artifact unavailable 语义）。"""
+        text = out if isinstance(out, str) else ""
+        kind = classify_failure(rc, text, error)
+        try:
+            art = self._artifacts.record(
+                tid, phase, env_dir, cmd, rc, text, started, time.time(),
+                error=str(error) if error is not None else None,
+                failure_kind=kind)
+        except Exception:
+            self._audit(tid, "gate_artifact_write_failed", phase=phase)
+            return None
+        try:
+            self._state.set_fields(tid, gate_artifact={
+                "path": art["path"], "phase": art["phase"], "rc": art["rc"],
+                "failure_kind": art["failure_kind"],
+                "duration_s": art["duration_s"], "bytes": art["bytes"]})
+        except Exception:
+            pass
+        try:
+            self._audit(tid, "gate_artifact_written", phase=art["phase"],
+                        rc=art["rc"], failure_kind=art["failure_kind"],
+                        bytes=art["bytes"], path=art["path"])
+        except Exception:
+            pass
+        return art
+
+    def _artifact_line(self, tid):  # F122
+        """通知附行：最新 artifact 目录路径（meta.json 所在）；投影缺席＝空串。"""
+        p = (self._state.get(tid).get("gate_artifact") or {}).get("path")
+        return f"\nartifact={p}" if p else ""
+
     def _verify_overrun(self, tid, out, budget, ceiling):
         """F36 超硬顶分类路由：审计＋派发方告知（普通与 review-only 门共用文案）。"""
         self._audit(tid, "verify_overrun")
@@ -1325,7 +1433,38 @@ class Gate:
             tid, "result",
             f"verify 超硬顶——进程组已终止（非质量败，无需 worker 重试）；"
             f"生效预算 {budget:g}s（硬顶 {ceiling:g}s）；"
-            f"输出尾部:\n{out[-_TAIL:]}")
+            f"输出尾部:\n{out[-_TAIL:]}{self._artifact_line(tid)}")
+
+    def _verify_infra(self, tid, rc, out):  # Req: F122
+        """signal 类机械失败分类（137 SIGKILL/139 SIGSEGV/134 SIGABRT 等）：
+        与活不达标分开——任务驻留 done、不计连败、不弹回 worker（基础设施疑点
+        worker 无从修）；审计 verify_infra_failed＋KIND_VERIFY_INFRA 升级
+        （通知通道唤醒派发方，8122a2e 同 verify-dead 渠道）；worker 只收最小
+        等待说明；通知明确「机械失败/基础设施疑点，非质量败」。通知面尽力而为
+        （F54 口径）——败不改变驻留语义。"""
+        self._audit(tid, "verify_infra_failed", rc=rc)
+        try:
+            self._health.escalate(
+                KIND_VERIFY_INFRA, tid,
+                raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}"
+                    f"{self._artifact_line(tid)}")
+        except Exception:
+            pass
+        try:
+            self._router.notify_dispatcher(
+                tid, "result",
+                f"任务 {tid} verify 机械失败（exit {rc}：signal 类——"
+                "SIGKILL/SIGSEGV/SIGABRT，疑似 OOM/基础设施）——"
+                "机械失败/基础设施疑点，非质量败：不计连败、无需 worker "
+                f"重试，任务驻留 done 待处置{self._artifact_line(tid)}")
+        except Exception:
+            pass
+        try:
+            self._post(tid, f"verify 机械失败（exit {rc}：signal 类，疑似"
+                            "基础设施/OOM）——非质量败，无需自愈重试；"
+                            "已升级派发方处置，等待通知即可")
+        except Exception:
+            pass
 
     def _verify_dead(self, tid, rc, out):
         """Req: F81 命令自身死分类（exit 126/127）：与活不达标分开——驻留 done、
@@ -1338,13 +1477,14 @@ class Gate:
         try:
             self._health.escalate(
                 KIND_VERIFY_DEAD, tid,
-                raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}")
+                raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}"
+                    f"{self._artifact_line(tid)}")  # Req: F122
         except Exception:
             pass
         try:
             self._post(tid, f"verify 命令自身死（exit {rc}：命令不存在/不可执行）"
                             "——非活不达标，无需自愈重试；已升级派发方处置，"
-                            "等待通知即可")
+                            f"等待通知即可{self._artifact_line(tid)}")
         except Exception:
             pass
 
@@ -1373,20 +1513,24 @@ class Gate:
         # 评审范围注入：AGORA_REVIEW_BASE 经 shell 前缀赋值只对本命令可见
         # （runner 为 shell=True；登记文本保持干净，卫生闸查的是登记面）
         self._phase(tid, "review")  # P1b 阶段审计
-        rc, out = runner(env, f"AGORA_REVIEW_BASE={base} {cmd}")
+        rc, out = self._run_with_artifact(
+            tid, "review", env, f"AGORA_REVIEW_BASE={base} {cmd}",
+            runner)  # Req: F122
         if rc == 124:
             self._audit(tid, "review_overrun")
             self._router.notify_dispatcher(
                 tid, "result",
                 f"任务 {tid} 门审超硬顶——进程组已终止（非质量败，无需 "
-                f"worker 重试）；输出尾部:\n{out[-_TAIL:]}")
+                f"worker 重试）；输出尾部:\n{out[-_TAIL:]}"
+                f"{self._artifact_line(tid)}")
             return False
         if _cmd_dead(rc, out):  # Req: F81/F82 同款分类：命令死≠评审红
             self._audit(tid, "review_dead", rc=rc)
             try:
                 self._health.escalate(
                     KIND_VERIFY_DEAD, tid,
-                    raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}")
+                    raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}"
+                        f"{self._artifact_line(tid)}")  # Req: F122
             except Exception:
                 pass
             try:
@@ -1396,10 +1540,36 @@ class Gate:
             except Exception:
                 pass
             return False
+        if classify_failure(rc, out) == "signal":  # Req: F122
+            # 评审跑被信号杀（oomd 等）＝机械失败——驻留 done、不计
+            # review_fail_streak、不弹 worker，KIND_VERIFY_INFRA 升级派发方。
+            self._audit(tid, "review_infra", rc=rc)
+            try:
+                self._health.escalate(
+                    KIND_VERIFY_INFRA, tid,
+                    raw=f"exit={rc} {out[-_VERIFY_DEAD_RAW_TAIL:]}"
+                        f"{self._artifact_line(tid)}")
+            except Exception:
+                pass
+            try:
+                self._router.notify_dispatcher(
+                    tid, "result",
+                    f"任务 {tid} 门审机械失败（exit {rc}：signal 类，疑似 "
+                    "OOM/基础设施）——机械失败/基础设施疑点，非质量败；"
+                    f"任务驻留 done 待处置{self._artifact_line(tid)}")
+            except Exception:
+                pass
+            try:
+                self._post(tid, f"门审机械失败（exit {rc}：signal 类，疑似"
+                                "基础设施/OOM）——非活不达标，无需自愈重试；"
+                                "已升级派发方处置，等待通知即可")
+            except Exception:
+                pass
+            return False
         if rc != 0:
             self._review_fail(
                 tid, f"门审未通过——按评审发现修复后重新 post(done, commit)"
-                     f"\n输出尾部:\n{out[-_TAIL:]}")
+                     f"\n输出尾部:\n{out[-_TAIL:]}{self._artifact_line(tid)}")
             return False
         self._state.set_fields(
             tid, review_cache={"cmd": cmd, "commit": head, "ok": True,
@@ -1463,7 +1633,8 @@ class Gate:
         try:
             self._gitx.build_integration_at(target, integration, base_sha=base)
             self._gitx.materialize_checkout(integration, target)  # ag-0d2daa 同款：submodule/LFS 物化后探针红才可信
-            rc, out = runner(integration, cmd)
+            rc, out = self._run_with_artifact(tid, "base_probe", integration,
+                                              cmd, runner)  # Req: F122
         except RuntimeError as e:  # env_base 对象缺失/引用被回收＝机械面不可用
             self._audit(tid, "base_probe_failed", note=str(e)[:200])
             try:
@@ -1482,7 +1653,7 @@ class Gate:
                     tid, "result",
                     f"任务 {tid} base-red 探针超硬顶——进程组已终止"
                     f"（非质量败，无需 worker 重试）；"
-                    f"输出尾部:\n{out[-_TAIL:]}")
+                    f"输出尾部:\n{out[-_TAIL:]}{self._artifact_line(tid)}")
             except Exception:
                 pass
             return False

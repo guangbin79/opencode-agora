@@ -22,7 +22,7 @@ from pathlib import Path
 
 # 升级事件类别（与 core/health 字面量对齐——独立命令不 import agorad）
 _KINDS = frozenset(("quality", "gatefiles", "reinject-fail", "dispatcher-dead",
-                    "stalled", "env-gone", "verify-dead"))
+                    "stalled", "env-gone", "verify-dead", "verify-infra"))
 
 # 五桶固序（计数行与数字键 1-5 同序）；桶归属映射 _bucket 单点，禁两套口径
 _BUCKETS = ("已合并", "在飞", "失败", "阻塞", "已取消")

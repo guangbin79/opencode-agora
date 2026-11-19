@@ -17,7 +17,8 @@ from unittest import mock
 
 from agorad.access.gitx import Gitx
 from agorad.access.store import Store
-from agorad.main import assemble, audit_root_poison, env_config, instance_identity, \
+from agorad.main import assemble, audit_root_poison, env_config, \
+    gate_artifact_keep_from_env, instance_identity, \
     issue_root, load_env_file, main, migrate_root_poison, payload_drift_note, \
     quick_limits_from_env, verify_ceiling_from_env, verify_timeout_from_env
 
@@ -127,6 +128,33 @@ class TestEnvFileDefaults(unittest.TestCase):
                              clear=True):
             self.assertEqual(load_env_file(), {})
             self.assertNotIn("AGORA_VERIFY_TIMEOUT", os.environ)
+
+
+class TestGateArtifactKeepConfig(unittest.TestCase):
+    """F122 执行产物保留旋钮：缺省/env 覆盖/坏值 fail-fast＋装配注入。"""
+
+    def test_default_and_valid(self):  # Req: F122
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(gate_artifact_keep_from_env(), 50)
+        with mock.patch.dict(os.environ, {"AGORA_GATE_ARTIFACT_KEEP": "7"},
+                             clear=True):
+            self.assertEqual(gate_artifact_keep_from_env(), 7)
+
+    def test_invalid_fail_fast(self):  # Req: F122
+        for raw in ("", "abc", "0", "-1", "2.5"):
+            with self.subTest(raw=raw), \
+                 mock.patch.dict(os.environ,
+                                 {"AGORA_GATE_ARTIFACT_KEEP": raw}, clear=True):
+                with self.assertRaises(ValueError) as cm:
+                    gate_artifact_keep_from_env()
+                self.assertIn("AGORA_GATE_ARTIFACT_KEEP", str(cm.exception))
+
+    def test_assemble_wires_artifact_store(self):  # Req: F122
+        with tempfile.TemporaryDirectory() as tmp:
+            app = assemble(tmp, oc_url="http://127.0.0.1:9", oc_password="pw",
+                           gate_artifact_keep=7)
+            self.assertIsNotNone(app.gate._artifacts)
+            self.assertEqual(app.gate._artifacts._keep, 7)
 
 
 class TestQuickLimitsConfig(unittest.TestCase):

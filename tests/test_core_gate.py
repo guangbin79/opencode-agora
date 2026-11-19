@@ -351,7 +351,7 @@ class TestCoreGate(unittest.TestCase):
     def mk_gate(self, merge="ok", gate=False, crash=False, fail_remove=False,
                 on_blocked=None, roster_path=None,
                 quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
-                page_writer=None):
+                page_writer=None, artifact_store=None):  # Req: F122
         self.gx = FakeGitx(merge=merge, gate=gate, crash=crash,
                            fail_remove=fail_remove)
         # 锚随 .review-loop/ 在位（镜像生产 read_anchor：缺目录即 None）
@@ -364,7 +364,8 @@ class TestCoreGate(unittest.TestCase):
                          quick_max_files=quick_max_files,
                          quick_max_lines=quick_max_lines,
                          clean_ignore_env=clean_ignore_env,
-                         page_writer=page_writer)
+                         page_writer=page_writer,
+                         artifact_store=artifact_store)
 
     def seed(self, tid="t1", state="running", streak=0, tb=None,
              cmd="pytest -q", timeout=None, quick=False):
