@@ -155,7 +155,7 @@ Deployment note: the plugin and service payloads are copies — after upgrading 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `AGORA_HOME` | `~/plaza` | Ledger home (state, messages, audit, wiki) |
+| `AGORA_HOME` | `~/.opencode-agora-plaza` | Ledger home (state, messages, audit, wiki) |
 | `$AGORA_HOME/.agora/inactive-repos` | empty | Repos where agora is fully dormant (one path per line) |
 | `AGORA_BOARD_INTERVAL` | `5` | Dashboard poll interval (seconds) |
 | `AGORA_HEALTH_INTERVAL` | `300` | Dispatcher health patrol (seconds) |
@@ -192,11 +192,11 @@ Honest by design — what's machine-checked vs what's trusted:
 ```bash
 rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch \
        ~/.config/opencode/skills/agora-ops ~/.local/bin/agora ~/.local/bin/agora-board \
-       ~/plaza ~/.agora-home
+       ~/.opencode-agora-plaza ~/.agora-home
 # then remove the "agora" entry from the mcp section of ~/.config/opencode/opencode.json
 ```
 
-(`~/plaza` is the default `AGORA_HOME` — if you configured a custom one, remove that directory instead.)
+(`~/.opencode-agora-plaza` is the default `AGORA_HOME` — if you configured a custom one, remove that directory instead.)
 
 **Does it work without a review-loop?** Verify still gates everything, but `done` needs an anchor: without one, `done` is bounced back to the worker with instructions. Implement the [open standard](docs/review-loop.md) to unlock auto-merge.
 

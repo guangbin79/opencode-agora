@@ -154,7 +154,7 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 
 | 选项 | 缺省 | 说明 |
 |------|------|------|
-| `AGORA_HOME` | `~/plaza` | 账本根目录（状态、消息、审计、wiki） |
+| `AGORA_HOME` | `~/.opencode-agora-plaza` | 账本根目录（状态、消息、审计、wiki） |
 | `$AGORA_HOME/.agora/inactive-repos` | 空 | agora 完全休眠的仓（一行一个路径） |
 | `AGORA_BOARD_INTERVAL` | `5` | 仪表盘轮询间隔（秒） |
 | `AGORA_HEALTH_INTERVAL` | `300` | dispatcher 健康巡检（秒） |
@@ -191,11 +191,11 @@ mkdir -p .review-loop && printf '%s\n' "$sha" > .review-loop/.last-reviewed
 ```bash
 rm -rf ~/.config/opencode/plugins/agora ~/.config/opencode/skills/agora-dispatch \
        ~/.config/opencode/skills/agora-ops ~/.local/bin/agora ~/.local/bin/agora-board \
-       ~/plaza ~/.agora-home
+       ~/.opencode-agora-plaza ~/.agora-home
 # 再把 ~/.config/opencode/opencode.json 里 mcp 段的 "agora" 条目删掉
 ```
 
-（`~/plaza` 是缺省 `AGORA_HOME`——若你配置了自定义路径，请删那个目录而非 `~/plaza`。）
+（`~/.opencode-agora-plaza` 是缺省 `AGORA_HOME`——若你配置了自定义路径，请删那个目录而非 `~/.opencode-agora-plaza`。）
 
 **没有 review-loop 能用吗？** verify 照跑照拦，但 `done` 需要锚：没有就拒收退回 worker 并附补建指引。实现[开放标准](docs/review-loop.md)即解锁自动合并。
 

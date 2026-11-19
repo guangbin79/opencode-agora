@@ -32,7 +32,7 @@ export function agoraHome(homeDir = homedir()): string {
   // 若跟随则 enforce 旗/读边界可被一行 bash 挪根（终闸 C 册 blocker 实证）——禁加指针回退。
   // homeDir 参数仅供测试注入口（Bun 缓存 homedir）。
   if (process.env.AGORA_HOME) return process.env.AGORA_HOME;
-  return join(homeDir, "plaza");
+  return join(homeDir, ".opencode-agora-plaza");
 }
 
 /** realpath 折叠：末端不存在时折叠到最深存在祖先再拼回（write 目标常尚未创建）。 */

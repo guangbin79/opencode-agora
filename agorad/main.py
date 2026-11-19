@@ -51,8 +51,8 @@ def pointer_home():
 
 
 def resolve_home():
-    """AGORA_HOME 优先级 env > ~/.agora-home 指针 > 缺省 ~/plaza（设计 §3）。"""
-    return os.environ.get("AGORA_HOME") or pointer_home() or str(Path.home() / "plaza")
+    """AGORA_HOME 优先级 env > ~/.agora-home 指针 > 缺省 ~/.opencode-agora-plaza（设计 §3）。"""
+    return os.environ.get("AGORA_HOME") or pointer_home() or str(Path.home() / ".opencode-agora-plaza")
 
 
 def load_env_file(home=None):

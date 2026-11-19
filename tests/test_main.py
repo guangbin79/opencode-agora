@@ -29,7 +29,7 @@ class TestEnvConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch("agorad.main.discover", return_value=(None, None)):
             home, url, _pw = env_config()
-        self.assertEqual(home, str(Path.home() / "plaza"))
+        self.assertEqual(home, str(Path.home() / ".opencode-agora-plaza"))
         self.assertIsNone(url)  # 无 service.json、无 env 显式 → None（main 报错）
 
     def test_explicit_home_wins(self):  # Req: F6

@@ -199,7 +199,7 @@ def resolve_url():
     url = os.environ.get("AGORAD_URL")
     if url:
         return url.rstrip("/")
-    home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
+    home = os.environ.get("AGORA_HOME") or str(Path.home() / ".opencode-agora-plaza")
     path = Path(home) / ".agora" / "service.json"
     try:
         port = json.loads(path.read_text(encoding="utf-8")).get("port")
@@ -308,7 +308,7 @@ def write_pointer():
     """启动桥（gt-32c051）：解析出的 AGORA_HOME 落 ~/.agora-home 指针（单行覆盖）——
     MCP 壳是配置 env 的唯一必有进程，写指针供插件/agorad/board 无 env 时统一发现。
     桥面失败（HOME 只读等）不阻壳启动。"""
-    home = os.environ.get("AGORA_HOME") or str(Path.home() / "plaza")
+    home = os.environ.get("AGORA_HOME") or str(Path.home() / ".opencode-agora-plaza")
     target = Path.home() / ".agora-home"
     tmp = target.with_name(target.name + ".tmp")
     try:

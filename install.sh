@@ -13,7 +13,7 @@ try:
 except (OSError, ValueError):
     pass' "$HOME/.agora-home" 2>/dev/null || true)"  # 坏指针严格解码失败→空→缺省（读全量取首行，与 pointer_home 同契约，评审环）
 fi
-AGORA_HOME="${AGORA_HOME:-$HOME/plaza}"          # 与 agorad env_config 同缺省（设计 §3）
+AGORA_HOME="${AGORA_HOME:-$HOME/.opencode-agora-plaza}"          # 与 agorad env_config 同缺省（设计 §3）
 # F31 pkg 分发：AGORA_PKG_ROOT 在位＝wheel 数据面（plugin/skills/install.sh/agora 拷贝源，
 # 由 agora-install 注入）；SRC 统一两模式拷贝源（repo 模式即本仓）
 PKG="${AGORA_PKG_ROOT:-}"

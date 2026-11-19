@@ -1003,14 +1003,14 @@ describe("agoraHome 安全回归：不跟随 ~/.agora-home 指针（gt-32c051 �
     else process.env.AGORA_HOME = savedAg;
   };
 
-  test("指针指向假目录→仍用缺省 ~/plaza；env 在→env 胜（判定链信任锚仅 env）", () => {
+  test("指针指向假目录→仍用缺省 ~/.opencode-agora-plaza；env 在→env 胜（判定链信任锚仅 env）", () => {
     // Req: gt-32c051（终闸 C 册 blocker 回归：指针=被辖方可写文件，禁作 enforce 锚）
     try {
       pHome = join(root, "pointer-home");
       mkdirSync(pHome, { recursive: true });
       writeFileSync(join(pHome, ".agora-home"), join(root, "fake-home")); // 被辖方一行 bash 可写
       delete process.env.AGORA_HOME;
-      expect(agoraHome(pHome)).toBe(join(pHome, "plaza")); // 指针被无视
+      expect(agoraHome(pHome)).toBe(join(pHome, ".opencode-agora-plaza")); // 指针被无视
       process.env.AGORA_HOME = home;
       expect(agoraHome(pHome)).toBe(home); // env 胜过一切
     } finally {

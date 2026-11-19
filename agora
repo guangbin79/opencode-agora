@@ -56,7 +56,7 @@ def _pointer_home():
 def discover(home=None):
     """root 牌＋端口：$AGORA_HOME/.agora/{root.token,service.json}（board_tui 同形）。"""
     home = Path(home or os.environ.get("AGORA_HOME") or _pointer_home()
-                or Path.home() / "plaza")
+                or Path.home() / ".opencode-agora-plaza")
     sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
     port = int(sj["port"])  # 非数端口（半写形态）在此炸 ValueError/TypeError，不外溢 fetch
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()

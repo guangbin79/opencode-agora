@@ -58,14 +58,14 @@ class PointerTest(unittest.TestCase):
             os.environ.pop("AGORA_HOME", None)
             self.assertEqual(env_config()[0], plaza_p)  # 指针回退（trim 后）
             self._pointer("")
-            self.assertEqual(env_config()[0], str(Path.home() / "plaza"))  # 缺省
+            self.assertEqual(env_config()[0], str(Path.home() / ".opencode-agora-plaza"))  # 缺省
 
     def test_pointer_bad_bytes_no_crash(self):
         # Req: gt-32c051（评审环 B1：坏字节指针→缺省，不崩）
         (self.home / ".agora-home").write_bytes(b"\xff\xfe\x00binary")
         with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
             os.environ.pop("AGORA_HOME", None)
-            self.assertEqual(env_config()[0], str(Path.home() / "plaza"))
+            self.assertEqual(env_config()[0], str(Path.home() / ".opencode-agora-plaza"))
 
     def test_pointer_multiline_first_line(self):
         # Req: gt-32c051（评审环 B4：多行指针取首行）
