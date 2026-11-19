@@ -123,6 +123,23 @@ class TestPatchSplitEquivalence(unittest.TestCase):
         self.assertTrue(self.gx.patch_equivalent_on_origin(
             str(self.repo), recorded, "main"))
 
+    def test_duplicate_hunks_need_full_multiplicity(self):  # A3 强化
+        # 同文件两个全同 hunk（上下文亦同，patch-id 行号豁免下同 id）：origin
+        # 只出版一份 → False——全覆盖按重数计，set 折叠会误判全出版
+        block = "ctx1\nctx2\nctx3\nold\nctx5\nctx6\nctx7\n"
+        filler = "m1\nm2\nm3\nm4\nm5\nm6\nm7\nm8\n"
+        base = block + filler + block
+        self._commit({"src/mainw.py": base}, "dup base")
+        self._git(["checkout", "-q", "-b", "work"])
+        recorded = self._commit(
+            {"src/mainw.py": base.replace("old", "new")}, "dup delivery")
+        self._git(["checkout", "-q", "main"])
+        self._commit({"src/mainw.py": base.replace("old", "new", 1)},
+                     "publish one copy")
+        self._set_origin(self._git(["rev-parse", "HEAD"]).stdout.strip())
+        self.assertFalse(self.gx.patch_equivalent_on_origin(
+            str(self.repo), recorded, "main"))
+
     def test_no_tracking_ref_and_empty_patch_false(self):  # G/A7 边界
         self._git(["checkout", "-q", "-b", "work"])
         recorded = self._commit({"src/mainw.py": "a1\na2\nA3\na4\na5\n"},
@@ -188,6 +205,36 @@ class TestHunkPatchParser(unittest.TestCase):
         binary = ("diff --git a/bin b/bin\n"
                   "Binary files /dev/null and b/bin differ\n")
         self.assertEqual(Gitx._hunk_patches(binary), [])
+
+    def test_stdin_stream_bare_sha_boundaries_not_in_hunks(self):
+        # diff-tree --stdin 多 commit 流的裸 40hex 分段行：闭 hunk 归零，
+        # 不得混入前一 commit 末 hunk 正文（契约兑现不寄望 patch-id 兜底）
+        sha_a, sha_b = "a" * 40, "b" * 40
+        diff = (sha_a + "\n"
+                "diff --git a/f.py b/f.py\n"
+                "index 1111111..2222222 100644\n"
+                "--- a/f.py\n"
+                "+++ b/f.py\n"
+                "@@ -1,3 +1,3 @@\n"
+                " c1\n"
+                "-c2\n"
+                "+C2\n"
+                " c3\n"
+                + sha_b + "\n"
+                "diff --git a/g.py b/g.py\n"
+                "index 1111111..2222222 100644\n"
+                "--- a/g.py\n"
+                "+++ b/g.py\n"
+                "@@ -1,1 +1,1 @@\n"
+                "-d1\n"
+                "+D1\n")
+        patches = Gitx._hunk_patches(diff)
+        self.assertEqual(len(patches), 2)
+        for p in patches:
+            for ln in p.splitlines():
+                self.assertFalse(len(ln) == 40 and all(
+                    c in "0123456789abcdef" for c in ln),
+                    f"裸 sha 行混入合成 patch: {ln}")
 
 
 if __name__ == "__main__":

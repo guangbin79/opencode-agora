@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import Counter
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -536,6 +537,8 @@ class Gitx:
         hunks = self._split_hunk_patch_ids(repo_dir, patch.stdout)
         if not hunks:  # 纯 mode change/二进制等无 hunk 面：无从 hunk 对账
             return False
+        # Counter 多重集包含：全同 hunk（patch-id 行号豁免下同 id）按重数
+        # 要求全覆盖——出版 N-1 份不算全出版
         return hunks <= self._split_hunk_patch_ids(repo_dir, win.stdout)
 
     def _patch_ids(self, repo_dir: str, patch_text: str) -> set:
@@ -552,10 +555,13 @@ class Gitx:
 
         合成 patch＝文件头（diff --git .. 首个 @@ 前：路径随 patch-id 入
         哈希，无关路径同内容 hunk 不互配）+单 hunk 正文。diff-tree 的
-        commit sha 前言行与 index/mode 行不入 hunk；无 hunk 文件（纯 mode
-        change/二进制占位）不产出。hunk 只认 @@ - 起始行：正文行恒带
-        ' '/'+'/'-'/'\\' 前缀，不会与文件头/前言行混淆。
+        commit sha 前言行（单 commit 首行与 --stdin 流的裸 40hex 分段行）
+        与 index/mode 行不入 hunk；无 hunk 文件（纯 mode change/二进制
+        占位）不产出。hunk 只认 @@ - 起始行：正文行恒带 ' '/'+'/'-'/'\\'
+        前缀，不会与文件头/前言行混淆；裸 sha 行自身是分段边界（闭 hunk
+        归零），正确性不寄望 patch-id 的隐式再分段。
         """
+        sha_line = Gitx._SHA40.fullmatch
         out, header, cur = [], None, None
         for ln in diff_text.splitlines():
             if ln.startswith("diff --git "):
@@ -566,6 +572,10 @@ class Gitx:
                 if cur is not None:
                     out.append("\n".join(header + cur))
                 cur = [ln] if header is not None else None
+            elif sha_line(ln):  # --stdin 多 commit 流的裸 sha 分段行
+                if cur is not None:
+                    out.append("\n".join(header + cur))
+                header, cur = None, None
             elif header is None:
                 continue
             elif cur is not None:
@@ -576,18 +586,25 @@ class Gitx:
             out.append("\n".join(header + cur))
         return out
 
-    def _split_hunk_patch_ids(self, repo_dir: str, diff_text: str) -> set:
-        """diff 文本 → per-hunk patch-id 集（Req: F121）。单一稳定流一次
-        patch-id：每合成 patch 前置唯一 "commit <40hex>" 行作分段边界
-        （patch-id 按该前言行分段，不按 diff --git）——免每 hunk 一进程的
-        O(N×H) 洪泛；实证与逐 hunk 独立进程结果一致、index 行不入哈希
-        （hunk id 对 rebase 漂移稳定）。"""
+    def _split_hunk_patch_ids(self, repo_dir: str,
+                              diff_text: str) -> Counter:  # Req: F121
+        """diff 文本 → per-hunk patch-id 多重集（Counter，Req: F121）。单一
+        稳定流一次 patch-id：每合成 patch 前置唯一 "commit <40hex>" 行作
+        分段边界（patch-id 按该前言行分段，不按 diff --git）——免每 hunk
+        一进程的 O(N×H) 洪泛；实证与逐 hunk 独立进程结果一致、index 行
+        不入哈希（hunk id 对 rebase 漂移稳定）。保重数：全同 hunk 各计
+        一份，调用方按多重集包含判全覆盖。"""
         patches = self._hunk_patches(diff_text)
         if not patches:
-            return set()
+            return Counter()
         stream = "".join(f"commit {i:040x}\n{p}\n"
                          for i, p in enumerate(patches))
-        return self._patch_ids(repo_dir, stream)
+        r = self._git(["patch-id", "--stable"], cwd=repo_dir, check=False,
+                      input_data=stream)
+        if r.returncode != 0:
+            raise RuntimeError(f"git patch-id --stable: {r.stderr.strip()}")
+        return Counter(p[0] for ln in r.stdout.splitlines()
+                       if (p := ln.split()))
 
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
