@@ -373,6 +373,15 @@ class TestBaseProbe(_Base):  # 断言2
         self.set_anchor(tid)
         self.assertEqual(self.gate.run(tid), "green")  # fail-open
 
+    def test_probe_cmd_dead_counts_red(self):
+        # ag-d68faf：base 阶段命令死（126/127）＝判别红放行——真死命令由
+        # env 阶段 verify_dead 分类兜底（A册 S1 锚）
+        tid = self.seed("ag-p9")
+        self.runner.script = [(126, "No such file"), (0, "env"), (0, "int")]
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "green")
+        self.assertEqual(self.storage.get_task(tid).probe.result, "red")
+
     def test_overrun_and_build_failure_park(self):
         tid = self.seed("ag-p7")
         self.runner.script = [(124, "slow")]
@@ -630,6 +639,26 @@ class TestIntegration(_Base):  # 断言6
         self.assertTrue(any(m.kind == "process"
                             and "rebase 后集成 verify 失败" in self.text(m)
                             for m in self.messages(WORKER)))
+
+    def test_overrun_and_dead_park_at_integration(self):
+        # A册 S2 锚：集成阶段 124/命令死同 verify 分类——驻留 done、不计
+        # 连败、路由派发方（signal 分支经 classify_failure 纯函数单测兜底）
+        tid = self.seed("ag-i5")
+        self.runner.script = [(1, ""), (0, ""), (124, "slow")]
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "overrun")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.fail_streak), ("done", 0))
+        self.assertIn("verify_overrun", self.events(tid))
+        tid = self.seed("ag-i6")
+        self.runner.script = [(1, ""), (0, ""), (127, "dead")]
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "dead")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.fail_streak), ("done", 0))
+        self.assertIn("verify_dead", self.events(tid))
+        self.assertTrue(any(kind == "notify" and "verify-dead" in text
+                            for kind, _, text in self.oc.injects))
 
     def _meta_by_phase(self, tid, phase):
         out = []
