@@ -212,6 +212,12 @@ class TestDiffSkeleton(unittest.TestCase):
         self.assertIn((1, "v2", "v3", "json"), mm)
         self.assertNotIn((0, "v2", "v3", "json"), mm)  # 前置一致步不误报
 
+    def test_degenerate_sides_rejected(self):
+        with self.assertRaises(ValueError):
+            diff_mismatches({})  # 空侧无从对齐，禁 IndexError/零失配
+        with self.assertRaises(ValueError):
+            diff_mismatches({"v2": []})  # 单侧同拒
+
 
 class TestCrashSimulation(unittest.TestCase):
     """断言⑥：failpoint 触发后目标不可用且源目录不变。"""
