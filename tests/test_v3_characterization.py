@@ -299,12 +299,14 @@ class TestCheckMailAndRefs(unittest.TestCase):
         self.assertFalse(_wants_refs("note", "见输出尾部", {}))  # 无产物不触发
 
     def test_reference_lines_order_and_artifact_relativization(self):
+        g = GOLDEN["f125"]
+        art = {"gate_artifact": {"path": "/h/gate/t1/output.log"}}
+        order = [ln.split("=", 1)[0] for ln in
+                 _reference_lines("t1", 12, art, "/h").splitlines()]
+        self.assertEqual(order, g["ref_line_order"])  # golden 键双侧锁定
         self.assertEqual(  # 无产物＝home/msg/page 三行，顺序固定
             _reference_lines("t1", 12, {}, "/h"),
             "home=/h\nmsg=state/messages/00000012.md\npage=wiki/tasks/t1.md")
-        art = {"gate_artifact": {"path": "/h/gate/t1/output.log"}}
-        self.assertTrue(_reference_lines("t1", 12, art, "/h").endswith(
-            "artifact=gate/t1/output.log"))  # home 下相对化
         art_abs = {"gate_artifact": {"path": "/elsewhere/x.log"}}
         self.assertTrue(_reference_lines("t1", 12, art_abs, "/h").endswith(
             "artifact=/elsewhere/x.log"))  # home 外绝对原样
@@ -329,7 +331,10 @@ class TestEnvelopeFixture(unittest.TestCase):
     def _search(self, name, text):
         p = ENVELOPE["patterns"][name]
         flags = re.MULTILINE if "m" in p["flags"] else 0
-        return re.search(p["source"], text, flags)
+        m = re.search(p["source"], text, flags)
+        self.assertIsNotNone(  # 失配即报样本与 pattern，不裸抛 None.group
+            m, f"信封样本与 pattern {name} 失配: {text[:60]!r}")
+        return m
 
     def test_patterns_reparse_every_sample(self):
         for s in ENVELOPE["boot"]:  # Python re 与 Bun 同语义样本级复算

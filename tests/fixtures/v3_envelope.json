@@ -43,6 +43,10 @@
   {
    "text": "[agora] credential task-3f9c21\ntoken: w-task-3f9c21-0c8b4d6a2e19",
    "expect": {"tid": "task-3f9c21", "token": "w-task-3f9c21-0c8b4d6a2e19"}
+  },
+  {
+   "text": "[agora] credential gt-7d1e88\ntoken: w-gt-7d1e88-4e2f8b9d1c7a",
+   "expect": {"tid": "gt-7d1e88", "token": "w-gt-7d1e88-4e2f8b9d1c7a"}
   }
  ]
 }
