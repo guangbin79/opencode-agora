@@ -81,7 +81,6 @@ _IN_FLIGHT = frozenset({"dispatched", "running"})  # 自愈重注入仅限在跑
 _STALE_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                            "reopened"})  # blocked 已拍人不重拍（doctor 口径）
 _WAIT_DONE = frozenset({"merged", "closed", "cancelled", "blocked"})
-_TERMINAL = frozenset({"merged", "closed", "cancelled"})
 
 
 class TaskRepo(typing.Protocol):
@@ -92,6 +91,7 @@ class TaskRepo(typing.Protocol):
     def tasks_all(self) -> list[Task]: ...
     def upsert_task(self, t: Task): ...
     def append_event(self, ev: Event): ...
+    def events_for_task(self, tid) -> list[Event]: ...
 
 
 class OcProbe(typing.Protocol):
@@ -134,7 +134,8 @@ class TaskFace(typing.Protocol):
 
 class HealthService:
     """tick 由装配定时驱动；无锁无线程（单写者假设，tasksvc 同款）。
-    边沿/退避记忆为内存态（崩溃回退＝重拍一次，v2 同口径）。"""
+    边沿记忆为内存态（崩溃回退＝重拍一次）；退避账经事件面重建（miss 时
+    按 escalate 审计行续命，重启不提前重拍——v2 _esc_book 同口径）。"""
 
     def __init__(self, store: TaskRepo, oc: OcProbe, notifier: Notifier, *,
                  clock=None, recover=None, tasks: TaskFace | None = None,
@@ -176,8 +177,12 @@ class HealthService:
                 manages = any(x.dispatcher_sid == t.worker_sid
                               and x.state in _IN_FLIGHT for x in tasks.values())
                 if t.state in _IN_FLIGHT:
-                    r = (self._recover.reinject(tid, expect_wsid=t.worker_sid)
-                         if self._recover is not None else False)
+                    try:
+                        r = (self._recover.reinject(
+                                tid, expect_wsid=t.worker_sid)
+                             if self._recover is not None else False)
+                    except Exception:
+                        r = False  # 钩异常＝失败口径（不废整轮 tick）
                     if r is not False:
                         continue  # True＝重建成功；None＝身份易主让位（免误报）
                     self.escalate(
@@ -207,7 +212,10 @@ class HealthService:
             self._resolve_wait(t.id, dep, d.state)
 
     def _resolve_wait(self, tid, dep, dep_state) -> bool:
-        """CAS 解析单点：read-decide-write 同事务（waiting_on==dep 才清）。"""
+        """CAS 解析单点：read-decide-write 同事务（waiting_on==dep 才清）。
+        与 tasksvc.clear_wait_if 双源有意分立：本面在清除同 UoW 内产审计＋
+        双消息（clear_wait_if 无消息面）——CAS 谓词语义两处保持一致，漂移
+        由 test_v3_health_auth CAS 锚互锁。"""
         now, msgs = self._now(), []
         with self._store.uow():
             fresh = self._store.get_task(tid)
@@ -241,11 +249,15 @@ class HealthService:
 
     def _stale_scan(self, tasks, busy):
         """免判口径：busy 回合/waiting_on（running）/in_gate/
-        gate_resource.waiting（F116 排队视同正常态）。边沿＝在候选集而不在
-        记忆集（拍到才记）；退避窗内不拍不记（下轮到期重试，不丢报）。
+        gate_resource.waiting（F116 排队视同正常态）/gate_busy 期 done
+        （ag-b49329：他任务持门＝串行排队，20min 必假拍）。边沿＝在候选集
+        而不在记忆集（拍到才记）；退避窗内不拍不记（下轮到期重试，不丢报）。
         env 在册不在盘改拍一次性 env-gone：持续丢失不拍 stalled 不注自检，
         恢复在盘回常规 stalled 边沿。"""
         now = self._now()
+        gate_busy = any(x.gate.in_gate
+                        or (x.gate.gate_resource or {}).get("waiting")
+                        for x in tasks.values())
         cand = set()
         for tid, t in tasks.items():
             if tid in busy or t.state not in _STALE_STATES or t.gate.in_gate:
@@ -254,6 +266,8 @@ class HealthService:
                 continue
             if t.waiting_on and t.state == "running":
                 continue  # 受控等待免判（F124 单一过滤点）
+            if gate_busy and t.state == "done":
+                continue  # 门忙排队＝正常态（v2 stale_candidates 同口径）
             base = t.last_seen_ms or t.created_ms or 0  # v2 口径：last_seen 缺席回退 created
             if now - base > self._stale_after_ms:
                 cand.add(tid)
@@ -266,7 +280,7 @@ class HealthService:
                     self._env_gone_seen.add(tid)
                 continue
             if tid not in self._stale_seen:  # 边沿触发
-                n, last = self._stale_esc.get(tid, (0, 0))
+                n, last = self._esc_book(self._stale_esc, tid, KIND_STALLED)
                 if now - last < self._gap(n):
                     continue  # 退避窗内：抑制本轮拍人，不记边沿下轮重试
                 self.escalate(KIND_STALLED, tid, streak=n + 1)
@@ -290,7 +304,10 @@ class HealthService:
     def _delivery_watch(self, tasks):
         """external-stale＝done＋awaiting_external 驻留超龄；unpublished＝
         managed delivered 未出版（sha 与补丁均不在 origin 才拍——祖先对账
-        ＋cherry 对账双口径防误报）。确认/出版/除籍即出账，再犯再拍。"""
+        ＋cherry 对账双口径防误报）。确认/出版/除籍即出账，再犯再拍；
+        对账不可得（异常）保账不清（unknown≠不适用，R1 B8）——下轮重试。
+        驻留龄基线＝任务行 updated_ms：门体 handoff/delivered 落账后驻留期
+        无他写（T9b 约定），故等价 v2 handoff_at/delivered_at。"""
         now = self._now()
         for tid, t in tasks.items():
             d = t.delivery
@@ -298,7 +315,7 @@ class HealthService:
                     and d.status == "awaiting_external"
                     and now - (t.updated_ms or 0)
                     > self._ext_stale_after_ms):
-                n, last = self._ext_esc.get(tid, (0, 0))
+                n, last = self._esc_book(self._ext_esc, tid, KIND_EXT_STALE)
                 if now - last >= self._gap(n):
                     self.escalate(KIND_EXT_STALE, tid, streak=n + 1,
                                   raw=f"commit={d.commit} "
@@ -310,9 +327,10 @@ class HealthService:
                     and d.mode == "managed" and d.status == "delivered"
                     and now - (t.updated_ms or 0)
                     > self._unpublished_after_ms):
-                pub, unpublished = {}, False
                 try:
-                    if self._gitx is not None:
+                    if self._gitx is None:
+                        pub, unpublished = None, False
+                    else:
                         pub = self._gitx.publication(t.project_dir,
                                                      t.target_branch)
                         # 分支 ahead 可能来自无关提交；交付 commit 也可能被
@@ -324,9 +342,10 @@ class HealthService:
                             and not self._gitx.patch_equivalent_on_origin(
                                 t.project_dir, d.commit, pub["branch"]))
                 except Exception:
-                    pub, unpublished = {}, False  # 对账不可得本轮免判（下轮重试）
+                    continue  # 对账不可得：保账不清，本轮免判（下轮重试）
                 if unpublished:
-                    n, last = self._unpub_esc.get(tid, (0, 0))
+                    n, last = self._esc_book(self._unpub_esc, tid,
+                                             KIND_UNPUBLISHED)
                     if now - last >= self._gap(n):
                         self.escalate(
                             KIND_UNPUBLISHED, tid, streak=n + 1,
@@ -366,11 +385,19 @@ class HealthService:
         with self._store.uow():
             self._store.append_event(self._ev(
                 self._now(), "health", "escalate", tid, {"kind": kind}))
+        # 通知面逐面尽力而为（F54 口径）：单任务通知败不废整轮 tick、
+        # 已落审计不回滚（评审环 R1 B2）
         if to_sid:
-            self._msg.post("health", to_sid, tid, "escalate", body,
-                           escalate_kind=kind)
+            try:
+                self._msg.post("health", to_sid, tid, "escalate", body,
+                               escalate_kind=kind)
+            except Exception:
+                pass
         if kind in QUIET_ESCALATES and self._emailer is not None:
-            self._emailer(tid, body)
+            try:
+                self._emailer(tid, body)
+            except Exception:
+                pass
 
     def nudge_worker(self, tid, text=None):
         """F70/F73 单一注入面：缺省＝自检提示；不强制打断；无 worker 或
@@ -415,6 +442,23 @@ class HealthService:
         """已连拍 count 次后的再拍退避窗（ms）：首档 1200s 逐档×4 封顶 24h。
         指数钳 15：count 数百时 4**count 先于 min 爆 float 上限（v2 B2）。"""
         return min(GAP0_MS * 4 ** min(max(count - 1, 0), 15), CAP_MS)
+
+    def _esc_book(self, book, tid, kind):
+        """退避账本查取（miss 时经事件面重建，v2 _esc_book 同口径——重启
+        退避续命不提前重拍）：n=该 kind 历史升级次数、last=末次升级 ts_ms；
+        无事件记 (0, 0)。仅在将要拍人的分支调用——出账路径不重建，防逐
+        tick 扫事件面；事件面读故障按首拍处理，不阻塞拍人。"""
+        ent = book.get(tid)
+        if ent is None:
+            try:
+                evs = [e for e in self._store.events_for_task(tid)
+                       if e.event == "escalate"
+                       and (e.detail or {}).get("kind") == kind]
+            except Exception:
+                evs = []
+            ent = (len(evs), evs[-1].ts_ms if evs else 0)
+            book[tid] = ent
+        return ent
 
     def _now(self):
         return self._clock()
