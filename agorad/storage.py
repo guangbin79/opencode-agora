@@ -712,6 +712,24 @@ class Storage:
                                  lineage=lineage, created_ms=row[3])
 
 
+    def credentials_all(self) -> list[Credential]:
+        """全量凭据投影（Req: F138——auth 服务内存索引装载/重载面）。"""
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT sid,token,task_id,created_ms FROM credentials "
+                "ORDER BY sid").fetchall()
+            out = []
+            for r in rows:
+                lineage = tuple(x[0] for x in read.execute(
+                    "SELECT ancestor_sid FROM credential_lineage WHERE sid=? "
+                    "ORDER BY position", (r[0],)))
+                out.append(Credential(sid=r[0], token=r[1], task_id=r[2] or "",
+                                      lineage=lineage, created_ms=r[3]))
+            return out
+        finally:
+            self._read_done(read)
+
     def delete_credential(self, sid) -> bool:
         """撤销＝删 credentials 行（Req: F135 cancel 侧；lineage 级联随 FK）。"""
         self._require_uow()
