@@ -14,8 +14,12 @@ import time
 
 
 def epoch_ms(seconds: float) -> int:
-    """浮点 epoch 秒→epoch 毫秒整数（毫秒粒度内与源值往返无损）。"""
-    return int(seconds * 1000)
+    """浮点 epoch 秒→epoch 毫秒整数（毫秒粒度内与源值往返无损）。
+
+    用 round 不用 int：二进制表示可能落在整数下方（2.046*1000＝
+    2045.999…8），截断会偏 1ms 破坏往返契约（评审环 round1）。
+    """
+    return round(seconds * 1000)
 
 
 def epoch_seconds(ms: int) -> float:
