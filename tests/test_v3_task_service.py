@@ -59,11 +59,21 @@ class GitxStub:
             raise RuntimeError(f"no such branch {branch!r}")
         return self.shas[branch]
 
-    def build_env(self, project_dir, tid, branch, base_sha=None):
-        self.calls.append(("build_env", tid, branch, base_sha))
+    def build_env(self, project_dir, tid, branch=None):
+        self.calls.append(("build_env", tid, branch, None))
         env = f"/tmp/envs/{tid}"
         self.built.add(env)
         return env
+
+    def build_env_at(self, project_dir, tid, branch=None, base_sha=None):
+        self.calls.append(("build_env_at", tid, branch, base_sha))
+        env = f"/tmp/envs/{tid}"
+        self.built.add(env)
+        return env
+
+    def materialize_checkout(self, tree_dir, source_dir):
+        self.calls.append(("materialize_checkout", tree_dir))
+        return "materialized"
 
     def head(self, env):
         return "e" * 40
@@ -331,13 +341,14 @@ class TestClientKey(_Base):  # 断言4
                   verify={"cmd": "true"})
         t1 = self.mk(**kw)
         self.svc.dispatch(t1, DISPATCHER, "dispatcher")
-        builds = [c for c in self.gitx.calls if c[0] == "build_env"]
+        builds = [c for c in self.gitx.calls if c[0].startswith("build_env")]
         n_events = len(self.events(t1))
         t2 = self.mk(**kw)
         self.assertEqual(t2, t1)  # 原 tid 返回
         self.assertEqual(len(self.storage.tasks_all()), 1)  # 零新行
         self.assertEqual(
-            [c for c in self.gitx.calls if c[0] == "build_env"], builds)
+            [c for c in self.gitx.calls if c[0].startswith("build_env")],
+            builds)  # 零新 env
         self.assertEqual(len(self.events(t1)), n_events)  # 零新事件
 
     def test_same_key_different_payload_conflict(self):
@@ -369,8 +380,11 @@ class TestDispatch(_Base):  # 断言5
         self.assertEqual(t.env_base, "e" * 40)
         self.assertIn(("local_branch_sha", "/repo", "v3-runtime"),
                       self.gitx.calls)
-        self.assertIn(("build_env", tid, "v3-runtime", "b" * 40),
-                      self.gitx.calls)  # 按钉死基线建 env
+        self.assertIn(("build_env_at", tid, "v3-runtime", "b" * 40),
+                      self.gitx.calls)  # 按钉死基线建 env（权威定基）
+        self.assertIn(("materialize_checkout", f"/tmp/envs/{tid}"),
+                      self.gitx.calls)  # ag-0d2daa 检出即物化
+        self.assertIn("checkout_materialize", self.events(tid))
         cred = self.storage.get_credential("ses-w1")  # DB 面
         self.assertEqual((cred.token, cred.task_id), (res["token"], tid))
         p = self.home.credentials / f"{tid}.token"  # secret 文件面 0600
@@ -683,6 +697,100 @@ class TestLastSeenThrottle(_Base):  # 断言11
         before = version()
         self.svc.touch_seen(tid)
         self.assertEqual(version(), before + 1)
+
+
+class TestReviewLoopFixes(_Base):
+    """评审环 R1 修复的机械锚（四源 findings 去重后逐项验证）。"""
+
+    def test_settle_cancel_in_gate_race_inlines_queue_no_nested_uow(self):
+        # B1/OCR：_settle_cancel UoW 内遇刚进门任务须内联排队不嵌套 uow
+        tid = self.seed("ag-f1", state="done", gate=GateState(in_gate=True))
+        self.assertFalse(self.svc._settle_cancel(tid, DISPATCHER, None))
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.gate.pending_cancel), ("done", True))
+
+    def test_redispatch_revokes_previous_worker_credential(self):
+        # C1/B3：blocked 重派撤旧牌防双绑
+        tid = self.mk(verify={"cmd": "true"})
+        self.svc.dispatch(tid, DISPATCHER, "dispatcher")
+        self.assertIsNotNone(self.storage.get_credential("ses-w1"))
+        for _ in range(3):
+            self.svc.bump_fail_streak(tid)  # dispatched 三连败→blocked
+        self.assertEqual(self.storage.get_task(tid).state, "blocked")
+        self.svc.dispatch(tid, DISPATCHER, "dispatcher")
+        self.assertIsNone(self.storage.get_credential("ses-w1"))  # 旧牌已撤
+        self.assertIsNotNone(self.storage.get_credential("ses-w2"))
+
+    def test_cancel_removes_credential_secret_file(self):
+        # B5/C3：终局撤牌双删（DB 行＋secret 文件）
+        tid = self.seed("ag-f2", state="dispatched", worker_sid="ses-w9")
+        p = self.home.write_credential(tid, "tok")
+        self.assertTrue(p.is_file())
+        self.svc.cancel(tid, DISPATCHER, "dispatcher")
+        self.assertFalse(p.is_file())
+
+    def test_transition_blocked_notify_not_swallowed_across_rounds(self):
+        # B2：dedup 键掺迁移时点——blocked 循环第二轮通知不被吞（两轮
+        # 迁移时点不同＝不同键；键形与 v2 ag-acae3b (tid,to,updated) 同构）
+        tid = self.seed("ag-f3", state="done")
+        self.svc.transition(tid, "blocked", actor="gate",
+                            delivery_failure=True)
+        for to in ("dispatched", "running", "done"):
+            self.clock.advance(5)  # 真实时钟下迁移时点必异
+            self.svc.transition(tid, to, actor="gate")
+        self.clock.advance(5)
+        self.svc.transition(tid, "blocked", actor="gate",
+                            delivery_failure=True)
+        pulled = self.messaging.pull(DISPATCHER)
+        self.assertEqual(sum(1 for m in pulled
+                             if m.kind == "result"
+                             and "blocked" in self.text(m)), 2)  # 两轮各达
+
+    def test_transition_missing_task_not_found(self):
+        # OCR：not_found 契约一致（防 None 入 domain）
+        with self.assertRaises(ContractError) as cm:
+            self.svc.transition("ag-none", "running")
+        self.assertEqual(cm.exception.code, "not_found")
+        with self.assertRaises(ContractError) as cm:
+            self.svc.bump_fail_streak("ag-none")
+        self.assertEqual(cm.exception.code, "not_found")
+
+    def test_blank_review_cmd_rejected(self):
+        # OCR：review_cmd 空值 fail-fast（v2 F114 语义）
+        with self.assertRaises(ContractError) as cm:
+            self.mk(verify={"review_cmd": "   "})
+        self.assertEqual(cm.exception.code, "invalid_argument")
+        self.assertEqual(self.storage.tasks_all(), [])
+
+    def test_external_branch_without_pinned_branch_rejected_at_dispatch(self):
+        # A3：external_branch 无钉死支拒派（v2 local_base 硬拒）
+        tid = self.seed("ag-f4", delivery=DeliveryState(
+            mode="external_branch"), target_branch=None)
+        self.assertIsNone(self.storage.get_task(tid).target_branch)
+        with self.assertRaises(ContractError) as cm:
+            self.svc.dispatch(tid, DISPATCHER, "dispatcher")
+        self.assertIn("local_base", cm.exception.message)
+
+    def test_client_key_idempotent_with_absent_project_dir(self):
+        # OCR：project_dir=None 幂等重试不炸（_repo_key None 防御）
+        kw = dict(execution={"client_key": "k9", "project_dir": None})
+        t1 = self.mk(**kw)
+        self.assertEqual(self.mk(**kw), t1)
+
+    def test_touch_seen_binding_rejects_foreign_worker(self):
+        # C4：worker_sid 绑定校验——非本任务在役 worker 拒刷
+        tid = self.seed("ag-f5", state="running", worker_sid="ses-w9")
+        self.assertFalse(self.svc.touch_seen(tid, worker_sid="ses-w1"))
+        self.assertNotIn(tid, self.svc._seen)  # 拒刷零内存态
+        self.assertTrue(self.svc.touch_seen(tid, worker_sid="ses-w9"))
+        self.assertIn(tid, self.svc._seen)
+
+    def test_credential_file_created_atomically_0600(self):
+        # C2：原子建 0600（os.open 带模式，无先建后 chmod 窗）
+        tid = self.mk(verify={"cmd": "true"})
+        self.svc.dispatch(tid, DISPATCHER, "dispatcher")
+        p = self.home.credentials / f"{tid}.token"
+        self.assertEqual(_mode(p), 0o600)
 
 
 if __name__ == "__main__":
