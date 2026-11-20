@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS task_delivery(
   mode TEXT NOT NULL DEFAULT 'managed', status TEXT NOT NULL DEFAULT 'pending',
   commit_sha TEXT, base TEXT, target_branch TEXT,
   attempt INTEGER NOT NULL DEFAULT 0,
-  local_status TEXT NOT NULL DEFAULT 'pending', error TEXT);
+  local_status TEXT NOT NULL DEFAULT 'pending', error TEXT,
+  conflict_files_json TEXT);
 CREATE TABLE IF NOT EXISTS task_gate(
   task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
   in_gate INTEGER NOT NULL DEFAULT 0, gate_env TEXT,
@@ -345,11 +346,13 @@ class Storage:
         if t.delivery is not None:
             c.execute(
                 "INSERT INTO task_delivery(task_id,mode,status,commit_sha,base,"
-                "target_branch,attempt,local_status,error) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "target_branch,attempt,local_status,error,conflict_files_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (t.id, t.delivery.mode, t.delivery.status, t.delivery.commit,
                  t.delivery.base, t.delivery.target_branch, t.delivery.attempt,
-                 t.delivery.local_status, t.delivery.error))
+                 t.delivery.local_status, t.delivery.error,
+                 _json(t.delivery.conflict_files)
+                 if t.delivery.conflict_files else None))
         art = None if t.gate.gate_artifact is None else {
             k: v for k, v in dataclasses.asdict(t.gate.gate_artifact).items()
             if k != "task_id"}
@@ -395,8 +398,8 @@ class Storage:
         verify = one("SELECT cmd,state,registered_by,registered_at_ms,"
                      "timeout_s,timeout_source FROM task_verify WHERE task_id=?")
         delivery = one("SELECT mode,status,commit_sha,base,target_branch,"
-                       "attempt,local_status,error FROM task_delivery "
-                       "WHERE task_id=?")
+                       "attempt,local_status,error,conflict_files_json "
+                       "FROM task_delivery WHERE task_id=?")
         g = one("SELECT in_gate,gate_env,pending_cancel,"
                 "pending_cancel_reason,gate_artifact_json,review_cache_json,"
                 "review_fail_streak,probe_json FROM task_gate WHERE task_id=?")
@@ -416,7 +419,10 @@ class Storage:
             after=tuple(json.loads(row[28])),
             legacy_extra_json=row[29],
             verify=VerifySpec(*verify) if verify else VerifySpec(),
-            delivery=DeliveryState(*delivery) if delivery else None,
+            delivery=(DeliveryState(*delivery[:8],
+                                    conflict_files=json.loads(delivery[8])
+                                    if delivery[8] else None)
+                      if delivery else None),
             probe=BaseProbe(**json.loads(g[7])) if g[7] else None,
             gate=GateState(
                 in_gate=bool(g[0]), gate_env=g[1], pending_cancel=bool(g[2]),

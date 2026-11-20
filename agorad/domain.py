@@ -86,6 +86,7 @@ class DeliveryState:
     attempt: int = 0
     local_status: str = "pending"
     error: str | None = None
+    conflict_files: list[str] | None = None  # F105 终局冲突清单（交付轮残值面）
 
 
 @dataclasses.dataclass(frozen=True)
