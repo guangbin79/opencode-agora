@@ -352,9 +352,9 @@ class TaskService:
                              "跳过（B7）")
         delivery = t.delivery  # Req: F98 重派开新交付轮（身份字段不动）
         if delivery is not None and delivery.status == "failed":
-            delivery = dataclasses.replace(
+            delivery = dataclasses.replace(  # Req: F105 残值必清（B1 同口径）
                 delivery, status="pending", error=None, attempt=0, commit=None,
-                base=None, local_status="pending")
+                base=None, local_status="pending", conflict_files=None)
         env, env_base, new_env = t.env_dir, t.env_base, False
         report = ""
         if not self._gitx.env_on_disk(env):  # F71：记录 env 不在盘＝重派新建路
@@ -871,7 +871,8 @@ class TaskService:
         with self._store.uow():
             fresh = self._store.get_task(tid)
             nd = dataclasses.replace(d, status="delivered",
-                                     local_status="not_required", error=None)
+                                     local_status="not_required", error=None,
+                                     conflict_files=None)  # Req: F105 残值必清
             task = task_transition(fresh, "merged", now_ms=now)
             task = reset_fail_streak(task, now_ms=now)
             task = task_transition(task, "closed", now_ms=now)  # 两跳同事务
@@ -906,7 +907,8 @@ class TaskService:
         now, msg = self._now(), None
         with self._store.uow():
             fresh = self._store.get_task(tid)
-            nd = dataclasses.replace(d, status="failed", error=error)
+            nd = dataclasses.replace(d, status="failed", error=error,
+                                     conflict_files=None)  # Req: F105 残值必清
             task = task_transition(fresh, "blocked", delivery_failure=True,
                                    now_ms=now)  # F98 交付失败专用边
             task = self._merge_seen(dataclasses.replace(task, delivery=nd))

@@ -389,7 +389,14 @@ class GateVerifyService:
                 self._store.append_event(self._ev(
                     now, "gate", "gate_enter", tid,
                     {"gate_env": integration}))
-            if t.commit and t.target_branch is not None:
+            budget, ceiling = self._budget(t)
+            soft = self._soft_notify(tid, budget)
+            runner = lambda e, cmd: self._runner(  # noqa: E731
+                e, cmd, timeout=budget, ceiling=ceiling, on_soft=soft)
+            # T9b 交付执行体钩：门闩后、崩溃残留探针前（out_of_band 豁免面＋
+            # 交付终局崩窗收敛）；基类无交付装配＝直通 None。
+            outcome = self._pre_pipeline(tid, t, runner)
+            if outcome is None and t.commit and t.target_branch is not None:
                 try:
                     landed = self._gitx.contains(target, t.commit,
                                                  t.target_branch)
@@ -397,20 +404,15 @@ class GateVerifyService:
                     landed = False  # 探针病照走验证路径（其内自有失败面）
                 if landed:  # 崩溃残留：权威已含交付即补终态，不重验（恰一次）
                     return self._land(tid)
-            budget, ceiling = self._budget(t)
-            soft = self._soft_notify(tid, budget)
-            runner = lambda e, cmd: self._runner(  # noqa: E731
-                e, cmd, timeout=budget, ceiling=ceiling, on_soft=soft)
-            outcome = (self._base_probe(tid, t, target, integration, runner)
-                       or self._env_verify(tid, env, t.verify.cmd, runner)
-                       or self._review_or_anchor(tid, t, env, runner)
-                       or self._integration(tid, t, env, target, integration,
-                                            runner))
+            if outcome is None:
+                outcome = (self._base_probe(tid, t, target, integration, runner)
+                           or self._env_verify(tid, env, t.verify.cmd, runner)
+                           or self._review_or_anchor(tid, t, env, runner)
+                           or self._integration(tid, t, env, target, integration,
+                                                runner))
             if outcome is None:
                 self._audit(tid, "verify_green")
-                self._result(tid, f"任务 {tid} verify/review 全绿（预算 "
-                                f"{budget:g}s）——交付推进待 T9b 装配")
-                outcome = "green"
+                outcome = self._after_green(tid, t, runner)
             return outcome
         except Exception as e:  # 门内崩：reopened 弹回（不计连败——非质量败）
             fresh = self._store.get_task(tid)
@@ -435,6 +437,19 @@ class GateVerifyService:
                 self._audit(tid, "reclaim_failed",
                             note=f"integration: {str(e)[:150]}")
             self._tail(tid)
+
+    def _pre_pipeline(self, tid, t, runner):  # T9b 交付执行体钩
+        """门体扩展点（T9b GateDeliveryService 覆写）：门闩后、崩溃残留探针
+        前——out_of_band 豁免面与交付终局崩窗收敛。基类＝直通 None。"""
+        return None
+
+    def _after_green(self, tid, t, runner):  # T9b 交付执行体钩
+        """verify/review 全绿出口（T9b 覆写＝交付推进）。基类＝驻留 done
+        报装配待续（无交付装配的 legacy/无投影行）。"""
+        budget, _ = self._budget(t)
+        self._result(tid, f"任务 {tid} verify/review 全绿（预算 "
+                        f"{budget:g}s）——交付推进待 T9b 装配")
+        return "green"
 
     def _budget(self, t):
         """F51/F126 生效预算：task > profile > global；任务/画像级硬顶恒
@@ -716,6 +731,11 @@ class GateVerifyService:
             runner, extra={"integration_base": before})
         where = ("rebase 后集成 verify 失败" if r else "集成 verify 失败",
                  "rebase 后集成" if r else "集成")
+        return self._route_int(tid, rc, out, art, where)
+
+    def _route_int(self, tid, rc, out, art, where):
+        """集成阶段 verify 分类路由（T9a 集成段与 T9b 交付循环共用单源）；
+        where＝(质量文案, 驻留文案前缀)。目标支零改动口径由调用方组树面保证。"""
         if rc == 124:
             self._audit(tid, "verify_overrun")
             self._result(tid, f"{where[1]} verify 超硬顶，目标分支未改动——"
@@ -728,7 +748,7 @@ class GateVerifyService:
             self._escalate(tid, "verify-dead",
                            f"exit={rc} {out[-_RAW_TAIL:]}"
                            f"{self._art_line(art)}")
-            self._worker_note(tid, "集成 verify 命令自身死（exit "
+            self._worker_note(tid, f"{where[1]} verify 命令自身死（exit "
                                 f"{rc}）——非活不达标，无需自愈重试；"
                                 "已升级派发方处置，等待通知即可")
             return "dead"
@@ -737,7 +757,7 @@ class GateVerifyService:
             self._escalate(tid, "verify-infra",
                            f"exit={rc} {out[-_RAW_TAIL:]}"
                            f"{self._art_line(art)}")
-            self._worker_note(tid, "集成 verify 机械失败（exit "
+            self._worker_note(tid, f"{where[1]} verify 机械失败（exit "
                                 f"{rc}：signal 类）——非质量败，无需自愈重试；"
                                 "已升级派发方处置，等待通知即可")
             return "infra"
