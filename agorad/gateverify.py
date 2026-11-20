@@ -315,14 +315,20 @@ class GateVerifyService:
             return self._deny_anchor(tid, "anchor", f"任务 {tid} 合并前置失败："
                                      "评审环未绿——修复 blocker/high 后重新 "
                                      "post(done, commit)")
-        now = self._now()
+        now, raced = self._now(), None
         with self._store.uow():
             fresh = self._store.get_task(tid)
-            task = task_transition(fresh, "done", now_ms=now)
-            task = dataclasses.replace(task, commit=c, rebased_from=None)
-            self._store.upsert_task(task)
-            self._store.append_event(self._ev(now, worker_sid, "done", tid,
-                                              {"commit": c}))
+            if fresh.state != "running":  # 受理窗竞速（并发 cancel 等）：
+                # 结构化 state 拒，不让裸 InvalidTransition 逃到 transport（B册 F-1）
+                raced = f"任务 {tid} 当前 {fresh.state} 非 running——仅 running 受理 done"
+            else:
+                task = task_transition(fresh, "done", now_ms=now)
+                task = dataclasses.replace(task, commit=c, rebased_from=None)
+                self._store.upsert_task(task)
+                self._store.append_event(self._ev(now, worker_sid, "done", tid,
+                                                  {"commit": c}))
+        if raced is not None:
+            return self._deny(tid, "state", raced)
         return "accepted"
 
     def _open_children(self, worker_sid):
