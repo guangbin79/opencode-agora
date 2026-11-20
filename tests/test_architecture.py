@@ -68,6 +68,9 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/main.py",
                     may_import=["agorad.access", "agorad.core", "agorad.transport"])
 
+    def test_contracts_stdlib_only(self):  # Req: F130——v3 Contract Catalog 仅 stdlib
+        assert_only("agorad/contracts.py", may_import=[])
+
 
 if __name__ == "__main__":
     unittest.main()
