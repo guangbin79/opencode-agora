@@ -150,7 +150,7 @@ class TestTimeSpec(unittest.TestCase):
     """断言③：epoch 毫秒 INTEGER↔v2 浮点秒往返。"""
 
     def test_roundtrip_and_shapes(self):
-        for secs in (0.0, 1.5, 1_763_728_000.123, 99.999):
+        for secs in (0.0, 1.5, 2.046, 1_763_728_000.123, 99.999):
             self.assertEqual(domain.epoch_seconds(domain.epoch_ms(secs)), secs)
         self.assertIsInstance(domain.epoch_ms(1.5), int)
         self.assertEqual(domain.epoch_ms(1.5), 1500)
