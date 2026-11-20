@@ -3,9 +3,13 @@
 
 独立单文件（Python 3 stdlib ONLY，不进 agorad 包——opencode 拉起的独立
 stdio 进程）。每行一请求一应答；通知（无 id）不应答；stderr 留诊断。
-16 工具（15 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
+v2 模式（缺省）：16 工具（15 个→`POST /<tool_name>` 根级路由；`sleep` 壳层本地休眠不走 HTTP）；arguments 内 `_token` 剥除→
 X-Agora-Token 头。服务地址：env AGORAD_URL 优先，缺省读
 `$AGORA_HOME/.agora/service.json` 的 port（lift 惰性拉起后每调用重读）。
+v3 模式（Req: F142，配置化不改 v2 运行语义——service.json api_version>=3
+或 AGORAD_URL＋AGORA_API_VERSION>=3 时激活）：tools/list 由服务端 contracts
+单源生成（GET /v3/tools：19＋sleep＋旧别名）；tools/call 路由
+`POST /v3/<name>`（服务端收旧名，壳零翻译）；错误映射两模式同一张表。
 错误映射（负数区，message 服务原文）：400→-32602、401→-32001、403→-32003、
 404→-32004、409→-32009、500→-32603；未知工具/缺牌壳内直错；服务不可达→
 -32000（默认拒，安全方向）。
@@ -205,25 +209,55 @@ def _err(rid, code, message):
             "error": {"code": code, "message": message}}
 
 
-def resolve_url():
-    """AGORAD_URL 优先；缺省读 $AGORA_HOME/.agora/service.json 的 port。"""
+def resolve_service():
+    """(url, api_version)：AGORAD_URL 优先（v3 面须携 AGORA_API_VERSION）；
+    缺省读 $AGORA_HOME/.agora/service.json 的 port＋api_version（缺省 2＝
+    v2 语义零变化；坏值回退 2 安全向）。"""
     url = os.environ.get("AGORAD_URL")
     if url:
-        return url.rstrip("/")
+        try:
+            api = int(os.environ.get("AGORA_API_VERSION", "2"))
+        except ValueError:
+            api = 2
+        return url.rstrip("/"), api
     home = os.environ.get("AGORA_HOME") or str(Path.home() / ".opencode-agora-plaza")
     path = Path(home) / ".agora" / "service.json"
     try:
-        port = json.loads(path.read_text(encoding="utf-8")).get("port")
-    except (OSError, ValueError, AttributeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        port = data.get("port")
+    except (OSError, ValueError, AttributeError, TypeError):
         port = None
     if not port:
         raise OSError(f"agorad 未发现（{path} 无 port 且未设 AGORAD_URL）")
-    return f"http://127.0.0.1:{port}"
+    try:
+        api = int(data.get("api_version", 2))
+    except (ValueError, TypeError):
+        api = 2  # 坏值回退 2 安全向（不动已到手的 port）
+    return f"http://127.0.0.1:{port}", api
 
 
-def http_call(name, arguments):
-    """POST /<name>：_token/_sid 剥除→头（_sid＝R25-A 调用者真实会话 sid，服务绑主会话）；
-    返回 (status, body)。HTTPError 亦为值。"""
+_V3_TOOLS = None
+
+
+def _v3_tools(url):
+    """v3 模式 tools/list：服务端 contracts 单源生成面（惰性缓存一次）；
+    应答形状异常 raise ValueError（调用方守卫 OSError|ValueError→rid 内
+    -32000，不落 serve 兜底的 id:null 应答）。"""
+    global _V3_TOOLS
+    if _V3_TOOLS is None:
+        with urllib.request.urlopen(f"{url}/v3/tools", timeout=30) as r:
+            data = json.loads(r.read() or b"{}")
+        if not isinstance(data, dict) or not isinstance(
+                data.get("tools"), list):
+            raise ValueError(f"/v3/tools 应答形状异常: {str(data)[:80]}")
+        _V3_TOOLS = [t for t in data["tools"] if isinstance(t, dict)]
+    return _V3_TOOLS
+
+
+def http_call(name, arguments, url=None, api=None):
+    """POST <name>（v3 模式＝v3/<name>）：_token/_sid 剥除→头（_sid＝R25-A
+    调用者真实会话 sid，服务绑主会话）；返回 (status, body)。HTTPError 亦为值。
+    url/api＝调用方已解析对（免二次读盘＋校验/路由同源）；缺省自解析。"""
     args = dict(arguments)
     token = args.pop("_token", None)
     sid = args.pop("_sid", None)
@@ -232,8 +266,11 @@ def http_call(name, arguments):
         headers["X-Agora-Token"] = token
     if sid:
         headers["X-Agora-Sid"] = sid
+    if url is None:
+        url, api = resolve_service()
+    route = f"v3/{name}" if api >= 3 else name
     req = urllib.request.Request(
-        f"{resolve_url()}/{name}",
+        f"{url}/{route}",
         data=json.dumps(args, ensure_ascii=False).encode(),
         headers=headers, method="POST")
     try:
@@ -256,7 +293,17 @@ def handle(msg):
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "agora", "version": _VERSION}}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": _TOOLS}}
+        try:
+            url, api = resolve_service()
+        except OSError:
+            url, api = None, 0  # 离线：回落 v2 静态面（v2 语义保真）
+        tools = _TOOLS
+        if api >= 3:
+            try:
+                tools = _v3_tools(url)
+            except (OSError, ValueError) as e:  # 形状异常同不可达档（rid 内报因）
+                return _err(rid, -32000, f"服务不可达（v3 tools）: {e}")
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": tools}}
     if method == "tools/call":
         return _tools_call(rid, msg.get("params") or {})
     if rid is None:  # 其余通知：静默
@@ -274,15 +321,29 @@ def _tools_call(rid, params):
         return {"jsonrpc": "2.0", "id": rid,
                 "result": {"content": [{"type": "text",
                                         "text": json.dumps({"ok": True, "waited": secs})}]}}
-    if name not in _NAMES:
-        return _err(rid, -32602, f"未知工具: {name}")
     args = params.get("arguments")
+    if name not in _NAMES and (not isinstance(args, dict)
+                               or not args.get("_token")):
+        # v2 优先级保真：非 v2 工具名在缺牌/无参分支先按名拒（-32602 先于
+        # -32001，勿把「未知工具」报成「缺牌可自愈」）；v3 正名有牌时走
+        # v3 服务端名集校验
+        return _err(rid, -32602, f"未知工具: {name}")
     if not isinstance(args, dict) or not args.get("_token"):
         return _err(rid, -32001, "缺 _token（插件未附牌）——本次调用未送达 agorad（非服务拒），稍候重试即自愈")
     try:
-        status, body = http_call(name, args)
+        url, api = resolve_service()
+        if api >= 3:
+            if name not in {t.get("name") for t in _v3_tools(url)}:
+                return _err(rid, -32602, f"未知工具: {name}")
+        elif name not in _NAMES:  # v2 静态名集壳内直错（F3：不烧服务 404）
+            return _err(rid, -32602, f"未知工具: {name}")
+        status, body = http_call(name, args, url, api)
     except OSError as e:  # 连接拒/发现失败：lift 线索报因
+        if name not in _NAMES:  # v2 优先级保真：非 v2 工具名先按名拒
+            return _err(rid, -32602, f"未知工具: {name}")
         return _err(rid, -32000, f"服务不可达: {e}")
+    except ValueError as e:  # v3 tools 应答形状异常（rid 内报因，不落 id:null）
+        return _err(rid, -32000, f"服务不可达（v3 tools）: {e}")
     print(f"[agora_mcp] {name} -> {status}", file=sys.stderr)
     if status != 200:
         return _err(rid, _ERROR_CODES.get(status, -32000),

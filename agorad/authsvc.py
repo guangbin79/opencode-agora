@@ -375,6 +375,12 @@ class AuthService:
     def _reload(self):
         self._creds = self._store.credentials_all()
 
+    def reload(self):
+        """装配面对账（Req: F142）：tasksvc/gate 经仓库直写 credentials
+        （dispatch 签牌/终态撤牌）不经本服务——transport 请求边界先刷缓存
+        再 identify，防 stale-positive（已撤牌仍认）与 stale-miss（新牌不认）。"""
+        self._reload()
+
     def _now(self):
         return self._clock()
 

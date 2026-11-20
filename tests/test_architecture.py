@@ -116,6 +116,23 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/adapter.py",
                     may_import=["agorad.domain", "agorad.contracts"])
 
+    def test_v3_compose_layer(self):  # Req: F142——v3 装配层（§1 main 唯一装配的 v3 对应件）：services＋storage＋access＋cutover 导出器全可入；oc/gitx/runner/anchors 经构造注入（Protocol 面，本模块不构造真件）；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖
+        assert_only("agorad/compose.py",
+                    may_import=["agorad.domain", "agorad.contracts",
+                                "agorad.storage", "agorad.access",
+                                "agorad.cutover", "agorad.tasksvc",
+                                "agorad.messaging", "agorad.authsvc",
+                                "agorad.healthsvc", "agorad.gateverify",
+                                "agorad.gatedelivery"])
+
+    def test_v3_serverv3_layer(self):  # Req: F142——v3 传输层仅 contracts/adapter/domain＋application 服务（不 import storage/access——存储经 V3Stack 注入；board/doctor/消息形状经 adapter 翻译）；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖
+        assert_only("agorad/serverv3.py",
+                    may_import=["agorad.domain", "agorad.contracts",
+                                "agorad.adapter", "agorad.tasksvc",
+                                "agorad.messaging", "agorad.authsvc",
+                                "agorad.healthsvc", "agorad.gateverify",
+                                "agorad.gatedelivery"])
+
     def test_entry_script_layer(self):  # Req: F140——无扩展名入口 ./agora 显式入册（勿按扩展名漏盘）：仅 stdlib＋agorad.cutover（延迟导入，HTTP 谓词零 agorad 依赖）
         assert_only("agora", may_import=["agorad.cutover"])
 
