@@ -292,14 +292,15 @@ def _stale_candidates(tasks, now, base):
     return cand
 
 
-def doctor(tasks, *, now_ms=None, env_activity=None, on_disk=None,
+def doctor(tasks, *, now_ms=None, env_activity=None, on_disk,
            models=None, verify_hygiene=None, verify_profiles=None, home=""):
     """domain.Tasks→v2 doctor_view 形（golden 顶层键；report.doctor_view
     口径镜像）。
 
     盘面/活性纯注入（适配层零 I/O）：env_activity(tid)→env 工作区最新 mtime
-    秒（缺省 0.0＝v2 缺席口径）；on_disk(env_dir)→在盘谓词（装配必注，测试
-    注桩）。models/verify_profiles 非 None 才注入条件键（F56/F126）。
+    秒（缺省 0.0＝v2 缺席口径）；on_disk(env_dir)→在盘谓词（评审环 R1：无
+    缺省必注——装配/测试漏注即调用点 TypeError 快败，不作静默假值）。
+    models/verify_profiles 非 None 才注入条件键（F56/F126）。
     """
     now = time.time() if now_ms is None else epoch_seconds(now_ms)
     act = env_activity or (lambda tid: 0.0)
