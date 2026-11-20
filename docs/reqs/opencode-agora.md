@@ -783,4 +783,5 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **边界**：不实现交付推进（T9b：目标支 ff-only/managed CAS/external handoff/out_of_band/幻影守卫——集成树组树属验证面，目标支零推进）；不实现 F116 跨进程资源闸与看门狗（transport/装配面——预算不折等待已按任务行现值解析保证）；不接 HTTP/MCP；不改 v2 gate.py 生产路径；不采集 F57 usage（T10 装配面）。
 **落点**：agorad/gateverify.py（新，Req: F136）、tests/test_v3_gate_port.py（新，Req: F136——断言 1-10 逐条机械判定，gitx/锚/runner 桩注入、消息面接真 MessagingService、streak 面接真 TaskService）、tests/test_architecture.py（gateverify 分层守卫）、docs/reqs/opencode-agora.md（本条）。
 **验收**：python3 -m pytest tests/test_v3_gate_port.py -q 全绿（37 passed；base 无此文件应红）；全量 python3 -m pytest tests/ -q 不回归。
-**实绩**：新增合计约 1900 行（预算 1200，超约 58%——断言面 10 组与 v2 平移保真面（六拒/三分类路由×4 阶段/双顶三级/门审四态/集成三路/产物四面/崩溃五窗）结构性宽于预算；F135 先例（派发方已按断言面宽度上调 T9 至 1200/5h 起步）同款申报，裁量归派发方；可裁剪项（v2 文案逐字保真、meta 字段全集、纯函数单测）均属平移必达语义，未裁）。
+**实绩**：新增合计约 1900 行（预算 1200，超约 58%——实结 1903：gateverify 1021＋test 870＋arch 4＋台账 8；断言面 10 组与 v2 平移保真面（六拒/三分类路由×4 阶段/双顶三级/门审四态/集成三路/产物四面/崩溃五窗）结构性宽于预算；可裁剪项（v2 文案逐字保真、meta 字段全集、纯函数单测）均属平移必达语义，未裁）。
+**超限裁定**（dispatcher msg 00012331，2026-11-20）：选(a) 接受超限入账（F133/F135 同款先例）——1200×1.58≈1900 与实绩恰合属结构性宽度非铺张；裁 150 行仅 8% 且全落平移必达语义，裁之无损预算结论、有损保真。根因修正（派发方口径）：平移类任务预算改按 v2 源面标定（被平移源码行数×1.0-1.1 系数），不再按前单线性外推；T9b 预算上调至 1800 行/6h 起步。
