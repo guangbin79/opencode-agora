@@ -32,8 +32,8 @@ import dataclasses
 import time
 import typing
 
-from agorad.domain import (Delivery, DeliveryPolicy, DeliveryReceipt, Event,
-                           Message, epoch_ms)
+from agorad.domain import (Delivery, DeliveryDecision, DeliveryPolicy,
+                           DeliveryReceipt, Event, Message, epoch_ms)
 
 LEASE_MS = 30_000       # §5 inflight lease（时钟可注入超时）
 DIGEST_N = 5            # §5 digest 冲刷条数阈值
@@ -131,12 +131,20 @@ class MessagingService:
         已 delivered 或他人持未过期 lease→False（不抢交）。"""
         with self._store.uow():
             msg = self._store.get_message(mid)
-            held = msg is not None and self._lease(msg.id)
+            if msg is None:
+                return False
+            # 先算决策再抢 lease：决策异常不得滞留 inflight 阻塞 pull（终闸
+            # A 册 F-1）；escalate 类别不落 Message 行，无类别重投按唤醒通道
+            # 兜底——at-least-once 不因缺类阻断
+            if msg.kind == DeliveryPolicy.ESCALATE and escalate_kind is None:
+                decision = DeliveryDecision(Delivery.WAKE)
+            else:
+                decision = self._policy.decision(
+                    msg.kind, escalate_kind=escalate_kind)
+            held = self._lease(msg.id)
         if not held:
             return False
-        return self._deliver(
-            msg, self._policy.decision(msg.kind, escalate_kind=escalate_kind),
-            self._export_path(msg))
+        return self._deliver(msg, decision, self._export_path(msg))
 
     def pull(self, sid) -> list:
         """message_pull：见模块 docstring（停止规则＋lineage 补拉＋抑制）。"""

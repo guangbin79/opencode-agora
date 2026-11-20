@@ -297,6 +297,19 @@ class TestReferenceLines(_Base):  # 断言8
         self.assertIn("正文内容", text)
 
 
+class TestDispatchEscalateRecovery(_Base):  # 终闸 A/B 册：escalate 类别不落行，无类别重投唤醒兜底不抛不滞留
+    def test_escalate_redispatch_without_kind_wakes_not_stuck(self):
+        self.oc.mode = "false"
+        m = self.svc.post("w", "d", self.TID, "escalate", "e",
+                          escalate_kind="stalled")  # quiet→notify 通道，OC 败留 pending
+        self.assertEqual(self.oc.calls[0][0], "notify")
+        self.assertEqual(self.storage.get_receipt(m.id).status, "pending")
+        self.oc.mode = None
+        self.assertTrue(self.svc.dispatch(m.id))  # 恢复重投：无类别→唤醒兜底
+        self.assertEqual(self.oc.calls[1][0], "inject")
+        self.assertEqual(self.storage.get_receipt(m.id).status, "delivered")
+
+
 class TestBlobBody(_Base):  # 断言9
     def test_non_utf8_bytes_roundtrip_via_pull(self):
         blob = bytes(range(256))  # 含非法 UTF-8 序列与 NUL
