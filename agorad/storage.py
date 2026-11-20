@@ -467,6 +467,12 @@ class Storage:
              tm.created_ms, tm.fired_ms))
         return tm  # 孤儿 task（无主行）→sqlite3.IntegrityError（FK 拒）
 
+    @staticmethod
+    def _timer(row):
+        return Timer(id=row[0], task_id=row[1], target_role=row[2],
+                     due_ms=row[3], state=TimerState(row[4]),
+                     created_ms=row[5], fired_ms=row[6])
+
     def get_timer(self, tid):
         read = self._read_conn()
         try:
@@ -475,11 +481,7 @@ class Storage:
                 "FROM timers WHERE id=?", (tid,)).fetchone()
         finally:
             self._read_done(read)
-        if row is None:
-            return None
-        return Timer(id=row[0], task_id=row[1], target_role=row[2],
-                            due_ms=row[3], state=TimerState(row[4]),
-                            created_ms=row[5], fired_ms=row[6])
+        return self._timer(row) if row is not None else None
 
     def upsert_approval(self, ap: Approval) -> Approval:
         self._require_uow()
@@ -496,6 +498,16 @@ class Storage:
              ap.orphan_reason, ap.created_ms, ap.resolved_ms))
         return ap
 
+    @staticmethod
+    def _approval(row):
+        return Approval(
+            id=row[0], task_id=row[1] or "", requester_sid=row[2],
+            backend=row[3], state=ApprovalState(row[4]), question=row[5],
+            metadata=json.loads(row[6]) if row[6] else None,
+            native_request_id=row[7], attempted_decision=row[8],
+            deadline_ms=row[9], orphan_reason=row[10], created_ms=row[11],
+            resolved_ms=row[12])
+
     def get_approval(self, aid):
         read = self._read_conn()
         try:
@@ -505,15 +517,7 @@ class Storage:
                 "created_ms,resolved_ms FROM approvals WHERE id=?", (aid,)).fetchone()
         finally:
             self._read_done(read)
-        if row is None:
-            return None
-        return Approval(
-            id=row[0], task_id=row[1] or "", requester_sid=row[2],
-            backend=row[3], state=ApprovalState(row[4]), question=row[5],
-            metadata=json.loads(row[6]) if row[6] else None,
-            native_request_id=row[7], attempted_decision=row[8],
-            deadline_ms=row[9], orphan_reason=row[10], created_ms=row[11],
-            resolved_ms=row[12])
+        return self._approval(row) if row is not None else None
 
     # ---- messages / receipts / cursors（断言2/5/6/10；outbox 服务归 T7）----
 
@@ -735,3 +739,117 @@ class Storage:
         self._require_uow()
         cur = self._conn.execute("DELETE FROM credentials WHERE sid=?", (sid,))
         return cur.rowcount > 0
+
+    # ---- cutover 面（Req: F140——切换/导出/备份 CLI；SQL 圈禁本模块不变）----
+
+    def backup_to(self, dest, *, scrub_credentials=False):
+        """SQLite backup API 一致性热备（Req: F140 断言3）。scrub＝备份件清
+        credentials（lineage 随 FK 级联）＋VACUUM 压实——凭据可重签不入备份
+        暗面（断言8）；journal 收敛 DELETE 模式后关闭，无 -wal/-shm 残留。"""
+        dest = os.fspath(dest)
+        conn = sqlite3.connect(dest, timeout=self._busy_timeout_ms / 1000,
+                               isolation_level=None)
+        try:
+            self._conn.backup(conn)  # 源写连接快照：在飞写者下仍一致
+            dropped = None
+            if scrub_credentials:
+                conn.execute("PRAGMA foreign_keys=ON")
+                dropped = conn.execute(
+                    "DELETE FROM credentials").rowcount
+                conn.execute("VACUUM")  # 压实清 freelist——牌值字节不驻文件暗面
+            mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            if mode != "delete":
+                raise StorageError(f"备份件 journal 收敛失败（{mode}）")
+            return {"credentials_dropped": dropped}
+        finally:
+            conn.close()
+            with contextlib.suppress(OSError):
+                os.chmod(dest, 0o600)
+
+    def checkpoint_truncate(self):
+        """wal_checkpoint(TRUNCATE)（Req: F140 断言5：切换前收卷，主库归零
+        -wal）。返回 (busy, log_pages, checkpointed_pages)。"""
+        row = self._conn.execute(
+            "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        return tuple(row)
+
+    @staticmethod
+    def verify_db(path):
+        """机读体检（Req: F140 断言3/5）：integrity_check＋foreign_key_check
+        ＋逐表计数，只读 URI 连接（体检零写入）。返回 dict。"""
+        path = os.fspath(path)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True,
+                               timeout=BUSY_TIMEOUT_MS / 1000)
+        try:
+            integrity = [r[0] for r in conn.execute("PRAGMA integrity_check")]
+            fk = len(conn.execute("PRAGMA foreign_key_check").fetchall())
+            counts = {t: conn.execute(
+                f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
+            return {"integrity": integrity, "fk_violations": fk,
+                    "counts": counts}
+        finally:
+            conn.close()
+
+    def events_all(self):
+        """全量事件按 seq（Req: F140 §8 派生导出面）。"""
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT seq,ts_ms,actor,event,task_id,detail_json FROM events "
+                "ORDER BY seq").fetchall()
+        finally:
+            self._read_done(read)
+        return [Event(seq=r[0], ts_ms=r[1], actor=r[2], event=r[3],
+                      task=r[4] or "", detail=json.loads(r[5]) if r[5] else None)
+                for r in rows]
+
+    def messages_all(self):
+        """全量消息按 id（Req: F140 §8 派生导出面）。"""
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                f"SELECT {self._MSG_COLS} FROM messages ORDER BY id").fetchall()
+        finally:
+            self._read_done(read)
+        return [self._message(r) for r in rows]
+
+    def timers_all(self):
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,fired_ms "
+                "FROM timers ORDER BY id").fetchall()
+        finally:
+            self._read_done(read)
+        return [self._timer(r) for r in rows]
+
+    def approvals_all(self):
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT id,task_id,session_id,backend,status,question,metadata_json,"
+                "native_request_id,attempted_decision,deadline_ms,orphan_reason,"
+                "created_ms,resolved_ms FROM approvals ORDER BY id").fetchall()
+        finally:
+            self._read_done(read)
+        return [self._approval(r) for r in rows]
+
+    def cursors_all(self):
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT sid,last_read_ms FROM mail_cursors ORDER BY sid").fetchall()
+        finally:
+            self._read_done(read)
+        return [MailCursor(*r) for r in rows]
+
+    def receipts_all(self):
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT message_id,status,attempts,last_error,email_status,"
+                "lease_until_ms,updated_ms FROM delivery_receipts "
+                "ORDER BY message_id").fetchall()
+        finally:
+            self._read_done(read)
+        return [DeliveryReceipt(*r) for r in rows]

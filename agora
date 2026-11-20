@@ -9,6 +9,9 @@ docker wait / kubectl wait 约定。status 子命令（F28 防误杀）单查任
 持 dispatcher 牌经 MCP 被归属细判拒的他池任务，走 root CLI 通道取消。
 reverify 子命令（ag-d68faf）薄代理 /reverify 把 done 驻留任务重排入
 验证门——verify-dead 停车恢复不再依赖整服务重启。
+F140 离线动词（export/backup/migrate/switch/rollback）：v3 切换/导出/备份
+（设计 §8/§9）——数据面＝本地 SQLite 权威（经 agorad.cutover 延迟导入），
+不连服务不触网络；退出码与 HTTP 谓词同契约（0 成功/1 可恢复/2 异常）。
 取数照抄 board_tui.py 形态：
 $AGORA_HOME/.agora/{root.token,service.json}，零直读状态文件、零格式逆向。
 非 MCP agora sleep（那是 agent 回合内本地睡眠，两者不互替）。
@@ -21,6 +24,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from agorad.cutover import (CutoverError, backup_home, export_home,
+                            migrate_cmd, rollback, switch)
 
 TERMINAL = frozenset(("merged", "closed", "blocked", "cancelled"))
 _INFLIGHT = ("todo", "dispatched", "running", "done", "verify_failed", "reopened")
@@ -316,12 +322,54 @@ def _resolve_timeout(flag):
         raise Fail(f"AGORA_WAIT_TIMEOUT 须为正数秒（收到 {raw!r}）") from None
 
 
+def _offline_home(a):
+    """离线动词 home 解析：--home > AGORA_HOME > 指针 > 缺省 plaza
+    （discover 同序，免牌面——离线动词不连服务）。"""
+    return (a.home or os.environ.get("AGORA_HOME") or _pointer_home()
+            or str(Path.home() / ".opencode-agora-plaza"))
+
+
+def _run_cutover(build):
+    """F140 离线动词公共壳：JSON 报告上 stdout；CutoverError＝结构化
+    stderr（code/message）＋1（可恢复）/2（终局）；未预期异常归 main exit 2。"""
+    try:
+        print(json.dumps(build(), ensure_ascii=False))
+        return 0
+    except CutoverError as e:
+        print(json.dumps({"error": {"code": e.code, "message": e.message}},
+                         ensure_ascii=False), file=sys.stderr)
+        return 1 if e.recoverable else 2
+
+
+def run_export(a):
+    return _run_cutover(lambda: export_home(_offline_home(a), out=a.out))
+
+
+def run_backup(a):
+    return _run_cutover(lambda: backup_home(_offline_home(a), a.out))
+
+
+def run_migrate(a):
+    return _run_cutover(
+        lambda: migrate_cmd(a.source, a.target, apply=a.apply,
+                            report_path=a.report))
+
+
+def run_switch(a):
+    return _run_cutover(lambda: switch(a.old, a.new))
+
+
+def run_rollback(a):
+    return _run_cutover(lambda: rollback(a.old, a.new))
+
+
 def _parser():
     ap = argparse.ArgumentParser(
         prog="agora",
         description="agora CLI——bash 可判定的条件谓词（F14→F104）：dispatch＝"
                     "派发＋等待一体、cancel＝中止任务、reverify＝done 驻留重排"
-                    "（双写面），watch/status 只读。")
+                    "（双写面），watch/status 只读；F140 离线动词（export/"
+                    "backup/migrate/switch/rollback）＝v3 切换/导出/备份。")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="command")
     d = sub.add_parser("dispatch",
                        help="派发任务并阻塞等终态（派发＋等待一体，F64）",
@@ -394,7 +442,75 @@ def _parser():
     rv.add_argument("task_id", metavar="task-id",
                     help="任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx）")
     rv.set_defaults(fn=run_reverify)
+    _cutover_parsers(sub)
     return ap
+
+
+def _cutover_parsers(sub):
+    """F140 切换/导出/备份离线动词（设计 §8/§9）：数据面＝本地 SQLite 权威
+    （经 agorad.cutover），不连服务不触网络——与 HTTP 谓词共用退出码契约。"""
+    epilog = ("退出码：0＝成功（stdout＝JSON 机读报告）\n"
+              "1＝可恢复失败（stderr＝结构化 error{code,message}：体检门拒/"
+              "迁移中止/库缺席等，处置后可重试）\n"
+              "2＝异常（用法错/不可回退互换失败/未预期异常）")
+    fmt = argparse.RawDescriptionHelpFormatter
+    x = sub.add_parser(
+        "export", help="从 SQLite 权威全量重建派生物（messages/events/ledger）",
+        description="§8 派生导出：state/messages/*.md（补零文件名＋v2 兼容"
+                    " frontmatter＋body 字节）＋events.jsonl（按 seq）＋"
+                    "state/ledger.json（记账快照 canonical JSON）——全部从"
+                    " SQLite 权威派生，删件重跑即修复，库外孤儿件清扫。",
+        epilog=epilog, formatter_class=fmt)
+    x.add_argument("--home", help="AGORA_HOME（缺省 $AGORA_HOME/指针/缺省 plaza）")
+    x.add_argument("--out", help="导出根目录（缺省＝home 本位重建）")
+    x.set_defaults(fn=run_export)
+    b = sub.add_parser(
+        "backup", help="SQLite backup API 一致性热备（凭据不入备份件）",
+        description="一致性热备（断言3）：backup API 快照→credentials 清扫"
+                    "（牌可重签，token 字节不驻备份暗面）→integrity/"
+                    "foreign_key 体检→0600 落盘；从备份恢复的库可读且"
+                    " 记账计数与源一致。",
+        epilog=epilog, formatter_class=fmt)
+    b.add_argument("--home", help="AGORA_HOME（缺省 $AGORA_HOME/指针/缺省 plaza）")
+    b.add_argument("--out", required=True, help="备份件路径（拒覆写已存在件）")
+    b.set_defaults(fn=run_backup)
+    m = sub.add_parser(
+        "migrate", help="v2 home→v3 home 一次性迁移（T11 迁移器集成）",
+        description="集成 T11 迁移器（断言4）：dry-run（缺省）＝探针临时目录"
+                    "全流程验证后产报告，source/target 零写入；--apply＝建"
+                    "目标 home（报告落 state/migration-report.json，重跑幂等）。"
+                    "源目录全程只读。",
+        epilog=epilog, formatter_class=fmt)
+    m.add_argument("--source", required=True, help="v2 旧 home 目录（只读）")
+    m.add_argument("--target", required=True, help="v3 新 home 目录")
+    m.add_argument("--apply", action="store_true",
+                   help="实迁（缺省 dry-run 只产报告）")
+    m.add_argument("--report", metavar="PATH",
+                   help="报告 JSON 落盘位（缺省仅 stdout）")
+    m.set_defaults(fn=run_migrate)
+    s = sub.add_parser(
+        "switch", help="切换：完整性门→WAL 收卷→同级目录两步互换",
+        description="切换流程（断言5，§9）：完整性门（integrity/FK/最小冒烟）"
+                    "不过即拒互换零动作；过门后 wal_checkpoint(TRUNCATE)＋"
+                    "关闭全部连接（无 -wal/-shm 残留）→同级两步 rename 互换"
+                    "——旧 home 驻 <old>.swapped（rollback 对端）。",
+        epilog=epilog, formatter_class=fmt)
+    s.add_argument("--old", required=True, metavar="PATH",
+                   help="现行 home 目录（切换后被挪至 <old>.swapped）")
+    s.add_argument("--new", required=True, metavar="PATH",
+                   help="迁移完成的 v3 home（须与 --old 同级）")
+    s.set_defaults(fn=run_switch)
+    r = sub.add_parser(
+        "rollback", help="互换回旧 home（v3 新写入随 v3 目录走，不回灌旧侧）",
+        description="回滚（断言6，§9）：switch 的逆互换——v3 home 归位原名、"
+                    "旧 home 回原名。切换后产生的 v3 新写入随 v3 目录离开，"
+                    "旧侧（v2 结构）零沾染；回滚后 v2 侧按原结构可启动。",
+        epilog=epilog, formatter_class=fmt)
+    r.add_argument("--old", required=True, metavar="PATH",
+                   help="切换后现行位（原 v2 home 名）")
+    r.add_argument("--new", required=True, metavar="PATH",
+                   help="v3 home 原名位（须为空，让位于回迁）")
+    r.set_defaults(fn=run_rollback)
 
 
 def main(argv=None):

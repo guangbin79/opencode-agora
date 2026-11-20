@@ -16,8 +16,11 @@ _STDLIB = sys.stdlib_module_names
 
 def _pkg_parts(py):
     """文件所在包的模块段：agorad/core/gate.py 与 …/core/__init__.py 均 ['agorad','core']。"""
-    rel = py.relative_to(ROOT / "agorad").with_suffix("").parts
-    return ["agorad", *rel[:-1]]
+    try:
+        rel = py.relative_to(ROOT / "agorad")
+    except ValueError:  # 包外顶层脚本（./agora 无扩展名入口——F140 显式入册，勿按扩展名漏盘）
+        return []
+    return ["agorad", *rel.with_suffix("").parts[:-1]]
 
 
 def _import_names(node, pkg):
@@ -104,8 +107,16 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/migrator.py",
                     may_import=["agorad.domain", "agorad.storage"])
 
-    def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）
-        for py in sorted((ROOT / "agorad").rglob("*.py")):
+    def test_v3_cutover_layer(self):  # Req: F140——切换/导出/备份服务面仅 stdlib＋domain＋storage＋migrator（不直接写 SQL、不 import access——backup/checkpoint/体检/全量扫描全走 storage；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/cutover.py",
+                    may_import=["agorad.domain", "agorad.storage",
+                                "agorad.migrator"])
+
+    def test_entry_script_layer(self):  # Req: F140——无扩展名入口 ./agora 显式入册（勿按扩展名漏盘）：仅 stdlib＋agorad.cutover（延迟导入，HTTP 谓词零 agorad 依赖）
+        assert_only("agora", may_import=["agorad.cutover"])
+
+    def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）；F140：./agora 无扩展名入口同面入册
+        for py in sorted((ROOT / "agorad").rglob("*.py")) + [ROOT / "agora"]:
             if py.name == "storage.py":
                 continue
             text = py.read_text(encoding="utf-8")
