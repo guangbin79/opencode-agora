@@ -21,6 +21,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import threading
 import time
 
 from agorad.domain import (Approval, ApprovalState, Artifact, BaseProbe,
@@ -149,8 +150,10 @@ class UnitOfWorkViolation(StorageError):
     """写事务内危险调用（网络/子进程/文件遍历）被守卫拦截。"""
 
 
-def _blocked(name):
+def _blocked(name, owner_ident, original):
     def _violation(*args, **kwargs):
+        if threading.get_ident() != owner_ident:
+            return original(*args, **kwargs)  # 非持锁线程放行原实现（T7 并发面）
         raise UnitOfWorkViolation(
             f"UoW 写事务内禁 {name}（设计 §4：无网络/子进程/文件遍历）")
     return _violation
@@ -172,6 +175,9 @@ _TASK_SCALARS = (  # 域标量列（DDL 顺序）；after/legacy_extra 走 JSON 
     "commit_sha", "rebased_from", "verify_pending", "verify_base_exempt",
     "review_cmd")
 _TASK_COLS = ", ".join([*_TASK_SCALARS, "after_json", "legacy_extra_json"])
+_TASK_UPSERT = ", ".join(
+    f"{n}=excluded.{n}" for n in
+    [*_TASK_SCALARS, "after_json", "legacy_extra_json"])
 
 
 def _connect(path, busy_timeout_ms):
@@ -190,6 +196,7 @@ class Storage:
     def __init__(self, db_path, *, busy_timeout_ms=BUSY_TIMEOUT_MS,
                  injector=None):
         self.path = os.fspath(db_path)
+        self._busy_timeout_ms = busy_timeout_ms
         self._injector = injector  # tests.v3_harness.FaultInjector（failpoint uow）
         self._saved = []
         self._depth = 0
@@ -240,10 +247,11 @@ class Storage:
             self._restore_guard()
 
     def _install_guard(self):
+        owner = threading.get_ident()  # 只拦持锁线程；并发读者/transport 线程不误伤
         for mod, names in _BLOCKED:
             for name in names:
                 self._saved.append((mod, name, getattr(mod, name)))
-                setattr(mod, name, _blocked(name))
+                setattr(mod, name, _blocked(name, owner, getattr(mod, name)))
 
     def _restore_guard(self):
         while self._saved:
@@ -259,7 +267,7 @@ class Storage:
 
     def open_reader(self):
         """读者独立连接：WAL 下未提交写不可见，commit 后立见（断言6）。"""
-        return _connect(self.path, BUSY_TIMEOUT_MS)
+        return _connect(self.path, self._busy_timeout_ms)
 
     def close(self):
         self._conn.close()
@@ -267,16 +275,20 @@ class Storage:
     # ---- tasks＋1:1 子表（断言4：frozen 实体全字段往返）----
 
     def upsert_task(self, t: Task):
-        """1:1 upsert＝删主行（级联三子行）＋重插；delivery None 不建行。"""
+        """主行 UPSERT 保级联子表（messages/events/timers/…皆 ON DELETE
+        CASCADE，删主行即全灭）；三张 1:1 子表删重插（其下无子行），
+        delivery None 撤行。"""
         self._require_uow()
         c = self._conn
-        c.execute("DELETE FROM tasks WHERE id=?", (t.id,))
         scalars = ["commit" if n == "commit_sha" else n for n in _TASK_SCALARS]
         c.execute(
             f"INSERT INTO tasks({_TASK_COLS}) "
-            f"VALUES({','.join(['?'] * (len(_TASK_SCALARS) + 2))})",
+            f"VALUES({','.join(['?'] * (len(_TASK_SCALARS) + 2))}) "
+            "ON CONFLICT(id) DO UPDATE SET " + _TASK_UPSERT,
             (*[getattr(t, n) for n in scalars],
              _json(list(t.after)), t.legacy_extra_json))
+        for sub in ("task_verify", "task_delivery", "task_gate"):
+            c.execute(f"DELETE FROM {sub} WHERE task_id=?", (t.id,))
         c.execute(
             "INSERT INTO task_verify(task_id,cmd,state,registered_by,"
             "registered_at_ms,timeout_s,timeout_source) VALUES(?,?,?,?,?,?,?)",
@@ -349,10 +361,14 @@ class Storage:
 
     def upsert_timer(self, tm: Timer) -> Timer:
         self._require_uow()
-        self._conn.execute("DELETE FROM timers WHERE id=?", (tm.id,))
+        # UPSERT 不删行：messages.timer_id 引用本行且默认 NO ACTION——
+        # fire 后补 fired／§6 按 timer_id 对账路径必需（评审环 R1 修2）
         self._conn.execute(
             "INSERT INTO timers(id,task_id,target_role,due_ms,status,"
-            "created_ms,fired_ms) VALUES(?,?,?,?,?,?,?)",
+            "created_ms,fired_ms) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET target_role=excluded.target_role,"
+            "due_ms=excluded.due_ms,status=excluded.status,"
+            "created_ms=excluded.created_ms,fired_ms=excluded.fired_ms",
             (tm.id, tm.task_id, tm.target_role, tm.due_ms, tm.state.value,
              tm.created_ms, tm.fired_ms))
         return tm  # 孤儿 task（无主行）→sqlite3.IntegrityError（FK 拒）
@@ -421,10 +437,18 @@ class Storage:
         except sqlite3.IntegrityError as exc:
             if "UNIQUE" not in str(exc) or dedup_key is timer_id is None:
                 raise
-            column = "dedup_key" if dedup_key is not None else "timer_id"
-            row = self._conn.execute(
-                f"SELECT {self._MSG_COLS} FROM messages WHERE {column}=?",
-                (dedup_key if dedup_key is not None else timer_id,)).fetchone()
+            row = None
+            for column, value in (("dedup_key", dedup_key),
+                                  ("timer_id", timer_id)):
+                if value is None:
+                    continue
+                row = self._conn.execute(
+                    f"SELECT {self._MSG_COLS} FROM messages WHERE {column}=?",
+                    (value,)).fetchone()
+                if row is not None:
+                    break
+            if row is None:  # 撞的不是消息唯一键（理论不可达）——抛原错不吞
+                raise
             return self._message(row)
 
     def get_message(self, mid):
