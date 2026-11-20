@@ -110,9 +110,13 @@ class TempAgoraHome:
 
     def __init__(self, root=None):
         self.path = Path(tempfile.mkdtemp(prefix="agora-v3-", dir=root))
-        for d in SKELETON_DIRS:
-            (self.path / d).mkdir(parents=True, exist_ok=True)
-            os.chmod(self.path / d, DIR_MODE)  # 显式收紧：mkdir mode 受 umask 影响
+        try:
+            for d in SKELETON_DIRS:
+                (self.path / d).mkdir(parents=True, exist_ok=True)
+                os.chmod(self.path / d, DIR_MODE)  # 显式收紧：mkdir mode 受 umask 影响
+        except BaseException:  # 半建骨架即焚：实例未成无人能 cleanup，防 tmp 泄漏
+            shutil.rmtree(self.path, ignore_errors=True)
+            raise
 
     @property
     def state(self):
@@ -198,7 +202,7 @@ def full_field_row(tid="gt-full", **over):
         "delivery": {"mode": "managed", "status": "pending", "commit": None,
                      "base": None, "target_branch": "main", "attempt": 0,
                      "local_status": "pending", "error": None},
-        "env_dir": "/envs/gt-full", "after": None,
+        "env_dir": f"/envs/{tid}", "after": None,
         "verify": {"cmd": "python3 -m pytest -q", "state": "registered",
                    "registered_by": "disp", "registered_at": 1780000000.0,
                    "timeout": 300, "timeout_source": "task"},
@@ -362,8 +366,11 @@ def run_diff(sides, ops):
 
 
 def diff_mismatches(records):
-    """逐侧逐 op 对齐比较：返回 [(op_index, 侧a, 侧b, key)] 失配清单。"""
+    """逐侧逐 op 对齐比较：返回 [(op_index, 侧a, 侧b, key)] 失配清单；
+    侧数 <2 即 ValueError——空/单侧无从对齐，禁冒充零失配。"""
     names = sorted(records)
+    if len(names) < 2:
+        raise ValueError(f"diff_mismatches 须至少两侧（收到 {len(names)}）")
     if len({len(records[n]) for n in names}) != 1:
         return [(-1, names[0], names[1], "length")]
     out = []
