@@ -74,6 +74,20 @@ class TestLayering(unittest.TestCase):
     def test_v3_domain_stdlib_only(self):  # Req: F131——domain 层仅 stdlib
         assert_only("agorad/domain.py")
 
+    def test_v3_storage_layer(self):  # Req: F133——storage 仅 stdlib＋domain
+        assert_only("agorad/storage.py", may_import=["agorad.domain"])
+
+    def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）
+        for py in sorted((ROOT / "agorad").rglob("*.py")):
+            if py.name == "storage.py":
+                continue
+            text = py.read_text(encoding="utf-8")
+            for marker in ("sqlite3", "CREATE TABLE", "INSERT INTO", "SELECT ",
+                           "PRAGMA ", "EXPLAIN QUERY PLAN"):
+                self.assertNotIn(
+                    marker, text,
+                    f"{py.name}: SQL/sqlite3 只许出现在 agorad/storage.py（设计 §1）")
+
 
 if __name__ == "__main__":
     unittest.main()
