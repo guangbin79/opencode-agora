@@ -119,6 +119,18 @@ class TestUowGuard(_HomeTest):  # 断言3
         self.assertIsInstance(socket.socket, type)  # 退出后恢复原入口
         self.assertTrue(callable(os.walk))
 
+    def test_other_thread_not_blocked_during_uow(self):  # 评审环 R1 修4 锚
+        results = []
+
+        def other_thread_runs_subprocess():
+            results.append(subprocess.run(["true"]).returncode)
+
+        with self.storage.uow():
+            thread = threading.Thread(target=other_thread_runs_subprocess)
+            thread.start()
+            thread.join(10)
+        self.assertEqual(results, [0])  # 持锁线程外放行原实现
+
     def test_writes_require_uow(self):
         with self.assertRaises(NoActiveUnitOfWork):
             self.storage.upsert_task(mk_task())
@@ -223,6 +235,34 @@ class TestRepositories(_HomeTest):  # 断言4
                             (self.storage.get_message, 999)):
             self.assertIsNone(getter(arg))
 
+    def test_upsert_task_keeps_cascade_children(self):  # 评审环 R1 修1 锚
+        with self.storage.uow():
+            composite_write(self.storage)
+        reader = self.storage.open_reader()
+        self.addCleanup(reader.close)
+
+        def counts():
+            return [reader.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in FOUR_TABLES]
+        updated = dataclasses.replace(mk_task(), state="done")
+        with self.storage.uow():
+            self.storage.upsert_task(updated)
+        self.assertEqual(self.storage.get_task("ag-st01"), updated)  # 状态已更新
+        self.assertEqual(counts(), [1, 1, 1, 1])  # 消息/回执/事件不被级联清空
+
+    def test_upsert_timer_after_its_message(self):  # 评审环 R1 修2 锚（§6 对账）
+        with self.storage.uow():
+            self.storage.upsert_task(mk_task())
+            self.storage.upsert_timer(domain.Timer(id="tm-f", task_id="ag-st01"))
+            self.storage.insert_message(
+                ts_ms=1, task_id="ag-st01", kind="timer", from_sid="sys",
+                to_sid="w", body="tick", timer_id="tm-f")
+            self.storage.upsert_timer(domain.Timer(  # 消息已引用后仍可补 fired
+                id="tm-f", task_id="ag-st01",
+                state=domain.TimerState.FIRED, fired_ms=99))
+        self.assertIs(self.storage.get_timer("tm-f").state,
+                      domain.TimerState.FIRED)
+
     def test_orphan_timer_rejected_by_fk(self):
         with self.storage.uow():
             with self.assertRaises(sqlite3.IntegrityError):
@@ -263,6 +303,18 @@ class TestUniqueness(_HomeTest):  # 断言5
                 ts_ms=2, task_id="ag-st01", kind="timer", from_sid="sys",
                 to_sid="w", body="b", timer_id="tm-9")
         self.assertEqual(again.id, first.id)
+
+    def test_both_keys_collision_on_timer_id(self):  # 评审环 R1 修3 锚
+        with self.storage.uow():
+            self.storage.upsert_task(mk_task())
+            self.storage.upsert_timer(domain.Timer(id="tm-b", task_id="ag-st01"))
+            first = self.storage.insert_message(
+                ts_ms=1, task_id="ag-st01", kind="timer", from_sid="sys",
+                to_sid="w", body="a", dedup_key="dk-a", timer_id="tm-b")
+            again = self.storage.insert_message(  # 撞的是 timer_id 非 dedup_key
+                ts_ms=2, task_id="ag-st01", kind="timer", from_sid="sys",
+                to_sid="w", body="b", dedup_key="dk-b", timer_id="tm-b")
+        self.assertEqual(again.id, first.id)  # 回读既有行而非 None
 
     def test_native_request_id_rejected(self):
         def approval(aid, native):
