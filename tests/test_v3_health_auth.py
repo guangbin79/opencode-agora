@@ -25,7 +25,7 @@ import stat
 import unittest
 
 from agorad import domain
-from agorad.authsvc import TASK_DOMAIN, AuthService
+from agorad.authsvc import TASK_DOMAIN, AuthService, _TASK_ROW_OPTIONAL
 from agorad.contracts import CATALOG, ContractError
 from agorad.domain import Credential, DeliveryState, GateState, VerifySpec
 from agorad.healthsvc import (CAP_MS, GAP0_MS, KIND_DISPATCHER_DEAD,
@@ -307,13 +307,17 @@ class TestAuthBasics(_Base):  # 断言1
         self.assertEqual(self.auth.identify(back), ("root", "root"))
 
     def test_sweep_bad_json_orphan_removed_without_crash(self):
-        # R1 B5/C10：合法非对象 JSON（list/str）不再炸整个清扫，按孤儿清
+        # R1 B5/C10＋R2：合法非对象 JSON 与非字符串牌值不再炸清扫，按孤儿清
         (self.home.credentials / "ag-junk.token").write_text(
             "[1, 2]", encoding="utf-8")
+        (self.home.credentials / "ag-unhashable.token").write_text(
+            '{"token": ["a"]}', encoding="utf-8")
         swept = AuthService(self.storage, home=str(self.home.path),
                             clock=self.clock, oc=self.oc).sweep()
-        self.assertEqual(swept, 1)
+        self.assertEqual(swept, 2)
         self.assertFalse((self.home.credentials / "ag-junk.token").exists())
+        self.assertFalse(
+            (self.home.credentials / "ag-unhashable.token").exists())
 
     def test_revoke_and_revoke_session(self):
         token, _ = self.auth.issue(WORKER, "worker", task_id=self.seed("ag-t"))
@@ -505,6 +509,10 @@ class TestRoleMatrix(_Base):  # 断言5
         self.assertFalse(self.auth.may("root", "bogus_tool"))
         self.assertTrue(self.auth.may("worker", "message_post"))
         self.assertTrue(self.auth.may("worker", "sleep"))
+        # R2：成员资格子集锚——CATALOG.ownership 漂移致闸面静默收窄/放宽即红
+        self.assertLessEqual({"task_update", "task_cancel", "task_deliver",
+                              "task_reverify", "task_wait"}, TASK_DOMAIN)
+        self.assertFalse(_TASK_ROW_OPTIONAL & TASK_DOMAIN)
 
 
 class TestStaleScan(_Base):  # 断言6
