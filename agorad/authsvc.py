@@ -240,10 +240,16 @@ class AuthService:
             except (OSError, ValueError, AttributeError):
                 on_disk = None
             if root_cred is None:
-                root_file.unlink(missing_ok=True)  # 孤儿 root 牌文件
-                n += 1
+                try:
+                    root_file.unlink(missing_ok=True)  # 孤儿 root 牌文件
+                    n += 1
+                except OSError:
+                    pass
             elif on_disk != root_cred.token:
-                self._write_secret(root_file, root_cred.token)  # DB 权威回写
+                try:  # 回写败留判下轮（R2：ELOOP/EACCES 不废整轮清扫）
+                    self._write_secret(root_file, root_cred.token)  # DB 权威回写
+                except OSError:
+                    pass
         if not credsdir.is_dir():
             return n
         tokens = {c.token for c in self._creds}
@@ -255,7 +261,9 @@ class AuthService:
             except ValueError:
                 data = None  # 撕裂/坏 JSON＝孤儿（清）
             token = data.get("token") if isinstance(data, dict) else None
-            if token in tokens:
+            if isinstance(token, str) and token in tokens:
+                # 非字符串牌值（撕裂/bit-rot）＝孤儿——不可哈希值防 TypeError
+                # 炸整轮清扫（R2）
                 t = self._store.get_task(p.stem)
                 if t is None or t.state not in _FROZEN:
                     continue  # 在册活任务/非任务键（dispatcher 牌）文件：留
