@@ -112,6 +112,10 @@ class TestLayering(unittest.TestCase):
                     may_import=["agorad.domain", "agorad.storage",
                                 "agorad.migrator"])
 
+    def test_v3_adapter_layer(self):  # Req: F141——v2 适配层仅 stdlib＋domain＋contracts（纯数据面翻译：请求/响应/错误/时间向，不 import storage/access；盘面/活性/探测经参数注入归 T13a 装配；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/adapter.py",
+                    may_import=["agorad.domain", "agorad.contracts"])
+
     def test_entry_script_layer(self):  # Req: F140——无扩展名入口 ./agora 显式入册（勿按扩展名漏盘）：仅 stdlib＋agorad.cutover（延迟导入，HTTP 谓词零 agorad 依赖）
         assert_only("agora", may_import=["agorad.cutover"])
 
