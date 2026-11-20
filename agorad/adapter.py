@@ -260,10 +260,14 @@ def board_full(tasks, events):
 
 def message_dict(m):
     """domain.Message→v2 消息 dict（F128 断言⑤：id int、frontmatter 余值
-    str、body 原文；ts＝v2 store 口径 str(浮点秒)；replay_of 在案才在键）。"""
+    str、body 原文；ts＝v2 store 口径 str(浮点秒)；replay_of 在案才在键）。
+    Req: F142——storage BLOB body 宽容解码（messaging._text 同口径；str
+    原文直过，多行逐字节语义不变）。"""
+    body = (bytes(m.body).decode("utf-8", "replace")
+            if isinstance(m.body, (bytes, bytearray, memoryview)) else m.body)
     row = {"id": m.id, "ts": str(_seconds(m.ts_ms)), "task": m.task_id,
            "kind": m.kind, "from": m.from_sid, "to": m.to_sid,
-           "body": m.body}
+           "body": body}
     if m.replay_of is not None:
         row["replay_of"] = str(m.replay_of)
     return row
