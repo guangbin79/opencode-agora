@@ -210,6 +210,23 @@ class Gitx:
         if dirty:
             raise DirtyWorktree(dirty)
 
+    def status_records(self, repo_dir: str) -> list[str]:  # Req: F137
+        """porcelain 脏面原始记录（-z 机读解析，ensure_clean 同款；rename/copy
+        的 orig 路径段非工作树条目跳过）——v3 交付执行体 F97 自动豁免判定的
+        取数面（只读；脏面判定与豁免裁归调用方）。"""
+        r = self._git(["status", "--porcelain", "-z",
+                       "--untracked-files=normal"], cwd=repo_dir)
+        out, skip = [], False
+        for rec in r.stdout.split("\0"):
+            if not rec:
+                continue
+            if skip:  # rename/copy 的 orig 路径段：非工作树条目
+                skip = False
+                continue
+            skip = rec[0] in "RC"
+            out.append(rec)
+        return out
+
     def clean_ignore(self, repo_dir: str, env_value: str = "") -> list[str]:
         """clean-ignore 声明解析（ag-f5aa4d）：仓根 .agora/clean-ignore（一行一条，
         # 注释/空行丢弃）∪ 部署 env AGORA_CLEAN_IGNORE（逗号分隔，调用点透传），

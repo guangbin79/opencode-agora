@@ -73,12 +73,14 @@ def _auto_ignore_patterns(records):  # Req: F97
 
 
 def _append_roster(path, patterns):  # Req: F97
-    """中央名册幂等追加：字节面比对防重、既有文本无尾换行先补防粘连；
-    缺文件＝新建，父目录缺＝建。"""
+    """中央名册幂等追加：字节面比对防重（仅按 \\n 切行——\\r 等归入行内容，
+    splitlines 会劈行击穿幂等判定）、既有文本无尾换行先补防粘连；缺文件＝
+    新建，父目录缺＝建。shortcut: 跨仓并发 append 的 RMW 竞窗＝v2 平移保真
+    （本轮 exclude 已独立落盘生效，丢行下轮幂等补回），收口归 T13 装配面。"""
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     data = p.read_bytes() if p.exists() else b""
-    have = set(data.splitlines())
+    have = set(data.split(b"\n"))
     missing = [e for e in patterns if e.encode("utf-8") not in have]
     if not missing:
         return
@@ -96,8 +98,7 @@ class DeliveryGitx(VerifyGitx):
     def local_branch_sha(self, repo_dir, branch) -> str: ...
     def build_integration_at(self, target_dir, integration_dir,
                              base_sha=None): ...
-    def rebase_onto(self, env_dir, integration, branch=None,
-                    conflicts=None) -> str: ...
+    def rebase_onto(self, env_dir, integration, conflicts=None) -> str: ...
     def advance_local_target(self, repo_dir, branch, sha,
                              expected_old) -> str: ...
     def delivery_lock(self, repo_dir): ...
@@ -199,6 +200,25 @@ class GateDeliveryService(GateVerifyService):
                 return "blocked"
         return None
 
+    def _landed_probe(self, tid, t):
+        """交付协议行收口拆分（评审环 R1 B2）：managed 崩溃残留经
+        _finish_delivered——投影 delivered/synced 一并落账（基类 _land 不写
+        投影，假 pending 残值会泄漏给迁移/确认面）；external 权威在外部
+        派发方——无本地 landed 补终态探针（v2 口径），照走管线 handoff。"""
+        d = t.delivery
+        if d is None:
+            return super()._landed_probe(tid, t)  # legacy 行：基类 _land 口径
+        if d.mode != "managed" or not t.commit or not t.target_branch:
+            return None
+        try:
+            landed = self._gitx.contains(t.project_dir, t.commit,
+                                         t.target_branch)
+        except RuntimeError:
+            return None  # 探针病照走验证路径（其内自有失败面）
+        if not landed:
+            return None  # 门重排链路续跑（恰一次）
+        return self._finish_delivered(tid, t.commit, None, d.attempt or 0)
+
     def _integration(self, tid, t, env, target, integration, runner):
         if t.delivery is not None:  # 交付协议行：集成组树/复验归交付循环
             return None  # （每 attempt 组树＋复验——推进前权威口径）
@@ -295,6 +315,7 @@ class GateDeliveryService(GateVerifyService):
             return self._delivery_fail(
                 tid, 1, "local_base",
                 "managed 未钉死 target_branch——交付协议不回退仓默认支")
+        e0 = t.rebased_from or t.commit  # done sha＝交付权威（轮前快照，v2 同源）
         for attempt in range(1, _DELIVERY_ATTEMPTS + 1):
             try:
                 base = self._gitx.local_branch_sha(target, branch)
@@ -304,7 +325,7 @@ class GateDeliveryService(GateVerifyService):
             try:
                 self._gitx.build_integration_at(target, integration,
                                                 base_sha=base)
-            except RuntimeError as e:  # 基对象缺失＝交付面终局
+            except (RuntimeError, ValueError) as e:  # 基对象缺失＝交付面终局
                 return self._delivery_fail(tid, attempt, "local_base", str(e))
             before = self._gitx.head(integration)
             r = None  # R＝重放后交付 sha（None＝ff 直通）
@@ -321,7 +342,7 @@ class GateDeliveryService(GateVerifyService):
                     try:
                         self._gitx.build_integration_at(target, integration,
                                                         base_sha=base)
-                    except RuntimeError as e:
+                    except (RuntimeError, ValueError) as e:
                         return self._delivery_fail(tid, attempt,
                                                    "local_base", str(e))
                     before = self._gitx.head(integration)
@@ -331,8 +352,6 @@ class GateDeliveryService(GateVerifyService):
                         return self._delivery_fail(
                             tid, attempt, "rebase_conflict",
                             conflict_files=conflicts)
-                fresh = self._store.get_task(tid)
-                e0 = fresh.rebased_from or fresh.commit  # done sha＝交付权威
                 r = self._gitx.head(integration)
                 if r == before and not self._gitx.is_ancestor(target, e0,
                                                               base):
@@ -376,44 +395,46 @@ class GateDeliveryService(GateVerifyService):
     def _publish(self, tid, target, branch, deliver, base, attempt):
         """发布面：仓级交付锁有界等待→锁内重读 tip（他写者推进＝non-ff 整链
         重试）→advance_local_target CAS ff-only 推进（expected-old 前置）→
-        F97 脏面自动豁免同轮重试一次→G2 幻影终检→_finish_delivered。"""
+        F97 脏面自动豁免同轮重试一次→G2 幻影终检→_finish_delivered。落账/
+        通知恒在锁外（评审环 R1：锁内 transport I/O 拉长临界区烧他仓 attempt）。"""
         self._fire("publish", "before", tid=tid, attempt=attempt)
         lock = self._gitx.delivery_lock(target)
         if not self._acquire_lock(lock):
             self._audit(tid, "delivery_lock_timeout", attempt=attempt)
             return "retry"  # 等锁让位＝一次失败尝试（F96/F98 口径）
-        st = None
+        st, fail = None, None  # fail＝锁内捕获、出锁后落账（终局不占临界区）
         try:
             try:
                 tip = self._gitx.local_branch_sha(target, branch)  # 锁内重读
-            except RuntimeError as e:
-                return self._delivery_fail(tid, attempt, "local_base", str(e))
-            if tip != base:  # 他写者已推进：释放后整链重试（重排重验）
-                self._audit(tid, "delivery_nonff", attempt=attempt,
-                            note=f"{base[:12]}→{tip[:12]}")
-                return "retry"
-            self._phase(tid, "publish", attempt=attempt)
-            try:
-                st = self._gitx.advance_local_target(target, branch, deliver,
-                                                     base)
-            except RuntimeError as e:  # 锁内环境病＝交付终局（F98 D2 口径）
-                return self._delivery_fail(tid, attempt, "local_base", str(e))
-            if st == "dirty":  # Req: F97 全根级未跟踪隐藏整目录→入册同轮重试
-                if self._auto_ignore_face(tid, target):
-                    try:
-                        st = self._gitx.advance_local_target(
-                            target, branch, deliver, base)
-                    except RuntimeError as e:
-                        return self._delivery_fail(tid, attempt, "local_base",
-                                                   str(e))
+            except (RuntimeError, ValueError) as e:
+                fail = (attempt, "local_base", str(e))
+            if fail is None:
+                if tip != base:  # 他写者已推进：释放后整链重试（重排重验）
+                    self._audit(tid, "delivery_nonff", attempt=attempt,
+                                note=f"{base[:12]}→{tip[:12]}")
+                    return "retry"
+                self._phase(tid, "publish", attempt=attempt)
+                try:
+                    st = self._gitx.advance_local_target(target, branch,
+                                                         deliver, base)
+                except (RuntimeError, ValueError) as e:  # 锁内环境病＝终局
+                    fail = (attempt, "local_base", str(e))  # （F98 D2 口径）
+                if fail is None and st == "dirty":  # Req: F97 全根级未跟踪
+                    if self._auto_ignore_face(tid, target):  # 隐藏整目录→入册
+                        try:  # 同轮重试一次
+                            st = self._gitx.advance_local_target(
+                                target, branch, deliver, base)
+                        except (RuntimeError, ValueError) as e:
+                            fail = (attempt, "local_base", str(e))
         finally:
             lock.release()
+        if fail is not None:
+            return self._delivery_fail(tid, *fail)
         if st == "synced":
             self._fire("publish", "after", tid=tid, attempt=attempt)
-            try:  # G2 幻影守卫：merged ⇒ 目标支真含落账 commit
-                landed = self._gitx.contains(target, deliver, branch)
-            except RuntimeError:
-                landed = False
+            # G2 幻影守卫：merged ⇒ 目标支真含落账 commit（探针病如实上抛走
+            # 门内异常面 reopened——非质量败，不冤 worker 计连败，评审环 R1）
+            landed = self._gitx.contains(target, deliver, branch)
             if not landed:
                 self._audit(tid, "phantom_merge_blocked")
                 self._quality_fail(tid, "reopened", _PHANTOM_BOUNCE,
@@ -448,10 +469,11 @@ class GateDeliveryService(GateVerifyService):
     def _auto_ignore_face(self, tid, target):  # Req: F97
         """advance dirty 自动豁免面：脏面全为「根级未跟踪隐藏整目录」→中央
         名册幂等追加＋exclude 写入（同轮重试一次）；混合脏面/名册面缺席＝
-        None 零部分豁免。"""
+        None 零部分豁免；取数病留痕（不静默废 F97）。"""
         try:
             records = self._gitx.status_records(target)
-        except Exception:
+        except (RuntimeError, ValueError) as e:
+            self._audit(tid, "auto_ignore_probe_failed", note=str(e)[:200])
             return None
         patterns = _auto_ignore_patterns(records)
         if not patterns or not self._roster_path:
@@ -463,12 +485,13 @@ class GateDeliveryService(GateVerifyService):
 
     def _acquire_lock(self, lock):
         """有界等锁（F96/F98 口径）：非阻塞探测＋短步长轮询，到点让位＝一次
-        失败尝试，绝不无限阻塞串行门；lock_wait_s 构造旋钮（测试秒级）。"""
-        start = self._now()
+        失败尝试，绝不无限阻塞串行门；预算走墙钟 monotonic（与域时钟注入
+        解耦——冻结 clock 不致死循环）；lock_wait_s 构造旋钮（测试秒级）。"""
+        deadline = time.monotonic() + self._lock_wait_ms / 1000
         while True:
             if lock.acquire(blocking=False):
                 return True
-            if self._now() - start >= self._lock_wait_ms:
+            if time.monotonic() >= deadline:
                 return False
             time.sleep(_LOCK_POLL)
 
@@ -656,8 +679,14 @@ class GateDeliveryService(GateVerifyService):
                                     now, "gate", "delivery_failed_recovery",
                                     t.id))
                     continue  # 终局：恢复面绝不重试
-                if d.mode != "managed" or d.status != "pending":
+                if d.mode != "managed":
                     continue  # external 驻留/已交付＝确认面权威，直通
+                if d.status == "delivered":
+                    continue  # 确认面同事务闭环（merged→closed）——零接触
+                if d.status != "pending":  # 未知态＝可上报恢复错误（v2 口径）
+                    self._audit(t.id, "delivery_recover_unknown_status",
+                                note=str(d.status)[:200])
+                    continue
                 if t.state != "done":
                     continue  # 在飞/续修态归各自车道（reinject/门）
                 if not t.commit or not t.target_branch:

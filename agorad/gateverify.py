@@ -396,14 +396,8 @@ class GateVerifyService:
             # T9b 交付执行体钩：门闩后、崩溃残留探针前（out_of_band 豁免面＋
             # 交付终局崩窗收敛）；基类无交付装配＝直通 None。
             outcome = self._pre_pipeline(tid, t, runner)
-            if outcome is None and t.commit and t.target_branch is not None:
-                try:
-                    landed = self._gitx.contains(target, t.commit,
-                                                 t.target_branch)
-                except RuntimeError:
-                    landed = False  # 探针病照走验证路径（其内自有失败面）
-                if landed:  # 崩溃残留：权威已含交付即补终态，不重验（恰一次）
-                    return self._land(tid)
+            if outcome is None:
+                outcome = self._landed_probe(tid, t)
             if outcome is None:
                 outcome = (self._base_probe(tid, t, target, integration, runner)
                            or self._env_verify(tid, env, t.verify.cmd, runner)
@@ -442,6 +436,20 @@ class GateVerifyService:
         """门体扩展点（T9b GateDeliveryService 覆写）：门闩后、崩溃残留探针
         前——out_of_band 豁免面与交付终局崩窗收敛。基类＝直通 None。"""
         return None
+
+    def _landed_probe(self, tid, t):  # T9b 交付执行体钩
+        """崩溃残留探针（基类口径＝legacy 无投影行）：done 落账 commit 已在
+        目标支＝上轮推进已完成，_land 补终态不重验（恰一次）；探针病照走
+        验证路径。T9b 覆写＝交付协议行收口拆分（managed 补投影／external 直通）。"""
+        if not (t.commit and t.target_branch is not None):
+            return None
+        try:
+            landed = self._gitx.contains(t.project_dir, t.commit,
+                                         t.target_branch)
+        except RuntimeError:
+            return None
+        return self._land(tid) if landed else None
+
 
     def _after_green(self, tid, t, runner):  # T9b 交付执行体钩
         """verify/review 全绿出口（T9b 覆写＝交付推进）。基类＝驻留 done
