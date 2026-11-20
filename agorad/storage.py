@@ -365,35 +365,41 @@ class Storage:
         return t
 
     def tasks_all(self):
-        """全任务投影（Req: F135——task 服务父任务/级联/幂等/深度只读查询面）。"""
+        """全任务投影（Req: F135——task 服务父任务/级联/幂等/深度只读查询面；
+        单读者连接单快照，免逐 id 建连）。"""
         read = self._read_conn()
         try:
             ids = [r[0] for r in read.execute("SELECT id FROM tasks").fetchall()]
+            return [t for i in ids if (t := self._get_task_on(read, i))
+                    is not None]
         finally:
             self._read_done(read)
-        return [t for i in ids if (t := self.get_task(i)) is not None]
 
     def get_task(self, tid):
         read = self._read_conn()
         try:
-            row = read.execute(
-                f"SELECT {_TASK_COLS} FROM tasks WHERE id=?", (tid,)).fetchone()
-            if row is None:
-                return None
-
-            def one(sql):
-                return read.execute(sql, (tid,)).fetchone()
-
-            verify = one("SELECT cmd,state,registered_by,registered_at_ms,"
-                         "timeout_s,timeout_source FROM task_verify WHERE task_id=?")
-            delivery = one("SELECT mode,status,commit_sha,base,target_branch,"
-                           "attempt,local_status,error FROM task_delivery "
-                           "WHERE task_id=?")
-            g = one("SELECT in_gate,gate_env,pending_cancel,"
-                    "pending_cancel_reason,gate_artifact_json,review_cache_json,"
-                    "review_fail_streak,probe_json FROM task_gate WHERE task_id=?")
+            return self._get_task_on(read, tid)
         finally:
-            self._read_done(read)  # 先关再解析：json 异常也不滞留连接（N2）
+            self._read_done(read)
+
+    def _get_task_on(self, read, tid):
+        """单连接读体（get_task/tasks_all 共用）。"""
+        row = read.execute(
+            f"SELECT {_TASK_COLS} FROM tasks WHERE id=?", (tid,)).fetchone()
+        if row is None:
+            return None
+
+        def one(sql):
+            return read.execute(sql, (tid,)).fetchone()
+
+        verify = one("SELECT cmd,state,registered_by,registered_at_ms,"
+                     "timeout_s,timeout_source FROM task_verify WHERE task_id=?")
+        delivery = one("SELECT mode,status,commit_sha,base,target_branch,"
+                       "attempt,local_status,error FROM task_delivery "
+                       "WHERE task_id=?")
+        g = one("SELECT in_gate,gate_env,pending_cancel,"
+                "pending_cancel_reason,gate_artifact_json,review_cache_json,"
+                "review_fail_streak,probe_json FROM task_gate WHERE task_id=?")
         g = g or (None,) * 8
         scalars = dict(zip(
             ("id", "state", "title", "goal", "req_id", "model", "quick",

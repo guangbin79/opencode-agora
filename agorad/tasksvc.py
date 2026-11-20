@@ -88,15 +88,17 @@ class TaskRepo(typing.Protocol):
 class Gitx(typing.Protocol):
     """gitx 注入面（access.gitx 同形；调用必在 UoW 外）。"""
 
-    def symref(self, project_dir): ...
-    def default_branch(self, project_dir): ...
-    def check_branch(self, project_dir, branch): ...
-    def local_branch_sha(self, project_dir, branch): ...
-    def build_env(self, project_dir, tid, branch, base_sha=None): ...
-    def head(self, env): ...
-    def env_on_disk(self, env) -> bool: ...
-    def remove_env(self, env): ...
-    def is_ancestor(self, project_dir, ancestor, descendant) -> bool: ...
+    def symref(self, repo_dir): ...
+    def default_branch(self, repo_dir): ...
+    def check_branch(self, repo_dir, branch): ...
+    def local_branch_sha(self, repo_dir, branch): ...
+    def build_env(self, project_dir, tid, branch=None): ...
+    def build_env_at(self, project_dir, tid, branch=None, base_sha=None): ...
+    def materialize_checkout(self, tree_dir, source_dir) -> str: ...
+    def head(self, repo_dir, branch=None): ...
+    def env_on_disk(self, env_dir) -> bool: ...
+    def remove_env(self, env_dir): ...
+    def is_ancestor(self, repo_dir, base, commit) -> bool: ...
 
 
 class SessionFactory(typing.Protocol):
@@ -111,6 +113,10 @@ class Notifier(typing.Protocol):
     def record(self, *, ts_ms, from_sid, to_sid, task_id, kind, body,
                dedup_key=None): ...
     def dispatch(self, mid, *, escalate_kind=None) -> bool: ...
+
+
+class _GuardConflict(ContractError):
+    """dispatch UoW 内卫兵拒（身份/复核）——回滚后补审计行再抛。"""
 
 
 class TaskService:
@@ -186,6 +192,9 @@ class TaskService:
             self._reject(tid, actor_sid, "invalid_argument",
                          f"deliverable 仅支持 out_of_band/external_branch"
                          f"（收到 {deliverable!r}）")
+        if review_cmd is not None and not str(review_cmd).strip():  # Req: F114
+            self._reject(tid, actor_sid, "invalid_argument",
+                         "review_cmd 为空——传非空命令或不传")
         client_key = ex["client_key"]
         if client_key is not None and (
                 not isinstance(client_key, str) or not client_key
@@ -347,23 +356,46 @@ class TaskService:
                 delivery, status="pending", error=None, attempt=0, commit=None,
                 base=None, local_status="pending")
         env, env_base, new_env = t.env_dir, t.env_base, False
+        report = ""
         if not self._gitx.env_on_disk(env):  # F71：记录 env 不在盘＝重派新建路
             new_env = True
+            mode = delivery.mode if delivery is not None else None
+            if mode == "external_branch" and t.target_branch is None:
+                self._reject(tid, actor_sid, "conflict",
+                             "local_base: external_branch 须钉死 target_branch"
+                             "（显式指定后重派）")
             base_sha = None
-            if delivery is not None and t.target_branch is not None:
-                # ag-b5f2e9/F101：定基一律本地钉死支 tip 权威，缺支拒派点名
-                # local_base，绝不回退仓默认支。
+            if t.target_branch is not None:
+                # ag-b5f2e9/F101：定基一律本地钉死支 tip 权威（managed/
+                # external_branch 同口径），缺支拒派点名 local_base，绝不
+                # 回退仓默认支。
                 try:
                     base_sha = self._gitx.local_branch_sha(t.project_dir,
                                                            t.target_branch)
                 except Exception as e:
                     self._reject(tid, actor_sid, "conflict", f"local_base: {e}")
-            try:
-                env = self._gitx.build_env(t.project_dir, tid, t.target_branch,
-                                           base_sha)
+            try:  # Protocol 对齐 access.gitx：有基线走 build_env_at（权威定基）
+                if base_sha is not None:
+                    env = self._gitx.build_env_at(t.project_dir, tid,
+                                                  t.target_branch, base_sha)
+                else:
+                    env = self._gitx.build_env(t.project_dir, tid,
+                                               t.target_branch)
             except Exception as e:
                 self._reject(tid, actor_sid, "conflict", f"env_build: {e}")
-            env_base = self._gitx.head(env)  # F111 评审链根锚
+            try:
+                env_base = self._gitx.head(env)  # F111 评审链根锚
+            except Exception as e:
+                if new_env:
+                    self._gitx.remove_env(env)
+                self._reject(tid, actor_sid, "conflict", f"env_head: {e}")
+            try:  # Req: ag-0d2daa 检出后即物化（worker 首轮构建不撞空依赖）
+                report = self._gitx.materialize_checkout(env, t.project_dir)
+            except Exception as e:  # 物化败＝拒派并回收新 env（不交残树）
+                if new_env:
+                    self._gitx.remove_env(env)
+                self._reject(tid, actor_sid, "conflict",
+                             f"checkout_materialize: {e}")
         boot = (f"[agora] {tid}: {t.title}\nenv: {env}\n"
                 f"page: wiki/tasks/{tid}.md\ngoal: {t.goal}")
         try:
@@ -374,16 +406,29 @@ class TaskService:
                 self._gitx.remove_env(env)
             self._reject(tid, actor_sid, "conflict", f"can_spawn: {e}")
         token = secrets.token_hex(16)
-        cred_path = self._write_credential(tid, token)  # 先落盘（败＝零账面残局）
         now = self._now()
         msg = None
         try:
+            cred_path = self._write_credential(tid, token)  # 先落盘（败＝零残局）
             with self._store.uow():
                 fresh = self._store.get_task(tid)  # 身份卫兵（read-decide-write）
                 if (fresh.state not in ("todo", "blocked")
                         or fresh.worker_sid != t.worker_sid):
-                    raise ContractError(
+                    raise _GuardConflict(
                         "conflict", f"{tid}: running 不可重派（session_replaced）")
+                if fresh.chain_depth >= self._max_depth:  # 守卫内复核（B7）
+                    raise _GuardConflict(
+                        "conflict", f"{tid}: chain_depth>={self._max_depth}")
+                pool = fresh.root_sid or fresh.dispatcher_sid
+                active = sum(1 for x in self._store.tasks_all()
+                             if x.id != tid and x.state in _ACTIVE
+                             and (x.root_sid or x.dispatcher_sid) == pool)
+                if active >= self._quota:
+                    raise _GuardConflict(
+                        "conflict",
+                        f"{tid}: quota[{pool}]: 活动任务 {active}>={self._quota}")
+                if t.worker_sid:  # 重派废旧牌（v2 _revoke_worker 语义：防双绑）
+                    self._store.delete_credential(t.worker_sid)
                 self._store.put_credential(Credential(
                     sid=wsid, token=token, task_id=tid, created_ms=now))
                 task = task_transition(fresh, "dispatched", now_ms=now)
@@ -393,14 +438,23 @@ class TaskService:
                 self._store.upsert_task(self._merge_seen(task))
                 self._store.append_event(self._ev(
                     now, actor_sid, EV_DISPATCHED, tid, {"worker": wsid}))
+                if report:  # 物化审计（ag-0d2daa）
+                    self._store.append_event(self._ev(
+                        now, actor_sid, "checkout_materialize", tid,
+                        {"note": report}))
                 if self._msg is not None:  # 凭据指针随迁移同事务落消息
                     msg, _ = self._msg.record(
                         ts_ms=now, from_sid=actor_sid, to_sid=wsid, task_id=tid,
                         kind="process",
                         body=f"[agora] credential {tid}\nfile: {cred_path}",
                         dedup_key=f"credential:{tid}:{wsid}")
-        except ContractError:
+        except _GuardConflict as exc:  # 卫兵拒：补审计行（原报因保持）
             self._remove_credential_file(tid)  # 牌已废（DB 行随回滚消失）
+            if new_env:
+                self._gitx.remove_env(env)
+            self._reject(tid, actor_sid, exc.code, exc.message)
+        except BaseException:  # 清理窗全覆盖（存储/注入器/落盘异常同回收）
+            self._remove_credential_file(tid)
             if new_env:
                 self._gitx.remove_env(env)
             raise
@@ -441,11 +495,13 @@ class TaskService:
             self._store.upsert_task(task)
             self._store.append_event(self._ev(now, actor_sid, EV_VERIFY, tid))
             if self._msg is not None and task.worker_sid:
+                # dedup 键掺登记后 updated_ms：transport 同次登记重试去重，
+                # 二次登记（改命令）照推
                 msg, _ = self._msg.record(
                     ts_ms=now, from_sid=actor_sid, to_sid=task.worker_sid,
                     task_id=tid, kind="process",
                     body=f"[agora] verify 已登记: {cmd}",
-                    dedup_key=f"verify_registered:{tid}:{now}")
+                    dedup_key=f"verify_registered:{tid}:{task.updated_ms}")
         if msg is not None:
             self._msg.dispatch(msg.id)
         return {"ok": True}
@@ -520,9 +576,16 @@ class TaskService:
                 return False  # 竞态：已被他方结算——幂等
             if fresh.state == "done":
                 if fresh.gate.in_gate:
-                    self._queue_cancel(tid, reason)  # 竞态：刚进门
+                    # 竞态：刚进门——身处本 UoW 内联排队（uow 不可嵌套），
+                    # 门尾消费语义（F-4）不变
+                    gate = dataclasses.replace(
+                        fresh.gate, pending_cancel=True,
+                        pending_cancel_reason=reason)
+                    self._store.upsert_task(self._merge_seen(dataclasses.replace(
+                        fresh, gate=gate, updated_ms=now)))
                     return False
-                task = dataclasses.replace(fresh, state="cancelled")
+                task = dataclasses.replace(fresh, state="cancelled",
+                                           updated_ms=now)
             else:
                 task = task_transition(fresh, "cancelled", now_ms=now)
             if reason is not None:
@@ -543,6 +606,7 @@ class TaskService:
                         dedup_key=f"transition:{tid}:cancelled")
         if msg is not None:
             self._msg.dispatch(msg.id)
+        self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
         self._reclaim_env(tid, task.env_dir, sid)
         return True
 
@@ -573,6 +637,7 @@ class TaskService:
         """单跳迁移＋审计事件＋终态 result 消息（同一 UoW，§5）；非法迁移
         拒且零写入。done→blocked 须显式 delivery_failure=True（F98）。"""
         now, msg = self._now(), None
+        self._get(tid)  # not_found 契约与其余入口一致（防 None 入 domain）
         try:
             with self._store.uow():
                 fresh = self._store.get_task(tid)
@@ -582,11 +647,13 @@ class TaskService:
                 self._store.append_event(self._ev(now, actor, to, tid))
                 if (to in _TERMINAL_NOTIFY and self._msg is not None
                         and task.dispatcher_sid):
+                    # dedup 键掺迁移后 updated_ms：同迁移重放（gate 重试/崩溃
+                    # 重排窗）同键去重不重推，跨轮迁移（blocked 循环）照推
                     msg, _ = self._msg.record(
                         ts_ms=now, from_sid=actor, to_sid=task.dispatcher_sid,
                         task_id=tid, kind="result",
                         body=body or f"任务 {tid} {to}",
-                        dedup_key=f"transition:{tid}:{to}")
+                        dedup_key=f"transition:{tid}:{to}:{task.updated_ms}")
         except InvalidTransition as e:
             self._reject(tid, actor, "conflict", str(e))
         if msg is not None:
@@ -597,6 +664,7 @@ class TaskService:
         """质量连败＋1；≥3 且非终态/非 blocked 自动 blocked（复用 domain，
         服务层落库＋终态消息）。"""
         now, msg = self._now(), None
+        self._get(tid)  # not_found 契约一致（防 None 入 domain）
         with self._store.uow():
             fresh = self._store.get_task(tid)
             task = self._merge_seen(bump_fail_streak(fresh, now_ms=now))
@@ -608,7 +676,7 @@ class TaskService:
                         ts_ms=now, from_sid=actor,
                         to_sid=task.dispatcher_sid, task_id=tid, kind="result",
                         body=f"任务 {tid} blocked（质量连败 {task.fail_streak}）",
-                        dedup_key=f"transition:{tid}:blocked:{now}")
+                        dedup_key=f"transition:{tid}:blocked:{task.updated_ms}")
         if msg is not None:
             self._msg.dispatch(msg.id)
         return {"fail_streak": task.fail_streak, "state": task.state}
@@ -811,8 +879,10 @@ class TaskService:
             task = self._merge_seen(task)
             self._store.upsert_task(task)
             self._store.append_event(self._ev(
-                now, sid, "merged", tid, {"commit": commit,
-                                          "note": "external_delivered"}))
+                now, sid, "merged", tid,
+                {"commit": commit, "note": "external_delivered"
+                 + (f"；reason={str(reason).strip()}" if str(reason).strip()
+                    else "")}))
             self._store.append_event(self._ev(now, sid, "closed", tid))
             if fresh.worker_sid:
                 self._store.delete_credential(fresh.worker_sid)
@@ -824,9 +894,11 @@ class TaskService:
                     msgs.append(self._msg.record(
                         ts_ms=now, from_sid=sid,
                         to_sid=task.dispatcher_sid, task_id=tid, kind="result",
-                        body=text, dedup_key=f"transition:{tid}:{state}")[0])
+                        body=text,
+                        dedup_key=f"transition:{tid}:{state}:{task.updated_ms}")[0])
         for m in msgs:
             self._msg.dispatch(m.id)
+        self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
         self._reclaim_env(tid, task.env_dir, sid)
         return {"ok": True, "outcome": "delivered"}
 
@@ -855,18 +927,26 @@ class TaskService:
 
     # ---- last_seen 活动心跳（§3 批量窗 ≤5s） ----
 
-    def touch_seen(self, tid, now_ms=None):
+    def touch_seen(self, tid, worker_sid=None, now_ms=None):
         """逐调用只进内存；距上次持久 ≥ 窗口才落一次库（摊销——不逐调用
-        独立写事务，gt-a18ef6 写放大口径）。"""
+        独立写事务，gt-a18ef6 写放大口径）。worker_sid 给定时做绑定校验
+        （非本任务在役 worker 拒刷——防伪造活性；None＝内部代刷，T10 health
+        观测面），返回是否受理。"""
+        with self._store.uow():
+            t = self._store.get_task(tid)
+        if t is None or (worker_sid is not None
+                         and t.worker_sid != worker_sid):
+            return False
         ms = now_ms if now_ms is not None else self._now()
         if ms > self._seen.get(tid, -1):
             self._seen[tid] = ms
         if ms - self._seen_flushed.get(tid, 0) >= self._seen_window_ms:
             with self._store.uow():
-                t = self._store.get_task(tid)
-                if t is not None:
-                    self._store.upsert_task(self._merge_seen(t))
+                fresh = self._store.get_task(tid)
+                if fresh is not None:
+                    self._store.upsert_task(self._merge_seen(fresh))
             self._seen_flushed[tid] = ms
+        return True
 
     def _merge_seen(self, task):
         cand = self._seen.get(task.id)
@@ -900,7 +980,7 @@ class TaskService:
         with self._store.uow():  # 审计留痕（调用点必在事务外）
             task = tid if self._store.get_task(tid) is not None else None
             # FK：行未入库（create 拒绝）不带 task_id，tid 入 detail 留痕
-            note = {"note": reason}
+            note = {"note": str(reason)[:200]}  # 回显截断（防事件膨胀/注入）
             if task is None:
                 note["task"] = tid
             self._store.append_event(self._ev(
@@ -910,7 +990,8 @@ class TaskService:
 
     @staticmethod
     def _repo_key(path):
-        return str(pathlib.Path(path).resolve())  # F90 别名归一
+        """F90 别名归一；None（缺省 absent）原样返回——幂等扫描/继承两用。"""
+        return None if path is None else str(pathlib.Path(path).resolve())
 
     def _new_tid(self):
         ids = {t.id for t in self._store.tasks_all()}
@@ -1013,21 +1094,36 @@ class TaskService:
                      "quick 验收按账本历史动态判定：证据不足" + evid)
 
     def _write_credential(self, tid, token):
+        """原子建 0600（os.open 带模式——无「先建后 chmod」世界可读窗；同
+        access.store.write_ephemeral 口径）；tid 形态断言（纵深：防迁移器
+        引入外部 id 后路径逃逸）。"""
+        self._check_tid(tid)
         p = pathlib.Path(self._home) / "credentials" / f"{tid}.token"
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"token": token}) + "\n", encoding="utf-8")
-            os.chmod(p, 0o600)  # store.write_ephemeral 同口径
+            data = (json.dumps({"token": token}) + "\n").encode("utf-8")
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
         except OSError as e:
             self._reject(tid, "agorad", "internal", f"credential_write: {e}")
         return str(p)
 
     def _remove_credential_file(self, tid):
+        self._check_tid(tid)
         try:
             (pathlib.Path(self._home) / "credentials"
              / f"{tid}.token").unlink()
         except OSError:
             pass
+
+    @staticmethod
+    def _check_tid(tid):
+        if not isinstance(tid, str) or not tid or "/" in tid or "\\" in tid:
+            raise ContractError("invalid_argument",
+                                f"tid 形态非法（收到 {tid!r}）", {"task": tid})
 
     def _reclaim_env(self, tid, env_dir, actor):
         if not env_dir:
