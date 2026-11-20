@@ -203,36 +203,10 @@ class Gitx:
         from importlib import import_module
         return import_module("agorad.access.gitlock").RepoDeliveryLock(repo_dir)
 
-    def ensure_clean(self, repo_dir: str, exempt=()) -> None:
-        """主检出写前硬闸：任何已跟踪或未跟踪变更都拒绝，防合并/回滚伤用户工作。
-
-        exempt＝clean-ignore 数据层豁免（ag-f5aa4d 产品裁定，有意打破旧「全净
-        口径不变」设计）：门防的是代码任务污染主检出，声明路径上的数据层心跳
-        不再拦门；条目按仓根锚定的目录前缀语义匹配（`data/` 豁免 data 本体与
-        整棵子树，非子串匹配）。缺省空＝逐条目全计，与旧口径行为等价。status
-        用 -z 机读解析：路径含空格/引号/非 ASCII 不撕裂；rename/copy 条目的
-        第二段（orig 路径）非工作树条目，不评脏面。"""
-        r = self._git(["status", "--porcelain", "-z", "--untracked-files=normal"],
-                      cwd=repo_dir)
-        bases = [b for b in (e.rstrip("/") for e in exempt) if b]
-        dirty, skip = [], False
-        for rec in r.stdout.split("\0"):
-            if not rec:
-                continue
-            if skip:  # rename/copy 的 orig 路径段：非工作树条目，不评脏面
-                skip = False
-                continue
-            skip = rec[0] in "RC"
-            path = rec[3:]
-            if not any(path == b or path.startswith(b + "/") for b in bases):
-                dirty.append(rec)
-        if dirty:
-            raise DirtyWorktree(dirty)
-
-    def status_records(self, repo_dir: str) -> list[str]:  # Req: F137
-        """porcelain 脏面原始记录（-z 机读解析，ensure_clean 同款；rename/copy
-        的 orig 路径段非工作树条目跳过）——v3 交付执行体 F97 自动豁免判定的
-        取数面（只读；脏面判定与豁免裁归调用方）。"""
+    def _porcelain_records(self, repo_dir: str) -> list[str]:
+        """-z 机读解析统一落点（ensure_clean/status_records 共用——评审环 R2
+        去重防漂移：F97 豁免面与门硬闸面必须判同一脏面）：rename/copy 的
+        orig 路径段非工作树条目跳过。"""
         r = self._git(["status", "--porcelain", "-z",
                        "--untracked-files=normal"], cwd=repo_dir)
         out, skip = [], False
@@ -245,6 +219,27 @@ class Gitx:
             skip = rec[0] in "RC"
             out.append(rec)
         return out
+
+    def ensure_clean(self, repo_dir: str, exempt=()) -> None:
+        """主检出写前硬闸：任何已跟踪或未跟踪变更都拒绝，防合并/回滚伤用户工作。
+
+        exempt＝clean-ignore 数据层豁免（ag-f5aa4d 产品裁定，有意打破旧「全净
+        口径不变」设计）：门防的是代码任务污染主检出，声明路径上的数据层心跳
+        不再拦门；条目按仓根锚定的目录前缀语义匹配（`data/` 豁免 data 本体与
+        整棵子树，非子串匹配）。缺省空＝逐条目全计，与旧口径行为等价。status
+        用 -z 机读解析：路径含空格/引号/非 ASCII 不撕裂；rename/copy 条目的
+        第二段（orig 路径）非工作树条目，不评脏面。"""
+        bases = [b for b in (e.rstrip("/") for e in exempt) if b]
+        dirty = [rec for rec in self._porcelain_records(repo_dir)
+                 if not any(rec[3:] == b or rec[3:].startswith(b + "/")
+                            for b in bases)]
+        if dirty:
+            raise DirtyWorktree(dirty)
+
+    def status_records(self, repo_dir: str) -> list[str]:  # Req: F137
+        """porcelain 脏面原始记录——v3 交付执行体 F97 自动豁免判定的取数面
+        （只读；脏面判定与豁免裁归调用方；解析与 ensure_clean 同一单源）。"""
+        return self._porcelain_records(repo_dir)
 
     def clean_ignore(self, repo_dir: str, env_value: str = "") -> list[str]:
         """clean-ignore 声明解析（ag-f5aa4d）：仓根 .agora/clean-ignore（一行一条，

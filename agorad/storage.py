@@ -231,16 +231,28 @@ class Storage:
             if version < SCHEMA_VERSION:  # 仅初始化/补齐才拿写锁（重开不写）
                 conn.executescript(DDL)
                 # v3→v4（Req: F137）：CREATE IF NOT EXISTS 不改既有表——旧 v3
-                # 库补列（评审环 R1 B1：无此迁移则旧库首读写即 no such column）
-                cols = {r[1] for r in conn.execute(
-                    "PRAGMA table_info(task_delivery)")}
-                if "conflict_files_json" not in cols:
-                    conn.execute("ALTER TABLE task_delivery "
-                                 "ADD COLUMN conflict_files_json TEXT")
-                conn.execute(
-                    "INSERT OR IGNORE INTO schema_migrations VALUES(?,?,?)",
-                    (SCHEMA_VERSION, "v4-conflict-files", epoch_ms(time.time())))
-                conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                # 库补列（评审环 R1 B1：无此迁移则旧库首读写即 no such
+                # column）。显式 IMMEDIATE 事务串行化并发迁移者（评审环 R2：
+                # 自动提交下 check-then-ALTER 竞窗——后来者 duplicate column
+                # 外抛开库失败；醒后重读已见列即跳过）
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    cols = {r[1] for r in conn.execute(
+                        "PRAGMA table_info(task_delivery)")}
+                    if "conflict_files_json" not in cols:
+                        conn.execute("ALTER TABLE task_delivery "
+                                     "ADD COLUMN conflict_files_json TEXT")
+                    conn.execute(
+                        "INSERT OR IGNORE INTO schema_migrations "
+                        "VALUES(?,?,?)",
+                        (SCHEMA_VERSION, "v4-conflict-files",
+                         epoch_ms(time.time())))
+                    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                    conn.execute("COMMIT")
+                except BaseException:
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.execute("ROLLBACK")
+                    raise
         except BaseException:
             conn.close()
             raise
