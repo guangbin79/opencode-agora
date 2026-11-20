@@ -84,6 +84,10 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/tasksvc.py",
                     may_import=["agorad.domain", "agorad.contracts"])
 
+    def test_v3_gateverify_layer(self):  # Req: F136——verify/review 门执行体仅 stdlib＋domain＋contracts（仓库/gitx/runner/锚/产物/Notifier/streak 全 Protocol 注入，不 import access/storage；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/gateverify.py",
+                    may_import=["agorad.domain", "agorad.contracts"])
+
     def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）
         for py in sorted((ROOT / "agorad").rglob("*.py")):
             if py.name == "storage.py":
