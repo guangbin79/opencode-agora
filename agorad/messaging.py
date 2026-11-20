@@ -97,17 +97,9 @@ class MessagingService:
         self._sweep()  # 过龄 digest 先冲，保投递时序
         ts = self._clock()
         with self._store.uow():
-            msg = self._store.insert_message(
-                ts_ms=ts, task_id=task_id, kind=kind, from_sid=from_sid,
-                to_sid=to_sid, body=body, dedup_key=dedup_key,
-                timer_id=timer_id)
-            fresh = self._store.get_receipt(msg.id) is None
-            if fresh:  # 撞键回读行必有 receipt 在案→缺席即新消息
-                self._store.upsert_receipt(DeliveryReceipt(message_id=msg.id))
-                self._store.append_event(Event(
-                    seq=0, ts_ms=ts, actor=from_sid, event="message_posted",
-                    task=task_id,
-                    detail={"kind": kind, "message_id": msg.id, "to": to_sid}))
+            msg, fresh = self.record(
+                ts_ms=ts, from_sid=from_sid, to_sid=to_sid, task_id=task_id,
+                kind=kind, body=body, dedup_key=dedup_key, timer_id=timer_id)
         if not fresh:
             return msg  # 幂等重试：原 id 返回，不重投（断言5）
         path = self._export_path(msg)  # §8：提交后先导出再注入
@@ -125,6 +117,24 @@ class MessagingService:
         return msg
 
     # ---- Outbox 投递（§5 receipt 生命周期）----
+
+    def record(self, *, ts_ms, from_sid, to_sid, task_id, kind, body,
+               dedup_key=None, timer_id=None):
+        """Req: F135 复合写入口：身处调用方 UoW 内落 message＋receipt＋event
+        （§5 同事务铁则的服务复合方版本——task 服务终态/取消迁移同事务产
+        event＋message）。返回 (Message, fresh)；fresh=False＝dedup 撞键回读
+        原行。投递与 digest 归调用方（提交后 dispatch(mid) at-least-once）。"""
+        msg = self._store.insert_message(
+            ts_ms=ts_ms, task_id=task_id, kind=kind, from_sid=from_sid,
+            to_sid=to_sid, body=body, dedup_key=dedup_key, timer_id=timer_id)
+        fresh = self._store.get_receipt(msg.id) is None
+        if fresh:  # 撞键回读行必有 receipt 在案→缺席即新消息
+            self._store.upsert_receipt(DeliveryReceipt(message_id=msg.id))
+            self._store.append_event(Event(
+                seq=0, ts_ms=ts_ms, actor=from_sid, event="message_posted",
+                task=task_id,
+                detail={"kind": kind, "message_id": msg.id, "to": to_sid}))
+        return msg, fresh
 
     def dispatch(self, mid, *, escalate_kind=None) -> bool:
         """单发投递／崩溃恢复后的重投入口（at-least-once）。消息缺席、
