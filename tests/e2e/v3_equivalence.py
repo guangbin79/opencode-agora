@@ -870,7 +870,7 @@ class Diff:
 
     def op(self, label, path, body, tok=None, sid_header=None):
         """双侧同调用：记录 status/归一化 json/时延＋可见面对比（断言2）。"""
-        rec = {"label": label, "raw": {}, "norm": {}, "ms": {}}
+        rec = {"label": label, "raw": {}, "norm": {}, "ms": {}, "tok": tok}
         for kind, side in self.sides.items():
             resolved = {k: self._resolve(side, v) for k, v in body.items()}
             st, payload, ms = side.http(path, resolved,
@@ -887,6 +887,16 @@ class Diff:
         a, b = rec["norm"]["v2"], rec["norm"]["v3"]
         diffs = []
         if a["status"] != b["status"]:
+            # §11 扩册（dispatcher 2026-11-21 裁定①）：worker 牌终态生命周期
+            # ——终态撤牌侧 401「无牌或牌无效」vs v2 滞留簿记 200，整族 intended
+            # （牌随任务生死 §4/F43；v2 松面＝被废除遗留）。仅 worker 牌调用面。
+            pair = {a["status"], b["status"]}
+            err401 = "无牌或牌无效" in json.dumps(
+                (b if b["status"] == 401 else a)["json"], ensure_ascii=False)
+            if pair == {200, 401} and err401 and rec.get("tok") not in \
+                    (None, "root"):
+                return [("牌终态生命周期(§11扩册)", "$.status+body",
+                         a["status"], b["status"])]
             diffs.append(("unintended", "$.status", a["status"], b["status"]))
         ja, jb = a["json"], b["json"]
         # check_mail 面：messages 列表走消息族分类（id 漂移→A；通知→B）
