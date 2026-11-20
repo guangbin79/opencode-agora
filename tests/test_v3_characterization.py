@@ -304,6 +304,8 @@ class TestCheckMailAndRefs(unittest.TestCase):
         order = [ln.split("=", 1)[0] for ln in
                  _reference_lines("t1", 12, art, "/h").splitlines()]
         self.assertEqual(order, g["ref_line_order"])  # golden 键双侧锁定
+        self.assertTrue(_reference_lines("t1", 12, art, "/h").endswith(
+            "artifact=gate/t1/output.log"))  # home 下相对化（值锁定）
         self.assertEqual(  # 无产物＝home/msg/page 三行，顺序固定
             _reference_lines("t1", 12, {}, "/h"),
             "home=/h\nmsg=state/messages/00000012.md\npage=wiki/tasks/t1.md")
