@@ -364,6 +364,15 @@ class Storage:
              _json(dataclasses.asdict(t.probe)) if t.probe else None))
         return t
 
+    def tasks_all(self):
+        """全任务投影（Req: F135——task 服务父任务/级联/幂等/深度只读查询面）。"""
+        read = self._read_conn()
+        try:
+            ids = [r[0] for r in read.execute("SELECT id FROM tasks").fetchall()]
+        finally:
+            self._read_done(read)
+        return [t for i in ids if (t := self.get_task(i)) is not None]
+
     def get_task(self, tid):
         read = self._read_conn()
         try:
@@ -394,6 +403,8 @@ class Storage:
              "project_dir", "target_branch", "env_dir", "env_base", "commit",
              "rebased_from", "verify_pending", "verify_base_exempt",
              "review_cmd"), row[:28]))
+        for k in ("quick", "verify_pending", "verify_base_exempt"):
+            scalars[k] = bool(scalars[k])  # INTEGER→bool（域类型保真；同 in_gate 口径）
         return Task(
             **scalars,
             after=tuple(json.loads(row[28])),
@@ -668,3 +679,10 @@ class Storage:
             self._read_done(read)
         return Credential(sid=row[0], token=row[1], task_id=row[2] or "",
                                  lineage=lineage, created_ms=row[3])
+
+
+    def delete_credential(self, sid) -> bool:
+        """撤销＝删 credentials 行（Req: F135 cancel 侧；lineage 级联随 FK）。"""
+        self._require_uow()
+        cur = self._conn.execute("DELETE FROM credentials WHERE sid=?", (sid,))
+        return cur.rowcount > 0
