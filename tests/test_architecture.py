@@ -100,6 +100,10 @@ class TestLayering(unittest.TestCase):
     def test_v3_healthsvc_layer(self):  # Req: F138——health 服务仅 stdlib＋domain（仓库/oc/gitx/Notifier/recover 钩全 Protocol 注入，不 import access/storage；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
         assert_only("agorad/healthsvc.py", may_import=["agorad.domain"])
 
+    def test_v3_migrator_layer(self):  # Req: F139——迁移器仅 stdlib＋domain＋storage（SQL 仅经 storage、源只读；不 import access——v2 磁盘形状解析自含；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/migrator.py",
+                    may_import=["agorad.domain", "agorad.storage"])
+
     def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）
         for py in sorted((ROOT / "agorad").rglob("*.py")):
             if py.name == "storage.py":
