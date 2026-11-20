@@ -171,18 +171,26 @@ class TestExportIdempotentRepair(_Scratch):  # 断言2
         mdir = home / "state" / "messages"
         before = {p.name: p.read_bytes() for p in mdir.glob("*.md")}
         ev_before = (home / EVENTS_NAME).read_bytes()
-        (mdir / "00000009.md").write_bytes(b"id: 9\norphan\n\nx")  # 库外孤儿
-        (mdir / "00000001.md").unlink()
+        (mdir / "00000002.md").unlink()
         (home / EVENTS_NAME).write_text('{"ts": 4.0, "actor": "t')  # 断尾行
+        import sqlite3
+        conn = sqlite3.connect(home / "state" / "agora.db")  # 行删除留孤儿件
+        conn.execute("DELETE FROM messages WHERE id=1")
+        conn.commit()
+        conn.close()
+        (mdir / "00000009.md").write_bytes(b"id: 9\nnewer\n\nx")  # 快照外新件
         report = export_home(home)
-        self.assertEqual({p.name: p.read_bytes() for p in mdir.glob("*.md")},
-                         before)  # 删件/撕裂/孤儿全部按库面重建
+        after = {p.name: p.read_bytes() for p in mdir.glob("*.md")}
+        self.assertEqual(sorted(after),
+                         ["00000002.md", "00000003.md", "00000009.md"])
+        self.assertEqual(after["00000009.md"], b"id: 9\nnewer\n\nx")  # 保留
+        self.assertEqual(after["00000002.md"], before["00000002.md"])  # 重建
         self.assertEqual((home / EVENTS_NAME).read_bytes(), ev_before)
-        self.assertEqual((report["messages"], report["events"]), (3, 2))
+        self.assertEqual((report["messages"], report["events"]), (2, 2))
         st = Storage(home / "state" / "agora.db")  # 计数与库一致
         try:
-            self.assertEqual([m.id for m in st.messages_all()], [1, 2, 3])
-            self.assertEqual(st.messages_all()[0].body, b"hello\n")
+            self.assertEqual([m.id for m in st.messages_all()], [2, 3])
+            self.assertEqual(st.messages_all()[0].body, b"\xff\xfe raw \x00 bytes")
             self.assertEqual([e.seq for e in st.events_all()], [1, 2])
         finally:
             st.close()
@@ -239,7 +247,7 @@ class TestBackup(_Scratch):  # 断言3
         self.assertFalse(dest.with_name(dest.name + "-wal").exists())
         self.assertFalse(dest.with_name(dest.name + "-shm").exists())
         self.assertEqual(stat.S_IMODE(os.stat(dest).st_mode), 0o600)
-        rb = Storage(dest)  # 恢复：备份件即库——可读且计数一致
+        rb = Storage(dest)  # 恢复：备份件即库——可读且逐表计数一致
         try:
             self.assertEqual(len(rb.tasks_all()), 2)
             self.assertEqual([m.body for m in rb.messages_all()],
@@ -249,6 +257,9 @@ class TestBackup(_Scratch):  # 断言3
             self.assertIsNone(rb.get_credential("root"))  # 牌已清扫（可重签）
         finally:
             rb.close()
+        for table, n in report["source_counts"].items():  # 逐表对账
+            want = 0 if table.startswith("credential") else n
+            self.assertEqual(report["backup_counts"][table], want, table)
         with self.assertRaises(CutoverError) as cm:  # 拒覆写
             backup_home(home, dest)
         self.assertEqual(cm.exception.code, "backup_exists")
@@ -360,6 +371,45 @@ class TestSwitch(_Scratch):  # 断言5
             self.assertFalse((old / "state" / residue).exists(),
                              residue)  # 收卷后无活跃残留
 
+    def test_wal_residue_and_rename_fallback(self):
+        old, new = self._pair()
+        live = Storage(new / "state" / "agora.db")  # 外部活连接持有 -wal/-shm
+        try:
+            with self.assertRaises(CutoverError) as cm:
+                switch(old, new)
+            self.assertEqual(cm.exception.code, "wal_residue")
+        finally:
+            live.close()
+        import unittest.mock
+        real_rename = os.rename
+
+        def make_flaky(bad):
+            calls = {"n": 0}
+
+            def flaky(a, b):
+                calls["n"] += 1
+                if calls["n"] in bad:
+                    raise OSError(5, "popularity")
+                return real_rename(a, b)
+            return flaky
+
+        with unittest.mock.patch("agorad.cutover.os.rename", make_flaky({2})):
+            with self.assertRaises(CutoverError) as cm:  # 第二步败＝回退归位
+                switch(old, new)
+        self.assertEqual(cm.exception.code, "swap_failed")
+        self.assertFalse(cm.exception.recoverable)
+        self.assertTrue((old / "keep.txt").is_file())  # 第一步已回退
+        self.assertTrue((new / MARKER).is_file())
+        swapped = old.with_name(old.name + SWAPPED_SUFFIX)
+        with unittest.mock.patch("agorad.cutover.os.rename", make_flaky({2, 3})):
+            with self.assertRaises(CutoverError) as cm:  # 回退也败＝手工指令
+                switch(old, new)
+        self.assertEqual(cm.exception.code, "swap_broken")
+        self.assertIn("mv", cm.exception.message)
+        self.assertTrue(swapped.is_dir())  # 现场保持：old 缺席、swapped 在
+        self.assertFalse(old.exists())
+        real_rename(swapped, old)  # 手工归位（错误文案给的路）
+
 
 class TestRollback(_Scratch):  # 断言6
     def test_rollback_v2_restartable_and_v3_writes_isolated(self):
@@ -396,6 +446,7 @@ class TestRollback(_Scratch):  # 断言6
         self.assertEqual(harness.digest_tree(old), v2_digest)  # v3 写入零回灌
         store = harness.Store(old)  # v2 侧可启动（桩级装载）
         self.assertEqual(len(store.read_messages()), 2)
+        self.assertIsNotNone(store.load_state())
         st = Storage(new / "state" / "agora.db")  # v3 新写入随 v3 目录走
         try:
             self.assertTrue(any(m.body == b"post-switch"
@@ -429,12 +480,39 @@ class TestCliContract(_Scratch):  # 断言7
         self.assertTrue(err["error"]["message"])
         usage = agora("migrate", "--target", "x")  # 用法错
         self.assertEqual(usage.returncode, 2)
+        r = agora("migrate", "--source", "nowhere-at-all",
+                  "--target", str(self.work / "t"),
+                  "--report", str(self.work / "r.json"))
+        self.assertEqual(r.returncode, 1)  # --report str 面（argparse 原生串）
+
+    def test_installed_copy_contract(self):
+        """安装件形态（install.sh 拷 agora 至独立目录、agorad 载荷在
+        <home>/.agora）：在线动词纯 stdlib 可跑；离线动词经载荷位可达。"""
+        import shutil
+        bin_dir = self.work / "bin"
+        bin_dir.mkdir()
+        shutil.copy2(ROOT / "agora", bin_dir / "agora")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("AGORA_HOME", "PYTHONPATH")}
+        help_run = subprocess.run(
+            [sys.executable, str(bin_dir / "agora"), "--help"],
+            capture_output=True, text=True, env=env, cwd="/")
+        self.assertEqual(help_run.returncode, 0, help_run.stderr)  # 零 agorad 依赖
+        home = seed(self.work / "v3")
+        shutil.copytree(ROOT / "agorad", home / ".agora" / "agorad")
+        exp = subprocess.run(
+            [sys.executable, str(bin_dir / "agora"), "export",
+             "--home", str(home)],
+            capture_output=True, text=True, env=env, cwd="/")
+        self.assertEqual(exp.returncode, 0, exp.stderr)  # 载荷位引导可达
+        self.assertEqual(json.loads(exp.stdout)["messages"], 3)
 
 
 class TestSecurity(_Scratch):  # 断言8
     def test_no_token_plaintext_across_artifacts(self):
         src = v2_fixture(self.work)
         target = self.work / "v3home"
+        migrate_cmd(src.path, target, report_path=self.work / "dry.json")
         migrate_cmd(src.path, target, apply=True)
         backup = self.work / "bak.db"
         export_home(target)
@@ -444,7 +522,8 @@ class TestSecurity(_Scratch):  # 断言8
                  (target / LEDGER_PATH).read_bytes(),
                  (target / EVENTS_NAME).read_bytes(),
                  (target / "state" / "migration-report.json").read_bytes(),
-                 (self.work / "mirror" / LEDGER_PATH).read_bytes()]
+                 (self.work / "mirror" / LEDGER_PATH).read_bytes(),
+                 (self.work / "dry.json").read_bytes()]
         faces += [p.read_bytes() for p in
                   (target / "state" / "messages").glob("*.md")]
         for face in faces:

@@ -18,6 +18,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import pathlib
 import socket
 import sqlite3
 import subprocess
@@ -749,7 +750,8 @@ class Storage:
         dest = os.fspath(dest)
         conn = sqlite3.connect(dest, timeout=self._busy_timeout_ms / 1000,
                                isolation_level=None)
-        try:
+        try:  # 建时即收紧（v2 store.write_ephemeral 同家规）：页拷贝起即含
+            os.chmod(dest, 0o600)  # credentials 明文，不得开 0644 窗口
             self._conn.backup(conn)  # 源写连接快照：在飞写者下仍一致
             dropped = None
             if scrub_credentials:
@@ -776,9 +778,11 @@ class Storage:
     @staticmethod
     def verify_db(path):
         """机读体检（Req: F140 断言3/5）：integrity_check＋foreign_key_check
-        ＋逐表计数，只读 URI 连接（体检零写入）。返回 dict。"""
-        path = os.fspath(path)
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True,
+        ＋逐表计数，只读 URI 连接（体检零写入）。返回 dict。路径经
+        pathlib.as_uri 转义——含 ?/# 的路径不得截断 URI 开错件。"""
+        uri = pathlib.Path(os.path.abspath(os.fspath(path))).as_uri() \
+            + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True,
                                timeout=BUSY_TIMEOUT_MS / 1000)
         try:
             integrity = [r[0] for r in conn.execute("PRAGMA integrity_check")]

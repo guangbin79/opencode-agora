@@ -16,6 +16,7 @@ freelist 暗面）；迁移报告 token_hashes 摘要面系 T11 既有口径。
 驻 <old>.swapped 全程不被 v3 写入触碰（边界：目录级隔离，文档与测试双面
 申报）。完整性门（integrity/FK/最小冒烟）不过即拒互换，零动作。
 """
+import contextlib
 import dataclasses
 import json
 import os
@@ -51,16 +52,24 @@ def _require_dir(path, what):
 
 
 def _atomic_write_bytes(path: pathlib.Path, data: bytes, *, private=False):
-    """tmp＋fsync＋os.replace 原子落盘（撕裂不可见半态；v2 store 同款纪律）。"""
+    """tmp＋fsync＋os.replace 原子落盘（撕裂不可见半态；v2 store 同款纪律）。
+    短写循环收口（ENOSPC 边界 os.write 允许部分写）＋O_NOFOLLOW（tmp 位
+    预置符号链接即拒）＋失败清 tmp（不留残垃圾）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                 | getattr(os, "O_NOFOLLOW", 0),
                  0o600 if private else 0o644)
     try:
-        os.write(fd, data)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
         os.fsync(fd)
-    finally:
+    except BaseException:
         os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    os.close(fd)
     os.replace(tmp, path)
 
 
@@ -79,12 +88,13 @@ def message_document(msg) -> bytes:
 
 
 def event_line(ev) -> str:
-    """v2 兼容事件行：ts/actor/event(/task)＋detail 平展，ensure_ascii=False。"""
+    """v2 兼容事件行：ts/actor/event(/task)＋detail 平展，ensure_ascii=False。
+    核心键后置——detail 同名键不得覆写 ts/actor/event/task（防伪造行首语义）。"""
     row = {"ts": ev.ts_ms / 1000.0, "actor": ev.actor, "event": ev.event}
     if ev.task:
         row["task"] = ev.task
     if ev.detail:
-        row.update(ev.detail)
+        row = {**ev.detail, **row}
     return json.dumps(row, ensure_ascii=False)
 
 
@@ -120,13 +130,22 @@ def _ledger(st: Storage, extra_counts) -> dict:
     }
 
 
+def _open_storage(db: pathlib.Path) -> Storage:
+    """Storage 开库缝（CLI 面）：开库异常（腐蚀库等）归一 CutoverError
+    （可恢复——修复/换位后重试），不留裸异常面。"""
+    try:
+        return Storage(db)
+    except Exception as exc:
+        raise CutoverError("storage_open_failed", f"{db}: {exc}") from exc
+
+
 def export_home(home, out=None):
     """全量派生导出：state/messages/*.md＋events.jsonl＋state/ledger.json——
     一律从 SQLite 重建（库为权威，孤儿派生件清扫）；返回机读报告。"""
     home = pathlib.Path(home)
     dest = pathlib.Path(out) if out else home
     db = _db_path(home)
-    st = Storage(db)
+    st = _open_storage(db)
     try:
         msgs, events = st.messages_all(), st.events_all()
         ledger = _ledger(st, {"tasks": None, "messages": len(msgs),
@@ -138,9 +157,17 @@ def export_home(home, out=None):
     for m in msgs:
         exporter.export(m)
     keep = {f"{m.id:08d}.md" for m in msgs}
-    for stale in sorted((dest / "state" / "messages").glob("*.md")):
-        if stale.name not in keep:  # 库面外孤儿件＝权威之外的暗尸，清之
-            stale.unlink()
+    mdir = dest / "state" / "messages"
+    # 孤儿清扫界：仅清 id≤快照 max 的库外件（AUTOINCREMENT 单调——并发新
+    # 提交 id 必大于快照 max，不误删）；messages 目录为符号链接时跳过（不
+    # 追随出界删件）。
+    top = max((m.id for m in msgs), default=0)
+    if not mdir.is_symlink():
+        for stale in sorted(mdir.glob("*.md")):
+            if stale.name not in keep:
+                with contextlib.suppress(ValueError):
+                    if int(stale.stem) <= top:
+                        stale.unlink()
     lines = "".join(event_line(e) + "\n" for e in events)
     _atomic_write_bytes(dest / EVENTS_NAME, lines.encode("utf-8"))
     _atomic_write_bytes(dest / LEDGER_PATH,
@@ -153,6 +180,12 @@ def export_home(home, out=None):
 
 # ---- backup（断言3：backup API 一致性热备＋体检＋凭据清扫）----
 
+def _scrub_tmp(tmp: pathlib.Path):
+    """tmp＋sidecar 全清（失败路径/陈旧残件——含牌明文窗的半备件不得存活）。"""
+    for suffix in ("", "-wal", "-shm"):
+        pathlib.Path(str(tmp) + suffix).unlink(missing_ok=True)
+
+
 def backup_home(home, dest):
     db = _db_path(pathlib.Path(home))
     dest = pathlib.Path(dest)
@@ -160,24 +193,31 @@ def backup_home(home, dest):
         raise CutoverError("backup_exists", f"{dest}: 备份件已存在（拒覆写）")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
-    st = Storage(db)
+    _scrub_tmp(tmp)  # kill -9 残件预清：陈旧半备件会让重试炸「非库」且含牌面
+    st = _open_storage(db)
     try:
-        scrub = st.backup_to(tmp, scrub_credentials=True)
-        before = _verify(db)["counts"]
+        try:
+            scrub = st.backup_to(tmp, scrub_credentials=True)
+            before = _verify(db)["counts"]
+        except BaseException:
+            _scrub_tmp(tmp)  # 任一失败面：含牌 tmp 不留盘
+            raise
     finally:
         st.close()
     try:
         report = _verify(tmp)
-    except CutoverError:
-        tmp.unlink(missing_ok=True)
+    except BaseException:
+        _scrub_tmp(tmp)
         raise
     if (report["integrity"] != ["ok"] or report["fk_violations"]
             or report["counts"]["credentials"]):
-        tmp.unlink(missing_ok=True)
+        _scrub_tmp(tmp)
         raise CutoverError(
             "backup_verify_failed",
             f"备份件体检未过（integrity={report['integrity'][:2]} "
             f"fk={report['fk_violations']} credentials={report['counts']['credentials']}）")
+    # tmp 内容耐久由 sqlite synchronous=FULL 收口（backup_to 收敛 journal 后
+    # 关连接）；replace 原子性同 v2 store._compact 纪律（目录项 fsync 不另做）
     os.replace(tmp, dest)
     return {"backup": str(dest), "integrity": report["integrity"],
             "source_counts": before, "backup_counts": report["counts"],
@@ -191,6 +231,7 @@ def migrate_cmd(source, target, *, apply=False, report_path=None):
     真实 target；apply＝LegacyMigrator 全量迁移（报告落 target/state/
     migration-report.json，重跑幂等＝T11 契约）。"""
     source, target = pathlib.Path(source), pathlib.Path(target)
+    report_path = pathlib.Path(report_path) if report_path else None
     try:
         if apply:
             report = LegacyMigrator(source, target).migrate()
@@ -251,10 +292,14 @@ def switch(old, new):
                            f"{new / MARKER}: 迁移完成标记缺席（先 migrate --apply）")
     db = new / "state" / "agora.db"
     gate = _gate(db)
-    st = Storage(db)
+    st = _open_storage(db)
     try:
-        smoke = len(st.tasks_all())  # 最小业务冒烟：任务面整读可读
-        ckpt = st.checkpoint_truncate()
+        try:
+            smoke = len(st.tasks_all())  # 最小业务冒烟：任务面整读可读
+            ckpt = st.checkpoint_truncate()
+        except Exception as exc:  # 冒烟/收卷异常＝门拒（零动作，可处置重试）
+            raise CutoverError("integrity_gate_failed",
+                               f"冒烟/收卷失败（拒互换）: {exc}") from exc
     finally:
         st.close()  # 关闭全部连接——互换前提
     for suffix in ("-wal", "-shm"):
@@ -263,13 +308,21 @@ def switch(old, new):
                                f"{db}{suffix}: 收卷后仍活跃——拒互换")
     swapped = old.with_name(old.name + SWAPPED_SUFFIX)
     if swapped.exists():
-        raise CutoverError("swapped_exists",
-                           f"{swapped}: 已在（上次切换未回滚？先 rollback）")
+        raise CutoverError(
+            "swapped_exists",
+            f"{swapped}: 已在（上次切换未回滚？先 rollback；若上次互换中途"
+            "崩溃致 old 缺席，手工归位：mv 该目录回原 old 路径）")
     os.rename(old, swapped)
     try:
         os.rename(new, old)
     except OSError as exc:  # 第二步败＝第一步回退，old 归位零动作
-        os.rename(swapped, old)
+        try:
+            os.rename(swapped, old)
+        except OSError as back:  # 回退也败＝裸现场：给手工恢复指令
+            raise CutoverError(
+                "swap_broken", f"互换第二步失败且回退失败（现场保持）: {exc}；"
+                f"手工归位：mv {swapped} {old}",
+                recoverable=False) from back
         raise CutoverError("swap_failed", f"互换第二步失败（已回退）: {exc}",
                            recoverable=False) from exc
     return {"switched_to": str(old), "old_home_at": str(swapped),
@@ -291,7 +344,14 @@ def rollback(old, new):
     try:
         os.rename(swapped, old)
     except OSError as exc:
-        os.rename(new, old)
+        try:
+            os.rename(new, old)
+        except OSError as back:
+            raise CutoverError(
+                "rollback_broken",
+                f"回滚第二步失败且回退失败（现场保持）: {exc}；"
+                f"手工归位：mv {new} {old}",
+                recoverable=False) from back
         raise CutoverError("rollback_failed", f"回滚第二步失败（已回退）: {exc}",
                            recoverable=False) from exc
     return {"rolled_back_to": str(old), "v3_home_at": str(new)}

@@ -25,9 +25,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from agorad.cutover import (CutoverError, backup_home, export_home,
-                            migrate_cmd, rollback, switch)
-
 TERMINAL = frozenset(("merged", "closed", "blocked", "cancelled"))
 _INFLIGHT = ("todo", "dispatched", "running", "done", "verify_failed", "reopened")
 _INTERVAL = 15        # 内部轮询间隔（秒）
@@ -322,16 +319,25 @@ def _resolve_timeout(flag):
         raise Fail(f"AGORA_WAIT_TIMEOUT 须为正数秒（收到 {raw!r}）") from None
 
 
-def _offline_home(a):
+def _home_from(a=None):
     """离线动词 home 解析：--home > AGORA_HOME > 指针 > 缺省 plaza
     （discover 同序，免牌面——离线动词不连服务）。"""
-    return (a.home or os.environ.get("AGORA_HOME") or _pointer_home()
-            or str(Path.home() / ".opencode-agora-plaza"))
+    return (getattr(a, "home", None) or os.environ.get("AGORA_HOME")
+            or _pointer_home() or str(Path.home() / ".opencode-agora-plaza"))
 
 
-def _run_cutover(build):
-    """F140 离线动词公共壳：JSON 报告上 stdout；CutoverError＝结构化
-    stderr（code/message）＋1（可恢复）/2（终局）；未预期异常归 main exit 2。"""
+def _offline(a, build):
+    """F140 离线动词公共壳：载荷位 sys.path 引导（<home>/.agora＝install.sh
+    随装 agorad 处）＋延迟导入——在线动词保持纯 stdlib（~/.local/bin 独立
+    拷贝可运行，tests/test_install.sh 锚）；引导仅在当前环境无 agorad 时
+    生效（不遮蔽既有解析位）；CutoverError＝结构化 stderr（code/message）
+    ＋1（可恢复）/2（终局）；未预期异常归 main exit 2。"""
+    try:
+        from agorad.cutover import CutoverError  # 已可达即用（勿让载荷遮蔽）
+    except ImportError:
+        payload = Path(_home_from(a)) / ".agora"
+        sys.path.insert(0, str(payload))
+        from agorad.cutover import CutoverError
     try:
         print(json.dumps(build(), ensure_ascii=False))
         return 0
@@ -342,25 +348,39 @@ def _run_cutover(build):
 
 
 def run_export(a):
-    return _run_cutover(lambda: export_home(_offline_home(a), out=a.out))
+    def go():
+        from agorad.cutover import export_home
+        return export_home(_home_from(a), out=a.out)
+    return _offline(a, go)
 
 
 def run_backup(a):
-    return _run_cutover(lambda: backup_home(_offline_home(a), a.out))
+    def go():
+        from agorad.cutover import backup_home
+        return backup_home(_home_from(a), a.out)
+    return _offline(a, go)
 
 
 def run_migrate(a):
-    return _run_cutover(
-        lambda: migrate_cmd(a.source, a.target, apply=a.apply,
-                            report_path=a.report))
+    def go():
+        from agorad.cutover import migrate_cmd
+        return migrate_cmd(a.source, a.target, apply=a.apply,
+                           report_path=a.report)
+    return _offline(a, go)
 
 
 def run_switch(a):
-    return _run_cutover(lambda: switch(a.old, a.new))
+    def go():
+        from agorad.cutover import switch
+        return switch(a.old, a.new)
+    return _offline(a, go)
 
 
 def run_rollback(a):
-    return _run_cutover(lambda: rollback(a.old, a.new))
+    def go():
+        from agorad.cutover import rollback
+        return rollback(a.old, a.new)
+    return _offline(a, go)
 
 
 def _parser():
@@ -469,7 +489,7 @@ def _cutover_parsers(sub):
         description="一致性热备（断言3）：backup API 快照→credentials 清扫"
                     "（牌可重签，token 字节不驻备份暗面）→integrity/"
                     "foreign_key 体检→0600 落盘；从备份恢复的库可读且"
-                    " 记账计数与源一致。",
+                    " 记账计数与源一致（凭据除外——不入备份件）。",
         epilog=epilog, formatter_class=fmt)
     b.add_argument("--home", help="AGORA_HOME（缺省 $AGORA_HOME/指针/缺省 plaza）")
     b.add_argument("--out", required=True, help="备份件路径（拒覆写已存在件）")
