@@ -1,0 +1,48 @@
+{
+ "$note": "v2 信封表征样本（Req: F128，ag-ac1045）：BOOT／credential 指针／旧 token 文本三形态＋期望解析结果，供 v3 Bun 跨语言契约测试复用。pattern＝agora-plugin/inject.ts 锚定正则源（flags: m＝multiline）；agora_home＝样本系虚构根，指针合法判定（legit）以它为基准。",
+ "agora_home": "/home/user/.opencode-agora-plaza",
+ "patterns": {
+  "boot_msg": {"source": "\\[agora\\] (gt-\\S+|task-\\S+|ag-\\S+): ", "flags": ""},
+  "boot_env": {"source": "^env: (\\S+)$", "flags": "m"},
+  "cred_pointer": {"source": "\\[agora\\] credential (\\S+)\\nfile: (.+)$", "flags": "m"},
+  "cred_token_legacy": {"source": "\\[agora\\] credential (\\S+)\\ntoken: (\\S+)", "flags": ""}
+ },
+ "boot": [
+  {
+   "text": "[agora] ag-ac1045: v3 P0-T1 v2 契约表征基线\npage: /home/user/.opencode-agora-plaza/wiki/tasks/ag-ac1045.md\nenv: /home/user/envs/ag-ac1045\ncontract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note\nrole: worker。可用: post/check_mail/repo_board/wiki_read/wiki_write/task_create/task_dispatch/sleep",
+   "expect": {"tid": "ag-ac1045", "env": "/home/user/envs/ag-ac1045"}
+  },
+  {
+   "text": "[agora] task-3f9c21: 修复 board_tui 取消报错头\npage: /home/user/.opencode-agora-plaza/wiki/tasks/task-3f9c21.md\nenv: /home/user/envs/task-3f9c21\ncontract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note",
+   "expect": {"tid": "task-3f9c21", "env": "/home/user/envs/task-3f9c21"}
+  },
+  {
+   "text": "[agora] gt-7d1e88: 迁移存量凭据注入面\npage: /home/user/.opencode-agora-plaza/wiki/tasks/gt-7d1e88.md\nenv: /home/user/envs/gt-7d1e88\ncontract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha，结论文本走 note",
+   "expect": {"tid": "gt-7d1e88", "env": "/home/user/envs/gt-7d1e88"}
+  }
+ ],
+ "credential_pointer": [
+  {
+   "text": "[agora] credential ag-ac1045\nfile: /home/user/.opencode-agora-plaza/credentials/ag-ac1045.token",
+   "expect": {"tid": "ag-ac1045", "file": "/home/user/.opencode-agora-plaza/credentials/ag-ac1045.token", "legit": true}
+  },
+  {
+   "text": "[agora] credential ag-ac1045\nfile: /home/user/.opencode-agora-plaza/credentials/other-task.token",
+   "expect": {"tid": "ag-ac1045", "file": "/home/user/.opencode-agora-plaza/credentials/other-task.token", "legit": false}
+  },
+  {
+   "text": "[agora] credential ag-ac1045\nfile: /etc/passwd",
+   "expect": {"tid": "ag-ac1045", "file": "/etc/passwd", "legit": false}
+  }
+ ],
+ "credential_token_legacy": [
+  {
+   "text": "[agora] credential ag-ac1045\ntoken: w-ag-ac1045-5f3a9c2e7b1d",
+   "expect": {"tid": "ag-ac1045", "token": "w-ag-ac1045-5f3a9c2e7b1d"}
+  },
+  {
+   "text": "[agora] credential task-3f9c21\ntoken: w-task-3f9c21-0c8b4d6a2e19",
+   "expect": {"tid": "task-3f9c21", "token": "w-task-3f9c21-0c8b4d6a2e19"}
+  }
+ ]
+}

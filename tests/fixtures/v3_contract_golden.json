@@ -1,0 +1,122 @@
+{
+ "$note": "v2 契约表征基线（Req: F128）：ag-ac1045 从基线 7e24af6 活码投影；v3 重写须逐键对齐或经有意差异清单显式偏离",
+ "mcp": {
+  "tool_count": 16,
+  "tool_names": ["board", "check_mail", "doctor", "enforce", "post", "repo_board", "reverify", "sleep", "task_cancel", "task_create", "task_deliver", "task_dispatch", "task_update", "task_wait", "wiki_read", "wiki_write"],
+  "tools": {
+   "task_create": {
+    "required": ["goal"],
+    "enums": {
+     "deliverable": ["out_of_band", "external_branch"]
+    }
+   },
+   "task_dispatch": {
+    "required": ["task"],
+    "enums": {}
+   },
+   "task_update": {
+    "required": ["task", "verify_cmd"],
+    "enums": {}
+   },
+   "task_cancel": {
+    "required": ["task"],
+    "enums": {}
+   },
+   "task_deliver": {
+    "required": ["task", "outcome", "commit"],
+    "enums": {
+     "outcome": ["delivered", "non_ff", "failed"]
+    }
+   },
+   "reverify": {
+    "required": ["task"],
+    "enums": {}
+   },
+   "task_wait": {
+    "required": ["task"],
+    "enums": {}
+   },
+   "post": {
+    "required": ["kind", "body"],
+    "enums": {
+     "kind": ["note", "question", "answer", "done", "verify", "verify_reject", "peer"]
+    }
+   },
+   "check_mail": {
+    "required": [],
+    "enums": {}
+   },
+   "board": {
+    "required": [],
+    "enums": {
+     "view": ["full"]
+    }
+   },
+   "doctor": {
+    "required": [],
+    "enums": {}
+   },
+   "repo_board": {
+    "required": [],
+    "enums": {}
+   },
+   "wiki_read": {
+    "required": ["path"],
+    "enums": {}
+   },
+   "wiki_write": {
+    "required": ["path", "text"],
+    "enums": {}
+   },
+   "enforce": {
+    "required": ["on"],
+    "enums": {}
+   },
+   "sleep": {
+    "required": [],
+    "enums": {}
+   }
+  },
+  "http_tool_routes": ["board", "check_mail", "doctor", "enforce", "post", "repo_board", "reverify", "task_cancel", "task_create", "task_deliver", "task_dispatch", "task_update", "task_wait", "wiki_read", "wiki_write"],
+  "error_codes": {
+   "400": -32602,
+   "401": -32001,
+   "403": -32003,
+   "404": -32004,
+   "409": -32009,
+   "500": -32603
+  }
+ },
+ "http_string_fields": {
+  "board": ["task", "view"],
+  "post": ["task", "kind", "body"],
+  "repo_board": ["repo"],
+  "reverify": ["task"],
+  "task_alarm": ["task"],
+  "task_cancel": ["task"],
+  "task_create": ["goal", "project_dir", "after", "target_branch", "verify_cmd", "req_id", "model", "title", "deliverable", "client_key"],
+  "task_deliver": ["task", "outcome", "commit", "base", "reason"],
+  "task_dispatch": ["task"],
+  "task_nudge": ["task", "body"],
+  "task_update": ["task", "verify_cmd"],
+  "task_wait": ["task"],
+  "wiki_read": ["path"],
+  "wiki_write": ["path", "text"]
+ },
+ "board_full_view": {
+  "task_fields": ["state", "title", "worker_sid", "dispatcher_sid", "last_seen", "created", "project_dir", "in_gate", "model", "usage", "delivery", "waiting_on", "review_fail_streak", "gate_resource", "gate_artifact"],
+  "verify_budget_key": "verify_budget",
+  "top_keys": ["buckets", "events", "forest", "stats", "tasks"]
+ },
+ "doctor": {
+  "base_keys": ["age_rank", "env", "last_seen_rank", "stale_candidates", "verify_hygiene_findings"],
+  "models_keys": ["models", "models_note"],
+  "verify_profiles_key": "verify_profiles"
+ },
+ "f125": {
+  "ref_len": 240,
+  "ref_kinds": ["escalate", "question", "result", "verify"],
+  "ref_marks": ["输出尾部", "失败", "异常", "超时", "artifact="],
+  "ref_line_order": ["home", "msg", "page", "artifact"]
+ }
+}
