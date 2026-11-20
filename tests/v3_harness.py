@@ -1,4 +1,4 @@
-"""Req: F129 — v3 故障注入与差分测试设施（opencode-agora v3 重写 P0-T2）。
+"""Req: F129, F132 — v3 故障注入与差分测试设施（opencode-agora v3 P0-T2＋T2b 修复）。
 
 测试支撑库（零生产码）：v3 迁移/差分/浸泡共用的四件设施——
 ① FaultInjector：命名 failpoint，before/after 两相位，触发抛可控异常并携上下文；
@@ -36,10 +36,11 @@ CREATE_KEYS = (
     "verify_pending", "waiting_on", "quick", "verify_base_exempt",
     "review_cmd", "state", "dispatcher_sid", "worker_sid", "root_sid",
     "chain_depth", "fail_streak", "last_seen", "created", "updated")
-# gate/health/recover 写点字段（set_fields/transition/gate_tail/queue_cancel）。
+# gate/health/recover 写点字段（set_fields/transition/gate_tail/queue_cancel；
+# env_base＝F111 评审锚消费（task.py dispatch 写入）、probe＝F107 base 探针缓存）。
 GATE_HEALTH_KEYS = (
-    "commit", "rebased_from", "usage", "in_gate", "gate_env",
-    "gate_origin_branch", "gate_artifact", "review_cache",
+    "commit", "rebased_from", "env_base", "usage", "in_gate", "gate_env",
+    "gate_origin_branch", "gate_artifact", "review_cache", "probe",
     "review_fail_streak", "pending_cancel", "pending_cancel_reason",
     "cancel_reason")
 
@@ -213,14 +214,17 @@ def full_field_row(tid="gt-full", **over):
         "last_seen": 1780000100.0, "created": 1780000000.0,
         "updated": 1780000200.0,
         # -- gate/health/recover 写点（GATE_HEALTH_KEYS 权威清单的实例化）--
-        "commit": "a" * 40, "rebased_from": "b" * 40,
-        "usage": {"input": 1, "output": 2},
+        "commit": "a" * 40, "rebased_from": "b" * 40, "env_base": "e" * 40,
+        "usage": {"input": 1, "output": 2, "reasoning": 3, "cache_read": 4,
+                  "cache_write": 5, "cost": 0.5, "msgs": 9},
         "in_gate": False, "gate_env": None, "gate_origin_branch": None,
-        "gate_artifact": {"path": "/h/gate/gt-full/output.log",
+        "gate_artifact": {"path": f"/h/gate/{tid}/output.log",
                           "phase": "verify", "rc": 0, "failure_kind": None,
                           "duration_s": 1.0, "bytes": 10},
         "review_cache": {"cmd": "true", "commit": "a" * 40, "ok": True,
                          "ran_at": 1780000150.0},
+        "probe": {"result": "green", "cmd": "true", "base": "e" * 40,
+                  "ran_at": 1780000050.0},
         "review_fail_streak": 0, "pending_cancel": False,
         "pending_cancel_reason": None, "cancel_reason": None,
     }

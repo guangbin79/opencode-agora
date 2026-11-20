@@ -1,9 +1,11 @@
-"""Req: F129 — 故障注入与差分设施测试（opencode-agora v3 重写 P0-T2）。
+"""Req: F129, F132 — 故障注入与差分设施测试（opencode-agora v3 P0-T2＋T2b 修复）。
 
-断言清单与裁定见 docs/reqs/opencode-agora.md F129；设施本体＝tests/v3_harness.py。
-live 交叉锚：full-fields 字段集以真 TaskService.create（真 Store/State/Auth/
-Router＋假 oc/gitx，同 test_core_task 装配套路）对照，防冻结清单漂移。
+断言清单与裁定见 docs/reqs/opencode-agora.md F129/F132；设施本体＝
+tests/v3_harness.py。live 交叉锚：full-fields 字段集以真 TaskService.create
+（真 Store/State/Auth/Router＋假 oc/gitx，同 test_core_task 装配套路）对照；
+GATE_HEALTH_KEYS/usage 投影以 agorad 活码 AST 写点锚（F132）——防冻结清单漂移。
 """
+import ast
 import json
 import shutil
 import tempfile
@@ -19,9 +21,41 @@ from agorad.core.task import TaskService
 from agorad.core.verify_hygiene import find_verify_hygiene_issues
 from tests.v3_harness import (
     CREATE_KEYS, DIR_MODE, GATE_HEALTH_KEYS, FaultInjected, FaultInjector,
-    StubSide, TempAgoraHome, digest_tree, diff_mismatches, guarded_home_copy,
-    home_is_complete, legacy_torn, legacy_unknown, mail_lineage, run_diff,
-    task_full_fields, task_state_matrix)
+    StubSide, TempAgoraHome, digest_tree, diff_mismatches, full_field_row,
+    guarded_home_copy, home_is_complete, legacy_torn, legacy_unknown,
+    mail_lineage, run_diff, task_full_fields, task_state_matrix)
+
+AGORAD_ROOT = Path(__file__).resolve().parents[1] / "agorad"
+# state.py queue_cancel/gate_tail/settle_parked_cancel 体内直写键（调用面无 kwargs）
+_LATCH_CANCEL_KEYS = {"pending_cancel", "pending_cancel_reason", "cancel_reason"}
+
+
+def _agorad_write_keys():
+    """agorad 现行 gate/health 持久写入键集（F132 live 锚）：全仓
+    set_fields/transition 调用 kwargs AST 机械提取＋cancel/门闩体内写点，
+    减 CREATE_KEYS（create/dispatch 侧字段归另一清单）。"""
+    keys = set(_LATCH_CANCEL_KEYS)
+    for py in sorted(AGORAD_ROOT.rglob("*.py")):
+        for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("set_fields", "transition")):
+                keys |= {k.arg for k in node.keywords
+                         if k.arg not in (None, "tid", "to")}
+    return keys - set(CREATE_KEYS)
+
+
+def _gate_usage_keys():
+    """gate._collect_usage 的 usage 投影键集（赋值字面 AST 锚）。"""
+    src = ast.parse((AGORAD_ROOT / "core" / "gate.py").read_text(encoding="utf-8"))
+    for node in ast.walk(src):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "usage"
+                        for t in node.targets)
+                and isinstance(node.value, ast.Dict)):
+            return {k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant)}
+    raise AssertionError("gate.py usage 投影字面缺失")
 
 
 class _FakeGitx:  # create 触达面最小件（symref 钉支＋分支名校验）
@@ -170,6 +204,23 @@ class TestLegacyTaskFixtures(unittest.TestCase):
         # F87 游标帽：不越过本收件更老 inflight（ts=300）
         cursor = kit["state"].snapshot()["mail_read"][new]
         self.assertLess(cursor, 300.0)
+
+
+class TestGateHealthAuthorityAnchors(unittest.TestCase):
+    """断言（Req: F132/T2b）：冻结清单与 agorad 活码写点一致、tid 传导、
+    usage 子投影全键——三缺陷各一锚，防清单再漏。"""
+
+    def test_gate_health_keys_equal_agorad_write_keys(self):
+        self.assertEqual(set(GATE_HEALTH_KEYS), _agorad_write_keys())
+
+    def test_artifact_path_carries_custom_tid(self):
+        row = full_field_row(tid="ag-quirk42")
+        self.assertIn("ag-quirk42", row["gate_artifact"]["path"])
+        self.assertNotIn("gt-full", row["gate_artifact"]["path"])  # 去硬编码
+
+    def test_usage_projection_equals_gate_collect_usage_keys(self):
+        row = full_field_row()
+        self.assertEqual(set(row["usage"]), _gate_usage_keys())
 
 
 class TestDiffSkeleton(unittest.TestCase):
