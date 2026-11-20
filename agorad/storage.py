@@ -1,0 +1,543 @@
+"""Req: F133 — v3 SQLite 存储 core：schema／UoW／仓库（设计 §4/§5）。
+
+stdlib sqlite3 记账权威：14 表基线（表名自设计 §4 枚举名单——任务页断言
+计数「15」系笔误，两处枚举一致，以名单为准）；WAL＋synchronous=FULL＋
+foreign_keys=ON＋busy_timeout（缺省 5000）；user_version=3；单一写连接＋
+BEGIN IMMEDIATE（不可嵌套）；读者独立连接（WAL 未提交快照不可见）。
+
+UoW 硬规（§4）：写事务内禁网络/子进程/文件遍历（守卫拦截）；写操作必须
+身处 UoW；FaultInjector failpoint「uow」before＝BEGIN 后写前／after＝
+写完 COMMIT 前。SQL/sqlite3 只许出现在本模块（test_architecture.py 守卫）。
+
+行↔实体列名映射（任务页/设计页两处文本名差，仓库层消化）：
+timers.status↔Timer.state、approvals.session_id·status↔
+Approval.requester_sid·state。消息 body 恒 BLOB 出入（str 入＝UTF-8 落库，
+非 UTF-8 字节逐字节往返；域内 str 解码归 T7 服务层）。
+"""
+import contextlib
+import dataclasses
+import json
+import os
+import socket
+import sqlite3
+import subprocess
+import time
+
+from agorad.domain import (Approval, ApprovalState, Artifact, BaseProbe,
+                           Credential, DeliveryReceipt, DeliveryState, Event,
+                           GateState, MailCursor, Message, Task, Timer,
+                           TimerState, VerifySpec, epoch_ms)
+
+SCHEMA_VERSION = 3
+BUSY_TIMEOUT_MS = 5000
+
+# 设计 §4 表清单（枚举权威，14 名；任务页计数「15」系笔误）
+TABLES = (
+    "schema_migrations", "tasks", "task_verify", "task_delivery", "task_gate",
+    "timers", "approvals", "messages", "delivery_receipts", "mail_cursors",
+    "events", "artifacts", "credentials", "credential_lineage")
+
+# 热路径索引见 §4；EXPLAIN QUERY PLAN 守护在 test_v3_storage.py（断言8）。
+DDL = """
+CREATE TABLE IF NOT EXISTS schema_migrations(
+  version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks(
+  id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'todo',
+  title TEXT NOT NULL DEFAULT '', goal TEXT NOT NULL DEFAULT '',
+  req_id TEXT, model TEXT, quick INTEGER NOT NULL DEFAULT 0,
+  deliverable TEXT, chain_depth INTEGER NOT NULL DEFAULT 1,
+  root_sid TEXT, dispatcher_sid TEXT, worker_sid TEXT,
+  created_ms INTEGER, updated_ms INTEGER,
+  fail_streak INTEGER NOT NULL DEFAULT 0,
+  cancel_reason TEXT, waiting_on TEXT, client_key TEXT, last_seen_ms INTEGER,
+  project_dir TEXT, target_branch TEXT, env_dir TEXT, env_base TEXT,
+  commit_sha TEXT, rebased_from TEXT,
+  verify_pending INTEGER NOT NULL DEFAULT 0,
+  verify_base_exempt INTEGER NOT NULL DEFAULT 0, review_cmd TEXT,
+  after_json TEXT NOT NULL DEFAULT '[]',
+  legacy_extra_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(root_sid, client_key));
+CREATE TABLE IF NOT EXISTS task_verify(
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  cmd TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'pending',
+  registered_by TEXT, registered_at_ms INTEGER, timeout_s INTEGER,
+  timeout_source TEXT NOT NULL DEFAULT 'default');
+CREATE TABLE IF NOT EXISTS task_delivery(
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL DEFAULT 'managed', status TEXT NOT NULL DEFAULT 'pending',
+  commit_sha TEXT, base TEXT, target_branch TEXT,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  local_status TEXT NOT NULL DEFAULT 'pending', error TEXT);
+CREATE TABLE IF NOT EXISTS task_gate(
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  in_gate INTEGER NOT NULL DEFAULT 0, gate_env TEXT,
+  pending_cancel INTEGER NOT NULL DEFAULT 0, pending_cancel_reason TEXT,
+  gate_artifact_json TEXT, review_cache_json TEXT,
+  review_fail_streak INTEGER NOT NULL DEFAULT 0, probe_json TEXT);
+CREATE TABLE IF NOT EXISTS timers(
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  target_role TEXT NOT NULL DEFAULT 'worker',
+  due_ms INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+  created_ms INTEGER, fired_ms INTEGER);
+CREATE INDEX IF NOT EXISTS idx_timers_status_due ON timers(status, due_ms);
+CREATE TABLE IF NOT EXISTS approvals(
+  id TEXT PRIMARY KEY,
+  task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+  session_id TEXT, backend TEXT NOT NULL DEFAULT 'protocol',
+  status TEXT NOT NULL DEFAULT 'pending', question TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT, native_request_id TEXT UNIQUE,
+  attempted_decision TEXT, deadline_ms INTEGER, orphan_reason TEXT,
+  created_ms INTEGER, resolved_ms INTEGER);
+CREATE INDEX IF NOT EXISTS idx_approvals_session_status
+  ON approvals(session_id, status);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, from_sid TEXT NOT NULL, to_sid TEXT NOT NULL,
+  body BLOB NOT NULL, dedup_key TEXT UNIQUE,
+  timer_id TEXT UNIQUE REFERENCES timers(id), replay_of INTEGER);
+CREATE INDEX IF NOT EXISTS idx_messages_to_id ON messages(to_sid, id);
+CREATE TABLE IF NOT EXISTS delivery_receipts(
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT, email_status TEXT, lease_until_ms INTEGER, updated_ms INTEGER);
+CREATE TABLE IF NOT EXISTS mail_cursors(
+  sid TEXT PRIMARY KEY, last_read_ms INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS events(
+  seq INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, actor TEXT NOT NULL,
+  event TEXT NOT NULL,
+  task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, detail_json TEXT);
+CREATE INDEX IF NOT EXISTS idx_events_task_seq ON events(task_id, seq);
+CREATE TABLE IF NOT EXISTS artifacts(
+  id INTEGER PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  phase TEXT NOT NULL, path TEXT NOT NULL DEFAULT '', cmd TEXT NOT NULL DEFAULT '',
+  rc INTEGER, failure_kind TEXT, duration_s REAL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  error TEXT, started_at_ms INTEGER, ended_at_ms INTEGER);
+CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id, id);
+CREATE TABLE IF NOT EXISTS credentials(
+  sid TEXT PRIMARY KEY, token TEXT NOT NULL, task_id TEXT, created_ms INTEGER);
+CREATE TABLE IF NOT EXISTS credential_lineage(
+  sid TEXT NOT NULL REFERENCES credentials(sid) ON DELETE CASCADE,
+  position INTEGER NOT NULL, ancestor_sid TEXT NOT NULL,
+  PRIMARY KEY(sid, position));
+"""
+
+# UoW 守卫面（§4：禁网络/子进程/文件遍历）——进入写事务即替换、退出恢复。
+# in-process 纪律：uow 前先 from socket import socket 的本地名不在拦截面。
+_BLOCKED = (
+    (socket, ("socket", "create_connection")),
+    (subprocess, ("Popen", "run", "call", "check_output", "check_call")),
+    (os, ("system", "popen", "walk")))
+
+
+class StorageError(Exception):
+    """存储层基错。"""
+
+
+class SchemaVersionError(StorageError):
+    """库 user_version 高于已知 schema——启动即拒，不静默降级。"""
+
+
+class NoActiveUnitOfWork(StorageError):
+    """写操作必须身处 with st.uow()（read-decide-write 同事务，设计 §4）。"""
+
+
+class UnitOfWorkViolation(StorageError):
+    """写事务内危险调用（网络/子进程/文件遍历）被守卫拦截。"""
+
+
+def _blocked(name):
+    def _violation(*args, **kwargs):
+        raise UnitOfWorkViolation(
+            f"UoW 写事务内禁 {name}（设计 §4：无网络/子进程/文件遍历）")
+    return _violation
+
+
+def _json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _null(text):  # 域缺省 ""→NULL（可空 FK/TEXT 列）
+    return None if not text else text
+
+
+_TASK_SCALARS = (  # 域标量列（DDL 顺序）；after/legacy_extra 走 JSON 列另算
+    "id", "state", "title", "goal", "req_id", "model", "quick", "deliverable",
+    "chain_depth", "root_sid", "dispatcher_sid", "worker_sid", "created_ms",
+    "updated_ms", "fail_streak", "cancel_reason", "waiting_on", "client_key",
+    "last_seen_ms", "project_dir", "target_branch", "env_dir", "env_base",
+    "commit_sha", "rebased_from", "verify_pending", "verify_base_exempt",
+    "review_cmd")
+_TASK_COLS = ", ".join([*_TASK_SCALARS, "after_json", "legacy_extra_json"])
+
+
+def _connect(path, busy_timeout_ms):
+    # check_same_thread=False：写连接纪律由单一全局写锁保证（§4），线程边界
+    # 归服务层（T7+ 装配）；读者连接各自独立。
+    conn = sqlite3.connect(str(path), timeout=busy_timeout_ms / 1000,
+                           isolation_level=None, check_same_thread=False)
+    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+class Storage:
+    """单一写连接＋独立读者连接。db 文件与 -wal/-shm 统一 0600。"""
+
+    def __init__(self, db_path, *, busy_timeout_ms=BUSY_TIMEOUT_MS,
+                 injector=None):
+        self.path = os.fspath(db_path)
+        self._injector = injector  # tests.v3_harness.FaultInjector（failpoint uow）
+        self._saved = []
+        self._depth = 0
+        conn = sqlite3.connect(self.path, timeout=busy_timeout_ms / 1000,
+                               isolation_level=None, check_same_thread=False)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            conn.close()
+            raise SchemaVersionError(
+                f"{self.path}: user_version={version} 高于已知 "
+                f"{SCHEMA_VERSION}，拒开不静默（设计 §4）")
+        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
+        if version < SCHEMA_VERSION:  # 仅初始化/补齐时才拿写锁（重开不写）
+            conn.executescript(DDL)
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES(?,?,?)",
+                (SCHEMA_VERSION, "v3-baseline", epoch_ms(time.time())))
+            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        self._conn = conn
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                os.chmod(self.path + suffix, 0o600)
+
+    # ---- UoW（设计 §4：单一全局写锁＋BEGIN IMMEDIATE）----
+
+    @contextlib.contextmanager
+    def uow(self):
+        if self._depth:
+            raise StorageError("UoW 不可嵌套（单一全局写锁，设计 §4）")
+        # 先 BEGIN 再装守卫：BEGIN 失败（锁冲突）不得留下已替换的模块入口
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._depth = 1
+        try:
+            self._install_guard()
+            self._fire("uow", "before")
+            yield self
+            self._fire("uow", "after")  # 写完、COMMIT 前——崩溃窗（断言2）
+            self._conn.execute("COMMIT")
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.execute("ROLLBACK")
+            raise
+        finally:
+            self._depth = 0
+            self._restore_guard()
+
+    def _install_guard(self):
+        for mod, names in _BLOCKED:
+            for name in names:
+                self._saved.append((mod, name, getattr(mod, name)))
+                setattr(mod, name, _blocked(name))
+
+    def _restore_guard(self):
+        while self._saved:
+            setattr(*self._saved.pop())  # (mod, name, original)
+
+    def _fire(self, name, phase):
+        if self._injector is not None:
+            self._injector.fire(name, phase)
+
+    def _require_uow(self):
+        if not self._depth:
+            raise NoActiveUnitOfWork("写操作必须身处 with st.uow()（设计 §4）")
+
+    def open_reader(self):
+        """读者独立连接：WAL 下未提交写不可见，commit 后立见（断言6）。"""
+        return _connect(self.path, BUSY_TIMEOUT_MS)
+
+    def close(self):
+        self._conn.close()
+
+    # ---- tasks＋1:1 子表（断言4：frozen 实体全字段往返）----
+
+    def upsert_task(self, t: Task):
+        """1:1 upsert＝删主行（级联三子行）＋重插；delivery None 不建行。"""
+        self._require_uow()
+        c = self._conn
+        c.execute("DELETE FROM tasks WHERE id=?", (t.id,))
+        scalars = ["commit" if n == "commit_sha" else n for n in _TASK_SCALARS]
+        c.execute(
+            f"INSERT INTO tasks({_TASK_COLS}) "
+            f"VALUES({','.join(['?'] * (len(_TASK_SCALARS) + 2))})",
+            (*[getattr(t, n) for n in scalars],
+             _json(list(t.after)), t.legacy_extra_json))
+        c.execute(
+            "INSERT INTO task_verify(task_id,cmd,state,registered_by,"
+            "registered_at_ms,timeout_s,timeout_source) VALUES(?,?,?,?,?,?,?)",
+            (t.id, t.verify.cmd, t.verify.state, t.verify.registered_by,
+             t.verify.registered_at_ms, t.verify.timeout_s,
+             t.verify.timeout_source))
+        if t.delivery is not None:
+            c.execute(
+                "INSERT INTO task_delivery(task_id,mode,status,commit_sha,base,"
+                "target_branch,attempt,local_status,error) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (t.id, t.delivery.mode, t.delivery.status, t.delivery.commit,
+                 t.delivery.base, t.delivery.target_branch, t.delivery.attempt,
+                 t.delivery.local_status, t.delivery.error))
+        art = None if t.gate.gate_artifact is None else {
+            k: v for k, v in dataclasses.asdict(t.gate.gate_artifact).items()
+            if k != "task_id"}
+        c.execute(
+            "INSERT INTO task_gate(task_id,in_gate,gate_env,pending_cancel,"
+            "pending_cancel_reason,gate_artifact_json,review_cache_json,"
+            "review_fail_streak,probe_json) VALUES(?,?,?,?,?,?,?,?,?)",
+            (t.id, t.gate.in_gate, t.gate.gate_env, t.gate.pending_cancel,
+             t.gate.pending_cancel_reason, _json(art) if art else None,
+             _json(t.gate.review_cache) if t.gate.review_cache is not None else None,
+             t.gate.review_fail_streak,
+             _json(dataclasses.asdict(t.probe)) if t.probe else None))
+        return t
+
+    def get_task(self, tid):
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLS} FROM tasks WHERE id=?", (tid,)).fetchone()
+        if row is None:
+            return None
+
+        def one(sql):
+            return self._conn.execute(sql, (tid,)).fetchone()
+
+        verify = one("SELECT cmd,state,registered_by,registered_at_ms,timeout_s,"
+                     "timeout_source FROM task_verify WHERE task_id=?")
+        delivery = one("SELECT mode,status,commit_sha,base,target_branch,attempt,"
+                       "local_status,error FROM task_delivery WHERE task_id=?")
+        g = one("SELECT in_gate,gate_env,pending_cancel,pending_cancel_reason,"
+                "gate_artifact_json,review_cache_json,review_fail_streak,"
+                "probe_json FROM task_gate WHERE task_id=?")
+        g = g or (None,) * 8
+        scalars = dict(zip(
+            ("id", "state", "title", "goal", "req_id", "model", "quick",
+             "deliverable", "chain_depth", "root_sid", "dispatcher_sid",
+             "worker_sid", "created_ms", "updated_ms", "fail_streak",
+             "cancel_reason", "waiting_on", "client_key", "last_seen_ms",
+             "project_dir", "target_branch", "env_dir", "env_base", "commit",
+             "rebased_from", "verify_pending", "verify_base_exempt",
+             "review_cmd"), row[:28]))
+        return Task(
+            **scalars,
+            after=tuple(json.loads(row[28])),
+            legacy_extra_json=row[29],
+            verify=VerifySpec(*verify) if verify else VerifySpec(),
+            delivery=DeliveryState(*delivery) if delivery else None,
+            probe=BaseProbe(**json.loads(g[7])) if g[7] else None,
+            gate=GateState(
+                in_gate=bool(g[0]), gate_env=g[1], pending_cancel=bool(g[2]),
+                pending_cancel_reason=g[3],
+                gate_artifact=(Artifact(task_id=tid, **json.loads(g[4]))
+                               if g[4] else None),
+                review_cache=json.loads(g[5]) if g[5] else None,
+                review_fail_streak=g[6]))
+
+    # ---- timers / approvals（断言4/5）----
+
+    def upsert_timer(self, tm: Timer) -> Timer:
+        self._require_uow()
+        self._conn.execute("DELETE FROM timers WHERE id=?", (tm.id,))
+        self._conn.execute(
+            "INSERT INTO timers(id,task_id,target_role,due_ms,status,"
+            "created_ms,fired_ms) VALUES(?,?,?,?,?,?,?)",
+            (tm.id, tm.task_id, tm.target_role, tm.due_ms, tm.state.value,
+             tm.created_ms, tm.fired_ms))
+        return tm  # 孤儿 task（无主行）→sqlite3.IntegrityError（FK 拒）
+
+    def get_timer(self, tid):
+        row = self._conn.execute(
+            "SELECT id,task_id,target_role,due_ms,status,created_ms,fired_ms "
+            "FROM timers WHERE id=?", (tid,)).fetchone()
+        if row is None:
+            return None
+        return Timer(id=row[0], task_id=row[1], target_role=row[2],
+                            due_ms=row[3], state=TimerState(row[4]),
+                            created_ms=row[5], fired_ms=row[6])
+
+    def upsert_approval(self, ap: Approval) -> Approval:
+        self._require_uow()
+        self._conn.execute("DELETE FROM approvals WHERE id=?", (ap.id,))
+        self._conn.execute(
+            "INSERT INTO approvals(id,task_id,session_id,backend,status,"
+            "question,metadata_json,native_request_id,attempted_decision,"
+            "deadline_ms,orphan_reason,created_ms,resolved_ms) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ap.id, _null(ap.task_id), ap.requester_sid, ap.backend,
+             ap.state.value, ap.question,
+             _json(ap.metadata) if ap.metadata is not None else None,
+             ap.native_request_id, ap.attempted_decision, ap.deadline_ms,
+             ap.orphan_reason, ap.created_ms, ap.resolved_ms))
+        return ap
+
+    def get_approval(self, aid):
+        row = self._conn.execute(
+            "SELECT id,task_id,session_id,backend,status,question,metadata_json,"
+            "native_request_id,attempted_decision,deadline_ms,orphan_reason,"
+            "created_ms,resolved_ms FROM approvals WHERE id=?", (aid,)).fetchone()
+        if row is None:
+            return None
+        return Approval(
+            id=row[0], task_id=row[1] or "", requester_sid=row[2],
+            backend=row[3], state=ApprovalState(row[4]), question=row[5],
+            metadata=json.loads(row[6]) if row[6] else None,
+            native_request_id=row[7], attempted_decision=row[8],
+            deadline_ms=row[9], orphan_reason=row[10], created_ms=row[11],
+            resolved_ms=row[12])
+
+    # ---- messages / receipts / cursors（断言2/5/6/10；outbox 服务归 T7）----
+
+    _MSG_COLS = ("id,ts_ms,task_id,kind,from_sid,to_sid,body,dedup_key,"
+                 "timer_id,replay_of")
+
+    def insert_message(self, *, ts_ms, task_id, kind, from_sid, to_sid, body,
+                       dedup_key=None, timer_id=None, replay_of=None):
+        """幂等：dedup_key/timer_id 撞既有行→回读既有行不新建（断言5）。"""
+        self._require_uow()
+        blob = bytes(body) if isinstance(body, (bytes, bytearray)) \
+            else str(body).encode()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO messages(ts_ms,task_id,kind,from_sid,to_sid,body,"
+                "dedup_key,timer_id,replay_of) VALUES(?,?,?,?,?,?,?,?,?)",
+                (ts_ms, task_id, kind, from_sid, to_sid, sqlite3.Binary(blob),
+                 dedup_key, timer_id, replay_of))
+            return Message(id=cur.lastrowid, ts_ms=ts_ms,
+                                  task_id=task_id, kind=kind, from_sid=from_sid,
+                                  to_sid=to_sid, body=blob, dedup_key=dedup_key,
+                                  replay_of=replay_of)
+        except sqlite3.IntegrityError as exc:
+            if "UNIQUE" not in str(exc) or dedup_key is timer_id is None:
+                raise
+            column = "dedup_key" if dedup_key is not None else "timer_id"
+            row = self._conn.execute(
+                f"SELECT {self._MSG_COLS} FROM messages WHERE {column}=?",
+                (dedup_key if dedup_key is not None else timer_id,)).fetchone()
+            return self._message(row)
+
+    def get_message(self, mid):
+        return self._message(self._conn.execute(
+            f"SELECT {self._MSG_COLS} FROM messages WHERE id=?", (mid,)).fetchone())
+
+    def messages_for_sid(self, sid, after_id=0):
+        rows = self._conn.execute(
+            f"SELECT {self._MSG_COLS} FROM messages WHERE to_sid=? AND id>? "
+            "ORDER BY id", (sid, after_id)).fetchall()
+        return [self._message(r) for r in rows]
+
+    @staticmethod
+    def _message(row):
+        if row is None:
+            return None
+        return Message(id=row[0], ts_ms=row[1], task_id=row[2],
+                              kind=row[3], from_sid=row[4], to_sid=row[5],
+                              body=row[6], dedup_key=row[7], replay_of=row[9])
+
+    def upsert_receipt(self, r: DeliveryReceipt):
+        self._require_uow()
+        self._conn.execute(
+            "DELETE FROM delivery_receipts WHERE message_id=?", (r.message_id,))
+        self._conn.execute(
+            "INSERT INTO delivery_receipts(message_id,status,attempts,"
+            "last_error,email_status,lease_until_ms,updated_ms) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (r.message_id, r.status, r.attempts, r.last_error, r.email_status,
+             r.lease_until_ms, r.updated_ms))
+        return r
+
+    def get_receipt(self, mid):
+        row = self._conn.execute(
+            "SELECT message_id,status,attempts,last_error,email_status,"
+            "lease_until_ms,updated_ms FROM delivery_receipts WHERE message_id=?",
+            (mid,)).fetchone()
+        return DeliveryReceipt(*row) if row else None
+
+    def upsert_cursor(self, sid, last_read_ms) -> MailCursor:
+        self._require_uow()
+        self._conn.execute(
+            "INSERT INTO mail_cursors(sid,last_read_ms) VALUES(?,?) "
+            "ON CONFLICT(sid) DO UPDATE SET last_read_ms=excluded.last_read_ms",
+            (sid, last_read_ms))
+        return MailCursor(sid=sid, last_read_ms=last_read_ms)
+
+    def get_cursor(self, sid):
+        row = self._conn.execute(
+            "SELECT sid,last_read_ms FROM mail_cursors WHERE sid=?",
+            (sid,)).fetchone()
+        return MailCursor(*row) if row else None
+
+    # ---- events / artifacts（断言4；events 全局 seq 单流派号，§8）----
+
+    def append_event(self, ev: Event) -> Event:
+        self._require_uow()
+        seq = ev.seq or self._conn.execute(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM events").fetchone()[0]
+        self._conn.execute(
+            "INSERT INTO events(seq,ts_ms,actor,event,task_id,detail_json) "
+            "VALUES(?,?,?,?,?,?)",
+            (seq, ev.ts_ms, ev.actor, ev.event, _null(ev.task),
+             _json(ev.detail) if ev.detail is not None else None))
+        return dataclasses.replace(ev, seq=seq)
+
+    def events_for_task(self, tid):
+        rows = self._conn.execute(
+            "SELECT seq,ts_ms,actor,event,task_id,detail_json FROM events "
+            "WHERE task_id=? ORDER BY seq", (tid,)).fetchall()
+        return [Event(seq=r[0], ts_ms=r[1], actor=r[2], event=r[3],
+                             task=r[4] or "", detail=json.loads(r[5]) if r[5] else None)
+                for r in rows]
+
+    def insert_artifact(self, a: Artifact):
+        self._require_uow()
+        self._conn.execute(
+            "INSERT INTO artifacts(task_id,phase,path,cmd,rc,failure_kind,"
+            "duration_s,bytes,error,started_at_ms,ended_at_ms) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (a.task_id, a.phase, a.path, a.cmd, a.rc, a.failure_kind,
+             a.duration_s, a.bytes, a.error, a.started_at_ms, a.ended_at_ms))
+
+    def artifacts_for_task(self, tid):
+        rows = self._conn.execute(
+            "SELECT task_id,phase,path,cmd,rc,failure_kind,duration_s,bytes,"
+            "error,started_at_ms,ended_at_ms FROM artifacts WHERE task_id=? "
+            "ORDER BY id DESC", (tid,)).fetchall()
+        return [Artifact(*r) for r in rows]
+
+    # ---- credentials＋lineage（断言4；血统补拉语义归 T7/T10）----
+
+    def put_credential(self, cred: Credential):
+        self._require_uow()
+        self._conn.execute("DELETE FROM credentials WHERE sid=?", (cred.sid,))
+        self._conn.execute(
+            "INSERT INTO credentials(sid,token,task_id,created_ms) "
+            "VALUES(?,?,?,?)",
+            (cred.sid, cred.token, _null(cred.task_id), cred.created_ms))
+        for position, ancestor in enumerate(cred.lineage):
+            self._conn.execute(
+                "INSERT INTO credential_lineage(sid,position,ancestor_sid) "
+                "VALUES(?,?,?)", (cred.sid, position, ancestor))
+        return cred
+
+    def get_credential(self, sid):
+        row = self._conn.execute(
+            "SELECT sid,token,task_id,created_ms FROM credentials WHERE sid=?",
+            (sid,)).fetchone()
+        if row is None:
+            return None
+        lineage = tuple(r[0] for r in self._conn.execute(
+            "SELECT ancestor_sid FROM credential_lineage WHERE sid=? "
+            "ORDER BY position", (sid,)))
+        return Credential(sid=row[0], token=row[1], task_id=row[2] or "",
+                                 lineage=lineage, created_ms=row[3])
