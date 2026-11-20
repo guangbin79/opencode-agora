@@ -366,6 +366,10 @@ class TestDoctorResponse(unittest.TestCase):
         # 门忙非 done 照候选（v2 stale_candidates 同判）
         self.assertEqual(d["stale_candidates"], [["s", 0.001]])
 
+    def test_on_disk_required_fail_fast(self):  # 评审环 R1：必注关键字无缺省
+        with self.assertRaises(TypeError):
+            adapter.doctor({}, env_activity=lambda tid: 0.0)
+
     def test_conditional_keys(self):
         d = adapter.doctor({}, models=["m"], verify_profiles={}, home="/h",
                            on_disk=lambda e: True)

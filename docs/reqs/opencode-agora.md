@@ -865,3 +865,5 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **边界**：不实现 HTTP 服务器/MCP 壳运行时接线（T13a）；不改 v2 httpd/agora_mcp 生产文件；不做差分执行器（T13b）；board task 明细页（report.detail 形状）与 repo_board 分区形状归 T13a 装配面；usage（F57 经济投影）v3 Task 无字段不投影——v2 行键条件在场所合法，T13a 若补采再扩（shortcut 注在案）。
 **落点**：agorad/adapter.py（新，Req: F141）、tests/test_v3_v2_adapter.py（新，Req: F141——断言 1-8 逐条机械判定）、tests/test_architecture.py（adapter 分层守卫）、docs/reqs/opencode-agora.md（本条）。
 **验收**：python3 -m pytest tests/test_v3_v2_adapter.py -q 全绿（37 passed＋8 subtests；base 无此文件应红）；python3 -m pytest tests/test_architecture.py -q 全绿；全量 python3 -m pytest tests/ -q 不回归。
+**实绩**：新增合计约 930 行（预算 1000 内：adapter 336＋tests 502＋架构守卫 3＋台账；工具轮次约 36/40）。
+**评审环 R1**（OCR 对 d45898f，1 finding 当轮修）：low＝doctor.on_disk 缺省 None 却被无条件调用（装配漏注即 TypeError 中途炸）——改必注关键字无缺省（漏注调用点快败），补 test_on_disk_required_fail_fast 锚；OCR 复核确认 task_create spec 变更面/error message 键/domain 属性面/event detail 摊平语义四处均非缺陷。
