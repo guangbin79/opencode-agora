@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS delivery_receipts(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT, email_status TEXT, lease_until_ms INTEGER, updated_ms INTEGER);
+CREATE INDEX IF NOT EXISTS idx_receipts_status
+  ON delivery_receipts(status, message_id);
 CREATE TABLE IF NOT EXISTS mail_cursors(
   sid TEXT PRIMARY KEY, last_read_ms INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS events(
@@ -559,6 +561,19 @@ class Storage:
         finally:
             self._read_done(read)
         return DeliveryReceipt(*row) if row else None
+
+    def receipts_by_status(self, status):
+        """按投递状态扫 receipt（Req: F134 outbox 恢复面——durable inflight
+        扫描归仓库查询，SQL 不出层）。"""
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT message_id,status,attempts,last_error,email_status,"
+                "lease_until_ms,updated_ms FROM delivery_receipts "
+                "WHERE status=? ORDER BY message_id", (status,)).fetchall()
+        finally:
+            self._read_done(read)
+        return [DeliveryReceipt(*r) for r in rows]
 
     def upsert_cursor(self, sid, last_read_ms) -> MailCursor:
         self._require_uow()
