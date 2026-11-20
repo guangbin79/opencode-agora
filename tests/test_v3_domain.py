@@ -145,6 +145,12 @@ class TestTaskStateMachine(unittest.TestCase):
         t = domain.task_transition(t0, "blocked", delivery_failure=True)
         self.assertEqual(t.state, "blocked")
 
+    def test_delivery_failure_flag_rejected_off_edge(self):
+        # R4：专用旗落在非 done→blocked 边＝误用，同罪拒绝（评审环）
+        with self.assertRaises(domain.InvalidTransition):
+            domain.task_transition(task(state="running"), "done",
+                                   delivery_failure=True)
+
 
 class TestTimeSpec(unittest.TestCase):
     """断言③：epoch 毫秒 INTEGER↔v2 浮点秒往返。"""
@@ -245,6 +251,9 @@ class TestTimerApprovalMachines(unittest.TestCase):
                                           domain.ApprovalState.ORPHANED,
                                           orphan_reason="oc_restart")
         self.assertEqual(lost.orphan_reason, "oc_restart")
+        with self.assertRaises(ValueError):  # R4：终态审计不留悬空 reason
+            domain.approval_transition(approval(),
+                                       domain.ApprovalState.ORPHANED)
 
     def test_approval_terminal_no_exit(self):
         # 终态无出边（不可 resolving 等）；sibling 记档自 pending 直接落终态

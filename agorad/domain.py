@@ -313,7 +313,8 @@ def task_transition(task: Task, to: str, *, delivery_failure: bool = False,
     """
     legal = TASK_LEGAL.get(task.state, frozenset())
     if (to not in legal
-            or (task.state == "done" and to == "blocked" and not delivery_failure)):
+            or (task.state == "done" and to == "blocked" and not delivery_failure)
+            or (delivery_failure and (task.state, to) != ("done", "blocked"))):
         raise InvalidTransition(task.id, task.state, to, legal)
     fields: dict = {"state": to, "updated_ms": _now(now_ms)}
     if to == "dispatched":
@@ -354,6 +355,11 @@ def approval_transition(approval: Approval, to: ApprovalState, *,
     if to not in legal:
         raise InvalidTransition(approval.id, approval.state.value, to.value,
                                 {s.value for s in legal})
+    if to is ApprovalState.ORPHANED and not orphan_reason:
+        # 终态无出边——reason 缺失即永久悬空审计（R4；五类见 ApprovalState.ORPHANED）
+        raise ValueError(
+            f"{approval.id}: ORPHANED 须携带 orphan_reason"
+            "（worker_rebind/oc_restart/task_cancel/session_deleted/backend_unavailable）")
     return dataclasses.replace(
         approval, state=to,
         resolved_ms=(_now(now_ms) if to in TERMINAL_APPROVAL_STATES

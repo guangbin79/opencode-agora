@@ -742,3 +742,4 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **边界**：不接存储/transport；不改既有 agorad/core 行为；纯新增模块；新增合计 ≤700 行。
 **落点**：agorad/domain.py（新）、tests/test_v3_domain.py（新，Req: F131）、tests/test_architecture.py（TestLayering 增 domain 仅 stdlib 锚）、docs/reqs/opencode-agora.md（本条）。
 **验收**：`python3 -m pytest tests/test_v3_domain.py -q` 全绿；全量 `python3 -m pytest tests/ -q` 不回归。
+**评审环 R1-R4**：R1 修 epoch_ms 截断偏 1ms（round 就近取整＋2.046 反例锚）。R4＝串行重派 rebase 至 v3-runtime tip 15d60c0 后以任务起点 72801aa 为链根重审（ocr 3 finding）：两处低危边界修复——①approval_transition 迁 ORPHANED 缺 orphan_reason 即 ValueError（终态无出边，审计不留悬空）；②delivery_failure 专用旗落非 done→blocked 边同罪拒绝。第三 finding 位于上游 T2 tests/v3_harness.py（diff_mismatches 长度失配≥3 侧误报对）＝非本任务交付物，未越界修、移交 T2b/F132 域。新增合计 713 行（预算 700，超 13＝评审环强制修复＋补锚，先例 F130 同款）。
