@@ -29,7 +29,7 @@ from agorad.domain import (Approval, ApprovalState, Artifact, BaseProbe,
                            GateState, MailCursor, Message, Task, Timer,
                            TimerState, VerifySpec, epoch_ms)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # v4＝task_delivery.conflict_files_json（Req: F137）；v3＝14 表基线
 BUSY_TIMEOUT_MS = 5000
 
 # 设计 §4 表清单（枚举权威，14 名；任务页计数「15」系笔误）
@@ -230,9 +230,16 @@ class Storage:
             conn.execute("PRAGMA synchronous=FULL")
             if version < SCHEMA_VERSION:  # 仅初始化/补齐才拿写锁（重开不写）
                 conn.executescript(DDL)
+                # v3→v4（Req: F137）：CREATE IF NOT EXISTS 不改既有表——旧 v3
+                # 库补列（评审环 R1 B1：无此迁移则旧库首读写即 no such column）
+                cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(task_delivery)")}
+                if "conflict_files_json" not in cols:
+                    conn.execute("ALTER TABLE task_delivery "
+                                 "ADD COLUMN conflict_files_json TEXT")
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations VALUES(?,?,?)",
-                    (SCHEMA_VERSION, "v3-baseline", epoch_ms(time.time())))
+                    (SCHEMA_VERSION, "v4-conflict-files", epoch_ms(time.time())))
                 conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         except BaseException:
             conn.close()

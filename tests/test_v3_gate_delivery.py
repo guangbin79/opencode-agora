@@ -558,6 +558,35 @@ class TestPhantomGuard(_Base):  # 断言5
         self.assertTrue(any("无新增提交" in self.text(m)
                             for m in self.messages(WORKER)))
 
+    def test_g2_probe_sick_is_gate_crash_not_quality(self):
+        # 探针病如实上抛走门内异常面 reopened（非质量败不冤 worker 计连败）
+        tid = self.seed("ag-g4")
+        self.green_script()
+        self.set_anchor(tid)
+        orig_contains = self.gitx.contains
+
+        def sick_contains(repo, commit, branch=None):
+            if commit == C and branch == BRANCH:
+                raise RuntimeError("git sick")
+            return orig_contains(repo, commit, branch)
+        self.gitx.contains = sick_contains
+        self.assertEqual(self.gate.run(tid), "reopened")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.fail_streak, t.delivery.status),
+                         ("reopened", 0, "pending"))
+        self.assertNotIn("phantom_merge_blocked", self.events(tid))
+
+    def test_external_landed_locally_still_hands_off(self):
+        # external 权威在外部派发方——本地支已含 commit 也不走 landed 直收
+        tid = self.seed("ag-g5", delivery="external")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.contained.add((C, BRANCH))  # 本地支已含（如外部已推回）
+        self.assertEqual(self.gate.run(tid), "awaiting_external")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status), ("done",
+                                                        "awaiting_external"))
+
     def test_crash_after_advance_settles_exactly_once(self):
         tid = self.seed("ag-g3")
         self.green_script()
@@ -569,13 +598,18 @@ class TestPhantomGuard(_Base):  # 断言5
         self.assertEqual(len(self.advance_args()), 1)
         self.injector.disarm("publish")
         # 崩溃残留：目标支已含落账 commit——重受理由 vacuous 放行（prev==C），
-        # 重排后 landed 探针直收口（不重验、不重复推进）
+        # 重排后 landed 探针经 _finish_delivered 直收口（投影一并落账——
+        # 基类 _land 不写投影，假 pending 残值不得泄漏）
         self.tasksvc.transition(tid, "running", actor=WORKER)
         self.set_anchor(tid, head=C)
         self.assertEqual(self.gate.accept_done(tid, WORKER, C), "accepted")
         self.runner.script = []  # landed 直收：零重验
         self.assertEqual(self.gate.run(tid), "merged")
-        self.assertEqual(self.storage.get_task(tid).state, "closed")
+        t = self.storage.get_task(tid)
+        self.assertEqual(t.state, "closed")
+        d = t.delivery
+        self.assertEqual((d.status, d.local_status, d.commit),
+                         ("delivered", "synced", C))  # 投影终态一致
         self.assertEqual(len(self.advance_args()), 1)  # 绝不重复推进
 
 
@@ -1005,6 +1039,63 @@ class TestConflictFilesRoundtrip(_Base):  # 断言10：投影残值持久化
                             attempt=1, conflict_files=["a.py", "b.py"]))
         d = self.storage.get_task(tid).delivery
         self.assertEqual(d.conflict_files, ["a.py", "b.py"])
+
+
+class TestSchemaUpgrade(unittest.TestCase):  # 评审环 R1 B1：v3→v4 补列迁移
+    def test_old_v3_db_upgrades_in_place(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "agora.db"
+            raw = sqlite3.connect(db)  # 旧 v3 库形状：task_delivery 无新列
+            raw.execute(
+                "CREATE TABLE task_delivery(task_id TEXT PRIMARY KEY,"
+                " mode TEXT, status TEXT, commit_sha TEXT, base TEXT,"
+                " target_branch TEXT, attempt INTEGER, local_status TEXT,"
+                " error TEXT)")
+            raw.execute("PRAGMA user_version=3")
+            raw.commit()
+            raw.close()
+            from agorad.storage import Storage
+            st = Storage(db)  # 迁移：ALTER 补列＋版本推进
+            self.addCleanup(st.close)
+            cols = {r[1] for r in st.open_reader().execute(
+                "PRAGMA table_info(task_delivery)")}
+            self.assertIn("conflict_files_json", cols)
+            self.assertEqual(st.open_reader().execute(
+                "PRAGMA user_version").fetchone()[0], 4)
+            with st.uow():
+                st.upsert_task(domain.Task(
+                    id="ag-u1", state="done",
+                    delivery=DeliveryState(mode="managed",
+                                           target_branch="b",
+                                           conflict_files=["x.py"])))
+            self.assertEqual(
+                st.get_task("ag-u1").delivery.conflict_files, ["x.py"])
+
+
+class TestAccessStatusRecords(unittest.TestCase):  # 评审环 R1 C1：取数面真件
+    def test_records_shape_on_real_repo(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from agorad.access.gitx import Gitx
+        with tempfile.TemporaryDirectory() as d:
+            def g(*a):
+                subprocess.run(["git", *a], cwd=d, check=True,
+                               capture_output=True)
+            g("init", "-q")
+            g("config", "user.email", "t@t")
+            g("config", "user.name", "t")
+            (Path(d) / "f.txt").write_text("x", encoding="utf-8")
+            g("add", "-A")
+            g("commit", "-qm", "init")
+            (Path(d) / ".cache").mkdir()
+            (Path(d) / ".cache" / "x.bin").write_bytes(b"1")
+            (Path(d) / "a.py").write_text("y", encoding="utf-8")
+            self.assertEqual(sorted(Gitx().status_records(d)),
+                             ["?? .cache/", "?? a.py"])
 
 
 if __name__ == "__main__":
