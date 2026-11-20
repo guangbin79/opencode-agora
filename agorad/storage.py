@@ -126,12 +126,30 @@ CREATE TABLE IF NOT EXISTS credential_lineage(
   PRIMARY KEY(sid, position));
 """
 
-# UoW 守卫面（§4：禁网络/子进程/文件遍历）——进入写事务即替换、退出恢复。
-# in-process 纪律：uow 前先 from socket import socket 的本地名不在拦截面。
+# UoW 守卫面（§4：禁网络/子进程/文件遍历）——模块级共享包装（首装存真
+# 原件、引用计数归零恢复；跨实例重叠不叠层防闭包泄漏——终闸 R2 F1），
+# 只拦正身处任一 uow 的线程；uow 前先 from socket import socket 不在拦截面。
 _BLOCKED = (
     (socket, ("socket", "create_connection")),
     (subprocess, ("Popen", "run", "call", "check_output", "check_call")),
     (os, ("system", "popen", "walk")))
+
+
+_GUARD_LOCK = threading.Lock()
+_GUARD_REFS = 0  # 活跃 uow 计数（跨 Storage 实例共享）
+_GUARD_OWNERS = {}  # 线程 ident→持锁计数：正身处写事务的线程集合
+_GUARD_SAVED = []  # [(mod, name, original)]——首装保存的真原件
+
+
+def _make_guard(original, name):
+    def _violation(*args, **kwargs):
+        with _GUARD_LOCK:
+            guarded = threading.get_ident() in _GUARD_OWNERS
+        if not guarded:
+            return original(*args, **kwargs)  # 事务外线程放行原实现
+        raise UnitOfWorkViolation(
+            f"UoW 写事务内禁 {name}（设计 §4：无网络/子进程/文件遍历）")
+    return _violation
 
 
 class StorageError(Exception):
@@ -148,15 +166,6 @@ class NoActiveUnitOfWork(StorageError):
 
 class UnitOfWorkViolation(StorageError):
     """写事务内危险调用（网络/子进程/文件遍历）被守卫拦截。"""
-
-
-def _blocked(name, owner_ident, original):
-    def _violation(*args, **kwargs):
-        if threading.get_ident() != owner_ident:
-            return original(*args, **kwargs)  # 非持锁线程放行原实现（T7 并发面）
-        raise UnitOfWorkViolation(
-            f"UoW 写事务内禁 {name}（设计 §4：无网络/子进程/文件遍历）")
-    return _violation
 
 
 def _json(value):
@@ -185,8 +194,12 @@ def _connect(path, busy_timeout_ms):
     # 归服务层（T7+ 装配）；读者连接各自独立。
     conn = sqlite3.connect(str(path), timeout=busy_timeout_ms / 1000,
                            isolation_level=None, check_same_thread=False)
-    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -198,26 +211,29 @@ class Storage:
         self.path = os.fspath(db_path)
         self._busy_timeout_ms = busy_timeout_ms
         self._injector = injector  # tests.v3_harness.FaultInjector（failpoint uow）
-        self._saved = []
         self._depth = 0
+        self._owner_ident = None
         conn = sqlite3.connect(self.path, timeout=busy_timeout_ms / 1000,
                                isolation_level=None, check_same_thread=False)
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
+        try:  # 任一步失败先关连接再抛（防 fd 泄漏——终闸 R2 F3）
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise SchemaVersionError(
+                    f"{self.path}: user_version={version} 高于已知 "
+                    f"{SCHEMA_VERSION}，拒开不静默（设计 §4）")
+            conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            if version < SCHEMA_VERSION:  # 仅初始化/补齐才拿写锁（重开不写）
+                conn.executescript(DDL)
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations VALUES(?,?,?)",
+                    (SCHEMA_VERSION, "v3-baseline", epoch_ms(time.time())))
+                conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        except BaseException:
             conn.close()
-            raise SchemaVersionError(
-                f"{self.path}: user_version={version} 高于已知 "
-                f"{SCHEMA_VERSION}，拒开不静默（设计 §4）")
-        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=FULL")
-        if version < SCHEMA_VERSION:  # 仅初始化/补齐时才拿写锁（重开不写）
-            conn.executescript(DDL)
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations VALUES(?,?,?)",
-                (SCHEMA_VERSION, "v3-baseline", epoch_ms(time.time())))
-            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            raise
         self._conn = conn
         for suffix in ("", "-wal", "-shm"):
             with contextlib.suppress(OSError):
@@ -232,6 +248,7 @@ class Storage:
         # 先 BEGIN 再装守卫：BEGIN 失败（锁冲突）不得留下已替换的模块入口
         self._conn.execute("BEGIN IMMEDIATE")
         self._depth = 1
+        self._owner_ident = threading.get_ident()
         try:
             self._install_guard()
             self._fire("uow", "before")
@@ -244,18 +261,33 @@ class Storage:
             raise
         finally:
             self._depth = 0
+            self._owner_ident = None
             self._restore_guard()
 
     def _install_guard(self):
-        owner = threading.get_ident()  # 只拦持锁线程；并发读者/transport 线程不误伤
-        for mod, names in _BLOCKED:
-            for name in names:
-                self._saved.append((mod, name, getattr(mod, name)))
-                setattr(mod, name, _blocked(name, owner, getattr(mod, name)))
+        global _GUARD_REFS
+        with _GUARD_LOCK:
+            me = threading.get_ident()
+            _GUARD_OWNERS[me] = _GUARD_OWNERS.get(me, 0) + 1
+            _GUARD_REFS += 1
+            if _GUARD_REFS == 1:  # 首装存真原件；跨实例共享包装不叠层
+                for mod, names in _BLOCKED:
+                    for name in names:
+                        original = getattr(mod, name)
+                        _GUARD_SAVED.append((mod, name, original))
+                        setattr(mod, name, _make_guard(original, name))
 
     def _restore_guard(self):
-        while self._saved:
-            setattr(*self._saved.pop())  # (mod, name, original)
+        global _GUARD_REFS
+        with _GUARD_LOCK:
+            me = threading.get_ident()
+            _GUARD_OWNERS[me] -= 1
+            if not _GUARD_OWNERS[me]:
+                del _GUARD_OWNERS[me]
+            _GUARD_REFS -= 1
+            if _GUARD_REFS == 0:
+                while _GUARD_SAVED:
+                    setattr(*_GUARD_SAVED.pop())
 
     def _fire(self, name, phase):
         if self._injector is not None:
@@ -268,6 +300,19 @@ class Storage:
     def open_reader(self):
         """读者独立连接：WAL 下未提交写不可见，commit 后立见（断言6）。"""
         return _connect(self.path, self._busy_timeout_ms)
+
+    def _read_conn(self):
+        """读路由（终闸 R2 F2/N1）：持锁线程读自身事务视图（read-decide-
+        write 同事务）；其余现开短命读者——WAL 提交快照，读完即关
+        （_read_done），无任何跨线程滞留。"""
+        if (self._depth and self._owner_ident is not None
+                and threading.get_ident() == self._owner_ident):
+            return self._conn
+        return self.open_reader()
+
+    def _read_done(self, conn):
+        if conn is not self._conn:  # 短命读者即关；写连接不在此关
+            conn.close()
 
     def close(self):
         self._conn.close()
@@ -318,21 +363,26 @@ class Storage:
         return t
 
     def get_task(self, tid):
-        row = self._conn.execute(
-            f"SELECT {_TASK_COLS} FROM tasks WHERE id=?", (tid,)).fetchone()
-        if row is None:
-            return None
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                f"SELECT {_TASK_COLS} FROM tasks WHERE id=?", (tid,)).fetchone()
+            if row is None:
+                return None
 
-        def one(sql):
-            return self._conn.execute(sql, (tid,)).fetchone()
+            def one(sql):
+                return read.execute(sql, (tid,)).fetchone()
 
-        verify = one("SELECT cmd,state,registered_by,registered_at_ms,timeout_s,"
-                     "timeout_source FROM task_verify WHERE task_id=?")
-        delivery = one("SELECT mode,status,commit_sha,base,target_branch,attempt,"
-                       "local_status,error FROM task_delivery WHERE task_id=?")
-        g = one("SELECT in_gate,gate_env,pending_cancel,pending_cancel_reason,"
-                "gate_artifact_json,review_cache_json,review_fail_streak,"
-                "probe_json FROM task_gate WHERE task_id=?")
+            verify = one("SELECT cmd,state,registered_by,registered_at_ms,"
+                         "timeout_s,timeout_source FROM task_verify WHERE task_id=?")
+            delivery = one("SELECT mode,status,commit_sha,base,target_branch,"
+                           "attempt,local_status,error FROM task_delivery "
+                           "WHERE task_id=?")
+            g = one("SELECT in_gate,gate_env,pending_cancel,"
+                    "pending_cancel_reason,gate_artifact_json,review_cache_json,"
+                    "review_fail_streak,probe_json FROM task_gate WHERE task_id=?")
+        finally:
+            self._read_done(read)  # 先关再解析：json 异常也不滞留连接（N2）
         g = g or (None,) * 8
         scalars = dict(zip(
             ("id", "state", "title", "goal", "req_id", "model", "quick",
@@ -374,9 +424,13 @@ class Storage:
         return tm  # 孤儿 task（无主行）→sqlite3.IntegrityError（FK 拒）
 
     def get_timer(self, tid):
-        row = self._conn.execute(
-            "SELECT id,task_id,target_role,due_ms,status,created_ms,fired_ms "
-            "FROM timers WHERE id=?", (tid,)).fetchone()
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,fired_ms "
+                "FROM timers WHERE id=?", (tid,)).fetchone()
+        finally:
+            self._read_done(read)
         if row is None:
             return None
         return Timer(id=row[0], task_id=row[1], target_role=row[2],
@@ -399,10 +453,14 @@ class Storage:
         return ap
 
     def get_approval(self, aid):
-        row = self._conn.execute(
-            "SELECT id,task_id,session_id,backend,status,question,metadata_json,"
-            "native_request_id,attempted_decision,deadline_ms,orphan_reason,"
-            "created_ms,resolved_ms FROM approvals WHERE id=?", (aid,)).fetchone()
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT id,task_id,session_id,backend,status,question,metadata_json,"
+                "native_request_id,attempted_decision,deadline_ms,orphan_reason,"
+                "created_ms,resolved_ms FROM approvals WHERE id=?", (aid,)).fetchone()
+        finally:
+            self._read_done(read)
         if row is None:
             return None
         return Approval(
@@ -422,8 +480,8 @@ class Storage:
                        dedup_key=None, timer_id=None, replay_of=None):
         """幂等：dedup_key/timer_id 撞既有行→回读既有行不新建（断言5）。"""
         self._require_uow()
-        blob = bytes(body) if isinstance(body, (bytes, bytearray)) \
-            else str(body).encode()
+        blob = bytes(body) if isinstance(
+            body, (bytes, bytearray, memoryview)) else str(body).encode()
         try:
             cur = self._conn.execute(
                 "INSERT INTO messages(ts_ms,task_id,kind,from_sid,to_sid,body,"
@@ -452,13 +510,23 @@ class Storage:
             return self._message(row)
 
     def get_message(self, mid):
-        return self._message(self._conn.execute(
-            f"SELECT {self._MSG_COLS} FROM messages WHERE id=?", (mid,)).fetchone())
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                f"SELECT {self._MSG_COLS} FROM messages WHERE id=?",
+                (mid,)).fetchone()
+        finally:
+            self._read_done(read)
+        return self._message(row)
 
     def messages_for_sid(self, sid, after_id=0):
-        rows = self._conn.execute(
-            f"SELECT {self._MSG_COLS} FROM messages WHERE to_sid=? AND id>? "
-            "ORDER BY id", (sid, after_id)).fetchall()
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                f"SELECT {self._MSG_COLS} FROM messages WHERE to_sid=? AND id>? "
+                "ORDER BY id", (sid, after_id)).fetchall()
+        finally:
+            self._read_done(read)
         return [self._message(r) for r in rows]
 
     @staticmethod
@@ -482,10 +550,14 @@ class Storage:
         return r
 
     def get_receipt(self, mid):
-        row = self._conn.execute(
-            "SELECT message_id,status,attempts,last_error,email_status,"
-            "lease_until_ms,updated_ms FROM delivery_receipts WHERE message_id=?",
-            (mid,)).fetchone()
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT message_id,status,attempts,last_error,email_status,"
+                "lease_until_ms,updated_ms FROM delivery_receipts "
+                "WHERE message_id=?", (mid,)).fetchone()
+        finally:
+            self._read_done(read)
         return DeliveryReceipt(*row) if row else None
 
     def upsert_cursor(self, sid, last_read_ms) -> MailCursor:
@@ -497,9 +569,13 @@ class Storage:
         return MailCursor(sid=sid, last_read_ms=last_read_ms)
 
     def get_cursor(self, sid):
-        row = self._conn.execute(
-            "SELECT sid,last_read_ms FROM mail_cursors WHERE sid=?",
-            (sid,)).fetchone()
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT sid,last_read_ms FROM mail_cursors WHERE sid=?",
+                (sid,)).fetchone()
+        finally:
+            self._read_done(read)
         return MailCursor(*row) if row else None
 
     # ---- events / artifacts（断言4；events 全局 seq 单流派号，§8）----
@@ -516,9 +592,13 @@ class Storage:
         return dataclasses.replace(ev, seq=seq)
 
     def events_for_task(self, tid):
-        rows = self._conn.execute(
-            "SELECT seq,ts_ms,actor,event,task_id,detail_json FROM events "
-            "WHERE task_id=? ORDER BY seq", (tid,)).fetchall()
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT seq,ts_ms,actor,event,task_id,detail_json FROM events "
+                "WHERE task_id=? ORDER BY seq", (tid,)).fetchall()
+        finally:
+            self._read_done(read)
         return [Event(seq=r[0], ts_ms=r[1], actor=r[2], event=r[3],
                              task=r[4] or "", detail=json.loads(r[5]) if r[5] else None)
                 for r in rows]
@@ -533,10 +613,14 @@ class Storage:
              a.duration_s, a.bytes, a.error, a.started_at_ms, a.ended_at_ms))
 
     def artifacts_for_task(self, tid):
-        rows = self._conn.execute(
-            "SELECT task_id,phase,path,cmd,rc,failure_kind,duration_s,bytes,"
-            "error,started_at_ms,ended_at_ms FROM artifacts WHERE task_id=? "
-            "ORDER BY id DESC", (tid,)).fetchall()
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT task_id,phase,path,cmd,rc,failure_kind,duration_s,bytes,"
+                "error,started_at_ms,ended_at_ms FROM artifacts WHERE task_id=? "
+                "ORDER BY id DESC", (tid,)).fetchall()
+        finally:
+            self._read_done(read)
         return [Artifact(*r) for r in rows]
 
     # ---- credentials＋lineage（断言4；血统补拉语义归 T7/T10）----
@@ -555,13 +639,17 @@ class Storage:
         return cred
 
     def get_credential(self, sid):
-        row = self._conn.execute(
-            "SELECT sid,token,task_id,created_ms FROM credentials WHERE sid=?",
-            (sid,)).fetchone()
-        if row is None:
-            return None
-        lineage = tuple(r[0] for r in self._conn.execute(
-            "SELECT ancestor_sid FROM credential_lineage WHERE sid=? "
-            "ORDER BY position", (sid,)))
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT sid,token,task_id,created_ms FROM credentials WHERE sid=?",
+                (sid,)).fetchone()
+            if row is None:
+                return None
+            lineage = tuple(r[0] for r in read.execute(
+                "SELECT ancestor_sid FROM credential_lineage WHERE sid=? "
+                "ORDER BY position", (sid,)))
+        finally:
+            self._read_done(read)
         return Credential(sid=row[0], token=row[1], task_id=row[2] or "",
                                  lineage=lineage, created_ms=row[3])

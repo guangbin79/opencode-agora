@@ -36,6 +36,13 @@ def mk_task(tid="ag-st01", **over):
     return domain.Task(**base)
 
 
+def _readlink(fd):
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return ""
+
+
 def composite_write(storage, tid="ag-st01"):
     """task＋message＋receipt＋event 复合写（断言2 语料）。"""
     storage.upsert_task(mk_task(tid))
@@ -130,6 +137,105 @@ class TestUowGuard(_HomeTest):  # 断言3
             thread.start()
             thread.join(10)
         self.assertEqual(results, [0])  # 持锁线程外放行原实现
+
+    def test_guard_no_cross_instance_leak(self):  # 终闸 R2 F1 锚
+        home2 = harness.TempAgoraHome()
+        self.addCleanup(home2.cleanup)
+        other = make_storage(home2)
+        self.addCleanup(other.close)
+        entered, release = threading.Event(), threading.Event()
+
+        def hold_other_uow():
+            with other.uow():
+                entered.set()
+                self.assertTrue(release.wait(10))
+
+        thread = threading.Thread(target=hold_other_uow)
+        thread.start()
+        self.assertTrue(entered.wait(10))
+        with self.storage.uow():  # 两实例守卫重叠期：共享包装不叠层
+            pass
+        release.set()
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(socket.socket, type)  # 无 blocked 闭包泄漏
+        self.assertEqual(subprocess.run(["true"]).returncode, 0)
+
+    def test_reads_outside_owner_see_committed_only(self):  # 终闸 R2 F2 锚
+        seen = {}
+
+        def other_thread_reads():
+            seen["task"] = self.storage.get_task("ag-st01")
+
+        with self.storage.uow():
+            self.storage.upsert_task(mk_task())
+            self.assertIsNotNone(  # 持锁线程读自身事务视图（read-decide-write）
+                self.storage.get_task("ag-st01"))
+            reader = threading.Thread(target=other_thread_reads)
+            reader.start()
+            reader.join(10)
+            self.assertIsNone(seen["task"])  # 他线程只见已提交快照
+        self.assertIsNotNone(self.storage.get_task("ag-st01"))  # 提交后立见
+
+    def test_shortlived_reader_threads_do_not_accumulate(self):  # R2 N1 锚
+        with self.storage.uow():
+            self.storage.upsert_task(mk_task())
+        def db_fds():
+            return sum(1 for f in os.listdir("/proc/self/fd")
+                       if "agora-v3" in _readlink(f))
+
+        def run_readers(n):
+            threads = [threading.Thread(
+                target=lambda: self.storage.get_task("ag-st01"))
+                for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+
+        # 短命读者读完即关：fd 面收敛到稳定水位（平台 WAL 索引 fd 池自稳、
+        # 裸 sqlite3 同款行为），连续两批零增长＝无界累积已除（N1）
+        previous = db_fds()
+        stabilized = False
+        for _ in range(8):
+            run_readers(30)
+            current = db_fds()
+            if current == previous:
+                stabilized = True
+                break
+            previous = current
+        self.assertTrue(stabilized)
+
+    def test_failing_reads_do_not_leak_readers(self):  # R2 N2 锚
+        with self.storage.uow():
+            self.storage.upsert_task(mk_task())
+        writer = self.storage.open_reader()  # 外部面写坏 TEXT 行（复现 N2 触发）
+        writer.execute("UPDATE tasks SET title=CAST(X'ff8080' AS TEXT) "
+                       "WHERE id='ag-st01'")
+        writer.close()
+
+        def db_fds():
+            return sum(1 for f in os.listdir("/proc/self/fd")
+                       if "agora-v3" in _readlink(f))
+
+        baseline = db_fds()
+        for _ in range(20):
+            with self.assertRaises(sqlite3.Error):
+                self.storage.get_task("ag-st01")
+        self.assertEqual(db_fds(), baseline)  # 异常路径读者即关不滞留
+
+    def test_init_failure_closes_connection(self):  # 终闸 R2 F3 锚
+        home2 = harness.TempAgoraHome()
+        self.addCleanup(home2.cleanup)
+        db = home2.state / "agora.db"
+        db.write_text("", encoding="utf-8")  # 空文件→初始化路径必触写
+        os.chmod(db, 0o400)  # 只读：connect 成功、后续写 pragma/DDL 失败
+        self.addCleanup(os.chmod, db, 0o600)
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(3):
+            with self.assertRaises(sqlite3.Error):
+                make_storage(home2)
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)  # 零 fd 泄漏
 
     def test_writes_require_uow(self):
         with self.assertRaises(NoActiveUnitOfWork):
@@ -411,6 +517,15 @@ class TestSchemaVersionGuard(unittest.TestCase):  # 断言9
 
 
 class TestBodyBlob(_HomeTest):  # 断言10
+    def test_memoryview_body_roundtrip(self):  # 终闸 R2 F4 锚
+        raw = b"\xffmv-\x80"
+        with self.storage.uow():
+            self.storage.upsert_task(mk_task())
+            msg = self.storage.insert_message(
+                ts_ms=1, task_id="ag-st01", kind="peer", from_sid="w",
+                to_sid="d", body=memoryview(raw))
+        self.assertEqual(self.storage.get_message(msg.id).body, raw)
+
     def test_non_utf8_roundtrip(self):
         raw = b"\xff\xfe\x00bin\x80ary\xc3"
         with self.storage.uow():
