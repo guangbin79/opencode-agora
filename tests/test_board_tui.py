@@ -974,6 +974,60 @@ class _DetailFailBoard(_CountingBoard):
         self.wfile.write(data)
 
 
+class _FlipDetailBoard(http.server.BaseHTTPRequestHandler):
+    """F127 桩：明细首访 running、再访 done——进页/r 均取新帧的时序取证。"""
+    calls = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        _FlipDetailBoard.calls.append(body)
+        if "task" in body:
+            first = sum(1 for c in _FlipDetailBoard.calls
+                        if "task" in c) == 1
+            out = {"task": {**trow(), "state": "running" if first else "done"},
+                   "events": [], "done_body": None}
+        else:
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow()}, "events": []}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class _DetailDieBoard(http.server.BaseHTTPRequestHandler):
+    """F127 桩：明细首访 200、再访恒 500——进页首取失败必落降级提示。"""
+    calls = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        _DetailDieBoard.calls.append(body)
+        if "task" in body:
+            if sum(1 for c in _DetailDieBoard.calls if "task" in c) > 1:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            out = {"task": trow(), "events": [], "done_body": None}
+        else:
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow()}, "events": []}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
 class _FakeStdscr:
     """run() 无 curses 夹具：录制 addnstr 行，getch 按脚本吐键。"""
 
@@ -1049,7 +1103,7 @@ class TestRunErrSemantics(unittest.TestCase):
 
 
 class TestFullViewLazyDetail(unittest.TestCase):
-    """F48 N+1 根治：load_board 单调用，明细懒取＋缓存（stub 计数取证）。"""
+    """F48 N+1 根治：load_board 单调用；明细进页取新（stub 计数取证）。"""
 
     def setUp(self):
         # 无头环境跑 run()：桩掉 curses 面（同 TestRunErrSemantics）
@@ -1077,12 +1131,26 @@ class TestFullViewLazyDetail(unittest.TestCase):
         self.assertEqual(snap["tasks"]["t1"]["state"], "running")
         self.assertEqual([e["kind"] for e in events], ["quality"])
 
-    def test_detail_lazy_fetched_once_then_cached(self):  # Req: F48
+    def test_detail_refetched_on_reentry(self):  # Req: F127
         _CountingBoard.calls = []
         keys = [ord("\r"), ord("h"), ord("\r"), ord("q")]  # 进明细→回→再进同任务→退
         run(_FakeStdscr(keys), self._serve(_CountingBoard), "tok")
         self.assertEqual(_CountingBoard.calls,
-                         [{"view": "full"}, {"task": "t1"}])  # 明细恰 1 次，二次命中缓存
+                         [{"view": "full"}, {"task": "t1"}, {"task": "t1"}])  # 再进页必取新帧
+
+    def test_r_on_detail_page_refetches_state(self):  # Req: F127
+        _FlipDetailBoard.calls = []
+        scr = _FakeStdscr([ord("\r"), ord("r"), ord("q")])  # 进明细→r 刷→退
+        run(scr, self._serve(_FlipDetailBoard), "tok")
+        self.assertTrue(any("state: done" in s for _, s in scr.lines))
+        self.assertEqual([c for c in _FlipDetailBoard.calls if "task" in c],
+                         [{"task": "t1"}, {"task": "t1"}])
+
+    def test_detail_reentry_fetch_fail_degrades(self):  # Req: F127
+        _DetailDieBoard.calls = []
+        scr = _FakeStdscr([ord("\r"), ord("\r"), ord("q")])  # 进明细→页内再进同任务（再访 500）→退
+        run(scr, self._serve(_DetailDieBoard), "tok")
+        self.assertTrue(any("detail unavailable" in s for _, s in scr.lines))
 
     def test_detail_failure_degrades_to_hint(self):  # Req: F48
         _DetailFailBoard.calls = []

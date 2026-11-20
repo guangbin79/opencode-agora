@@ -665,7 +665,7 @@ def run(stdscr, base, token):
          "input": None, "buf": "", "filter": "", "expanded": set(),
          "bucket": None, "proj": False, "gexpanded": set(), "prompt": False,
          "prompt_task": None, "tids": set(), "groups": set(), "titles": {}}
-    details, snap, events = {}, None, None
+    snap, events, page_tid = None, None, None
     status, err, page = "loading…", None, []
 
     def poll():
@@ -693,6 +693,15 @@ def run(stdscr, base, token):
         _skip_bucket(m, down=True)
         status = f"{len(m['rows'])} rows  poll {interval:g}s"
 
+    def _pull_detail():
+        """F127 明细取新帧：失败保旧页，空页降级提示（doctor/tail 同款）。"""
+        nonlocal page
+        try:
+            page = detail_page(_call(base, token, "/board", {"task": page_tid}))
+        except Exception as e:
+            if not page:
+                page = [f"detail unavailable: {e}"]
+
     poll()                                         # 首帧先拉，免空板白等一个周期
     while True:
         if m["view"] == "board":
@@ -702,6 +711,8 @@ def run(stdscr, base, token):
         key = stdscr.getch()
         if key == -1:
             poll()                                 # 到点轮询刷一帧
+            if m["view"] == "detail":
+                _pull_detail()                     # F127：明细页与看板同帧率活刷
             continue
         k = curses.keyname(key).decode() if key >= 256 else chr(key)
         a = handle_key(m, k)
@@ -721,6 +732,8 @@ def run(stdscr, base, token):
             status = msg
         elif a.op == "refresh":
             poll()                                 # r 手动刷：立即拉一帧
+            if m["view"] == "detail":
+                _pull_detail()                     # F127：明细页同刷
         elif a.op in ("apply", "fold"):        # 过滤回车/z 折叠：用缓存帧即时重建，零 HTTP
             if snap is not None:
                 try:
@@ -728,14 +741,9 @@ def run(stdscr, base, token):
                 except Exception as e:             # 与 poll 同口径：坏帧保旧行＋报因
                     err = str(e)
         elif a.op == "detail":
-            if a.task not in details:          # F48 懒取：进页才单次取数＋缓存
-                try:
-                    details[a.task] = _call(base, token, "/board",
-                                            {"task": a.task})
-                except Exception as e:         # doctor/tail 同款降级提示行
-                    page = [f"detail unavailable: {e}"]
-            if a.task in details:
-                page = detail_page(details[a.task])
+            page = []                          # F127：换页先清——首取失败必落降级提示
+            page_tid = a.task                  # F127：进页必取新帧，F48 缓存退役
+            _pull_detail()
         elif a.op == "doctor":
             try:
                 page = doctor_page(_call(base, token, "/doctor", {}))
