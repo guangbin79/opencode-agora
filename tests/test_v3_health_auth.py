@@ -113,6 +113,8 @@ class RecoverStub:
 
     def reinject(self, tid, expect_wsid=None):
         self.calls.append((tid, expect_wsid))
+        if isinstance(self.result, BaseException):
+            raise self.result
         return self.result
 
 
@@ -252,6 +254,67 @@ class TestAuthBasics(_Base):  # 断言1
         with self.assertRaises(ContractError):
             self.auth.issue("bad/sid", "dispatcher")
 
+    def test_issue_rejects_root_sid_for_non_root_and_traversal(self):
+        with self.assertRaises(ContractError):  # R1 C3：非 root 角色签 root sid＝提权
+            self.auth.issue("root", "dispatcher")
+        tid = self.seed("ag-tv", state="running", worker_sid=WORKER)
+        with self.assertRaises(ContractError):  # R1 C4：worker task_id 路径穿越
+            self.auth.issue(WORKER, "worker", task_id="../evil")
+        with self.assertRaises(ContractError):  # 控制字符 sid（防伪造服务行）
+            self.auth.issue("ses-bad\nx", "dispatcher")
+
+    def test_rebind_root_target_and_same_sid_guards(self):
+        # R1 C1/C2：rebind 新 sid＝root 拒（角色按 sid 派生＝提权面）
+        self.put_cred(WORKER, "tok-w", task_id="ag-t1")
+        self.assertIsNone(self.auth.rebind(WORKER, "root"))
+        self.assertEqual(self.auth.identify("tok-w"),
+                         (WORKER, "worker"))  # 原Praça面不动
+        # R1 B3：同 sid rebind 不自灭牌
+        self.assertEqual(self.auth.rebind(WORKER, WORKER), "tok-w")
+        self.assertEqual(self.auth.identify("tok-w"), (WORKER, "worker"))
+        # R1 C2：bind_worker 自报 caller=root 拒绑
+        tok_root, _ = self.auth.issue(ROOT, "root")
+        self.seed("ag-bw", state="running", worker_sid=WORKER)
+        self.assertEqual(self.auth.bind_worker(WORKER, "root"), WORKER)
+        self.assertEqual(self.storage.get_task("ag-bw").worker_sid, WORKER)
+        self.assertEqual(self.auth.identify(tok_root), ("root", "root"))
+
+    def test_bind_worker_credential_occupancy_recheck(self):
+        # R1 B4：caller 已持牌（无任务行的 fresh dispatcher）——事务内拒绑
+        self.seed("ag-oc", state="running", worker_sid="ses-old")
+        self.put_cred("ses-held", "tok-h")
+        self.assertEqual(self.auth.bind_worker("ses-old", "ses-held"),
+                         "ses-old")
+        self.assertEqual(self.storage.get_task("ag-oc").worker_sid, "ses-old")
+        self.assertEqual(self.storage.get_credential("ses-held").token,
+                         "tok-h")  # 占位者牌不被覆写
+
+    def test_rotate_root_crash_window_sweeps_back_to_db(self):
+        # R1 B1/C8：文件先落、DB 崩 → 孤儿新文件；sweep 按 DB 权威对账回写
+        old, _ = self.auth.issue(ROOT, "root")
+        self.injector.arm("uow", "before")
+        with self.assertRaises(Exception):
+            self.auth.rotate_root()  # 崩在 DB 提交前（文件已写新牌）
+        self.injector.disarm("uow")
+        self.assertEqual(self.auth.identify(old), ("root", "root"))  # DB 旧牌续用
+        AuthService(self.storage, home=str(self.home.path),
+                    clock=self.clock, oc=self.oc).sweep()
+        import json as _json
+        back = _json.loads((self.home.agora / "root.token")
+                           .read_text(encoding="utf-8"))["token"]
+        cred = self.storage.get_credential("root")
+        self.assertEqual(back, cred.token)  # 文件回写 DB 权威牌
+        self.assertEqual(self.auth.identify(back), ("root", "root"))
+
+    def test_sweep_bad_json_orphan_removed_without_crash(self):
+        # R1 B5/C10：合法非对象 JSON（list/str）不再炸整个清扫，按孤儿清
+        (self.home.credentials / "ag-junk.token").write_text(
+            "[1, 2]", encoding="utf-8")
+        swept = AuthService(self.storage, home=str(self.home.path),
+                            clock=self.clock, oc=self.oc).sweep()
+        self.assertEqual(swept, 1)
+        self.assertFalse((self.home.credentials / "ag-junk.token").exists())
+
     def test_revoke_and_revoke_session(self):
         token, _ = self.auth.issue(WORKER, "worker", task_id=self.seed("ag-t"))
         self.assertTrue(self.auth.revoke(token))
@@ -354,16 +417,32 @@ class TestBindWorker(_Base):  # 断言3
 
 class TestBindDispatcher(_Base):  # 断言4
     def test_dead_dispatcher_healed(self):
+        old, heal = "ses-d-old", "ses-d-new"
+        self.seed("ag-a", state="running", dispatcher_sid=old, root_sid=old)
+        self.put_cred(old, "tok-d")
+        self.oc.sessions[old] = None  # 死号
+        self.auth.bind_dispatcher("root", heal,
+                                  self.storage.get_task("ag-a"))
+        t = self.storage.get_task("ag-a")
+        self.assertEqual(t.dispatcher_sid, heal)
+        self.assertEqual(self.events("ag-a"), ["dispatcher_rebind"])
+        cred = self.storage.get_credential(heal)
+        self.assertEqual((cred.token, cred.lineage), ("tok-d", (old,)))
+
+    def test_heal_target_root_sid_refused_no_clobber(self):
+        # R1 C1：治愈目标＝daemon 身份 → 拒；真 root 牌不可被改绑覆写
         old = "ses-d-old"
         self.seed("ag-a", state="running", dispatcher_sid=old, root_sid=old)
-        self.put_cred(old, "tok-d", )
-        self.oc.sessions[old] = None  # 死号
-        self.auth.bind_dispatcher("root", ROOT, self.storage.get_task("ag-a"))
-        t = self.storage.get_task("ag-a")
-        self.assertEqual(t.dispatcher_sid, ROOT)
-        self.assertEqual(self.events("ag-a"), ["dispatcher_rebind"])
-        cred = self.storage.get_credential(ROOT)
-        self.assertEqual((cred.token, cred.lineage), ("tok-d", (old,)))
+        self.put_cred(old, "tok-dead")
+        tok_root, _ = self.auth.issue(ROOT, "root")
+        self.oc.sessions[old] = None
+        self.auth.bind_dispatcher("root", "root",
+                                  self.storage.get_task("ag-a"))
+        self.assertEqual(self.storage.get_task("ag-a").dispatcher_sid, old)
+        self.assertEqual(self.auth.identify(tok_root), ("root", "root"))
+        # 死号牌原地不动（未被顶成 root 牌）；行未改绑＝下一轮可重试愈合
+        self.assertEqual(self.auth.identify("tok-dead"),
+                         ("ses-d-old", "dispatcher"))
 
     def test_alive_dispatcher_not_healed(self):
         old = "ses-d-old"
@@ -430,8 +509,10 @@ class TestRoleMatrix(_Base):  # 断言5
 
 class TestStaleScan(_Base):  # 断言6
     def stale_task(self, tid="ag-st", age=25 * MIN, **over):
-        t = self.seed(tid, state="running", worker_sid=WORKER,
-                      last_seen_ms=self.clock.ms - age, **over)
+        over.setdefault("state", "running")
+        over.setdefault("worker_sid", WORKER)
+        over.setdefault("last_seen_ms", self.clock.ms - age)
+        t = self.seed(tid, **over)
         self.oc.sessions[WORKER] = {"time": {"updated": 0, "idle": 1}}
         return t
 
@@ -470,6 +551,20 @@ class TestStaleScan(_Base):  # 断言6
         self.assertEqual(self.escalate_kinds("ag-st"), [])
         self.assertEqual(self.escalate_kinds("ag-g1"), [])
 
+    def test_gate_busy_done_queued_exempt(self):
+        # ag-b49329：他任务持门＝done 串行排队，正常态免判；门闲滞留照拍
+        self.seed("ag-holder", state="done", worker_sid="ses-wh",
+                  gate=GateState(in_gate=True))
+        self.stale_task("ag-queued", state="done", worker_sid="ses-wq")
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds("ag-queued"), [])
+        with self.storage.uow():  # 门空闲：done 滞留仍候选（无人消费＝真异常）
+            self.storage.upsert_task(dataclasses.replace(
+                self.storage.get_task("ag-holder"),
+                gate=GateState(in_gate=False)))
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds("ag-queued"), [KIND_STALLED])
+
     def test_gate_resource_waiting_exempt(self):
         # F116 gate_resource 系瞬态投影不落库（§3）——经内存 Task 直调判僵面
         tasks = {t.id: t for t in self.storage.tasks_all()}
@@ -501,6 +596,21 @@ class TestStaleScan(_Base):  # 断言6
         self.assertEqual(self.escalate_kinds(tid), [KIND_STALLED] * 2)
         self.assertIn("第 2 次升级",
                       self.bodies(DISPATCHER)[-1][1])
+
+    def test_esc_book_rebuilt_from_events_after_restart(self):
+        # R1 A4：重启退避账经事件面重建——退避窗不因重启归零提前重拍
+        tid = self.stale_task()
+        self.health.tick()
+        self.clock.advance(GAP0_MS // 2)  # 窗内重启
+        fresh = HealthService(self.storage, self.oc, self.messaging,
+                              clock=self.clock, tasks=self.tasksvc,
+                              emailer=lambda *a: True)
+        fresh.tick()  # 重建账 n=1：仍在退避窗内不拍
+        self.assertEqual(self.escalate_kinds(tid), [KIND_STALLED])
+        self.clock.advance(GAP0_MS)  # 越窗到期：第 2 次（streak 连续）
+        fresh.tick()
+        self.assertEqual(self.escalate_kinds(tid), [KIND_STALLED] * 2)
+        self.assertIn("第 2 次升级", self.bodies(DISPATCHER)[-1][1])
 
     def test_backoff_progression_and_cap(self):
         self.assertEqual(self.health._gap(1), GAP0_MS)      # 首档 1200s
@@ -635,6 +745,23 @@ class TestNudge(_Base):  # 断言9
         self.health.tick()  # 仍僵边沿内：无第二次注入
         self.assertEqual(len(self.nudges()), 1)
 
+    def test_emailer_failure_does_not_kill_tick(self):
+        # R1 B2：邮件缝持续抛异常不废整轮 tick（delivery_watch 照跑）
+        def boom(tid, body):
+            raise RuntimeError("smtp dead")
+        self.health = HealthService(
+            self.storage, self.oc, self.messaging, clock=self.clock,
+            tasks=self.tasksvc, emailer=boom, gitx=self.gitx,
+            stale_after_ms=10 ** 12)
+        self.seed("ag-x", state="done", worker_sid=WORKER,
+                  last_seen_ms=self.clock.ms,
+                  updated_ms=self.clock.ms - 31 * MIN,
+                  delivery=DeliveryState(mode="external_branch",
+                                         status="awaiting_external",
+                                         commit="c" * 40))
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds("ag-x"), [KIND_EXT_STALE])
+
     def test_nudge_without_worker(self):
         self.seed("ag-n", state="dispatched",
                   last_seen_ms=self.clock.ms - 25 * MIN)
@@ -705,6 +832,37 @@ class TestDeliveryWatch(_Base):  # 断言10
                                                commit="a" * 40))
         self.health.tick()
         self.assertEqual(self.escalate_kinds(tid), [])
+
+
+class TestDeliveryWatchOutage(_Base):  # 断言10 评审环 R1 B8 锚
+    def setUp(self):
+        super().setUp()
+        self.health = HealthService(
+            self.storage, self.oc, self.messaging, clock=self.clock,
+            tasks=self.tasksvc, emailer=self.email_fn, gitx=self.gitx,
+            stale_after_ms=10 ** 12)
+
+    def merged_task(self, tid):
+        return self.seed(tid, state="merged",
+                         updated_ms=self.clock.ms - 61 * MIN,
+                         commit="a" * 40,
+                         delivery=DeliveryState(mode="managed",
+                                                status="delivered",
+                                                commit="a" * 40))
+
+    def test_transient_outage_keeps_backoff_book(self):
+        tid = self.merged_task("ag-o")
+        self.health.tick()  # 首发 n=1
+        self.gitx.raises = True
+        self.clock.advance(GAP0_MS * 4)  # 对账不可得窗口：保账不清
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds(tid), [KIND_UNPUBLISHED])
+        self.gitx.raises = False
+        self.clock.advance(GAP0_MS * 4)  # 恢复后按重建账续退避（第 2 次）
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds(tid),
+                         [KIND_UNPUBLISHED] * 2)
+        self.assertIn("第 2 次升级", self.bodies(DISPATCHER)[-1][1])
 
 
 class TestLastSeenWindow(_Base):  # 断言11
@@ -781,6 +939,13 @@ class TestRecoverHook(_Base):  # 断言12
         h.tick()
         self.assertEqual(self.escalate_kinds("ag-r"),
                          [KIND_DISPATCHER_DEAD])
+
+    def test_reinject_hook_raising_counts_as_failure(self):
+        # R1 B2：钩异常＝失败口径（升级 reinject-fail），不废整轮 tick
+        self.dead_worker_task()
+        h = self.health_with(recover=RecoverStub(RuntimeError("boom")))
+        h.tick()
+        self.assertEqual(self.escalate_kinds("ag-r"), [KIND_REINJECT])
 
     def test_oc_unreachable_round_wholly_exempt(self):
         self.seed("ag-r", state="running", worker_sid=WORKER,
