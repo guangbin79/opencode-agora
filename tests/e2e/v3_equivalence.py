@@ -95,6 +95,7 @@ _GATE_RES_EVENTS = ("gate_resource_acquire", "gate_resource_wait",
 _V3_ONLY_EVENT_KEYS = frozenset({"kind", "message_id", "to"})  # A 类细节键
 _HEX40 = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 _HEX32 = re.compile(r"(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])")  # 32/64 位牌值
+_TS_PATH = re.compile(r"\d{8}T\d{6}")  # gate-artifacts 目录名时钟（侧各自钟）
 _RESERVED_SID = re.compile(r"[a-z]+")  # 纯字母 sid（main/root）＝通用词，禁全串替换
 _BOOT_PAT = ENVELOPE["patterns"]["boot_msg"]
 _CRED_PAT = ENVELOPE["patterns"]["cred_pointer"]
@@ -201,6 +202,7 @@ class Normalizer:
         # sandbox 根蒙版（含 home/repos/env——home 恒为 root 前缀，无需独立蒙版）
         if self.root and self.root in s:
             s = s.replace(self.root, "<SANDBOX>")
+        s = _TS_PATH.sub("<TSPATH>", s)  # artifact 目录名内嵌时钟（YYYYMMDDTHHMMSS）
         for k, alias in self.sid.items():
             if _RESERVED_SID.match(k):  # B 册 R1：main/root 等保留字只替换
                 # 信封语境（"from <sid>"）——防分支名 "main" 等通用词被吞
@@ -421,6 +423,27 @@ def event_rows_diffs(ra, rb, where):
                 else:
                     out.append(("unintended", f"{where}[{key}].{k}",
                                 da.get(k, "<缺席>"), db_.get(k, "<缺席>")))
+        # 尾行（B 册终闸 F1：行数不等时 zip 后的尾部逐行核查——同侧既有行的
+        # 重复＝at-least-once；gate/agorad 审计行尾＝C 新增行族（可见非吞没，
+        # 与空桶分支同口径）；迁移事件尾行/其他 actor＝unintended 严格）
+        seen = {json.dumps(r, sort_keys=True, ensure_ascii=False)
+                for r in la[:min(len(la), len(lb))]}
+        seen |= {json.dumps(r, sort_keys=True, ensure_ascii=False)
+                 for r in lb[:min(len(la), len(lb))]}
+
+        def tail_cls(r):
+            dup = json.dumps(r, sort_keys=True, ensure_ascii=False) in seen
+            if dup:
+                return "at-least-once重复投递"
+            if r.get("actor") in ("gate", "agorad") \
+                    and r.get("event") not in TRANSITION_EVENTS:
+                return "门/迁移审计行新增(C)"
+            return "unintended"
+
+        for r in la[min(len(la), len(lb)):]:
+            out.append((tail_cls(r), f"{where}[{key}].v2tail", r, None))
+        for r in lb[min(len(la), len(lb)):]:
+            out.append((tail_cls(r), f"{where}[{key}].v3tail", None, r))
         if len(la) != len(lb):
             out.append(("at-least-once重复投递", f"{where}[{key}].multiplicity",
                         len(la), len(lb)))
@@ -504,6 +527,7 @@ def inject_diffs(ta, tb, where):
     na = [t for t in ta if kind_of(t) not in USER_KINDS and kind_of(t)]
     nb = [t for t in tb if kind_of(t) not in USER_KINDS and kind_of(t)]
     out = []
+    n0 = len(out)
     for cls, w, x, y in seq_diffs(ua, ub):
         out.append((cls, f"{where}.user.{w}", x, y))
     ca = Counter(na)
@@ -512,9 +536,9 @@ def inject_diffs(ta, tb, where):
         out.append(("通知文案/命名(B)", f"{where}.notify.extra", k, None))
     for k in sorted(set(cb) - set(ca)):
         out.append(("通知文案/命名(B)", f"{where}.notify.missing", None, k))
-    if ca == cb and len(na) != len(nb):
+    if len(out) == n0 and ca != cb:  # 键集相等仅计数差＝at-least-once
         out.append(("at-least-once重复投递", f"{where}.notify.multiplicity",
-                    len(na), len(nb)))
+                    sum(ca.values()), sum(cb.values())))
     return out
 
 
@@ -891,12 +915,18 @@ class Diff:
             # ——终态撤牌侧 401「无牌或牌无效」vs v2 滞留簿记 200，整族 intended
             # （牌随任务生死 §4/F43；v2 松面＝被废除遗留）。仅 worker 牌调用面。
             pair = {a["status"], b["status"]}
-            err401 = "无牌或牌无效" in json.dumps(
-                (b if b["status"] == 401 else a)["json"], ensure_ascii=False)
+            bad = (b if b["status"] == 401 else a)["json"]
+            err401 = isinstance(bad, dict) and bad.get("error") == "无牌或牌无效"
             if pair == {200, 401} and err401 and rec.get("tok") not in \
                     (None, "root"):
-                return [("牌终态生命周期(§11扩册)", "$.status+body",
-                         a["status"], b["status"])]
+                # C 册终闸 F2：绑定终态（活任务提前吊销同签名不吞）＋error
+                # 字段精确匹配（勿全文子串——响应回显可伪造触发）
+                alias = rec["tok"]
+                if all(self.sides[k].row(alias).get("state") in
+                       ("closed", "cancelled", "merged", "blocked")
+                       for k in ("v2", "v3")):
+                    return [("牌终态生命周期(§11扩册)", "$.status+body",
+                             a["status"], b["status"])]
             diffs.append(("unintended", "$.status", a["status"], b["status"]))
         ja, jb = a["json"], b["json"]
         # check_mail 面：messages 列表走消息族分类（id 漂移→A；通知→B）
@@ -910,9 +940,10 @@ class Diff:
             diffs.extend(classify(leaf_diffs(rest_a, rest_b)))
             return diffs
         # board 单任务明细面：events 走事件族分类；task 行键缺席→D；
-        # classification 值差→D；其余严格
+        # classification 值差→D；其余严格（B 册终闸 F2：双侧键齐才进——
+        # 单侧缺键＝形状分歧，落通用严格比较防 KeyError 中断）
         if isinstance(ja, dict) and isinstance(jb, dict) \
-                and "events" in ja and "task" in ja:
+                and all("events" in j and "task" in j for j in (ja, jb)):
             rest_a = {k: v for k, v in ja.items()
                       if k not in ("events", "task", "classification")}
             rest_b = {k: v for k, v in jb.items()
@@ -936,15 +967,17 @@ class Diff:
         return diffs
 
     def _pair_pull_channel(self, diffs):
-        """check_mail 响应面的 §5 通道差：用户消息单侧多出/缺失、但其语义
-        在两侧消息文件面都在＝一侧经在线注入送达（拉取面抑制重复）、另一侧
-        经拉取补送——投递通道互替，语义已覆盖→at-least-once。"""
-        file_sets = {}
+        """check_mail 响应面的 §5 通道差：用户消息单侧多出/缺失、语义在两侧
+        消息文件面都在、且抑制侧（响应缺席侧）确有该消息的在线注入送达
+        （C 册终闸 F1：文件双在≠已送达——否则持久化但投递链整体失效的回归
+        会被静默吞掉）→投递通道互替→at-least-once。"""
+        file_sets, inject_texts = {}, {}
         for kind, side in self.sides.items():
             file_sets[kind] = {
                 json.dumps(_msg_semantic(m), sort_keys=True,
                            ensure_ascii=False)
                 for m in side.messages() if m.get("kind") in USER_KINDS}
+            inject_texts[kind] = side.raw_injects()
         out = []
         for cls, where, x, y in diffs:
             if cls == "unintended" and ".user." in where \
@@ -953,7 +986,13 @@ class Diff:
                 if isinstance(rec, dict):
                     key = json.dumps(_msg_semantic(rec), sort_keys=True,
                                      ensure_ascii=False)
-                    if key in file_sets["v2"] and key in file_sets["v3"]:
+                    # extra＝v3 响应缺席（v3 抑制）；missing＝v2 响应缺席（v2 抑制）
+                    suppressed = "v3" if x is not None else "v2"
+                    delivered = any(rec.get("body", None) is not None
+                                    and rec["body"] in t
+                                    for t in inject_texts[suppressed])
+                    if key in file_sets["v2"] and key in file_sets["v3"] \
+                            and delivered:
                         out.append(("at-least-once重复投递",
                                     where + "(通道差)", x, y))
                         continue
@@ -1467,13 +1506,23 @@ def release_stale_latches():
 
 
 def parse_known_defects(argv):
-    """--known-defects k1,k2,...（缺省空＝严格模式）；非法键 fail-fast。"""
+    """--known-defects k1,k2,...（缺省空＝严格模式）；支持 --known-defects=k
+    等号形与重复旗并集（B 册终闸 F4：静默丢弃/静默严格＝旗语义误行为）；
+    非法键 fail-fast。"""
     known = set()
-    if "--known-defects" in argv:
-        i = argv.index("--known-defects")
-        if i + 1 >= len(argv):
-            raise SystemExit("--known-defects 需要逗号分隔键列表参数")
-        known = {k.strip() for k in argv[i + 1].split(",") if k.strip()}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--known-defects":
+            if i + 1 >= len(argv):
+                raise SystemExit("--known-defects 需要逗号分隔键列表参数")
+            known |= {k.strip() for k in argv[i + 1].split(",") if k.strip()}
+            i += 2
+            continue
+        if arg.startswith("--known-defects="):
+            known |= {k.strip() for k in arg.split("=", 1)[1].split(",")
+                      if k.strip()}
+        i += 1
     bad = known - KNOWN_DEFECT_CLASSES
     if bad:
         raise SystemExit(f"--known-defects 非法键: {sorted(bad)}"
