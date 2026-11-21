@@ -87,6 +87,11 @@ class DeliveryState:
     local_status: str = "pending"
     error: str | None = None
     conflict_files: list[str] | None = None  # F105 终局冲突清单（交付轮残值面）
+    # Req: F144 delivered 时点（v2 行投影键 delivered_at——managed 交付落账；
+    # None＝未交付不入键）＋external handoff 时点（v2 handoff_at——awaiting
+    # 驻留龄基线）
+    delivered_at_ms: int | None = None
+    handoff_at_ms: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -396,10 +401,14 @@ class DeliveryPolicy:
     APPROVAL = "approval"
     RESULT = "result"
 
-    # v2 现行 kind 全集＋v3 域内 kind（timer/approval，设计 §2/§5）
+    # v2 现行 kind 全集＋v3 域内 kind（timer/approval，设计 §2/§5）。
+    # Req: F144 补 v2 通知类 milestone/cancel（v2 router milestone/cancel 面
+    # 平移——门入口/merged/取消通知通道；决策缺省 WAKE 同 result 族）
     KINDS = frozenset({"note", "question", "answer", "done", "verify",
                        "verify_reject", "peer", "process", "result",
-                       "escalate", "timer", "approval"})
+                       "escalate", "timer", "approval", "milestone",
+                       "cancel", "credential"})  # credential=reinject 兜底
+    # （v2 recover 同 kind；决策缺省 WAKE——dispatch 面不入 ValueError）
     # 六类 quiet escalate：通知通道＋邮件例外（health.escalate 口径平移）
     QUIET_ESCALATES = frozenset({"stalled", "env-gone", "verify-dead",
                                  "verify-infra", "external-stale", "unpublished"})

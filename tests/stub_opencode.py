@@ -19,6 +19,7 @@ password 拨密码面（None＝不校验；拨定后 Basic 错凭据一律 401�
 import base64
 import json
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -109,7 +110,7 @@ class StubOpencode:
                         self._json(200, {"data": {"id": sid, "location": {"directory": "/"}}})
                     elif len(parts) == 3 and parts[0] == "session" and parts[2] == "move":
                         s = stub.sessions.get(parts[1])
-                        if not s:
+                        if not s or s.get("dead"):
                             self._json(404, self._not_found(parts[1]))
                             return
                         s["directory"] = req.get("directory", s["directory"])
@@ -119,6 +120,8 @@ class StubOpencode:
                         # ag-3016f1：真 v2.2.6 端点——synthetic 落消息，resume 决定是否调度回合；
                         # 记录 (text, resume) 供 notify/silent 两通道形状断言（204 无体对齐真服务）
                         s = stub.sessions.get(parts[1])
+                        if s and s.get("dead"):
+                            s = None  # 墓碑＝死会话（F144 kill）：synthetic 同拒
                         if s:
                             s.setdefault("synthetics", []).append(
                                 (req.get("text", ""), bool(req.get("resume"))))
@@ -130,11 +133,16 @@ class StubOpencode:
                             self._json(404, self._not_found(parts[1]))
                     elif len(parts) == 3 and parts[0] == "session" and parts[2] == "prompt":
                         s = stub.sessions.get(parts[1])
+                        if s and s.get("dead"):
+                            s = None  # 墓碑＝死会话：prompt 同 404（F144 kill）
                         if s and stub.fail_prompt:  # F55：prompt 400 拨杆（坏 model 串面），不记录
                             self._json(400, {"error": "Bad Request"})
                         elif s:  # busy 排队按序＝stub 恒收（delivery:steer）
                             s.setdefault("prompt_models", []).append(req.get("model"))
                             s["injects"].append(req.get("text", ""))
+                            # Req: F144 通知覆盖矩阵：直投注入时间戳（credential
+                            # 指针经注入送达的通道覆盖窗判定）
+                            s.setdefault("inject_ts", []).append(time.time())
                             self._json(200, {"data": {"id": "msg_" + uuid.uuid4().hex[:8],
                                                       "delivery": "steer"}})
                         elif not parts[1].startswith("ses_"):  # T6 实测：非 ses_ 形 sid→400（非 404）
@@ -159,7 +167,7 @@ class StubOpencode:
                         self._json(200, stub.config_docs)
                     elif len(parts) == 2 and parts[0] == "session":
                         s = stub.sessions.get(parts[1])
-                        if not s:
+                        if not s or s.get("dead"):  # 墓碑＝死会话（F144 kill）
                             self._json(404, self._not_found(parts[1]))
                             return
                         self._json(200, {"data": {"id": parts[1],
@@ -170,7 +178,7 @@ class StubOpencode:
                                                            "idle": 0}}})
                     elif len(parts) == 3 and parts[0] == "session" and parts[2] == "message":
                         s = stub.sessions.get(parts[1])
-                        if not s:
+                        if not s or s.get("dead"):
                             self._json(404, self._not_found(parts[1]))
                             return
                         # F52 消息面：记录脚本化（sessions[sid]["messages"]），服务原样回 {data:[...]}
@@ -213,9 +221,15 @@ class StubOpencode:
         return f"http://127.0.0.1:{self.port}"
 
     def kill(self, sid: str) -> None:
-        """死会话＝会话消失（对齐真服务 DELETE 语义：GET/prompt 均 404）。"""
+        """死会话（对齐真服务 DELETE 语义：GET/prompt 均 404）。
+
+        Req: F144 墓碑而非删除——会话记录保留（dead 旗），injects/inject_ts
+        注入史不灭（差分器覆盖矩阵的 v2 credential 直投证据须跨死亡存活）；
+        GET/prompt 按 404 判死不变。"""
         with self.lock:
-            self.sessions.pop(sid, None)
+            s = self.sessions.get(sid)
+            if s is not None:
+                s["dead"] = True
 
     def stop(self) -> None:
         self.httpd.shutdown()

@@ -22,6 +22,7 @@ enforce 旗＝内存态（v2 同款：重启默认 on、开/关写审计）。
 （§8 任务页可从库重建，T13b/T17 再议）；verify 卫生闸（F99）与 usage
 经济投影（F57）v3 服务面未铺，doctor.findings 恒空/行键缺席（F141 已注）。
 """
+import dataclasses
 import json
 import os
 import pathlib
@@ -287,6 +288,137 @@ class PeerBoard:
         return {"repo": repo, "tasks": rows, "messages": msgs}
 
 
+class Recover:
+    """Req: F144 — 死 worker 会话重建（v2 core/recover.Recover 平移）。
+
+    startup：启动复查——dispatched/running 且有 worker_sid 的任务逐个探活
+    （oc 不可达≠死，本轮免判），死会话 reinject。reinject：oc.create 同
+    BOOT 语义（(reinject) 标记＋任务页/env/合同——先 check_mail 补拉）→
+    新 sid 覆写 worker_sid＋嵌套子任务 dispatcher_sid 同步（dispatcher_
+    rebind 审计）→auth.rebind 旧牌改绑新会话（token 本体不变）→reinjected
+    审计行→凭据文件重写＋直投（失败落消息兜底，kind=credential）。任何
+    失败返回 False 不抛：先 create 成功才覆写行，不半写。"""
+
+    _REINJECTABLE = frozenset({"dispatched", "running"})
+    _NESTED_OPEN = frozenset({"todo", "dispatched", "running", "done",
+                              "verify_failed", "reopened", "blocked"})
+
+    def __init__(self, repo, oc, gitx, auth, messaging, *, home="",
+                 clock=None):
+        self._repo, self._oc, self._gitx = repo, oc, gitx
+        self._auth, self._msg = auth, messaging
+        self._home, self._clock = str(home), clock
+        self._now = clock or (lambda: epoch_ms(time.time()))
+
+    def startup(self):
+        for t in self._repo.tasks_all():
+            if t.gate.in_gate:  # 评审环 A-F1：kill -9 残闩清扫（v2
+                # clear_gate_latches 同位——门线程不跨进程/栈存活，重启在
+                # 闩＝残闩；done 行随后重排重闩，终态行免永久 gate_busy）
+                now = self._now()
+                with self._repo.uow():
+                    fresh = self._repo.get_task(t.id)
+                    if fresh is not None and fresh.gate.in_gate:
+                        self._repo.upsert_task(dataclasses.replace(
+                            fresh, updated_ms=now,
+                            gate=dataclasses.replace(fresh.gate,
+                                                     in_gate=False)))
+                        self._repo.append_event(Event(
+                            seq=0, ts_ms=now, actor="agorad",
+                            event="gate_latch_reset", task=t.id))
+        for t in self._repo.tasks_all():
+            if t.state not in self._REINJECTABLE or not t.worker_sid:
+                continue
+            try:
+                alive = self._oc.alive(t.worker_sid)
+            except Exception:  # oc 不可达≠会话死：本轮免判，tick 再兜
+                continue
+            if not alive:
+                try:
+                    self.reinject(t.id)  # 评审环 B-F4：逐任务隔离，单任务
+                except Exception:  # 败不拦余下死任务的启动复查
+                    pass
+
+    def reinject(self, tid, expect_wsid=None):
+        t = self._repo.get_task(tid)
+        if t is None or t.state not in self._REINJECTABLE or not t.env_dir:
+            return False  # 复查：终态/续修态不重注入
+        if expect_wsid is not None and t.worker_sid != expect_wsid:
+            return None  # 身份已易主：让位他车道（CAS，与失败区分）
+        try:
+            self._gitx.head(t.env_dir)  # 环境在册探针：worktree 已失不盲注
+            title = " ".join(str(t.title or tid).splitlines())
+            boot = (f"[agora] {tid}: {title} (reinject)\n"
+                    f"page: {self._home}/wiki/tasks/{tid}.md\n"
+                    f"env: {t.env_dir}\n"
+                    "contract: 会话曾死亡已重建——先 check_mail 补拉断点上下文，"
+                    "继续任务页目标；结论经 post(done) 回填")
+            wsid = self._oc.create(t.env_dir, boot, model=t.model)
+        except Exception:
+            return False
+        old = t.worker_sid
+        now = self._now()
+        with self._repo.uow():
+            fresh = self._repo.get_task(tid)
+            if (fresh is None or fresh.state not in self._REINJECTABLE
+                    or fresh.worker_sid != old):
+                return None  # 评审环 A-F4：create 窗内易主＝让位（CAS）非
+                # 失败——False 会令 tick 对合法重派误升级 reinject-fail
+                # （孤儿会话无 oc delete 面，交会话 GC——B-F5/C2 在案）
+            self._repo.upsert_task(dataclasses.replace(
+                fresh, worker_sid=wsid, updated_ms=now))
+            for c in self._repo.tasks_all():
+                if c.dispatcher_sid == old and c.state in self._NESTED_OPEN:
+                    self._repo.upsert_task(dataclasses.replace(
+                        c, dispatcher_sid=wsid, updated_ms=now))
+                    self._repo.append_event(Event(
+                        seq=0, ts_ms=now, actor="agorad",
+                        event="dispatcher_rebind", task=c.id,
+                        detail={"from": old, "to": wsid}))
+            self._repo.append_event(Event(
+                seq=0, ts_ms=now, actor="agorad", event="reinjected",
+                task=tid, detail={"worker": wsid}))
+        token = None
+        try:
+            token = self._auth.rebind(old, wsid)  # 旧牌改绑新会话
+        except Exception as e:
+            # 评审环 B-F4：行已易主而 rebind 失败＝身份卡死窗——留审计行，
+            # rebind 幂等（按 old sid 查牌）可下轮 startup/tick 重入自愈
+            with self._repo.uow():
+                self._repo.append_event(Event(
+                    seq=0, ts_ms=self._now(), actor="agorad",
+                    event="rebind_failed", task=tid,
+                    detail={"note": str(e)[:200], "worker": wsid}))
+        if token:  # 凭据随 dispatch 同形送达（直投失败落库兜底）
+            try:
+                path = pathlib.Path(self._home) / "credentials" / f"{tid}.token"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # 建时 0600＋不跟符号链接（authsvc._write_secret 铁则同款，
+                # 评审环 C1：write_text＋事后 chmod 有 0644 窗与预置链写面）
+                data = (json.dumps({"token": token}) + "\n").encode("utf-8")
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                             | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+                text = f"[agora] credential {tid}\nfile: {path}"
+                try:
+                    ok = self._oc.inject(wsid, text, model=t.model)
+                except Exception:
+                    ok = False
+                if not ok and self._msg is not None:
+                    with self._repo.uow():
+                        self._msg.record(
+                            ts_ms=self._now(), from_sid="agorad",
+                            to_sid=wsid, task_id=tid, kind="credential",
+                            body=text,
+                            dedup_key=f"credential:{tid}:{wsid}")
+            except Exception:
+                pass  # 落盘/直投败不废重注入：pull 自愈兜底
+        return True
+
+
 class V3Stack:
     """v3 全栈（storage schema→services 全接线）；单实例＝单 home。"""
 
@@ -323,9 +455,11 @@ class V3Stack:
             quick_max_files=quick_max_files, quick_max_lines=quick_max_lines,
             lock_wait_s=lock_wait_s,
             roster_path=str(pathlib.Path(home) / ".agora" / "ignore.roster"))
+        self.recover = Recover(repo, oc, gitx, self.auth, self.messaging,
+                               home=self.home, clock=self.clock)
         self.health = HealthService(repo, oc, self.messaging, clock=self.clock,
                                     tasks=self.tasks, emailer=emailer,
-                                    gitx=gitx)
+                                    gitx=gitx, recover=self.recover)
         self.peer = PeerBoard(repo, self.home, clock=self.clock,
                               lock=self.write_lock)
         self._enforce = bool(enforce)
@@ -347,6 +481,11 @@ class V3Stack:
             self.root_token, _ = self.auth.issue("root", "root")
         self.auth.sweep()
         self.messaging.recover()
+        try:  # Req: F144 死 worker 启动复查重注入（v2 recover.startup 同位）
+            self.recover.startup()
+        except Exception as e:
+            print(f"agorad-v3 recover startup failed: {e}", file=sys.stderr,
+                  flush=True)
         try:
             self.gate.recover()  # managed 交付崩窗收敛（恢复面尽力而为）
         except Exception as e:
@@ -365,6 +504,8 @@ class V3Stack:
             self._gate_q.put(tid)
 
     def _gate_loop(self):
+        # 评审环 B-F2 注：单 gate 消费线程＝_LANE_LIMIT=1 车道互斥的唯一
+        # 保证（gateverify 车道非真实锁）——加第二消费者前须先铺真锁
         while True:
             tid = self._gate_q.get()
             try:

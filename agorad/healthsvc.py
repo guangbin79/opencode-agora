@@ -306,26 +306,31 @@ class HealthService:
         managed delivered 未出版（sha 与补丁均不在 origin 才拍——祖先对账
         ＋cherry 对账双口径防误报）。确认/出版/除籍即出账，再犯再拍；
         对账不可得（异常）保账不清（unknown≠不适用，R1 B8）——下轮重试。
-        驻留龄基线＝任务行 updated_ms：门体 handoff/delivered 落账后驻留期
-        无他写（T9b 约定），故等价 v2 handoff_at/delivered_at。"""
+        驻留龄基线＝delivery 投影时点（Req: F144 起有 handoff_at_ms/
+        delivered_at_ms 硬字段——external 用 handoff_at、managed 用
+        delivered_at；缺席回退任务行 updated_ms，v2 同口径）。"""
         now = self._now()
         for tid, t in tasks.items():
             d = t.delivery
+            handoff_base = ((d.handoff_at_ms if d is not None else None)
+                            or t.updated_ms or 0)
             if (t.state == "done" and d is not None
                     and d.status == "awaiting_external"
-                    and now - (t.updated_ms or 0)
+                    and now - handoff_base
                     > self._ext_stale_after_ms):
                 n, last = self._esc_book(self._ext_esc, tid, KIND_EXT_STALE)
                 if now - last >= self._gap(n):
                     self.escalate(KIND_EXT_STALE, tid, streak=n + 1,
                                   raw=f"commit={d.commit} "
-                                      f"age_ms={now - (t.updated_ms or 0)}")
+                                      f"age_ms={now - handoff_base}")
                     self._ext_esc[tid] = (n + 1, now)
             else:
                 self._ext_esc.pop(tid, None)
+            delivered_base = ((d.delivered_at_ms if d is not None else None)
+                              or t.updated_ms or 0)
             if (t.state in ("merged", "closed") and d is not None
                     and d.mode == "managed" and d.status == "delivered"
-                    and now - (t.updated_ms or 0)
+                    and now - delivered_base
                     > self._unpublished_after_ms):
                 try:
                     if self._gitx is None:

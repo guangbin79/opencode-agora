@@ -56,7 +56,8 @@ class TestEntities(unittest.TestCase):
             domain.DeliveryState: {"mode", "status", "commit", "base",
                                    "target_branch", "attempt",
                                    "local_status", "error",
-                                   "conflict_files"},
+                                   "conflict_files", "delivered_at_ms",  # F144
+                                   "handoff_at_ms"},
             domain.GateState: {"in_gate", "gate_env", "pending_cancel",
                                "pending_cancel_reason", "gate_artifact",
                                "review_cache", "review_fail_streak",

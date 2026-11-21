@@ -873,9 +873,11 @@ class TaskService:
             nd = dataclasses.replace(d, status="delivered",
                                      local_status="not_required", error=None,
                                      conflict_files=None)  # Req: F105 残值必清
+            # Req: F144 v2 external 确认不写 delivered_at（managed 专属）——
+            # conflict_files=None 显式在键归 adapter 写点规则
             task = task_transition(fresh, "merged", now_ms=now)
             task = reset_fail_streak(task, now_ms=now)
-            task = task_transition(task, "closed", now_ms=now)  # 两跳同事务
+            task = task_transition(task, "closed", now_ms=now + 1)
             task = dataclasses.replace(task, delivery=nd, commit=commit)
             task = self._merge_seen(task)
             self._store.upsert_task(task)
@@ -884,19 +886,24 @@ class TaskService:
                 {"commit": commit, "note": "external_delivered"
                  + (f"；reason={str(reason).strip()}" if str(reason).strip()
                     else "")}))
-            self._store.append_event(self._ev(now, sid, "closed", tid))
+            self._store.append_event(self._ev(now + 1, sid, "closed", tid))
             if fresh.worker_sid:
                 self._store.delete_credential(fresh.worker_sid)
             if self._msg is not None and task.dispatcher_sid:
-                for state, text in (
-                        ("merged", f"@{commit[:7]} external delivered——外部"
-                         "派发方确认交付（local=not_required）"),
-                        ("closed", f"任务 {tid} 已 closed；commit={commit}")):
+                # Req: F144 closed ts=merged+1ms（merged 窗通知可落窗内）；
+                # external deliver 不发 worker milestone＝v2 同款
+                for ts_ms, state, text in (
+                        (now, "merged", f"任务 {tid} merged @{commit[:7]} "
+                         "external delivered——外部派发方确认交付"
+                         "（local=not_required）"),
+                        (now + 1, "closed", f"任务 {tid} 已 closed；"
+                         f"commit={commit}")):
                     msgs.append(self._msg.record(
-                        ts_ms=now, from_sid=sid,
+                        ts_ms=ts_ms, from_sid=sid,
                         to_sid=task.dispatcher_sid, task_id=tid, kind="result",
                         body=text,
-                        dedup_key=f"transition:{tid}:{state}:{task.updated_ms}")[0])
+                        dedup_key=f"transition:{tid}:{state}:"
+                        f"{task.updated_ms}")[0])
         for m in msgs:
             self._msg.dispatch(m.id)
         self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
