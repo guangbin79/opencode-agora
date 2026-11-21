@@ -7,7 +7,9 @@
 ③ legacy fixture 五件：v2 磁盘形状权威＝agorad/access/store.py 布局＋
    agorad/core/task.py create 行构造＋agorad/core/state.py _normalize_snapshot
    ＋gate/health/recover 写点——供 v3 迁移器（P0-T11）与差分测试当输入语料；
-④ 差分骨架 DiffSide/run_diff＋崩溃模拟 guarded_home_copy。
+④ 差分骨架 DiffSide/run_diff＋崩溃模拟 guarded_home_copy；
+⑤ F149 双后端工厂 make_store＋Git journal 只读观察器 GitJournalObserver
+（SQLite-v3 ↔ GitStore 差分基底）。
 OC 面复用 tests/stub_opencode.py，本库不新建第二套 OC HTTP 桩。
 """
 import hashlib
@@ -15,6 +17,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -412,3 +415,98 @@ def home_is_complete(path):
     p = Path(path)
     return ((p / HOME_COMPLETE).is_file()
             and all((p / d).is_dir() for d in SKELETON_DIRS))
+
+
+# ---- ⑤ 双后端工厂＋Git journal 只读观察器（Req: F149）----
+
+BACKENDS = ("sqlite", "git")
+
+
+def make_store(home, backend="sqlite", injector=None):
+    """双后端仓库工厂：sqlite→Storage(state/agora.db)、git→GitStore(state)。
+    Storage/GitStore import 惰性入体——git 路径零 SQL 模块触达自生产侧
+    （gitstore 自身 import storage 取错误基类不在本面）；未知 backend 拒
+    （拼写错防哑跑单侧冒充差分）。"""
+    if backend == "sqlite":
+        from agorad.storage import Storage
+        return Storage(home.state / "agora.db", injector=injector)
+    if backend == "git":
+        from agorad.gitstore import GitStore
+        return GitStore(home.state, injector=injector)
+    raise ValueError(f"未知 backend {backend!r}（可用: {BACKENDS}）")
+
+
+class GitJournalObserver:
+    """state/journal.git 只读观察器（差分断言面）：resolve refs/agora/journal
+    ＋首父 commit 链＋HEAD 对象路径＋tx JSON 解析＋相邻提交只增判定。
+    零 SQL/零 sqlite 触达——只起只读 plumbing（rev-parse/ls-tree/cat-file/
+    diff-tree）；写入/损毁语料归 test_v3_gitstore 侧 helpers。"""
+
+    def __init__(self, state_path):
+        self._git_dir = os.path.join(os.fspath(state_path), "journal.git")
+
+    def _git(self, *args, check=True):
+        env = {"PATH": os.environ.get("PATH", ""), "GIT_DIR": self._git_dir,
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "LC_ALL": "C"}
+        r = subprocess.run(["git", *args], env=env, capture_output=True)
+        if check and r.returncode != 0:
+            raise RuntimeError(
+                f"observer git {args[0]} rc={r.returncode}: "
+                f"{r.stderr.decode('utf-8', 'replace').strip()}")
+        return r.returncode, r.stdout
+
+    def head(self):
+        """refs/agora/journal → sha（空历史 None）。"""
+        rc, out = self._git("rev-parse", "--verify", "refs/agora/journal",
+                            check=False)
+        return out.decode().strip() if rc == 0 else None
+
+    def commits(self):
+        """首父链 [head..root]（cat-file 逐级解 parent）。"""
+        head = self.head()
+        chain = []
+        while head is not None:
+            chain.append(head)
+            _, out = self._git("cat-file", "commit", head)
+            head = next(
+                (l.split()[1].decode() for l in out.splitlines()
+                 if l.startswith(b"parent ")), None)
+        return chain
+
+    def paths(self):
+        """HEAD 树全路径→blob sha（-z：路径不转义）。"""
+        head = self.head()
+        if head is None:
+            return {}
+        _, out = self._git("ls-tree", "-r", "-z", head)
+        entries = {}
+        for chunk in out.split(b"\x00"):
+            if not chunk:
+                continue
+            meta, _, path = chunk.partition(b"\t")
+            entries[path.decode("utf-8", "surrogateescape")] = (
+                meta.split()[2].decode())
+        return entries
+
+    def blob(self, sha) -> bytes:
+        return self._git("cat-file", "blob", sha)[1]
+
+    def txs(self):
+        """{seq: tx dict}——tx/*.json 解析面。"""
+        out = {}
+        for path, sha in self.paths().items():
+            if path.startswith("tx/"):
+                tx = json.loads(self.blob(sha).decode("utf-8"))
+                out[tx["seq"]] = tx
+        return out
+
+    def additions_only(self):
+        """相邻提交 diff-tree --name-status 全 A（canonical 只增不改不删）。"""
+        chain = self.commits()
+        for old, new in zip(chain[1:], chain[:-1]):  # (旧, 新)
+            _, out = self._git("diff-tree", "-r", "--name-status", old, new)
+            lines = [l for l in out.decode().splitlines() if l.strip()]
+            if not lines or any(not l.startswith("A\t") for l in lines):
+                return False
+        return True
