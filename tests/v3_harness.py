@@ -502,8 +502,14 @@ class GitJournalObserver:
         return out
 
     def additions_only(self):
-        """相邻提交 diff-tree --name-status 全 A（canonical 只增不改不删）。"""
+        """相邻提交 diff-tree --name-status 全 A（canonical 只增不改不删）。
+        空链（ref 未解析/空历史）fail-closed——观察面失明≠不变量成立
+        （评审环 OCR R1：防恒 True 空转断言）。"""
         chain = self.commits()
+        if not chain:
+            raise RuntimeError(
+                f"{self._git_dir}: refs/agora/journal 未解析——"
+                "观察面失明≠只增成立（fail-closed）")
         for old, new in zip(chain[1:], chain[:-1]):  # (旧, 新)
             _, out = self._git("diff-tree", "-r", "--name-status", old, new)
             lines = [l for l in out.decode().splitlines() if l.strip()]

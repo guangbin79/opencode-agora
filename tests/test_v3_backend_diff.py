@@ -345,6 +345,14 @@ class TestJournalObserver(unittest.TestCase):  # 断言2
             self.assertIn(op["path"], paths)  # tx 引用对象在 HEAD 树
         self.assertTrue(obs.additions_only())
 
+    def test_additions_only_fails_closed_on_unresolvable_ref(self):
+        # 评审环 OCR R1 锚：ref 未解析（空历史/失明）≠ 只增成立——防恒 True
+        home = harness.TempAgoraHome()
+        self.addCleanup(home.cleanup)
+        harness.make_store(home, backend="git")  # 零提交：ref 未生
+        with self.assertRaises(RuntimeError):
+            harness.GitJournalObserver(home.state).additions_only()
+
     def test_git_mode_never_opens_sqlite(self):
         # sqlite3.connect 全局换装探针：Git 模式全程（构造/重放/提交/读面
         # /观察器）开库即炸——零 SQLite 触达的机械证明。
