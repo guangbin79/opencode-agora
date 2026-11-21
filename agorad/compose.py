@@ -602,8 +602,12 @@ class V3Stack:
         with self.write_lock:
             try:
                 self.storage.checkpoint_truncate()
-            except Exception:
-                pass  # 连接已被外部蒸发（崩溃模拟/迟到写者）：收口尽力而为
+            except Exception as e:
+                # 收口尽力而为（连接被外部蒸发/迟到写者），但无痕即失察
+                # （评审环 B1：Git 面 ref 失联 fail-closed 信号在此被吞——
+                # 至少 stderr 兜底，与 gate crashed 同纪律）
+                print(f"agorad-v3 checkpoint on close failed: {e}",
+                      file=sys.stderr, flush=True)
             finally:
                 try:
                     self.storage.close()

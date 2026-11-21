@@ -2715,7 +2715,8 @@ class TestV3StackOnGitLifecycle(unittest.TestCase):
         tm = s1.storage.get_timer("tm-overdue")  # timer catch-up 补发
         self.assertEqual(tm.state, TimerState.FIRED)
         self.assertIsNotNone(s1.storage.message_for_timer("tm-overdue"))
-        deadline = time.monotonic() + 10.0  # done 重排→gate 收敛
+        deadline = time.monotonic() + 30.0  # done 重排→gate 收敛（评审环
+        # B8：Git 每迁移多子进程，慢机余量放宽）
         while time.monotonic() < deadline:
             if s1.storage.get_task(tid).state == "closed":
                 break

@@ -1061,7 +1061,8 @@ class TestV3StackOnGitServerPort(_ChainBase):  # Req: F155——Git 后端服务
         self.assertTrue((Path(self.home.path) / "state" / "journal.git")
                         .is_dir())
         tid, wsid, wtok = self.green_chain()  # create/dispatch/running/done
-        self.assertEqual(self.wait_state(tid, {"closed"}), "closed")
+        self.assertEqual(self.wait_state(tid, {"closed"}, timeout=30),
+                         "closed")
         self.assertEqual(self.stack.storage.get_task(tid).state, "closed")
         s, b = self.call("check_mail", {}, wtok)  # 消息拉取（outbox/cursor）
         self.assertEqual(s, 200)

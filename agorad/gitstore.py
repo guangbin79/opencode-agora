@@ -1235,7 +1235,9 @@ class GitStore:
     # ---- 存储生命周期兼容面（Req: F155——V3Stack.close 同形收口）----
 
     def close(self):
-        """无持久句柄——幂等 no-op（每笔 UoW 落账即收口，无连接可关）。"""
+        """无持久句柄——幂等 no-op（每笔 UoW 落账即收口，无连接可关）。
+        已知与 SQLite 的有意差异（评审环 B4）：close 后迟到写者仍可成功
+        提交（无 closed 拒写面）——数据不丢，跨实例交叉由 CAS 防损。"""
         return None
 
     def checkpoint_truncate(self):
