@@ -282,7 +282,86 @@ class TestGitLegacyMigration(_GitCase):
         self.assertEqual(report["config"]["agorad.env"], "copied")
         self.assertEqual(report["wiki"], {"files_copied": 2})
         self.assertEqual(report["gate_artifacts"],
-                         {"remapped": 1, "copied": 1, "missing": 0})
+                         {"remapped": 1, "copied": 1, "missing": 0,
+                          "in_home_untouched": 0})
+
+    def test_artifact_escape_paths_untouched_reported(self):
+        """评审环 C 册 R1：子树外家内引用不拷不改（防 copytree 反噬）；
+        子树内符号链接证据不跟随。"""
+        art = self.src.state / "gate-artifacts" / "gt-ok" / \
+            "20260101T000000-verify-0001"
+        art.mkdir(parents=True)
+        (art / "output.log").write_text("ok\n", encoding="utf-8")
+        outsider = self.src.path / "outside"
+        outsider.mkdir()
+        (outsider / "loot.txt").write_text("sensitive\n", encoding="utf-8")
+        ln_dir = self.src.state / "gate-artifacts" / "gt-ln"
+        ln_dir.mkdir(parents=True)
+        (ln_dir / "dir").symlink_to(outsider, target_is_directory=True)
+        victim = self.src.credentials / "secret.token"  # 家内子树外敏感件
+        victim.write_text('{"token": "x"}\n', encoding="utf-8")
+        rows = {"gt-ok": harness.full_field_row(
+                    tid="gt-ok", gate_artifact={"path": str(art),
+                                                "phase": "verify", "rc": 0}),
+                "gt-root": harness.full_field_row(
+                    tid="gt-root", gate_artifact={"path": str(self.src.path),
+                                                  "phase": "verify", "rc": 0}),
+                "gt-cred": harness.full_field_row(
+                    tid="gt-cred", gate_artifact={"path": str(victim),
+                                                  "phase": "verify", "rc": 0}),
+                "gt-ln": harness.full_field_row(
+                    tid="gt-ln", gate_artifact={"path": str(ln_dir / "dir"),
+                                                "phase": "verify", "rc": 0})}
+        harness._append_snapshot(self.src, rows)
+        report = self.run_migrate()
+        st = self.open_git()
+        self.assertTrue(str(self.tgt.path) in
+                        st.get_task("gt-ok").gate.gate_artifact.path)
+        self.assertEqual(st.get_task("gt-root").gate.gate_artifact.path,
+                         str(self.src.path))  # 不改写不拷贝
+        self.assertEqual(st.get_task("gt-cred").gate.gate_artifact.path,
+                         str(victim))
+        self.assertFalse((self.tgt.state / "tasks.jsonl").exists())
+        self.assertFalse((self.tgt.path / "outside").exists())  # 零反噬
+        self.assertTrue(victim.exists())  # 源件原封
+        self.assertFalse((self.tgt.state / "gate-artifacts" / "gt-ln" /
+                          "dir" / "loot.txt").exists())  # 链接不跟随
+        self.assertEqual(report["gate_artifacts"],
+                         {"remapped": 2, "copied": 1, "missing": 1,
+                          "in_home_untouched": 2})
+
+    def test_wiki_symlinks_not_followed(self):
+        """评审环 C 册 R1：源 wiki 符号链接目录/文件不跟随不计数。"""
+        harness.task_full_fields(self.src)
+        outside = self.src.agora / "outside.txt"
+        outside.write_text("secret-ish\n", encoding="utf-8")
+        (self.src.wiki / "tasks").mkdir()
+        (self.src.wiki / "real.md").write_text("r\n", encoding="utf-8")
+        (self.src.wiki / "tasks" / "real2.md").write_text("r2\n",
+                                                          encoding="utf-8")
+        (self.src.wiki / "linked-dir").symlink_to(self.src.agora,
+                                                  target_is_directory=True)
+        (self.src.wiki / "linked.md").symlink_to(outside)
+        report = self.run_migrate()
+        self.assertTrue((self.tgt.wiki / "real.md").exists())
+        self.assertTrue((self.tgt.wiki / "tasks" / "real2.md").exists())
+        self.assertFalse((self.tgt.wiki / "linked-dir").exists())
+        self.assertFalse((self.tgt.wiki / "linked.md").exists())
+        self.assertFalse((self.tgt.wiki / "linked-dir" / "agorad.env")
+                         .exists())
+        self.assertEqual(report["wiki"], {"files_copied": 2})
+
+    def test_nested_source_target_rejected(self):
+        """评审环 C 册 R1：src/tgt 互相嵌套即拒（重置面不得删源）。"""
+        harness.task_full_fields(self.src)
+        nested = harness.TempAgoraHome(root=self.src.path)  # tgt⊂src
+        self.addCleanup(nested.cleanup)
+        self.freeze()  # 嵌套目录自身建好后取基线
+        with self.assertRaises(MigrationError):
+            git_migrate(self.src.path, nested.path)
+        with self.assertRaises(MigrationError):
+            git_migrate(nested.path, self.src.path)
+        self.assertSourceUntouched()
 
     def test_report_and_marker_shape(self):
         self.seed_credentials()
@@ -496,6 +575,25 @@ class TestGitMigrationSafety(_GitCase):
                 self.assertFalse((self.tgt.state / "journal.git").is_dir())
                 self.assertFalse((self.tgt.path / MARKER).exists())
                 self.assertSourceUntouched()
+
+    def test_foreign_ledger_refused_even_with_incomplete_journal(self):
+        """评审环 B 册 R1：journal 在而外来件也在（异源残留）——一律先拒，
+        不得先删 journal 后在构造期才拒。"""
+        harness.task_full_fields(self.src)
+        injector = harness.FaultInjector()  # 半途炸出无标记 journal
+        for batch in BATCHES:
+            injector.register(f"batch_{batch}")
+        injector.arm("batch_tasks", "after")
+        with self.assertRaises(harness.FaultInjected):
+            git_migrate(self.src.path, self.tgt.path, injector=injector)
+        self.assertTrue((self.tgt.state / "journal.git").is_dir())
+        (self.tgt.state / "agora.db").write_bytes(b"foreign")
+        self.freeze()
+        with self.assertRaises(MigrationError):
+            git_migrate(self.src.path, self.tgt.path)
+        self.assertTrue((self.tgt.state / "journal.git").is_dir())  # 未被删
+        self.assertTrue((self.tgt.state / "agora.db").exists())
+        self.assertSourceUntouched()
 
     def test_active_completed_target_refuses_rerun(self):
         harness.task_full_fields(self.src)

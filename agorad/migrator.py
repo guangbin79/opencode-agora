@@ -630,7 +630,9 @@ class LegacyMigrator:
     def _copy_secret(src: pathlib.Path, dst: pathlib.Path):
         try:
             data = src.read_bytes()
-            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            # 写面不跟符号链接（与 gitstore 读面/authsvc 写面同口径；评审环 C 册）
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
             try:
                 os.write(fd, data)
             finally:

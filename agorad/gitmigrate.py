@@ -13,10 +13,12 @@ v2 home → GitStore 目标 home 一次性导入：快照/消息/事件/凭据/�
   相对键位（明文不进任何 Git 对象/tx/报告）。无签发任务的投影 Git 保
   None／SQLite 读回 ""（F149 已记录的 None↻"" 读回不对称，差分面归
   allowlist，不在迁移器强扭）。
-②任务行 gate_artifact.path 引用源 home 的（state/gate-artifacts 证据）：
-  证据目录随迁＋路径改写为目标 home 同位路径；源 home 之外的引用照迁
-  不动——迁后投影不得引用旧 home。
-③wiki 用户内容整树随迁（不只骨架）；配置照拷（同 SQLite 面）。
+②任务行 gate_artifact.path 引用源 home 的：仅认 state/gate-artifacts
+  子树（v2 ArtifactStore 权威布局）——证据随迁（符号链接不跟随）＋路径
+  改写为目标 home 同位路径；子树外的家内引用不拷不改、计数申报（源可控
+  路径不进目标写面）；源 home 之外的引用照迁不动。
+③wiki 用户内容整树随迁（os.walk 不跟随符号链接；不只骨架）；配置照拷
+  （同 SQLite 面）。
 ④目标重置（pre-marker 确定性重建幂等）：journal 目录＋随迁文件面＋
   wiki/证据＋隔离区/报告/标记；外来账本（agora.db/tasks.jsonl 在而
   journal 缺席）在一切重置动作之前即拒（防 split-brain，且不删外来件
@@ -51,8 +53,11 @@ class GitLegacyMigrator(LegacyMigrator):
     """v2 home → GitStore 目标 home（源只读；pre-marker 重建幂等）。"""
 
     def migrate(self) -> dict:
-        if self._src.resolve() == self._tgt.resolve():
-            raise MigrationError("source 与 target 不得同目录（源全程只读）")
+        src_r, tgt_r = self._src.resolve(), self._tgt.resolve()
+        if src_r == tgt_r or src_r.is_relative_to(tgt_r) \
+                or tgt_r.is_relative_to(src_r):
+            raise MigrationError("source 与 target 不得同目录或互相嵌套"
+                                 "（源全程只读；嵌套则重置面可删源）")
         snap, dropped = _load_snapshot(self._src)
         if snap is None:
             raise MigrationError(
@@ -88,9 +93,12 @@ class GitLegacyMigrator(LegacyMigrator):
             cursors, duplicates, absent = _convert_cursors(mail_read,
                                                            delivered)
             self._fire("cursors", "before")
-            with store.uow():
-                for sid, cursor in sorted(cursors.items()):
-                    store.upsert_cursor(sid, cursor)
+            try:
+                with store.uow():
+                    for sid, cursor in sorted(cursors.items()):
+                        store.upsert_cursor(sid, cursor)
+            except Exception as exc:  # 错误面与其余批次一致（评审环 B 册）
+                raise MigrationError(f"游标批写入失败: {exc}") from exc
             self._fire("cursors", "after")
             config, wiki_files = self._copy_files()
             return self._finalize(
@@ -107,12 +115,14 @@ class GitLegacyMigrator(LegacyMigrator):
     # ---- 目标闸（一切重置动作之前；spec §3/§7）----
 
     def _refuse_foreign_or_live(self):
+        # 活性/外来检查＝快照非互斥（检查后到重置间的新提交会被重建抹除）；
+        # 排他静止保证归生产接线任务（spec §3 停服手工前提）。
         state = self._tgt / "state"
         foreign = [n for n in FOREIGN_LEDGERS if (state / n).exists()]
-        if foreign and not (state / JOURNAL_DIRNAME).is_dir():
+        if foreign:  # 异源混账一律拒——先于一切重置，不删 journal 不洗白
             raise MigrationError(
-                f"{state}: 外来账本在位 {foreign} 而 Git journal 缺席"
-                "——拒迁（防 split-brain；手工处置＝移走外来账本或换目标）")
+                f"{state}: 外来账本在位 {foreign}——拒迁（防 split-brain；"
+                "手工处置＝移走外来账本或换目标目录）")
         marker = self._tgt / MARKER
         if not marker.is_file():
             return  # 未完成/全新目标——pre-marker 确定性重建面
@@ -193,50 +203,69 @@ class GitLegacyMigrator(LegacyMigrator):
         if not src.is_dir():
             return 0
         count = 0
-        for path in sorted(src.rglob("*")):
-            dst = self._tgt / "wiki" / path.relative_to(src)
-            if path.is_dir():
-                dst.mkdir(parents=True, exist_ok=True)
-                os.chmod(dst, 0o700)
-            else:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dst)
-                os.chmod(dst, stat.S_IMODE(path.stat().st_mode))
+        # followlinks=False＋符号链接跳过：源 wiki 可控面不引入链接目标
+        # 内容、环状链接不死循环（评审环 C 册）
+        for root, dirs, files in os.walk(src, followlinks=False):
+            dirs[:] = sorted(d for d in dirs
+                             if not (pathlib.Path(root) / d).is_symlink())
+            dst_root = self._tgt / "wiki" / pathlib.Path(root).relative_to(
+                src)
+            dst_root.mkdir(parents=True, exist_ok=True)
+            os.chmod(dst_root, 0o700)
+            for name in sorted(files):
+                s = pathlib.Path(root) / name
+                if s.is_symlink():
+                    continue
+                dst = dst_root / name
+                shutil.copy2(s, dst)
+                os.chmod(dst, stat.S_IMODE(s.stat().st_mode))
                 count += 1
         return count
 
     # ---- gate 证据改写＋随迁（spec §6）----
 
     def _remap_artifact_paths(self, rows):
-        """引用源 home 的 gate_artifact.path 改写为目标同位路径（批次写
-        任务行前——纯串改写确定性）；证据清单留给 files 批次随迁。"""
+        """引用源 home 的 gate_artifact.path：仅 state/gate-artifacts 子树
+        （v2 ArtifactStore 权威布局）改写为目标同位路径＋证据随迁——子树
+        外的家内引用不拷不改（源可控路径可把任意源目录盖进目标，评审环
+        C 册），如实计数申报；家外引用照迁不动。纯串改写确定性。"""
         prefixes = sorted({str(self._src), str(self._src.resolve())},
                           key=len, reverse=True)
         self._art_evidence, self._art_stats = [], {"remapped": 0,
-                                                   "copied": 0, "missing": 0}
+                                                   "copied": 0, "missing": 0,
+                                                   "in_home_untouched": 0}
         for tid in sorted(rows):
             art = rows[tid].get("gate_artifact")
             if not isinstance(art, dict) or not isinstance(art.get("path"),
                                                            str):
                 continue
+            path = art["path"]
             for prefix in prefixes:
-                path = art["path"]
-                if path == prefix or path.startswith(prefix + os.sep):
-                    art["path"] = str(self._tgt
-                                      / os.path.relpath(path, prefix))
+                subtree = prefix + os.sep + os.path.join(
+                    "state", "gate-artifacts") + os.sep
+                if path.startswith(subtree):
+                    art["path"] = str(self._tgt / os.path.relpath(path,
+                                                                  prefix))
                     self._art_stats["remapped"] += 1
                     self._art_evidence.append((path, art["path"]))
+                    break
+                if path == prefix or path.startswith(prefix + os.sep):
+                    self._art_stats["in_home_untouched"] += 1
                     break
 
     def _copy_artifacts(self):
         for src_path, dst_path in self._art_evidence:
             src, dst = pathlib.Path(src_path), pathlib.Path(dst_path)
+            if src.is_symlink():  # 符号链接证据不跟随（评审环 C 册）
+                self._art_stats["missing"] += 1
+                continue
             try:
                 if src.is_dir():
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                    shutil.copytree(src, dst, dirs_exist_ok=True,
+                                    symlinks=True)
                 elif src.is_file():
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
+                    shutil.copy2(src, dst, follow_symlinks=False)
                 else:  # 源侧本就缺席（v2 悬空投影）——改写如实计数不阻塞
                     self._art_stats["missing"] += 1
                     continue
@@ -258,7 +287,7 @@ class GitLegacyMigrator(LegacyMigrator):
                  "events": len(parts["events"]),
                  "credentials": len(parts["creds"]),
                  "cursors": len(parts["cursors"])}
-        txs = sum(1 for n in sizes.values() if n)  # 空批次零 tx
+        txs = store.tx_count  # 盘面真值（评审环 B 册）——免批次对账假设
         report = self._report(**parts)
         report["backend"] = "git"
         report["journal"] = {"head": store.head, "txs": txs,
