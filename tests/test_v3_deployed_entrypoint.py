@@ -161,6 +161,41 @@ class TestAgoradV3Entrypoint(unittest.TestCase):
         self._assert_fail_closed_zero_artifacts(
             {"AGORA_BACKEND": "git"}, "AGORA_BACKEND")
 
+    def _main_v3_rc(self, home, needle):
+        import io
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {
+                "AGORA_HOME": str(home), "AGORA_API_VERSION": "3",
+                "AGORA_BACKEND": "git",
+                "AGORA_OC_URL": "http://127.0.0.1:9"}, clear=True), \
+             mock.patch("sys.stderr", err):
+            rc = main()
+        return rc, err.getvalue()
+
+    def test_foreign_ledger_fails_clean_not_traceback(self):  # Req: F158
+        # GitStore split-brain 拒开是 StorageError 族（非 ValueError）——
+        # 入口须收成 rc=2＋stderr 报因，不许裸 traceback 退 1
+        home = Path(tempfile.mkdtemp(prefix="agora-fl-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        (home / "state").mkdir(parents=True)
+        (home / "state" / "agora.db").write_bytes(b"foreign")
+        rc, err = self._main_v3_rc(home, "外来账本")
+        self.assertEqual(rc, 2)
+        self.assertIn("外来账本", err)
+
+    def test_bad_verify_profiles_fail_before_storage_artifacts(self):  # Req: F158
+        # v2 纪律：旋钮配置坏＝先于存储动土失败（不留半建 agora.db/journal）
+        home = Path(tempfile.mkdtemp(prefix="agora-vp-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        (home / ".agora").mkdir(parents=True)
+        (home / ".agora" / "verify-profiles.json").write_text(
+            "{ bad json", encoding="utf-8")
+        rc, err = self._main_v3_rc(home, "verify-profiles")
+        self.assertEqual(rc, 2)
+        self.assertTrue(err.strip())  # compose 压缩版报因不含路径——非空即可
+        for name in ("agora.db", "journal.git"):
+            self.assertFalse((home / "state" / name).exists(), name)
+
     def test_v3_sqlite_service_metadata_and_health(self):  # Req: F158
         home = Path(tempfile.mkdtemp(prefix="agora-v3-ep-"))
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
@@ -218,6 +253,10 @@ class TestAgoradV3Entrypoint(unittest.TestCase):
                          ("http://127.0.0.1:45678", "tok-v3-json"))
         (ag / "root.token").write_text("tok-v2-plain\n", encoding="utf-8")
         self.assertEqual(agora_cli.discover(str(home))[1], "tok-v2-plain")
+        with self.assertRaises(ValueError):  # 对象缺 token 键＝坏形归口 ValueError
+            (ag / "root.token").write_text('{"no_token": 1}',
+                                           encoding="utf-8")
+            agora_cli.discover(str(home))
 
 
 class TestInstallGitV3Deployment(unittest.TestCase):
@@ -328,6 +367,22 @@ class TestInstallDefaultV2Unchanged(unittest.TestCase):
         text = (ROOT / "install.sh").read_text(encoding="utf-8")
         for marker in (":-2}", ":-3}", ":-sqlite}", ":-git}"):
             self.assertNotIn(marker, text, marker)
+
+    def test_v3_via_agorad_env_keeps_json_root_token(self):  # Req: F158
+        # agorad.env 层选 v3（旋钮免疫 supervisor 重生的文档化用途）：daemon
+        # 实跑 v3 时 install 不得以纯文本覆写 authsvc 的 JSON 形 root.token
+        # （判定须按 daemon 实际形态＝ready 行，非壳 env）
+        ag = self.plaza / ".agora"
+        ag.mkdir(parents=True)
+        (ag / "agorad.env").write_text("AGORA_API_VERSION=3\n",
+                                       encoding="utf-8")
+        r = _run_install(self.home, self.plaza)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        log = (ag / "install-agorad.log").read_text()
+        self.assertIn("agorad-v3 ready", log)  # daemon 经 env 文件跑 v3
+        raw = (ag / "root.token").read_text(encoding="utf-8").strip()
+        self.assertTrue(raw.startswith("{"))
+        self.assertTrue(json.loads(raw)["token"])
 
 
 if __name__ == "__main__":

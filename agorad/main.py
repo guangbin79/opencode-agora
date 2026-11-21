@@ -38,8 +38,9 @@ from agorad.core.state import State
 from agorad.core.task import TaskService, _bad_timeout
 from agorad.core.verify_hygiene import find_verify_hygiene_issues
 from agorad.transport.httpd import make_server
-from agorad.compose import V3Stack  # Req: F158 v3 部署装配（main＝唯一装配文件）
+from agorad.compose import V3Stack, load_verify_profiles as load_profiles_v3  # Req: F158 v3 部署装配（main＝唯一装配文件）
 from agorad.serverv3 import serve_forever_v3  # Req: F158
+from agorad.storage import StorageError  # Req: F158——GitStore 拒开族（外来账本/日志损毁）收口入口
 
 _VERSION = "0.1.0"
 _MAIN_SID = "main"
@@ -469,14 +470,15 @@ def main_v3(backend):
     note = payload_drift_note()  # P2-13：版本漂移自检（v2 同款）
     if note:
         print(f"WARNING: {note}", flush=True)
-    try:
+    try:  # 旋钮画像先于存储动土（v2 纪律：坏配置不留半建后端账本）
+        load_profiles_v3(home)
         stack = V3Stack(home, oc=Oc(oc_url, oc_password),
                         gitx=Gitx(instance_id=instance_identity(home)),
                         verify_timeout=verify_timeout,
                         verify_ceiling=verify_ceiling,
                         quick_max_files=quick_files,
                         quick_max_lines=quick_lines, backend=backend)
-    except ValueError as e:  # verify 画像/外来账本拒开（GitStore split-brain 等）
+    except (ValueError, StorageError) as e:  # 画像坏/外来账本拒开（GitStore split-brain＝StorageError 族）
         print(str(e), file=sys.stderr)
         return 2
     stack.start()  # 幂等；root bootstrap＋root.token 落盘先于牌行

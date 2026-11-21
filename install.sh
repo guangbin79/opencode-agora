@@ -204,11 +204,11 @@ else
   # 不得把 root 牌泼进终端/agent 转录（流式过滤，无 -i，GNU/BSD 同形）
   [ -n "$ready" ] || { sed '/^AGORA_ROOT_TOKEN: /d' "$LOG" >&2; fail "agorad 启动失败（10s 未就绪，见上方输出）"; }
   tok="$(awk '/^AGORA_ROOT_TOKEN: /{print $2; exit}' "$LOG")"
-  if [ -n "$tok" ]; then
-    if [ "${AGORA_API_VERSION:-}" != "3" ]; then
-      (umask 077; printf '%s\n' "$tok" > "$ROOT_TOKEN")  # 0600（F1 root 牌唯一落盘点）
-    fi  # Req: F158 v3：authsvc 已在 start 落 JSON 形 root.token（0600）——
-    # 纯文本覆写会与 authsvc sweep 对账（JSON 权威）打架，不覆写
+  # Req: F158 v3：按 daemon 实测形态（ready 行）判定，非壳 env——agorad.env 旋钮层
+  # 亦可选 v3（ag-fc67bc 文档化用途）；v3 时 authsvc 已在 start 落 JSON 形
+  # root.token（0600），纯文本覆写会与 sweep 对账（JSON 权威）打架
+  if [ -n "$tok" ] && ! grep -q "^agorad-v3 ready" "$LOG" 2>/dev/null; then
+    (umask 077; printf '%s\n' "$tok" > "$ROOT_TOKEN")  # 0600（F1 root 牌唯一落盘点）
   elif [ ! -s "$ROOT_TOKEN" ]; then
     fail "未捕获 root 牌且无既有 root.token——异常态，请清 $AGORA_HOME/tokens 后重装"
   fi  # else: 复装复用既有 root.token（牌持久化，重启不换；v3 无牌行＝DB 已有 root，daemon 落盘在位）

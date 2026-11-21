@@ -68,7 +68,7 @@ def discover(home=None):
     if token.startswith("{"):  # Req: F158 v3 authsvc 落 JSON 形（v2 install 纯文本）——两形同读
         try:
             token = str(json.loads(token)["token"])
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, TypeError) as e:  # 非对象 JSON＝TypeError（坏形归口 ValueError）
             raise ValueError(f"root.token JSON 坏形或缺 token 键: {e}") from None
     if "\n" in token or "\r" in token:  # 控制符会让 putheader 带牌面炸进 stderr／折叠改头
         raise ValueError("root 牌撕裂（含换行/回车）")
