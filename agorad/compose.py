@@ -555,13 +555,14 @@ class V3Stack:
         首轮立即扫（启动补发兜底），其后按 next_wait_seconds 收敛醒点。"""
         def loop():
             while not self._stop.is_set():
-                try:
+                try:  # 评审环 B3：醒点计算与扫描同护——一次读错不杀线程
                     self.timers.catch_up()
+                    wait = self.timers.next_wait_seconds(interval)
                 except Exception as e:
                     print(f"agorad-v3 timer tick failed: {e}",
                           file=sys.stderr, flush=True)
-                if self._stop.wait(
-                        max(self.timers.next_wait_seconds(interval), 0.05)):
+                    wait = interval
+                if self._stop.wait(max(wait, 0.05)):
                     break
         thread = threading.Thread(target=loop, daemon=True, name="v3-timer")
         thread.start()

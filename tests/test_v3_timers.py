@@ -97,10 +97,12 @@ class _SvcBase(unittest.TestCase):
         self.storage = Storage(self.home.state / "agora.db",
                                injector=self.injector)
         self.addCleanup(self.storage.close)
+        # 装配同款写锁代理（compose.SerialRepo）——并发面与生产同构
+        self.repo = compose.SerialRepo(self.storage, threading.RLock())
         self.messaging = MessagingService(
-            self.storage, self.oc, home=str(self.home.path),
+            self.repo, self.oc, home=str(self.home.path),
             clock=self.clock, injector=self.injector)
-        self.svc = TimerService(self.storage, self.messaging,
+        self.svc = TimerService(self.repo, self.messaging,
                                 clock=self.clock, injector=self.injector)
 
     # ---- 助手 ----
@@ -155,6 +157,12 @@ class TestContractValidation(_SvcBase):  # 断言1
                                       after=None,
                                       due_at=self.clock.ms
                                       + (cap + 60) * 1000)))
+        # 评审环 C1：下界对称 30 天回溯窗（极端负值会穿透 SQLite INTEGER
+        # 冒 500——信任边界收 400）
+        self.assertTrue(self._err("invalid_argument", lambda: self.create(
+            after=None, due_at=-10 ** 30)))
+        self.assertTrue(self._err("invalid_argument", lambda: self.create(
+            after=None, due_at=self.clock.ms - (cap + 1) * 1000)))
         r = self.create(after=cap)  # 恰上限放行
         self.assertEqual(r["status"], "pending")
 
@@ -193,6 +201,36 @@ class TestContractValidation(_SvcBase):  # 断言1
         c = self.create(after=None, due_at=self.clock.ms + 120_000, key="k2")
         self.assertNotEqual(a["timer"], c["timer"])
 
+    def test_client_key_retry_at_full_pending_returns_original(self):
+        # 评审环 A1：幂等判定先于上限——16 满时同键同载荷重试仍返原 timer
+        first = self.create(after=10 ** 6, key="k1")
+        for _ in range(15):
+            self.create(after=10 ** 6)
+        self.assertTrue(self._err("conflict", lambda: self.create(after=1)))
+        again = self.create(after=10 ** 6, key="k1")
+        self.assertEqual(again["timer"], first["timer"])
+        self.assertEqual(len(self.storage.timers_for_task("ag-t01")), 16)
+
+    def test_client_key_namespace_scoped_per_task(self):
+        # 评审环 C2：键命名空间按任务隔离——跨任务同键互不干扰不泄漏
+        self.seed_task("ag-t02", worker_sid=WORKER2,
+                       dispatcher_sid="ses-d2")
+        a = self.create(key="retry-1")
+        b = self.create(tid="ag-t02", key="retry-1", actor="ses-d2")
+        self.assertNotEqual(a["timer"], b["timer"])
+        again = self.create(key="retry-1")  # 本任务命中本任务原 timer
+        self.assertEqual(again["timer"], a["timer"])
+
+    def test_client_key_concurrent_create_single_row(self):
+        # 评审环 B2：并发同键重试单行入账（检查＋插入同一 uow，全局写锁）
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            rows = list(ex.map(
+                lambda _: self.create(key="k-race", after=10 ** 6),
+                range(16)))
+        self.assertEqual(len({r["timer"] for r in rows}), 1)
+        self.assertEqual(len(self.storage.timers_all()), 1)
+
     def test_client_key_conflict_on_different_payload(self):
         self.create(after=120, key="k1")
         for kw in ({"after": 121}, {"target": "dispatcher"},
@@ -205,6 +243,14 @@ class TestContractValidation(_SvcBase):  # 断言1
         self.create(after=None, due_at=base, key="k3")
         self.assertTrue(self._err("conflict", lambda: self.create(
             after=None, due_at=base + 1, key="k3")))
+
+    def test_client_key_unique_index_enforced(self):
+        # 评审环 B2 索引背书：(task_id, client_key) 唯一——旁路双插被 DB 拒
+        from agorad.domain import Timer as _T
+        self.create(key="k1")
+        with self.storage.uow(), self.assertRaises(Exception):
+            self.storage.upsert_timer(_T(
+                id="tm-dupe", task_id="ag-t01", client_key="k1"))
 
     def test_unknown_target_rejected_by_contract(self):
         from agorad.contracts import validate_params
@@ -377,7 +423,16 @@ class TestScan(_SvcBase):  # 断言4
         self.create(after=5)
         self.assertAlmostEqual(self.svc.next_wait_seconds(), 5.0)
         self.clock.advance(6_000)
-        self.assertEqual(self.svc.next_wait_seconds(), 0.0)  # 已 overdue
+        # 评审环 B1：overdue 回默认节奏（门控不过的 overdue 无进展——
+        # 防 timer 线程 20Hz 忙自旋；可发 overdue 由 catch_up 即时触发）
+        self.assertEqual(self.svc.next_wait_seconds(), 30.0)
+
+    def test_stuck_overdue_no_busy_spin_after_scan(self):
+        self.seed_task(state="done")  # done∉触发态：timer 常驻 overdue
+        self.create(after=1)
+        self.clock.advance(10_000)
+        self.assertEqual(self.svc.catch_up(), 0)
+        self.assertEqual(self.svc.next_wait_seconds(), 30.0)
 
     def test_forward_jump_fires_once_rollback_no_refire(self):
         self.create(after=10)
