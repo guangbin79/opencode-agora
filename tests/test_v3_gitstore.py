@@ -525,6 +525,24 @@ class TestFaultInjection(_Base):  # spec §Fault injection：update-ref 两相�
         self.assertEqual([x.id for x in GitStore(self.home.state).messages_all()],
                          [1, 2])
 
+    def test_ref_deleted_reopen_resets_baseline_and_writes(self):  # R2 锚
+        st = self.store()
+        with st.uow():
+            st.insert_message(ts_ms=1, task_id=TID, kind="note",
+                              from_sid="w", to_sid="d", body="old")
+        r = _plumb(self.home.state, "update-ref", "-d",
+                   "refs/agora/journal")  # ref 外部消失（CAS 重入同路径）
+        self.assertEqual(r.returncode, 0, r.stderr)
+        fresh = GitStore(self.home.state)
+        self.assertIsNone(fresh.head)  # 基线清空不滞留陈旧 head
+        with fresh.uow():
+            fresh.insert_message(ts_ms=2, task_id=TID, kind="note",
+                                 from_sid="w", to_sid="d", body="new")
+        self.assertEqual([m.body for m in fresh.messages_all()], [b"new"])
+        self.assertEqual(
+            [m.body for m in GitStore(self.home.state).messages_all()],
+            [b"new"])
+
     def _loose_objects(self):
         r = _plumb(self.home.state, "count-objects", "-v")
         for line in r.stdout.decode().splitlines():
@@ -648,6 +666,28 @@ class TestCorruptionFailClosed(_Base):  # 断言10
         tx["operations"] = {"a": 1}  # operations 非列表
         _mutate_head(self.home.state,
                      {tx_path: json.dumps(tx).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_unhashable_op_path_fails_closed_dedicated_error(self):  # R2
+        self._seed()
+        files = _head_files(self.home.state)
+        [tx_path] = [p for p in files if p.startswith("tx/")]
+        tx = json.loads(_blob(self.home.state, files[tx_path]))
+        tx["operations"][0]["path"] = ["objects/tasks/x"]  # 不可哈希路径
+        _mutate_head(self.home.state,
+                     {tx_path: json.dumps(tx).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_bool_seq_fails_closed(self):  # R2 锚：bool 冒充 int seq
+        self._seed()
+        files = _head_files(self.home.state)
+        [task_path] = [p for p in files if p.startswith("objects/tasks/")]
+        obj = json.loads(_blob(self.home.state, files[task_path]))
+        obj["seq"] = True  # True == 1 不得溜过形状闸
+        _mutate_head(self.home.state,
+                     {task_path: json.dumps(obj).encode()})
         with self.assertRaises(JournalCorruptionError):
             self.store()
 

@@ -274,7 +274,8 @@ class GitStore:
         rc, out, _ = self._git(("rev-parse", "--verify", JOURNAL_REF),
                                check=False)
         if rc != 0:
-            return  # 空历史：保持现快照（重载场景高水位已在 _hwm 只升不降）
+            self._snap = _empty_state()  # ref 消失（CAS 路径重入）＝清空基线
+            return
         head = out.decode().strip()
         _, out, _ = self._git(("ls-tree", "-r", "-z", head))
         entries = {}
@@ -303,7 +304,7 @@ class GitStore:
             if (obj.get("schema_version") != SCHEMA_VERSION
                     or obj.get("epoch") != EPOCH or obj.get("kind") != kind
                     or obj.get("id") != ident or obj.get("version") != version
-                    or not isinstance(obj.get("seq"), int)
+                    or type(obj.get("seq")) is not int  # bool 非 int（R2）
                     or _bucket(ident) != bucket):
                 bad(path, "对象头/路径不一致")
             return obj
@@ -401,6 +402,7 @@ class GitStore:
                 obj = obj_of(sha, path)
                 if (obj.get("schema_version") != SCHEMA_VERSION
                         or obj.get("epoch") != EPOCH
+                        or type(obj.get("seq")) is not int
                         or obj.get("seq") != int(m["seq"])
                         or _bucket(int(m["seq"])) != m.group(1)
                         or not isinstance(obj.get("operations"), list)):
@@ -426,8 +428,9 @@ class GitStore:
         for obj in txs.values():
             for op in obj["operations"]:
                 path = op.get("path") if isinstance(op, dict) else None
-                if path not in entries:
-                    bad(path or "<非对象操作/无路径>", "tx 操作引用对象缺席")
+                if not isinstance(path, str) or path not in entries:
+                    bad(path if isinstance(path, str)
+                        else "<非对象操作/无路径>", "tx 操作引用对象缺席")
         # 落内存（对象/消息字典本体）——坏 meta 一律 fail-closed 专用错
         messages = {}
         for mid, d in metas.items():
