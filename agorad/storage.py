@@ -523,16 +523,22 @@ class Storage:
             self._read_done(read)
         return self._timer(row) if row is not None else None
 
-    def timers_due(self, now_ms, limit=32):
+    def timers_due(self, now_ms, limit=32, after_due=None, after_id=None):
         """到期待发批（Req: F145 §6：status='pending' AND due_ms<=now，按
-        due/id 升序、每批 ≤limit——idx_timers_status_due 命中）。"""
+        due/id 升序、每批 ≤limit——idx_timers_status_due 命中；after 键集
+        游标翻页——门控不过的行不消耗触发额度，防队头阻塞饿死后发）。"""
+        sql = ("SELECT id,task_id,target_role,due_ms,status,created_ms,"
+               "fired_ms,body,created_by,client_key FROM timers "
+               "WHERE status='pending' AND due_ms<=?")
+        args = [now_ms]
+        if after_due is not None:  # (due_ms,id) 键集游标
+            sql += " AND (due_ms>? OR (due_ms=? AND id>?))"
+            args += [after_due, after_due, after_id]
+        sql += " ORDER BY due_ms, id LIMIT ?"
+        args.append(limit)
         read = self._read_conn()
         try:
-            rows = read.execute(
-                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
-                "fired_ms,body,created_by,client_key FROM timers "
-                "WHERE status='pending' AND due_ms<=? "
-                "ORDER BY due_ms, id LIMIT ?", (now_ms, limit)).fetchall()
+            rows = read.execute(sql, args).fetchall()
         finally:
             self._read_done(read)
         return [self._timer(r) for r in rows]

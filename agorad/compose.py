@@ -457,7 +457,7 @@ class V3Stack:
             verify_timeout=verify_timeout, verify_ceiling=verify_ceiling,
             verify_profiles=self.verify_profiles,
             quick_max_files=quick_max_files, quick_max_lines=quick_max_lines,
-            lock_wait_s=lock_wait_s,
+            lock_wait_s=lock_wait_s, timers=self.timers,  # Req: F145 终态钩
             roster_path=str(pathlib.Path(home) / ".agora" / "ignore.roster"))
         self.recover = Recover(repo, oc, gitx, self.auth, self.messaging,
                                home=self.home, clock=self.clock)

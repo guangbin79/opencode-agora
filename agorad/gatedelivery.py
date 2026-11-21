@@ -115,13 +115,13 @@ class GateDeliveryService(GateVerifyService):
                  anchors=None, artifacts=None, home="", clock=None,
                  injector=None, verify_timeout=300, verify_ceiling=None,
                  verify_profiles=None, quick_max_files=3, quick_max_lines=30,
-                 lock_wait_s=300.0, roster_path=""):
+                 lock_wait_s=300.0, roster_path="", timers=None):
         super().__init__(store, gitx, runner, messaging=messaging,
                          tasksvc=tasksvc, anchors=anchors, artifacts=artifacts,
                          home=home, clock=clock, injector=injector,
                          verify_timeout=verify_timeout,
                          verify_ceiling=verify_ceiling,
-                         verify_profiles=verify_profiles)
+                         verify_profiles=verify_profiles, timers=timers)
         self._quick_max_files = quick_max_files
         self._quick_max_lines = quick_max_lines
         self._lock_wait_ms = max(0.0, float(lock_wait_s)) * 1000
@@ -263,6 +263,7 @@ class GateDeliveryService(GateVerifyService):
             task = reset_fail_streak(task, now_ms=now)
             task = task_transition(task, "closed", now_ms=now + 1)
             self._store.upsert_task(task)
+            self._autocancel_timers(tid, "closed", now + 1)  # Req: F145
             self._store.append_event(self._ev(
                 now, "gate", "merged", tid, {"note": "out_of_band"}))
             self._store.append_event(
@@ -649,6 +650,7 @@ class GateDeliveryService(GateVerifyService):
             task = task_transition(task, "closed", now_ms=now + 1)
             task = dataclasses.replace(task, delivery=nd, commit=sha)
             self._store.upsert_task(task)
+            self._autocancel_timers(tid, "closed", now + 1)  # Req: F145
             detail = {"commit": sha}
             if task.rebased_from:
                 detail["rebased_from"] = task.rebased_from

@@ -73,11 +73,14 @@ class TimerRepo(typing.Protocol):
     def get_task(self, tid) -> Task | None: ...
     def get_timer(self, tid) -> Timer | None: ...
     def timers_all(self) -> list[Timer]: ...
-    def timers_due(self, now_ms, limit=BATCH) -> list[Timer]: ...
+    def timers_due(self, now_ms, limit=BATCH, after_due=None,
+                   after_id=None) -> list[Timer]: ...
     def timers_by_status(self, status) -> list[Timer]: ...
     def timers_for_task(self, task_id) -> list[Timer]: ...
+    def timer_for_key(self, task_id, client_key) -> Timer | None: ...
     def next_due_ms(self): ...
     def message_for_timer(self, timer_id): ...
+    def upsert_timer(self, tm: Timer) -> Timer: ...
     def append_event(self, ev: Event): ...
 
 
@@ -149,13 +152,22 @@ class TimerService:
                       due_ms=due, state=TimerState.PENDING, created_ms=now,
                       body=body or "", created_by=actor_sid, client_key=key)
         with self._store.uow():
+            # 评审环 R2：终态闸（终态自动取消只在迁移时点执行——事后建的
+            # timer 无人再取消，永久滞留 overdue/向死任务发消息）＋uow 内
+            # 复读任务行防「读后任务恰终态」竞窗
+            live = self._store.get_task(task.id)
+            if live is None or live.state in TASK_TERMINAL:
+                raise ContractError(
+                    "conflict",
+                    f"{task.id}: 任务已终态（{live.state if live else '?'}"
+                    "）——终态任务不再受理 timer")
             # 评审环 B2/A1：幂等命中先于上限判定（16 满时同键同载荷重试仍
             # 返原 timer）；三项检查＋插入同一 uow（全局写锁下 read-decide-
             # write 原子——并发同键重试不双入账、上限不被击穿）
             if key is not None:
                 hit = self._store.timer_for_key(task.id, key)
                 if hit is not None:
-                    if not self._same_payload(hit, task.id, params, due):
+                    if not self._same_payload(hit, params):
                         raise ContractError(
                             "conflict",
                             f"client_key {key!r} 已用于本任务他 timer"
@@ -174,11 +186,11 @@ class TimerService:
             self._store.upsert_timer(timer)
         return self._row(timer)
 
-    def _same_payload(self, existing, task_id, params, due):
+    def _same_payload(self, existing, params):
         """同键载荷比对：task/target/body＋原始时刻（after_seconds 经
-        due-created 重建；due_at 原值直比）。"""
-        if (existing.task_id != task_id
-                or existing.target_role != params["target"]
+        due-created 重建；due_at 原值直比；task 域由 timer_for_key 索引
+        先行限定）。"""
+        if (existing.target_role != params["target"]
                 or existing.body != (params.get("body") or "")):
             return False
         if params.get("due_at") is not None:
@@ -241,15 +253,26 @@ class TimerService:
     # ---- 扫描与触发（断言3/4/5/9）----
 
     def scan(self) -> int:
-        """单批扫描：先对账 firing 残留，再按 due/id 升序触发 ≤batch 个
-        pending。门控不过（缺 worker/态不合）零数据库写入——保持 overdue
-        可见待环境恢复，不误 escalate。返回本轮触发数。"""
+        """单批扫描：先对账 firing 残留，再触发 ≤batch 个到期 pending。
+        门控行（缺 worker/态不合）不消耗触发额度——键集游标翻页越过（评审
+        环 R2：防僵死 overdue 占满批头饿死后发）；门控不过零数据库写入
+        ——保持 overdue 可见待环境恢复，不误 escalate。返回本轮触发数。"""
         now = self._clock()
         self.reconcile_firing(now)
-        fired = 0
-        for tm in self._store.timers_due(now, self._batch):
-            if self._fire(tm, now):
-                fired += 1
+        fired, cur_due, cur_id = 0, None, None
+        while fired < self._batch:
+            rows = self._store.timers_due(now, self._batch,
+                                          after_due=cur_due, after_id=cur_id)
+            if not rows:
+                break
+            for tm in rows:
+                cur_due, cur_id = tm.due_ms, tm.id
+                if self._fire(tm, now):
+                    fired += 1
+                    if fired >= self._batch:
+                        break
+            if len(rows) < self._batch:
+                break  # 尾页翻尽（防末页全门控时空转再查一次）
         return fired
 
     def catch_up(self) -> int:
