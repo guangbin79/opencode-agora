@@ -16,16 +16,20 @@ _WT_PATTERN = "*__wt-*"
 
 def scan_misplaced_worktrees(repo_path):
     """仓工作树内未跟踪 '*__wt-*' 目录清单（相对 posix 路径）。
-    未跟踪口径＝git ls-files --others --directory --exclude-standard
-    （.gitignore 命中不计）。shortcut: --directory 折叠列表层——错位
-    worktree 嵌在另一全未跟踪目录之内时不展开，巡检升级时再补。"""
+    未跟踪口径＝git ls-files --others --directory --exclude-standard；
+    -z＋bytes＋errors=replace——quotePath C 引号形态（非 ASCII 名尾符是 "
+    非 /）曾静默漏检、坏字节名曾 strict 解码崩（终闸 B1/C1），raw NUL 面
+    两者皆免疫。shortcut: --directory 折叠列表层——错位 worktree 嵌在另一
+    全未跟踪目录之内时不展开，巡检升级时再补。"""
     r = subprocess.run(
         ["git", "-C", str(repo_path), "ls-files", "--others",
-         "--directory", "--exclude-standard"],
-        capture_output=True, text=True, timeout=30)
+         "--directory", "--exclude-standard", "-z"],
+        capture_output=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"git ls-files: {r.stderr.strip()}")
-    return [p[:-1] for p in r.stdout.splitlines()
+        raise RuntimeError("git ls-files: "
+                           + r.stderr.decode("utf-8", errors="replace").strip())
+    return [p[:-1] for p in (seg.decode("utf-8", errors="replace")
+                             for seg in r.stdout.split(b"\0"))
             if p.endswith("/") and fnmatch(p[:-1].rsplit("/", 1)[-1],
                                            _WT_PATTERN)]
 
@@ -39,7 +43,9 @@ def main(argv=None):
         return 2
     try:
         found = scan_misplaced_worktrees(argv[0])
-    except (RuntimeError, subprocess.SubprocessError) as e:
+    except (RuntimeError, subprocess.SubprocessError, OSError) as e:
+        # OSError＝git 可执行缺席等 spawn 前失败（ocr/B 册：逃逸则 traceback
+        # exit 1 会被包装方误读为「发现」）——归口 exit 2 仓错面
         print(str(e), file=sys.stderr)
         return 2
     for path in found:

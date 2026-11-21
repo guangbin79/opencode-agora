@@ -1,4 +1,5 @@
 """F129 worktree 落位校验：纯判定／创建拦截／存量巡检（pytest，tmp_path 假仓）。"""
+import os
 import subprocess
 from pathlib import Path
 
@@ -54,11 +55,14 @@ def test_worktree_equal_repo_rejected(repo):  # Req: F129
 
 def test_build_env_rejects_misplaced_worktree(repo, monkeypatch):  # Req: F129
     gx = Gitx()
-    # name 含遍历成分 → env 解析进仓工作树内（落位闸须触 git 前拒）
+    # name 遍历后 resolve 回仓内（../<父名>/<仓名>/…）：落位闸须触 git 前拒
     monkeypatch.setattr(
-        gx, "_env_name", lambda _repo, _tid: f"../{repo.name}/evil__wt-x")
+        gx, "_env_name",
+        lambda _repo, _tid: f"../{repo.parent.name}/{repo.name}/evil__wt-x")
     with pytest.raises(RuntimeError) as ei:
         gx.build_env(str(repo), "ag-evil")
+    # 拒因来自闸而非 git 报错（摘闸假绿锚教训：git ENOENT 会冒充闸拒因）
+    assert str(ei.value).startswith("worktree 落位")
     assert str(repo.parent) in str(ei.value)
     assert _worktrees(repo) == [str(repo)]  # 零副作用：未建 worktree
 
@@ -75,6 +79,20 @@ def test_scan_detects_planted_worktree_dir(repo):  # Req: F129
     planted.mkdir()
     (planted / ".git").write_text("gitdir: ../.git/worktrees/x\n")
     assert scan_misplaced_worktrees(repo) == [planted.name]
+
+
+def test_scan_detects_nonascii_wt_dir(repo):  # Req: F129
+    # quotePath C 引号形态（非 ASCII 名）不得击穿目录判定（终闸 C1 回归锚）
+    planted = repo / "proj__wt-库存"
+    planted.mkdir()
+    assert scan_misplaced_worktrees(repo) == [planted.name]
+
+
+def test_scan_bad_bytes_name_no_crash(repo, capsys):  # Req: F129
+    # 坏字节文件名不解码崩、不产假「发现」外的畸形退出码（终闸 B1/C2 锚）
+    os.mkdir(os.path.join(os.fsencode(repo), b"bad__wt-\xff"))
+    assert scan_misplaced_worktrees(repo) == ["bad__wt-\ufffd"]
+    assert main([str(repo)]) == 1  # CLI 面照常报发现，不 traceback
 
 
 def test_scan_ignores_tracked_wt_named_dir(repo):  # Req: F129
