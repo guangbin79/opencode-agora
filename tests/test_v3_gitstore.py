@@ -35,6 +35,7 @@ pull 必须可持久化 credential）与 append_event——按同款 bucket 方�
 import dataclasses
 import hashlib
 import json
+import time
 from collections import Counter
 import os
 import shutil
@@ -42,6 +43,7 @@ import socket
 import subprocess
 import unittest
 
+from agorad import compose, gitstore
 from agorad.contracts import ContractError
 from agorad.domain import (Artifact, Credential, DeliveryReceipt, DeliveryState,
                            Event, Message, Task, Timer, TimerState, VerifySpec,
@@ -52,10 +54,12 @@ from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretErro
                              ForeignLedgerError, GitStore,
                              JournalCorruptionError, check_verb)
 from agorad.messaging import MessagingService
-from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
+from agorad.storage import (NoActiveUnitOfWork, Storage, StorageError,
+                            UnitOfWorkViolation)
 from agorad.tasksvc import TaskService
 from agorad.timersvc import TimerService
 from tests import v3_harness as harness
+from tests import test_v3_server as srv
 from tests.test_v3_gate_port import (BRANCH as GATE_BRANCH,
                                      C as GATE_C, E as GATE_E,
                                      TIP as GATE_TIP,
@@ -2553,6 +2557,181 @@ class TestGateDeliveryOnGitPort(unittest.TestCase):
         n = len(self.events(tid))
         self.gate.recover()  # 幂等：终局行零接触
         self.assertEqual(len(self.events(tid)), n)
+
+
+class TestV3StackBackendSelection(unittest.TestCase):
+    """Req: F155 — V3Stack 后端选择（spec gitstore-phase3-v3stack-backend）：
+    缺省 sqlite 不变；git 显式可选；未知 fail-closed 零动土；选择集中
+    compose（服务/传输零复制——test_architecture 分层守卫自动覆盖）。"""
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.oc, self.gitx = srv.OcStub(), srv.GitxStub()
+
+    def _stack(self, **over):
+        kw = dict(oc=self.oc, gitx=self.gitx, runner=srv.RunnerStub(),
+                  anchor_reader=srv.AnchorStub())
+        kw.update(over)
+        return compose.V3Stack(self.home.path, **kw)
+
+    def _sqlite_artifacts(self):
+        return sorted(p.name for p in self.home.state.glob("agora.db*"))
+
+    def test_default_backend_is_sqlite(self):
+        stack = self._stack()
+        self.assertIsInstance(stack.storage, Storage)
+        stack.start()
+        stack.close()
+        self.assertEqual(self._sqlite_artifacts(), ["agora.db"])
+        self.assertFalse((self.home.state / "journal.git").exists())
+
+    def test_git_backend_builds_gitstore_from_state(self):
+        stack = self._stack(backend=gitstore.BACKEND)
+        self.assertIsInstance(stack.storage, gitstore.GitStore)
+        self.assertTrue((self.home.state / "journal.git").is_dir())
+        self.assertEqual(self._sqlite_artifacts(), [])
+        stack.start()
+        stack.close()
+        self.assertEqual(self._sqlite_artifacts(), [])  # 起停零 SQLite 件
+
+    def test_unknown_backend_fails_closed_zero_dirt(self):
+        with self.assertRaises(ValueError):
+            self._stack(backend="postgres")
+        self.assertEqual(  # 骨架外零动土（messages/ 为 TempAgoraHome 预建）
+            sorted(p.name for p in self.home.state.glob("agora.db*")), [])
+        self.assertFalse((self.home.state / "journal.git").exists())
+
+
+class TestV3StackOnGitLifecycle(unittest.TestCase):
+    """Req: F155 — V3Stack 全栈生命周期跑 Git 后端：start() 恢复钩全跑
+    （root bootstrap/sweep/outbox/recover.startup/gate recover/timer
+    catch-up/done 重排）＋health/timer 线程无 SQL 假设＋close 收口兼容。"""
+
+    C = "c" * 40
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.injector = harness.FaultInjector()
+        for fp in GIT_FAILPOINTS + ("dispatch", "uow", "timer_fire",
+                                    "timer_firing"):
+            self.injector.register(fp)
+        self.clock = FakeClock()
+
+    def _stack(self, oc, runner=None, **over):
+        kw = dict(oc=oc, gitx=srv.GitxStub(), runner=runner or srv.RunnerStub(),
+                  anchor_reader=srv.AnchorStub(), clock=self.clock,
+                  injector=self.injector)
+        kw.update(over)
+        stack = compose.V3Stack(self.home.path, backend=gitstore.BACKEND,
+                                **kw)
+        stack.start()
+        return stack
+
+    def _mk_done_residue(self, stack, tid_goal="done-residue"):
+        """经服务面铺一笔 done 残留（未 start 栈——gate 线程缺席无人收敛）。"""
+        spec = make_task_spec(goal=tid_goal, verify={"cmd": "true"})
+        tid = stack.tasks.create("ses-r0", "root", spec)
+        stack.tasks.dispatch(tid, "ses-r0", "root")
+        row = stack.storage.get_task(tid)
+        stack.tasks.transition(tid, "running")
+        stack.gate.accept_done(tid, row.worker_sid, self.C)
+        self.assertEqual(stack.storage.get_task(tid).state, "done")
+        return tid, row.worker_sid
+
+    # ---- 存储生命周期兼容面（GitStore 自身语义）----
+
+    def test_close_idempotent_and_checkpoint_noop_with_history(self):
+        st = GitStore(self.home.state)
+        with st.uow():
+            st.upsert_task(Task(id=TID, state="running",
+                                dispatcher_sid="ses-d1", worker_sid="ses-w1",
+                                created_ms=1, updated_ms=2))
+        self.assertIsNotNone(st.head)
+        st.checkpoint_truncate()  # 有史：验证性 no-op
+        st.close()
+        st.close()  # 无持久句柄：幂等 no-op
+        fresh = GitStore(self.home.state)  # 收口不损账本
+        self.assertEqual(fresh.get_task(TID).state, "running")
+
+    def test_checkpoint_empty_history_noop(self):
+        st = GitStore(self.home.state)  # 零提交
+        st.checkpoint_truncate()
+        st.close()
+
+    def test_checkpoint_unresolved_ref_with_history_fails_closed(self):
+        st = GitStore(self.home.state)
+        with st.uow():
+            st.upsert_task(Task(id=TID, state="todo", created_ms=1,
+                                updated_ms=2))
+        os.unlink(self.home.state / "journal.git" / "refs" / "agora"
+                  / "journal")  # 历史在而 ref 失联
+        with self.assertRaises(StorageError):
+            st.checkpoint_truncate()
+
+    # ---- 全栈生命周期 ----
+
+    def test_start_recovery_hooks_and_full_lifecycle_on_git(self):
+        # 阶段0：未 start 的栈经服务面铺底账（模拟上一进程崩溃现场）
+        oc1 = srv.OcStub()
+        s0 = compose.V3Stack(
+            self.home.path, backend=gitstore.BACKEND, oc=oc1,
+            gitx=srv.GitxStub(), runner=srv.RunnerStub(),
+            anchor_reader=srv.AnchorStub(), clock=self.clock)
+        tid, wsid = self._mk_done_residue(s0)
+        boot_mid = s0.storage.messages_all()[0].id  # dispatch BOOT 消息
+        with s0.storage.uow():  # 崩窗残留：inflight 收据（lease 未过期）
+            s0.storage.upsert_receipt(dataclasses.replace(
+                s0.storage.get_receipt(boot_mid), status="inflight",
+                lease_until_ms=self.clock.ms + 60_000))
+        tid_dead = s0.tasks.create(  # 死 worker 残留（recover.startup 面）
+            "ses-r0", "root",
+            make_task_spec(goal="dead-worker", verify={"cmd": "true"}))
+        s0.tasks.dispatch(tid_dead, "ses-r0", "root")
+        dead_wsid = s0.storage.get_task(tid_dead).worker_sid
+        with s0.storage.uow():  # overdue timer 残留（catch-up 面；目标＝
+            # 死 worker 任务——reinject 先跑，补发落新会话）
+            s0.storage.upsert_timer(Timer(
+                id="tm-overdue", task_id=tid_dead,
+                due_ms=self.clock.ms - 1_000,
+                body="补发", created_by="ses-r0"))
+        self.home.write_credential("orphan", "tok-orphan")  # sweep 面
+        s0.close()
+
+        # 阶段1：重开即 start——恢复钩全跑
+        oc2 = srv.OcStub()
+        oc2.dead = {dead_wsid}
+        s1 = self._stack(oc2, runner=srv.RunnerStub(
+            script=[(1, "base-red"), (0, "ok"), (0, "ok")]))
+        self.assertIsNotNone(s1.root_token)  # root bootstrap
+        self.assertIsNotNone(s1.storage.get_credential("root"))
+        self.assertFalse((self.home.credentials / "orphan.token").exists())
+        self.assertEqual(  # outbox 恢复：inflight 归位 pending
+            s1.storage.get_receipt(boot_mid).status, "pending")
+        row = s1.storage.get_task(tid_dead)  # recover.startup：死会话重注入
+        self.assertNotEqual(row.worker_sid, dead_wsid)
+        self.assertIn(oc2.created[0]["sid"], row.worker_sid)
+        tm = s1.storage.get_timer("tm-overdue")  # timer catch-up 补发
+        self.assertEqual(tm.state, TimerState.FIRED)
+        self.assertIsNotNone(s1.storage.message_for_timer("tm-overdue"))
+        deadline = time.monotonic() + 10.0  # done 重排→gate 收敛
+        while time.monotonic() < deadline:
+            if s1.storage.get_task(tid).state == "closed":
+                break
+            time.sleep(0.02)
+        self.assertEqual(s1.storage.get_task(tid).state, "closed")
+
+        s1.health.tick()  # 无 SQL 假设直调
+        s1.start_health_thread(interval=0.05)
+        s1.start_timer_thread(interval=0.05)
+        time.sleep(0.2)
+        s1.close()
+        s1.close()  # 幂等
+        self.assertEqual(  # 全程零 SQLite 件
+            sorted(p.name for p in self.home.state.glob("agora.db*")), [])
+        fresh = GitStore(self.home.state)  # 收口后账本可重放
+        self.assertEqual(fresh.get_task(tid).state, "closed")
 
 if __name__ == "__main__":
     unittest.main()

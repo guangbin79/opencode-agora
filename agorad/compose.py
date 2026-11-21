@@ -17,6 +17,12 @@ V3Stack 生命周期：start() 幂等（auth 清扫＋outbox 恢复＋managed �
 close() 收口（队列哨兵→join→持写锁 wal_checkpoint(TRUNCATE)＋关连接）。
 enforce 旗＝内存态（v2 同款：重启默认 on、开/关写审计）。
 
+Req: F155 — 后端选择（spec gitstore-phase3-v3stack-backend）：V3Stack 增
+显式 backend 参数（缺省 sqlite、未知 fail-closed、选择集中 _select_storage
+唯一落点）；git 后端＝GitStore 自 <home>/state 构建＋同 SerialRepo/服务全接
+线，close()/checkpoint_truncate() 兼容语义归 GitStore（幂等 no-op＋ref 失联
+fail-closed）；本切片无 daemon/env/config 生产开关。
+
 边界：timer/approval 服务本体归 T14/T16（传输层占位）；真实 OpenCode
 接线归 T17；wiki 任务页常驻渲染（v2 page_writer 面）不在本任务断言面
 （§8 任务页可从库重建，T13b/T17 再议）；verify 卫生闸（F99）与 usage
@@ -40,6 +46,7 @@ from agorad.cutover import MessageFileExporter
 from agorad.domain import Event, epoch_ms, epoch_seconds
 from agorad.gatedelivery import GateDeliveryService
 from agorad.gateverify import DiskArtifactSink
+from agorad.gitstore import BACKEND as GIT_BACKEND, GitStore
 from agorad.healthsvc import HealthService
 from agorad.messaging import MessagingService
 from agorad.storage import Storage
@@ -143,6 +150,19 @@ def _repo_key(path):
         return str(pathlib.Path(path or "").resolve())
     except (OSError, ValueError):
         return str(path or "")
+
+
+def _select_storage(home, backend, injector):
+    """Req: F155 — 后端选择唯一落点（spec gitstore-phase3-v3stack-backend）：
+    缺省 sqlite 不变、git 经 GitStore 自 <home>/state 构建、未知即拒
+    （fail-closed 零动土）。选择集中装配层——服务/传输零复制（分层守卫
+    禁其 import 存储后端）；生产启动面（daemon/env/config）本切片零改动。"""
+    state = pathlib.Path(home) / "state"
+    if backend == "sqlite":
+        return Storage(state / "agora.db", injector=injector)
+    if backend == GIT_BACKEND:
+        return GitStore(state, injector=injector)
+    raise ValueError(f"未知 backend {backend!r}（可用: sqlite、{GIT_BACKEND}）")
 
 
 def _env_activity(env_dir):
@@ -426,13 +446,14 @@ class V3Stack:
     def __init__(self, home, *, oc, gitx, runner=None, anchor_reader=None,
                  clock=None, injector=None, exporter=None, emailer=None,
                  verify_timeout=300, verify_ceiling=None, quick_max_files=3,
-                 quick_max_lines=30, lock_wait_s=300.0, enforce=True):
+                 quick_max_lines=30, lock_wait_s=300.0, enforce=True,
+                 backend="sqlite"):
         self.home = str(home)
         self.oc, self.gitx, self.runner = oc, gitx, runner
         self.clock = clock or (lambda: epoch_ms(time.time()))
         self.write_lock = threading.RLock()
-        self.storage = Storage(pathlib.Path(home) / "state" / "agora.db",
-                               injector=injector)
+        self.backend = backend
+        self.storage = _select_storage(self.home, backend, injector)
         repo = SerialRepo(self.storage, self.write_lock)
         self.repo = repo
         exporter = (exporter if exporter is not None

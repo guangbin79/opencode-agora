@@ -120,14 +120,15 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/adapter.py",
                     may_import=["agorad.domain", "agorad.contracts"])
 
-    def test_v3_compose_layer(self):  # Req: F142——v3 装配层（§1 main 唯一装配的 v3 对应件）：services＋storage＋access＋cutover 导出器全可入；oc/gitx/runner/anchors 经构造注入（Protocol 面，本模块不构造真件）；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖
+    def test_v3_compose_layer(self):  # Req: F142——v3 装配层（§1 main 唯一装配的 v3 对应件）：services＋storage＋access＋cutover 导出器全可入；oc/gitx/runner/anchors 经构造注入（Protocol 面，本模块不构造真件）；F155 后端选择归装配——gitstore 同 storage 家族可入；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖
         assert_only("agorad/compose.py",
                     may_import=["agorad.domain", "agorad.contracts",
                                 "agorad.storage", "agorad.access",
                                 "agorad.cutover", "agorad.tasksvc",
                                 "agorad.messaging", "agorad.authsvc",
                                 "agorad.healthsvc", "agorad.gateverify",
-                                "agorad.gatedelivery", "agorad.timersvc"])
+                                "agorad.gatedelivery", "agorad.timersvc",
+                                "agorad.gitstore"])
 
     def test_v3_serverv3_layer(self):  # Req: F142——v3 传输层仅 contracts/adapter/domain＋application 服务（不 import storage/access——存储经 V3Stack 注入；board/doctor/消息形状经 adapter 翻译）；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖
         assert_only("agorad/serverv3.py",

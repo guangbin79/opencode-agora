@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest import mock
 
 import agora_mcp
-from agorad import compose, contracts, serverv3
+from agorad import compose, contracts, gitstore, serverv3
 from agorad.domain import DeliveryState, VerifySpec
 from agorad.storage import Storage, TABLES
 from tests import v3_harness as harness
@@ -226,7 +226,10 @@ class RunnerStub:
 
     def __call__(self, env_dir, cmd, *, timeout=None, ceiling=None,
                  on_soft=None):
-        if self.storage is not None and self.storage._depth:
+        # §4「runner 调用点身处 UoW 外」双后探针：Storage=_depth、GitStore=_ov
+        if (self.storage is not None
+                and (getattr(self.storage, "_depth", 0)
+                     or getattr(self.storage, "_ov", None))):
             raise AssertionError("runner 调用点身处 UoW 写事务内（§4）")
         if self.delay:
             time.sleep(self.delay)
@@ -1027,6 +1030,51 @@ class TestConcurrency(_ChainBase):  # 断言10
         self.assertEqual(s, 200)
         self.assertLess(elapsed, 1.0)  # 读端点不被长 verify 阻塞
         self.wait_state(tid, {"closed", "reopened", "blocked"}, timeout=15)
+
+
+class _GitStackInjector(harness.FaultInjector):
+    """_Base 注册集＋GitStore 提交/timer 面 failpoint——后端全量预注册
+    （stack 在 setUp 内即 start 提交，注册须先于 super().setUp()）。"""
+
+    def __init__(self):
+        super().__init__()
+        for fp in ("uow", "dispatch", "write-object", "write-tree",
+                   "commit-tree", "update-ref", "memory-publish",
+                   "timer_fire", "timer_firing"):
+            self.register(fp)
+
+
+class TestV3StackOnGitServerPort(_ChainBase):  # Req: F155——Git 后端服务器口
+    """V3Stack 显式 git 后端经组装栈＋传输层的聚焦端口：绿链
+    create/dispatch/post-done/gate settlement＋check_mail 拉取＋board/doctor
+    响应全走 HTTP 面；运行全程零 agora.db/-wal/-shm（spec 断言4）。"""
+
+    def _stack(self, **over):
+        return super()._stack(backend=gitstore.BACKEND, **over)
+
+    def setUp(self):
+        with mock.patch.object(harness, "FaultInjector", _GitStackInjector):
+            super().setUp()
+
+    def test_request_path_on_git_and_zero_sqlite_artifacts(self):
+        self.assertIsInstance(self.stack.storage, gitstore.GitStore)
+        self.assertTrue((Path(self.home.path) / "state" / "journal.git")
+                        .is_dir())
+        tid, wsid, wtok = self.green_chain()  # create/dispatch/running/done
+        self.assertEqual(self.wait_state(tid, {"closed"}), "closed")
+        self.assertEqual(self.stack.storage.get_task(tid).state, "closed")
+        s, b = self.call("check_mail", {}, wtok)  # 消息拉取（outbox/cursor）
+        self.assertEqual(s, 200)
+        self.assertTrue(b["messages"])  # 凭据/里程碑消息经 Git 账本可拉
+        s, b = self.call("board", {}, self.root)
+        self.assertEqual(s, 200)
+        self.assertIn("buckets", b)  # legacy board 金形状经 Git 栈可渲染
+        s, b = self.call("doctor", {}, self.root)
+        self.assertEqual(s, 200)
+        self.assertIn("age_rank", b)  # doctor 投影经 Git 栈可渲染
+        artifacts = sorted(p.name for p in
+                           (Path(self.home.path) / "state").glob("agora.db*"))
+        self.assertEqual(artifacts, [])  # 全程零 SQLite 件
 
 
 if __name__ == "__main__":

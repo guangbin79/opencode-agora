@@ -51,6 +51,7 @@ from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 SCHEMA_VERSION = 1
 EPOCH = 1
 JOURNAL_REF = "refs/agora/journal"
+BACKEND = "git"  # compose 后端选择名（Req: F155——名字常量随实现走）
 _MISSING = "0" * 40  # update-ref 零旧值＝断言 ref 不在（空历史首笔也 CAS）
 
 # spec §Repository model 初始化配置（精确六键）
@@ -1230,3 +1231,23 @@ class GitStore:
             merged.update(self._ov["artifacts"])
         return [merged[k] for k in sorted(merged, reverse=True)
                 if merged[k].task_id == tid]
+
+    # ---- 存储生命周期兼容面（Req: F155——V3Stack.close 同形收口）----
+
+    def close(self):
+        """无持久句柄——幂等 no-op（每笔 UoW 落账即收口，无连接可关）。"""
+        return None
+
+    def checkpoint_truncate(self):
+        """SQLite checkpoint 兼容面：durability 由每笔提交 fsync 保证——
+        验证性 no-op，零 SQLite 件；账本有历史（重放基线 head 在案）而
+        refs/agora/journal 解析失败＝失联失察，fail-closed 不静默放行。"""
+        if self._snap["head"] is None:
+            return None
+        rc, _, _ = self._git(("rev-parse", "--verify", JOURNAL_REF),
+                             check=False)
+        if rc != 0:
+            raise StorageError(
+                f"{self._journal}: 账本有历史而 {JOURNAL_REF} 未解析"
+                "——checkpoint 拒绝静默放行（fail-closed）")
+        return None
