@@ -37,7 +37,8 @@ import unittest
 
 from agorad.contracts import ContractError
 from agorad.domain import (Credential, DeliveryReceipt, Event, Message, Task,
-                           Timer, TimerState, timer_transition)
+                           Timer, TimerState, dispatch_secret_key,
+                           timer_transition)
 from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretError,
                              ForeignLedgerError, GitStore,
                              JournalCorruptionError, check_verb)
@@ -1640,6 +1641,26 @@ class TestTaskServiceOnGitPort(unittest.TestCase):
         self.assertTrue(self._staging(tid, r1["token"]).is_file())
         self.assertEqual(GitStore(self.home.state)
                          .get_credential("ses-w1").token, r1["token"])
+
+
+    def test_authsvc_sweep_keeps_live_staging_and_cleans_orphans(self):
+        # Req: F152——AuthService.sweep 保活/回收口径对 per-dispatch 键位
+        # 成立：活牌 staging 留、死牌 staging 孤儿（派发崩窗残件）清、
+        # 本尊指针不动——清扫后重启不砖（设计「preserve AuthService sweep」
+        # 的机械锚）。
+        from agorad.authsvc import AuthService
+        tid = self._mk()
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        orphan = self.home.write_credential(
+            dispatch_secret_key(tid, "tok-dead")[:-len(".token")], "tok-dead")
+        self.assertTrue(orphan.is_file())
+        self.assertEqual(AuthService(self.store, home=str(self.home.path))
+                         .sweep(), 1)  # 恰清死牌 staging 孤儿
+        self.assertFalse(orphan.exists())
+        self.assertTrue(self._staging(tid, r1["token"]).is_file())  # 活牌留
+        self.assertTrue((self.home.credentials / f"{tid}.token").is_file())
+        fresh = GitStore(self.home.state)  # 清扫后重启照常水合
+        self.assertEqual(fresh.get_credential("ses-w1").token, r1["token"])
 
 
 if __name__ == "__main__":

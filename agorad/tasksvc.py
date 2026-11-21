@@ -83,6 +83,7 @@ class TaskRepo(typing.Protocol):
     def tasks_all(self): ...
     def append_event(self, ev: Event): ...
     def put_credential(self, cred: Credential): ...
+    def get_credential(self, sid): ...  # Req: F152 撤牌前留牌文本（双键清理）
     def delete_credential(self, sid) -> bool: ...
 
 
@@ -1168,7 +1169,10 @@ class TaskService:
         conv = pathlib.Path(self._home) / "credentials" / f"{tid}.token"
         try:
             data = stage.read_bytes()
-            fd = os.open(conv, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            # O_NOFOLLOW 同 authsvc._write_secret 铁则——本尊键位可预测，
+            # 预置符号链接不跟（评审环 C2/A1）
+            fd = os.open(conv, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
             try:
                 os.write(fd, data)
             finally:

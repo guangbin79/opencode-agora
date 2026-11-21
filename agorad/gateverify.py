@@ -34,7 +34,8 @@ import typing
 
 from agorad.contracts import ContractError
 from agorad.domain import (Artifact, BaseProbe, Event, Task, epoch_ms,
-                           reset_fail_streak, task_transition)
+                           reset_fail_streak, task_transition,
+                           dispatch_secret_key)
 
 _TAIL = 2000            # 通知面输出尾截断（v2 同口径）
 _RAW_TAIL = 400         # escalate raw 头截 500 预留量（v2 同口径）
@@ -963,6 +964,7 @@ class GateVerifyService:
         merged→closed（不逆转历史）、余者仅清门闩；迁移＋事件＋消息同 UoW。"""
         self._fire("settle", "before", tid=tid)
         now, msgs, task, cancelled = self._now(), [], None, False
+        revoke = None  # Req: F152——撤牌前留牌文本（双键清理用）
         with self._store.uow():
             fresh = self._store.get_task(tid)
             if fresh is None:
@@ -986,6 +988,7 @@ class GateVerifyService:
                     now, "gate", "cancelled", tid,
                     {"reason": reason} if reason else None))
                 if task.worker_sid:
+                    revoke = self._store.get_credential(task.worker_sid)
                     self._store.delete_credential(task.worker_sid)
                 if self._msg is not None and task.dispatcher_sid:
                     msgs.append(self._msg.record(
@@ -1006,8 +1009,10 @@ class GateVerifyService:
             self._store.upsert_task(task)
         for m in msgs:
             self._msg.dispatch(m.id)
-        if cancelled:  # 终止副作用与 tasksvc._settle_cancel 同款（断言9锚）
-            self._remove_credential_file(tid)
+        if cancelled:  # 终止副作用与 tasksvc._settle_cancel 同款（断言9锚；
+            # Req: F152 双键清理）
+            self._remove_credential_file(
+                tid, revoke.token if revoke is not None else None)
             self._reclaim_env(tid, task.env_dir, "gateverify:tail_cancel")  # Req: ag-0e6ca3
         self._fire("settle", "after", tid=tid)
 
@@ -1127,11 +1132,16 @@ class GateVerifyService:
             pass
 
     def _revoke(self, tid, task):
-        """终局撤牌（DB 行＋secret 文件）＋env 回收（败留痕不断终局）。"""
+        """终局撤牌（DB 行＋secret 文件）＋env 回收（败留痕不断终局）。
+        Req: F152——双键清理（本尊＋per-dispatch 既录键位），与
+        tasksvc._settle_cancel 同款。"""
+        revoke = None
         if task.worker_sid:
             with self._store.uow():
+                revoke = self._store.get_credential(task.worker_sid)
                 self._store.delete_credential(task.worker_sid)
-        self._remove_credential_file(tid)
+        self._remove_credential_file(
+            tid, revoke.token if revoke is not None else None)
         self._reclaim_env(tid, task.env_dir, "gateverify:revoke")  # Req: ag-0e6ca3
 
     def _reclaim_env(self, tid, env_dir, site):  # Req: ag-0e6ca3
@@ -1151,12 +1161,18 @@ class GateVerifyService:
         except Exception as e:
             self._audit(tid, "reclaim_failed", note=str(e)[:200])
 
-    def _remove_credential_file(self, tid):
+    def _remove_credential_file(self, tid, token=None):
+        """终局撤牌文件清理（Req: F152＝本尊＋per-dispatch 既录键位；与
+        tasksvc._remove_credential_file 同款）；幂等（缺文件静默）。"""
         if not isinstance(tid, str) or not tid or "/" in tid:
             return
+        self._unlink_secret(f"{tid}.token")
+        if token is not None:
+            self._unlink_secret(dispatch_secret_key(tid, token))
+
+    def _unlink_secret(self, key):
         try:
-            (pathlib.Path(self._home) / "credentials"
-             / f"{tid}.token").unlink()
+            (pathlib.Path(self._home) / "credentials" / key).unlink()
         except OSError:
             pass
 

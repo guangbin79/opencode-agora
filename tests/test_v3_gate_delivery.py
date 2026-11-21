@@ -29,7 +29,8 @@ import unittest
 
 from agorad import domain
 from agorad.contracts import ContractError
-from agorad.domain import (Credential, DeliveryState, VerifySpec)
+from agorad.domain import (Credential, DeliveryState, VerifySpec,
+                           dispatch_secret_key)
 from agorad.gatedelivery import (GateDeliveryService, _append_roster,
                                  _auto_ignore_patterns)
 from agorad.messaging import MessagingService
@@ -369,6 +370,21 @@ class TestManagedGreen(_Base):  # 断言1/2/4
         self.assertIsNone(self.storage.get_credential(WORKER))
         self.assertFalse(self.home.credentials.joinpath(f"{tid}.token").exists())
         self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)
+
+    def test_green_revokes_per_dispatch_staging_secret_too(self):
+        # Req: F152——门侧终局撤牌双键清理（gateverify 与 tasksvc 同款）：
+        # per-dispatch staging 文件随撤牌同清，不留死牌明文至下次 sweep
+        tid = self.seed("ag-m2b")
+        self.put_credential(tid)
+        stg = self.home.write_credential(
+            dispatch_secret_key(tid, "tok")[:-len(".token")], "tok")
+        self.assertTrue(stg.is_file())
+        self.green_script()
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "merged")
+        self.assertIsNone(self.storage.get_credential(WORKER))
+        self.assertFalse(stg.exists())  # staging 键位随撤牌同清
+        self.assertFalse(self.home.credentials.joinpath(f"{tid}.token").exists())
 
     def test_integration_red_keeps_quality_reopened(self):
         tid = self.seed("ag-m3")
