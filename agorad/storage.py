@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS timers(
   body TEXT NOT NULL DEFAULT '',  -- Req: F145 触发消息正文
   created_by TEXT, client_key TEXT);  -- Req: F145 创建者/幂等键
 CREATE INDEX IF NOT EXISTS idx_timers_status_due ON timers(status, due_ms);
+-- idx_timers_task_client_key（UNIQUE）/idx_timers_task 在迁移段建——
+-- CREATE TABLE IF NOT EXISTS 不改既有表，DDL 段建索引会撞旧表缺列
 CREATE TABLE IF NOT EXISTS approvals(
   id TEXT PRIMARY KEY,
   task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
@@ -264,6 +266,12 @@ class Storage:
                     if "client_key" not in tcols:
                         conn.execute("ALTER TABLE timers "
                                      "ADD COLUMN client_key TEXT")
+                    # v6 索引（Req: F145）：键命名空间按任务＋任务面查询
+                    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS "
+                                 "idx_timers_task_client_key "
+                                 "ON timers(task_id, client_key)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_timers_task "
+                                 "ON timers(task_id)")
                     conn.execute(
                         "INSERT OR IGNORE INTO schema_migrations "
                         "VALUES(?,?,?)",
@@ -551,6 +559,20 @@ class Storage:
         finally:
             self._read_done(read)
         return [self._timer(r) for r in rows]
+
+    def timer_for_key(self, task_id, client_key):
+        """client_key 命中查（Req: F145；命名空间＝(task_id, client_key)
+        唯一索引——至多一行，跨任务同键互不干扰）。"""
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
+                "fired_ms,body,created_by,client_key FROM timers "
+                "WHERE task_id=? AND client_key=?",
+                (task_id, client_key)).fetchone()
+        finally:
+            self._read_done(read)
+        return self._timer(row) if row is not None else None
 
     def next_due_ms(self):
         """最早 pending due（提前醒计算）；无 pending→None。"""

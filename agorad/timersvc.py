@@ -1,10 +1,14 @@
 """Req: F145 — v3 timer 应用服务（opencode-agora v3 P5-T14，设计 §6）。
 
-契约：after_seconds/due_at 互斥（既传/都不传拒）；30 天上限（相对 now 的
-due 距离）；body 1-2000 可打印；每任务 ≤16 pending；client_key 幂等（同键
-同载荷返原 timer——载荷含原始 after_seconds，经 due_ms-created_ms 重建比对；
-异载荷 409）。权限：worker 限本任务建且仅取消自建（created_by）；dispatcher
-归属终审（task.dispatcher_sid）；root 放行；越权拒＋auth_denied 审计。
+契约：after_seconds/due_at 互斥（既传/都不传拒）；30 天上限（due 距 now
+±30 天窗口，过去 due 合法＝建即 overdue）；body 1-2000 可打印；每任务
+≤16 pending；client_key 幂等（命名空间按任务隔离——(task_id, client_key)
+唯一索引；同键同载荷返原 timer——载荷含原始 after_seconds，经
+due_ms-created_ms 重建比对；异载荷 409；幂等判定先于上限判定）。权限：
+worker 限本任务建且仅取消自建（created_by）；dispatcher 归属终审
+（task.dispatcher_sid）；root 放行；越权拒＋auth_denied 审计。create 全
+部检查＋插入同一 UoW（全局写锁下 read-decide-write 原子——并发同键重试
+不双入账、上限不被击穿，评审环 B2）。
 
 角色寻址：target 仅 worker|dispatcher；触发时解析当前 sid（task.worker_sid/
 dispatcher_sid 现值——换号跟随新 sid）；worker 目标仅 dispatched/running/
@@ -13,10 +17,12 @@ closed/cancelled）自动取消＋审计（tasksvc 终态路径同 UoW 内调
 cancel_task_timers_uow——幂等，无 pending 零写入）。
 
 两级扫描（§6）：health 300s 归 T10；timer 30s（或 next due 提前醒——
-next_wait_seconds 收敛 min(默认, due-now)）；每批 ≤32 按 due/id 升序；
-overdue 启动即补发分批（catch_up 循环至无进展——缺 worker/状态门控的
-overdue 不死循环、零数据库写入、不误 escalate）；时钟前跳只发一次（fired
-终态无出边）、回拨等待不重发（due 判定按当前钟，已 fired 不回头）。
+next_wait_seconds 收敛 min(默认, due-now)；已 overdue 回默认节奏——门控
+不过的 overdue 无进展，防忙自旋，可发者本方法前的 catch_up 已即时触发）；
+每批 ≤32 按 due/id 升序；overdue 启动即补发分批（catch_up 循环至无进展
+——缺 worker/状态门控的 overdue 不死循环、零数据库写入、不误 escalate）；
+时钟前跳只发一次（fired 终态无出边）、回拨等待不重发（due 判定按当前钟，
+已 fired 不回头）。
 
 触发事务（§6）：pending→firing＋message（dedup_key=timer id，唯一约束）
 ＋receipt＋event 同一 UoW→提交后 Outbox 在线注入（dispatch）→fired 第二
@@ -114,12 +120,14 @@ class TimerService:
             due = now + after * 1000
         else:
             due = due_at
-            if due > now + MAX_AHEAD_MS:
+            # 评审环 C1：下界钳制（对称 30 天回溯窗）——极端值穿透 SQLite
+            # INTEGER 会以 OverflowError 冒 500，信任边界应收 400
+            if not now - MAX_AHEAD_MS <= due <= now + MAX_AHEAD_MS:
                 raise ContractError(
                     "invalid_argument",
-                    f"due_at 超出 30 天上限（最远 {now + MAX_AHEAD_MS}）",
+                    "due_at 超出 ±30 天窗口（最远 "
+                    f"[{now - MAX_AHEAD_MS}, {now + MAX_AHEAD_MS}]）",
                     {"due_at": due_at})
-            # due 在过去合法：建即 overdue，扫描/启动补发面接管
         if body is not None and (not isinstance(body, str) or not body
                                  or len(body) > BODY_MAX
                                  or not body.isprintable()):
@@ -136,28 +144,30 @@ class TimerService:
             raise ContractError("not_found",
                                 f"{params['task']}: 任务不存在")
         self._permit_create(actor_sid, role, task)
-        pending = sum(1 for x in self._store.timers_for_task(task.id)
-                      if x.state is TimerState.PENDING)
-        if pending >= self._max_pending:
-            raise ContractError(
-                "conflict",
-                f"{task.id}: pending timer {pending}>={self._max_pending}"
-                "——先取消或等触发")
-        if key is not None:  # 幂等扫描（入账前；载荷＝任务/目标/正文/原始时刻）
-            for x in self._store.timers_all():
-                if x.client_key != key:
-                    continue
-                if not self._same_payload(x, task.id, params, due):
-                    raise ContractError(
-                        "conflict",
-                        f"client_key {key!r} 已用（timer {x.id}）且载荷不同"
-                        "——同键载荷须一致")
-                return self._row(x)
         tid = self._new_tid()
         timer = Timer(id=tid, task_id=task.id, target_role=params["target"],
                       due_ms=due, state=TimerState.PENDING, created_ms=now,
                       body=body or "", created_by=actor_sid, client_key=key)
         with self._store.uow():
+            # 评审环 B2/A1：幂等命中先于上限判定（16 满时同键同载荷重试仍
+            # 返原 timer）；三项检查＋插入同一 uow（全局写锁下 read-decide-
+            # write 原子——并发同键重试不双入账、上限不被击穿）
+            if key is not None:
+                hit = self._store.timer_for_key(task.id, key)
+                if hit is not None:
+                    if not self._same_payload(hit, task.id, params, due):
+                        raise ContractError(
+                            "conflict",
+                            f"client_key {key!r} 已用于本任务他 timer"
+                            f"（{hit.id}）且载荷不同——同键载荷须一致")
+                    return self._row(hit)  # 幂等命中：零新行/零事件
+            pending = sum(1 for x in self._store.timers_for_task(task.id)
+                          if x.state is TimerState.PENDING)
+            if pending >= self._max_pending:
+                raise ContractError(
+                    "conflict",
+                    f"{task.id}: pending timer {pending}>={self._max_pending}"
+                    "——先取消或等触发")
             self._store.append_event(self._ev(
                 now, actor_sid, EV_CREATED, task.id,
                 {"timer": tid, "target": params["target"], "due_ms": due}))
@@ -272,9 +282,11 @@ class TimerService:
 
     def next_wait_seconds(self, default=DEFAULT_INTERVAL_S):
         """扫描线程醒点：min(默认节奏, 距最近 pending due)——next due 提前
-        醒（时钟注入可测）；无 pending＝默认；已 overdue＝0。"""
+        醒（时钟注入可测）；无 pending＝默认；已 overdue＝默认（评审环 B1：
+        过门控的 overdue 扫描刚跑过不可能再进展——回默认节奏，防 20Hz
+        忙自旋；可发 due 在本方法前的 catch_up 里已即时触发）。"""
         due = self._store.next_due_ms()
-        if due is None:
+        if due is None or due <= self._clock():
             return float(default)
         return max(0.0, min(float(default), (due - self._clock()) / 1000.0))
 
