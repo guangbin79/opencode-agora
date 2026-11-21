@@ -885,4 +885,3 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：tests/e2e/v3_equivalence.py（新，Req: F143）、docs/reqs/opencode-agora.md（本条）。
 **验收**：python3 tests/e2e/v3_equivalence.py --known-defects board_detail_projection,worker_reinject_missing,gate_lane_audit_missing,notification_coverage_gap——**exit 0（ALL EQUIVALENT；intended≈2973/known_defects≈1320〔四 T13c 键〕/unintended=0**；base 无此文件应红）；第六族（worker 牌终态撤收 401/200）经裁定①扩册 §11 intended；全量 python3 -m pytest tests/ -q 不回归（2027 passed）。
 **实绩**：新增合计约 1600 行（预算 1400 的 ≈1.14×——裁定版分类面重构＋覆盖矩阵＋两轮评审环修复（ocr 3＋终闸 7），常设裁量入账：超限 ≤100% 且验收/回归/评审三绿；工具轮次约 48/45＋裁量）。
-
