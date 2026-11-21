@@ -125,9 +125,10 @@ class TaskService:
     def __init__(self, store: TaskRepo, gitx: Gitx, oc: SessionFactory, *,
                  messaging: Notifier | None = None, home="", clock=None,
                  max_depth=_MAX_DEPTH, quota=_QUOTA,
-                 seen_window_ms=SEEN_WINDOW_MS):
+                 seen_window_ms=SEEN_WINDOW_MS, timers=None):
         self._store, self._gitx, self._oc = store, gitx, oc
         self._msg = messaging
+        self._timers = timers  # Req: F145 终态路径同 UoW 自动取消 pending timer
         self._home = str(home)
         self._clock = clock or (lambda: epoch_ms(time.time()))
         self._max_depth, self._quota = max_depth, quota
@@ -595,6 +596,7 @@ class TaskService:
             self._store.append_event(self._ev(
                 now, sid, EV_CANCELLED, tid,
                 {"reason": reason} if reason else None))
+            self._cancel_task_timers(tid, "cancelled", now)  # Req: F145
             if task.worker_sid:
                 self._store.delete_credential(task.worker_sid)
                 if self._msg is not None and task.dispatcher_sid:
@@ -632,6 +634,12 @@ class TaskService:
 
     # ---- 状态机接线（T9 门体单跳驱动面） ----
 
+    def _cancel_task_timers(self, tid, state, now):
+        """Req: F145 任务终态自动取消 pending timer（身处调用方 UoW；幂等）。"""
+        if (self._timers is not None and state in ("merged", "closed",
+                                                   "cancelled")):
+            self._timers.cancel_task_timers_uow(tid, now, f"task_{state}")
+
     def transition(self, tid, to, *, actor="agorad", delivery_failure=False,
                    body=None):
         """单跳迁移＋审计事件＋终态 result 消息（同一 UoW，§5）；非法迁移
@@ -645,6 +653,7 @@ class TaskService:
                     fresh, to, delivery_failure=delivery_failure, now_ms=now))
                 self._store.upsert_task(task)
                 self._store.append_event(self._ev(now, actor, to, tid))
+                self._cancel_task_timers(tid, to, now)  # Req: F145 终态自动取消
                 if (to in _TERMINAL_NOTIFY and self._msg is not None
                         and task.dispatcher_sid):
                     # dedup 键掺迁移后 updated_ms：同迁移重放（gate 重试/崩溃
@@ -887,6 +896,8 @@ class TaskService:
                  + (f"；reason={str(reason).strip()}" if str(reason).strip()
                     else "")}))
             self._store.append_event(self._ev(now + 1, sid, "closed", tid))
+            self._cancel_task_timers(tid, "closed", now)  # Req: F145（merged→
+            # closed 全链同 UoW——一次收口，幂等面由 pending 过滤承担）
             if fresh.worker_sid:
                 self._store.delete_credential(fresh.worker_sid)
             if self._msg is not None and task.dispatcher_sid:

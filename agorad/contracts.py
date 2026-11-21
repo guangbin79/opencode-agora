@@ -153,8 +153,11 @@ CATALOG = {
         "task": _f("string", True), "wait_on": _f("string", nullable=True)},
         _STAFF, "task", _TASK_ERR),  # wait_on null/缺省＝清除（F124）
     "timer_create": ToolSpec("timer_create", {
-        "target": _f("string", True), "seconds": _f("integer", True),
-        "body": _f("string")}, _ANY, "global", _BASE_ERR + ("forbidden",)),
+        "task": _f("string", True),
+        "target": _f("string", True, ("worker", "dispatcher")),
+        "after_seconds": _f("integer"), "due_at": _f("integer"),
+        "body": _f("string"), "client_key": _f("string")},
+        _ANY, "task", _TASK_ERR),  # Req: F145 互斥/上限/幂等归服务层细判
     "timer_cancel": ToolSpec("timer_cancel", {"timer_id": _f("string", True)},
                              _ANY, "global",
                              _BASE_ERR + ("not_found", "forbidden")),

@@ -199,6 +199,9 @@ class Timer:
     state: TimerState = TimerState.PENDING
     created_ms: int | None = None
     fired_ms: int | None = None
+    body: str = ""  # Req: F145 触发消息正文（1-2000 可打印，信封带 timer id）
+    created_by: str | None = None  # 创建者 sid（worker 仅取消自建判据）
+    client_key: str | None = None  # 幂等键（同键同载荷返原 timer；异载荷 409）
 
 
 class ApprovalState(str, enum.Enum):
