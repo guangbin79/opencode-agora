@@ -23,6 +23,7 @@ storage_version=3（旧字段保留）。
 边界：不做 v2/v3 差分执行器（T13b）；不接真实 OpenCode（T17）；board
 单任务明细 classification＝压缩三态（queued/stalled/ok，无 v2 全判读面）。
 """
+import dataclasses
 import html
 import json
 import os
@@ -32,7 +33,8 @@ from pathlib import Path
 
 from agorad.adapter import (LEGACY_ROUTES, adapt_request, board_default,
                             board_full, check_mail, error_response,
-                            event_dicts, task_row)
+                            event_dicts, task_row_detail,
+                            detail_classification)
 from agorad.contracts import (API_VERSION, CATALOG, ContractError,
                               LEGACY_TO_V3, TASK_CREATE_GROUPS, http_status,
                               make_error, validate_params,
@@ -51,9 +53,6 @@ _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                           "reopened", "blocked"})  # v2 cred 拉取面在飞口径
 _ACTIVE = frozenset({"dispatched", "running", "done", "verify_failed",
                      "reopened", "blocked"})
-_STALE_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
-                           "reopened"})
-_STALE_AFTER = 1200.0  # v2 doctor/判僵同口径 20min
 
 _TOOL_DESC = {
     "task_create": "登记任务（todo）（dispatcher/root；worker 建嵌套子任务）",
@@ -322,7 +321,8 @@ class _V3Handler(BaseHTTPRequestHandler):
             if "task" in params:
                 return self._board_detail(params["task"], row, tasks_map)
             if params.get("view") == "full":
-                return board_full(tasks_map, stack.storage.events_all())
+                return board_full(_with_lane(stack, tasks_map),
+                                  stack.storage.events_all())
             return board_default(tasks_map, sid)
         if name == "doctor":
             return doctor_view(
@@ -387,21 +387,26 @@ class _V3Handler(BaseHTTPRequestHandler):
         return {"message": msg.id}
 
     def _board_detail(self, tid, row, tasks_map):
-        """单任务明细（F141 边界归装配；v2 report.detail 压缩三态版）。"""
+        """单任务明细（Req: F144＝v2 report.detail 全形状）：全字段行
+        （adapter.task_row_detail）＋事件链＋done 正文＋v2 三态判读
+        classification（终态 None/queued/stale_candidate/busy_round/fresh）
+        ＋F116 lane 投影注入（内存态，v2 行内投影同款）。"""
         stack = self.stack
+        lane = getattr(stack.gate, "lane_projection", lambda tid: None)
+        proj = lane(tid)
+        if proj is not None:  # F116 lane 投影（内存态，v2 行内投影同款）
+            row = dataclasses.replace(
+                row, gate=dataclasses.replace(row.gate, gate_resource=proj))
         done = [m for m in stack.storage.messages_all()
                 if m.task_id == tid and m.kind == "done"]
         act = stack.env_activity(tid)
-        queued = (row.state == "done" and not row.gate.in_gate
-                  and any(x.gate.in_gate for x in tasks_map.values()))
-        classification = "queued" if queued else (
-            "stalled" if self._is_stale(row, act) else "ok")
-        out = {"task": task_row(row),
+        out = {"task": task_row_detail(row),
                "events": event_dicts(
                    stack.storage.events_for_task(tid)),
                "done_body": (done[-1].body.decode("utf-8", "replace")
                              if done else None),
-               "classification": classification}
+               "classification": detail_classification(
+                   row, tasks_map, time.time(), act)}
         if act > 0.0:  # env 回收/缺失 walk 空→省略（v2 同口径）
             out["env_active_seconds_ago"] = int(time.time() - act)
         pub = getattr(stack.gitx, "publication", None)
@@ -411,13 +416,6 @@ class _V3Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         return out
-
-    @staticmethod
-    def _is_stale(t, act):
-        if t.state not in _STALE_STATES or t.gate.in_gate:
-            return False
-        base = max((t.last_seen_ms or t.created_ms or 0) / 1000.0, act)
-        return time.time() - base > _STALE_AFTER
 
     # ---- legacy 内部面 ----
 
@@ -583,6 +581,19 @@ class _V3Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+def _with_lane(stack, tasks_map):
+    """Req: F144 full_view 行内 F116 lane 投影注入（白名单键集不变——
+    gate_resource 本就在白名单，v3 此前无源）。"""
+    lane = getattr(stack.gate, "lane_projection", lambda tid: None)
+    out = {}
+    for tid, t in tasks_map.items():
+        proj = lane(tid)
+        out[tid] = (dataclasses.replace(
+            t, gate=dataclasses.replace(t.gate, gate_resource=proj))
+            if proj is not None else t)
+    return out
 
 
 def _write_service_json(stack, port):

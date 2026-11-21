@@ -30,7 +30,7 @@ from agorad.domain import (Approval, ApprovalState, Artifact, BaseProbe,
                            GateState, MailCursor, Message, Task, Timer,
                            TimerState, VerifySpec, epoch_ms)
 
-SCHEMA_VERSION = 4  # v4＝task_delivery.conflict_files_json（Req: F137）；v3＝14 表基线
+SCHEMA_VERSION = 5  # v5＝task_delivery.delivered_at_ms（Req: F144）；v4＝conflict_files_json（F137）；v3＝14 表基线
 BUSY_TIMEOUT_MS = 5000
 
 # 设计 §4 表清单（枚举权威，14 名；任务页计数「15」系笔误）
@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS task_delivery(
   commit_sha TEXT, base TEXT, target_branch TEXT,
   attempt INTEGER NOT NULL DEFAULT 0,
   local_status TEXT NOT NULL DEFAULT 'pending', error TEXT,
-  conflict_files_json TEXT);
+  conflict_files_json TEXT, delivered_at_ms INTEGER,  -- Req: F144 delivered_at
+  handoff_at_ms INTEGER);  -- Req: F144 external handoff_at
 CREATE TABLE IF NOT EXISTS task_gate(
   task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
   in_gate INTEGER NOT NULL DEFAULT 0, gate_env TEXT,
@@ -243,10 +244,16 @@ class Storage:
                     if "conflict_files_json" not in cols:
                         conn.execute("ALTER TABLE task_delivery "
                                      "ADD COLUMN conflict_files_json TEXT")
+                    if "delivered_at_ms" not in cols:  # v5（Req: F144）
+                        conn.execute("ALTER TABLE task_delivery "
+                                     "ADD COLUMN delivered_at_ms INTEGER")
+                    if "handoff_at_ms" not in cols:  # v5（Req: F144）
+                        conn.execute("ALTER TABLE task_delivery "
+                                     "ADD COLUMN handoff_at_ms INTEGER")
                     conn.execute(
                         "INSERT OR IGNORE INTO schema_migrations "
                         "VALUES(?,?,?)",
-                        (SCHEMA_VERSION, "v4-conflict-files",
+                        (SCHEMA_VERSION, "v5-delivered-at",
                          epoch_ms(time.time())))
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -366,13 +373,14 @@ class Storage:
         if t.delivery is not None:
             c.execute(
                 "INSERT INTO task_delivery(task_id,mode,status,commit_sha,base,"
-                "target_branch,attempt,local_status,error,conflict_files_json) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "target_branch,attempt,local_status,error,conflict_files_json,"
+                "delivered_at_ms,handoff_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (t.id, t.delivery.mode, t.delivery.status, t.delivery.commit,
                  t.delivery.base, t.delivery.target_branch, t.delivery.attempt,
                  t.delivery.local_status, t.delivery.error,
                  _json(t.delivery.conflict_files)
-                 if t.delivery.conflict_files else None))
+                 if t.delivery.conflict_files else None,
+                 t.delivery.delivered_at_ms, t.delivery.handoff_at_ms))
         art = None if t.gate.gate_artifact is None else {
             k: v for k, v in dataclasses.asdict(t.gate.gate_artifact).items()
             if k != "task_id"}
@@ -418,7 +426,8 @@ class Storage:
         verify = one("SELECT cmd,state,registered_by,registered_at_ms,"
                      "timeout_s,timeout_source FROM task_verify WHERE task_id=?")
         delivery = one("SELECT mode,status,commit_sha,base,target_branch,"
-                       "attempt,local_status,error,conflict_files_json "
+                       "attempt,local_status,error,conflict_files_json,"
+                       "delivered_at_ms,handoff_at_ms "
                        "FROM task_delivery WHERE task_id=?")
         g = one("SELECT in_gate,gate_env,pending_cancel,"
                 "pending_cancel_reason,gate_artifact_json,review_cache_json,"
@@ -441,7 +450,9 @@ class Storage:
             verify=VerifySpec(*verify) if verify else VerifySpec(),
             delivery=(DeliveryState(*delivery[:8],
                                     conflict_files=json.loads(delivery[8])
-                                    if delivery[8] else None)
+                                    if delivery[8] else None,
+                                    delivered_at_ms=delivery[9],
+                                    handoff_at_ms=delivery[10])
                       if delivery else None),
             probe=BaseProbe(**json.loads(g[7])) if g[7] else None,
             gate=GateState(

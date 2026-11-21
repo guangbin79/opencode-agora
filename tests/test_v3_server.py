@@ -799,8 +799,9 @@ class TestDoneChain(_ChainBase):  # 断言6
         arts = self.home.state / "gate-artifacts" / tid
         self.assertTrue(arts.is_dir() and any(arts.iterdir()))  # artifact 落盘
         s, b = self.call("board", {"task": tid}, self.root)  # board 反映终态
+        # Req: F144 classification＝v2 三态判读镜像（终态＝None，旧压缩版 ok 废）
         self.assertEqual((s, b["task"]["state"], b["classification"]),
-                         (200, "closed", "ok"))
+                         (200, "closed", None))
         s, b = self.call("check_mail", {}, self.root)
         kinds = [m["kind"] for m in b["messages"]]
         self.assertIn("result", kinds)  # 终态通知达派发方

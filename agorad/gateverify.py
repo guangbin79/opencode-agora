@@ -28,6 +28,7 @@ import os
 import pathlib
 import re
 import shlex
+import sys
 import time
 import typing
 
@@ -250,6 +251,7 @@ class GateVerifyService:
         self._verify_timeout = verify_timeout
         self._verify_ceiling = verify_ceiling
         self._verify_profiles = verify_profiles or {}
+        self._lane = {}  # Req: F144 F116 内存 lane 投影（tid→dict，v2 同款不落盘）
 
     # ---- done 受理（前置六拒；锚族计连败） ----
 
@@ -369,13 +371,21 @@ class GateVerifyService:
     # ---- 门体（上篇：探针→env verify→门审/锚复验→集成复跑） ----
 
     def run(self, tid) -> str:
+        """门入口（Req: F144 起＝F112/F116 车道面包装——wait/acquire 事件＋
+        内存 lane 投影，v2 run_guarded 同位：排队/获锁先于一切门体判定，
+        非 done/外部驻留 skip 路径同占道释放）。"""
         t = self._store.get_task(tid)
-        if t is None or t.state != "done":
+        if t is None:
+            return "skip"  # v2 run_guarded 于行缺失处先抛（无车道面可占）
+        res = self._lane_acquire(tid, t)
+        try:
+            return self._run(tid, t)
+        finally:
+            self._lane_release(tid, res)
+
+    def _run(self, tid, t) -> str:
+        if t.state != "done":
             return "skip"  # F36 R2：非 done（驻留取消直结/重启残留）不跑门
-        d = t.delivery
-        if (d is not None and d.mode == "external_branch"
-                and d.status in ("awaiting_external", "delivered", "failed")):
-            return "skip"  # F101 外部交付驻留/终局＝T9b 域，不重验不发明结果
         env, target = t.env_dir, t.project_dir
         integration = t.gate.gate_env or f"{env}__gate"
         try:
@@ -389,6 +399,14 @@ class GateVerifyService:
                 self._store.append_event(self._ev(
                     now, "gate", "gate_enter", tid,
                     {"gate_env": integration}))
+            # Req: F144 门启动拍双通道通知（v2 run() 同位同序）：milestone→
+            # worker＋result→dispatcher——通知覆盖矩阵 (done, 双通道) 面
+            self._gate_enter_notify(tid, t)
+            d = t.delivery
+            if (d is not None and d.mode == "external_branch"
+                    and d.status in ("awaiting_external", "delivered",
+                                     "failed")):
+                return "skip"  # F101 外部交付驻留/终局＝确认面权威，不重验
             budget, ceiling = self._budget(t)
             soft = self._soft_notify(tid, budget)
             runner = lambda e, cmd: self._runner(  # noqa: E731
@@ -436,6 +454,103 @@ class GateVerifyService:
         """门体扩展点（T9b GateDeliveryService 覆写）：门闩后、崩溃残留探针
         前——out_of_band 豁免面与交付终局崩窗收敛。基类＝直通 None。"""
         return None
+
+    # ---- Req: F144 F112/F116 门车道面（wait/acquire/release 事件＋内存投影） ----
+
+    _LANE_LIMIT = 1  # 单门线程＝同仓/跨仓全串行（F112 同仓串行的强化超集；
+    # 车道事件与 v2 逐键一致：repo/limit[/slot/duration]）
+
+    def _lane_acquire(self, tid, t):
+        """v2 run_guarded._acquire_resources 镜像（单线程即取即得）：排队前
+        落 waiting 投影＋wait 事件，获锁翻转＋acquire 事件；投影＝内存态
+        （v2 set_gate_resource 同款不落盘，重启 done 残留重排重建）。"""
+        repo = t.project_dir
+        if not repo:
+            return None
+        started = time.monotonic()
+        now = self._now()
+        with self._store.uow():
+            self._store.append_event(self._ev(
+                now, "gate", "gate_resource_wait", tid,
+                {"repo": repo, "limit": self._LANE_LIMIT}))
+        self._lane[tid] = {"waiting": True, "resource": repo,
+                           "limit": self._LANE_LIMIT}  # 事务成后置（C3 同款
+        # 防悬挂：uow 提交败不留内存 waiting 残影）
+        waited = time.monotonic() - started
+        now = self._now()
+        acquired_at = time.time()
+        try:
+            with self._store.uow():
+                self._store.append_event(self._ev(
+                    now, "gate", "gate_resource_acquire", tid,
+                    {"repo": repo, "limit": self._LANE_LIMIT, "slot": 0,
+                     "duration": round(waited, 3)}))
+                self._lane[tid] = {"waiting": False, "resource": repo,
+                                   "limit": self._LANE_LIMIT, "slot": 0,
+                                   "acquired_at": acquired_at,
+                                   "waited": round(waited, 3)}  # v2 同键
+        except BaseException:
+            self._lane.pop(tid, None)  # 评审环 C3：wait/acquire 间失败清投影
+            raise                      # 防 waiting=True 悬挂至重启
+        return {"repo": repo, "t0": time.monotonic(),
+                "acquired_at": acquired_at}
+
+    def _lane_release(self, tid, res):
+        """v2 _release_resources 镜像：finally 面全释放＋release 事件＋投影
+        released_at 翻转（进程死亡不释放——崩溃窗与 v2 flock 随进程消亡同口径，
+        重启重排后重取重投影）。评审环 B-F2：尽力而为——release 面异常不
+        置换 run() 原发结果（_gate_loop 崩溃归因不失真）。"""
+        if res is None:
+            return
+        held = time.monotonic() - res["t0"]
+        now = self._now()
+        try:
+            with self._store.uow():
+                self._store.append_event(self._ev(
+                    now, "gate", "gate_resource_release", tid,
+                    {"repo": res["repo"], "limit": self._LANE_LIMIT,
+                     "duration": round(held, 3)}))
+                self._lane[tid] = {"waiting": False, "resource": res["repo"],
+                                   "limit": self._LANE_LIMIT, "slot": 0,
+                                   "acquired_at": res["acquired_at"],
+                                   "released_at": time.time()}
+        except Exception as e:
+            self._lane.pop(tid, None)  # 投影不悬挂（C3 同款）
+            print(f"agorad-v3 gate lane release failed on {tid}: {e}",
+                  file=sys.stderr, flush=True)
+
+    def lane_projection(self, tid):
+        """内存 lane 投影只读面（board 明细/full_view 注入——v2 行内投影）。"""
+        return self._lane.get(tid)
+
+    def _gate_enter_notify(self, tid, t):
+        """v2 门启动拍镜像：milestone→worker＋result→dispatcher。两 record
+        同一 UoW＝同生共死（评审环 C4 注释修正：并非独立互压）；整体
+        尽力而为（F54）——败不断门。"""
+        if self._msg is None:
+            return
+        msgs = []
+        try:
+            with self._store.uow():
+                if t.worker_sid:
+                    m, _ = self._msg.record(
+                        ts_ms=self._now(), from_sid=t.dispatcher_sid,
+                        to_sid=t.worker_sid, task_id=tid, kind="milestone",
+                        body="已入验证门：verify 运行中——绿/败另有消息")
+                    msgs.append(m)
+                if t.dispatcher_sid:
+                    m, _ = self._msg.record(
+                        ts_ms=self._now(), from_sid="agorad",
+                        to_sid=t.dispatcher_sid, task_id=tid, kind="result",
+                        body=f"任务 {tid} 已入验证门（verify 运行中）")
+                    msgs.append(m)
+        except Exception:
+            pass
+        for m in msgs:
+            try:
+                self._msg.dispatch(m.id)
+            except Exception:
+                pass
 
     def _landed_probe(self, tid, t):  # T9b 交付执行体钩
         """崩溃残留探针（基类口径＝legacy 无投影行）：done 落账 commit 已在
@@ -799,28 +914,31 @@ class GateVerifyService:
     def _land(self, tid):
         """崩溃残留收口（上篇唯一成功出口）：目标支已含交付即补 merged→
         closed（两跳同事务，tasksvc._deliver_ok 同款）＋撤牌回收；幻影守卫
-        （落账 commit 不在目标支的假成功）归 T9b。"""
+        （落账 commit 不在目标支的假成功）归 T9b。Req: F144 closed 跳 ts=
+        merged+1ms（同事务原子保持）——merged 窗通知可落 [merged, closed)。"""
         now, msgs = self._now(), []
         with self._store.uow():
             fresh = self._store.get_task(tid)
             task = task_transition(fresh, "merged", now_ms=now)
             task = reset_fail_streak(task, now_ms=now)
-            task = task_transition(task, "closed", now_ms=now)
+            task = task_transition(task, "closed", now_ms=now + 1)
             self._store.upsert_task(task)
             self._store.append_event(self._ev(
                 now, "gate", "merged", tid, {"commit": task.commit}))
-            self._store.append_event(self._ev(now, "gate", "closed", tid))
+            self._store.append_event(
+                self._ev(now + 1, "gate", "closed", tid))
             if self._msg is not None and task.dispatcher_sid:
-                for state, text in (
-                        ("merged", f"@{(task.commit or '')[:7]} 崩溃残留收口"
+                for ts_ms, state, text in (
+                        (now, "merged", f"@{(task.commit or '')[:7]} 崩溃残留收口"
                          "（权威已含交付）"),
-                        ("closed", f"任务 {tid} 已 closed；"
+                        (now + 1, "closed", f"任务 {tid} 已 closed；"
                          f"commit={task.commit or '-'}")):
                     msgs.append(self._msg.record(
-                        ts_ms=now, from_sid="gate",
+                        ts_ms=ts_ms, from_sid="gate",
                         to_sid=task.dispatcher_sid, task_id=tid, kind="result",
                         body=text,
-                        dedup_key=f"transition:{tid}:{state}:{task.updated_ms}")[0])
+                        dedup_key=f"transition:{tid}:{state}:"
+                                  f"{task.updated_ms}")[0])
         for m in msgs:
             self._msg.dispatch(m.id)
         self._revoke(tid, task)

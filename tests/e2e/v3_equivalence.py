@@ -74,7 +74,11 @@ ENVELOPE = json.loads((REPO_ROOT / "tests" / "fixtures" / "v3_envelope.json")
 TIME_KEYS = frozenset({
     "ts", "created", "updated", "last_seen", "registered_at", "started",
     "duration_s", "age_seconds", "env_active_seconds_ago", "ran_at",
-    "first_created", "last_created", "stale_age_s", "last_seen_age_s"})
+    "first_created", "last_created", "stale_age_s", "last_seen_age_s",
+    # Req: F144 时间面补：门车道耗时/交付与车道投影时点——双侧各自时钟，
+    # 值恒不可等（同 duration_s/registered_at 家族，§11 typed/毫秒项）
+    "duration", "delivered_at", "acquired_at", "released_at",
+    "handoff_at"})
 # 通知类消息：文案/from/kind 命名面＝B intended；语义覆盖由矩阵守门
 NOTIFY_KINDS = frozenset({"milestone", "result", "process", "cancel",
                           "escalate"})
@@ -97,6 +101,7 @@ _HEX40 = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 _HEX32 = re.compile(r"(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])")  # 32/64 位牌值
 _TS_PATH = re.compile(r"\d{8}T\d{6}")  # gate-artifacts 目录名时钟（侧各自钟）
 _RESERVED_SID = re.compile(r"[a-z]+")  # 纯字母 sid（main/root）＝通用词，禁全串替换
+_RAW_SID_HEX = re.compile(r"[0-9a-f]{8,20}")  # 未登记会话形 hex（stub sid 12 位）
 _BOOT_PAT = ENVELOPE["patterns"]["boot_msg"]
 _CRED_PAT = ENVELOPE["patterns"]["cred_pointer"]
 
@@ -165,9 +170,12 @@ def latch_release(vd, start=1, upto=8):
 # ---- 归一化与差分分类 ----
 
 # sid 语义键：只有这些字段的值做精确 sid 归一（"main" 同时是 v2 root sid
-# 与常见分支名——泛字段精确替换会把 branch:"main" 吞成 ROOT，B 册 R1）
+# 与常见分支名——泛字段精确替换会把 branch:"main" 吞成 ROOT，B 册 R1）。
+# Req: F144 补 registered_by（verify 登记者＝root sid 面：v2 main/v3 root
+# 皆 daemon 身份，归一后等价）
 _SID_KEYS = frozenset({"dispatcher_sid", "worker_sid", "actor", "from",
-                       "to", "root_sid", "worker", "author", "sid", "caller"})
+                       "to", "root_sid", "worker", "author", "sid", "caller",
+                       "registered_by"})
 
 
 class Normalizer:
@@ -190,9 +198,15 @@ class Normalizer:
         return self._sha_rev[alias]
 
     def value(self, s):
-        """单值字段（actor/from/to）：精确 sid 命中优先（保留字免吞）。"""
+        """单值字段（actor/from/to）：精确 sid 命中优先（保留字免吞）；
+        未登记会话形 hex（reinject 重建新 sid 等）→<SID>（两侧各持随机
+        新号——值面恒不可等，语义等价＝重建都发生，Req: F144）。"""
         s = str(s)
-        return self.sid[s] if s in self.sid else self._text(s)
+        if s in self.sid:
+            return self.sid[s]
+        if _RAW_SID_HEX.fullmatch(s):
+            return "<SID>"
+        return self._text(s)
 
     def _text(self, s):
         for table in (self.env, self.sha, self.tid):
@@ -218,8 +232,11 @@ class Normalizer:
         if isinstance(obj, list):
             return [self.walk(v, key) for v in obj]
         if isinstance(obj, str):
-            if key in _SID_KEYS and obj in self.sid:  # sid 语义键精确命中
-                return self.sid[obj]
+            if key in _SID_KEYS:  # sid 语义键：精确命中→别名；
+                if obj in self.sid:  # 未登记会话形 hex→<SID>（value 同口径）
+                    return self.sid[obj]
+                if _RAW_SID_HEX.fullmatch(obj):
+                    return "<SID>"
             return self._text(obj)
         if key in TIME_KEYS and isinstance(obj, (int, float)) \
                 and not isinstance(obj, bool):
@@ -714,11 +731,30 @@ class Side:
     def coverage_matrix(self):
         """B 裁定·通知覆盖矩阵：{(任务别名, 迁移事件, 通道)→是否有通知}。
         通道＝dispatcher/worker（消息 to 归属）；窗＝本迁移 ts 至下一迁移 ts；
-        通知＝kind∈NOTIFY_KINDS 或 credential（A 类持久指针）到该通道。"""
+        通知＝kind∈NOTIFY_KINDS 或 credential（A 类持久指针）到该通道。
+        Req: F144 返回 (矩阵, 未结算集)——done/in_gate 任务迁移窗未闭合，
+        mid-flight 面跳过（双侧门体推进不同步＝线程时序非语义差；结算后
+        终面全量比对，场景收口前 wait(终态) 保证终面覆盖）。"""
         out = {}
-        raw_ts = self._notify_ts()  # 一次扫描（任务间共享，勿入循环）
+        unsettled = set()
+        boards = {}  # 先读 board 后扫文件——迁移已见而通知未写的窗内竞态收口
         for alias in sorted(set(self.norm.tid.values())):
-            raw = self.detail(alias)  # detail 收别名（内部自行转真 tid）
+            boards[alias] = self.detail(alias)  # detail 收别名（内部自转真 tid）
+
+        def last_ts(raw):
+            evs = [e["ts"] for e in raw.get("events", [])
+                   if e.get("event") in TRANSITION_EVENTS
+                   and isinstance(e.get("ts"), (int, float))]
+            return max(evs) if evs else None
+
+        for alias in list(boards):  # 新近迁移：有界等窗闭再重读（非跳过——
+            # 保证每任务终获一次结算态比较，评审环 OCR medium 落针）
+            lt = last_ts(boards[alias])
+            if lt is not None and (d := 0.5 - (time.time() - lt)) > 0:
+                time.sleep(d)
+                boards[alias] = self.detail(alias)
+        raw_ts = self._notify_ts()  # 一次扫描（任务间共享，勿入循环）
+        for alias, raw in boards.items():
             evs = sorted((e for e in raw.get("events", [])
                           if e.get("event") in TRANSITION_EVENTS
                           and isinstance(e.get("ts"), (int, float))),
@@ -727,16 +763,20 @@ class Side:
             disp, worker = row.get("dispatcher_sid"), row.get("worker_sid")
             if not disp or not worker:
                 continue
+            if row.get("state") == "done" or row.get("in_gate"):
+                unsettled.add(alias)  # Req: F144 窗未闭合任务（见 docstring）
             for j, e in enumerate(evs):
                 lo = e["ts"]
                 hi = evs[j + 1]["ts"] if j + 1 < len(evs) else float("inf")
                 for ch, sid in (("disp", disp), ("worker", worker)):
                     out[(alias, e["event"], ch)] = any(
                         lo <= ts < hi for ts, to in raw_ts if to == sid)
-        return out
+        return out, unsettled
 
     def _notify_ts(self):
-        """[(原始 ts, to_sid)]：通知类消息（矩阵专用，不经蒙版）。"""
+        """[(原始 ts, to_sid)]：通知类消息（矩阵专用，不经蒙版）。Req: F144
+        补计 stub 直投注入中的 credential 指针（§11 A：v2 credential 直投
+        零落库 vs v3 持久消息——通道覆盖语义双侧对等，注入带时间戳可入窗）。"""
         out = []
         d = self.home / "state" / "messages"
         for p in sorted(d.glob("*.md")) if d.is_dir() else []:
@@ -751,6 +791,15 @@ class Side:
                     out.append((float(rec["ts"]), rec.get("to", "")))
                 except (KeyError, ValueError):
                     continue
+        with self.stub.lock:
+            for sid in sorted(self.stub.sessions):
+                s = self.stub.sessions[sid]
+                for text, ts in zip(s.get("injects", []),
+                                    s.get("inject_ts", [])):
+                    if re.search(_CRED_PAT["source"], text,
+                                 re.MULTILINE if "m" in _CRED_PAT["flags"]
+                                 else 0):
+                        out.append((ts, sid))
         return out
 
     def raw_injects(self):
@@ -1019,9 +1068,12 @@ class Diff:
                    and _inject_body(d[2]) in bodies["v3"] else d)
                   for d in idiffs]
         diffs = mdiffs + ediffs + idiffs
-        ma = self.sides["v2"].coverage_matrix()
-        mb = self.sides["v3"].coverage_matrix()
+        ma, unsettled_a = self.sides["v2"].coverage_matrix()
+        mb, unsettled_b = self.sides["v3"].coverage_matrix()
+        skip = unsettled_a | unsettled_b  # 任一侧窗未闭合即不比（F144）
         for key in sorted(set(ma) | set(mb), key=str):
+            if key[0] in skip:
+                continue
             if ma.get(key) != mb.get(key):
                 diffs.append(("notification_coverage_gap",
                               f"{label}.coverage[{key}]", ma.get(key),
@@ -1256,8 +1308,10 @@ class Diff:
             parsed[kind] = {"boot": boots, "cred_pointer": creds}
         diffs = []
         for key in ("boot", "cred_pointer"):
-            for cls, where, x, y in seq_diffs(parsed["v2"][key],
-                                              parsed["v3"][key]):
+            # Req: F144 boot/指针语义＝集合（注入序按 sid 排序＝任意序，
+            # 多重集相等即等价——reinject 后双侧都持重建 BOOT 才落比较面）
+            for cls, where, x, y in seq_diffs(sorted(parsed["v2"][key]),
+                                              sorted(parsed["v3"][key])):
                 if key == "boot" and where in ("extra", "missing"):
                     # v2 多出的 (reinject) BOOT＝会话重建面（裁定 E 缺陷）
                     rec = x if where == "extra" else y

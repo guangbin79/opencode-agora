@@ -392,7 +392,10 @@ class TestBaseProbe(_Base):  # 断言2
         self.assertIn("base_probe_overrun", self.events(tid))
         self.assertTrue(any(m.kind == "result" for m in
                             self.messages(DISPATCHER)))
-        self.assertFalse(self.messages(WORKER))
+        # Req: F144 门入口 milestone（v2 同款）合法到 worker； overrun 不弹
+        # worker 的判据＝零 process 类弹回消息
+        self.assertFalse([m for m in self.messages(WORKER)
+                          if m.kind == "process"])
         tid = self.seed("ag-p8")
         self.gitx.fail_base_build = True
         self.assertEqual(self.gate.run(tid), "probe_failed")
@@ -754,8 +757,10 @@ class TestCrashWindow(_Base):  # 断言9
         self.assertIsNone(self.storage.get_credential(WORKER))  # 撤牌
         self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)  # 回收
         n_events = len(self.events(tid))
-        self.assertEqual(self.gate.run(tid), "skip")  # 重排恰一次：无重复
-        self.assertEqual(len(self.events(tid)), n_events)
+        self.assertEqual(self.gate.run(tid), "skip")  # 重排恰一次：无重复迁移
+        # Req: F144 skip 路径同占道（v2 run_guarded 同位）——唯车道审计三行
+        # （wait/acquire/release）新增，迁移/门体事件零重复
+        self.assertEqual(len(self.events(tid)), n_events + 3)
 
     def test_cancel_queued_in_gate_settles_at_tail(self):
         tid = self.seed("ag-w2")

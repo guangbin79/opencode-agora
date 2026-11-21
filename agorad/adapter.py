@@ -90,14 +90,22 @@ _MODELS_NOTE = ("清单＝配置绑定面（服务实际可路由），非供应
 
 
 def _delivery_row(d):
-    """DeliveryState→v2 delivery 投影（task._new_delivery 8 键；F105
-    conflict_files 仅终局在键——v2 set_fields 写点同形）。"""
+    """DeliveryState→v2 delivery 投影（Req: F144 写点语义对齐）：基础 8 键；
+    conflict_files 仅 external 终局在键（delivered 清 None/failed 载清单——
+    managed delivered 不写该键）；delivered_at 仅 managed delivered 在键；
+    handoff_at 仅 external handoff 落账后在键（v2 F101）。"""
     row = {"mode": d.mode, "status": d.status, "commit": d.commit,
            "base": d.base, "target_branch": d.target_branch,
            "attempt": d.attempt, "local_status": d.local_status,
            "error": d.error}
     if d.conflict_files is not None:
         row["conflict_files"] = d.conflict_files
+    elif d.mode == "external_branch" and d.status in ("delivered", "failed"):
+        row["conflict_files"] = None  # v2 external 终局显式清残值在键
+    if d.delivered_at_ms is not None:
+        row["delivered_at"] = _seconds(d.delivered_at_ms)
+    if d.handoff_at_ms is not None:
+        row["handoff_at"] = _seconds(d.handoff_at_ms)
     return row
 
 
@@ -132,6 +140,82 @@ def task_row(t):
             "source": v.timeout_source or (
                 "task" if v.timeout_s is not None else "default")}
     return row
+
+
+def task_row_detail(t):
+    """Req: F144 — domain.Task→v2 board 单任务明细全字段行（characterization
+    golden 键集镜像；v2 detail＝dict(账本行) 全量）。与 task_row（full_view
+    白名单投影）分立：明细面全字段、full_view 形状保持不变。
+
+    after＝v2 单值面（None/前驱 tid）；fail_streak＝v2 行键名（v3 域同名，
+    gate.review_fail_streak 是 v3-only 轮次态不入明细行）。Req: F144 写点
+    语义条件键：commit/rebased_from/gate_env/in_gate 仅在 v2 对应写点发生
+    后在键（done 受理写 commit＋rebased_from(None 清位)；门体写 in_gate/
+    gate_env——从未受理工/从未进门的行缺键，v2 账本行同形）。
+    """
+    gated = (t.state in ("done", "merged", "closed", "verify_failed",
+                         "reopened", "blocked") or t.gate.in_gate
+             or t.gate.gate_env is not None)
+    # blocked＝门后连败/blocked 行有门体历史（评审环 A-F2）；cancelled 面
+    # 歧义（直取消无键/门尾取消有键）按 v2 直路缺键维持——七场景外潜伏差
+    row = {
+        "state": t.state, "title": t.title, "goal": t.goal,
+        "worker_sid": t.worker_sid, "dispatcher_sid": t.dispatcher_sid,
+        "root_sid": t.root_sid, "chain_depth": t.chain_depth,
+        "last_seen": _seconds(t.last_seen_ms),
+        "created": _seconds(t.created_ms), "updated": _seconds(t.updated_ms),
+        "project_dir": t.project_dir, "target_branch": t.target_branch,
+        "req_id": t.req_id, "model": t.model, "quick": t.quick,
+        "deliverable": t.deliverable, "client_key": t.client_key,
+        "after": (t.after[0] if t.after else None),
+        "delivery": None if t.delivery is None else _delivery_row(t.delivery),
+        "env_dir": t.env_dir, "env_base": t.env_base,
+        "verify": {"cmd": t.verify.cmd, "state": t.verify.state,
+                   "registered_by": t.verify.registered_by,
+                   "registered_at": _seconds(t.verify.registered_at_ms),
+                   "timeout": t.verify.timeout_s,
+                   "timeout_source": t.verify.timeout_source},
+        "verify_pending": t.verify_pending,
+        "verify_base_exempt": t.verify_base_exempt,
+        "review_cmd": t.review_cmd, "waiting_on": t.waiting_on,
+        "fail_streak": t.fail_streak}
+    if gated:
+        row["in_gate"] = t.gate.in_gate
+        row["gate_env"] = t.gate.gate_env
+    if t.commit is not None:  # done 受理（managed/external sha 面）后写
+        row["commit"] = t.commit
+        row["rebased_from"] = t.rebased_from  # v2 受理清位写 None 在键
+    elif t.rebased_from is not None:
+        row["rebased_from"] = t.rebased_from
+    if t.gate.gate_resource is not None:
+        row["gate_resource"] = t.gate.gate_resource
+    if t.gate.gate_artifact is not None:
+        a = t.gate.gate_artifact  # v2 行投影 6 键（gate.py set_fields 同形）
+        row["gate_artifact"] = {
+            "path": a.path, "phase": a.phase, "rc": a.rc,
+            "failure_kind": a.failure_kind, "duration_s": a.duration_s,
+            "bytes": a.bytes}
+    return row
+
+
+def detail_classification(t, tasks, now, act):
+    """Req: F144 — v2 report.classify＋queued 镜像（board 明细三态判读）：
+    终态/无 worker＝None；排队 done＝queued；僵态候选＝stale_candidate；
+    last_seen 缺席或 >20min＝busy_round；否则 fresh。stale 判定复用
+    _stale_candidates（单任务快照口径，v2 detail 同款）。"""
+    queued = (t.state == "done" and not t.gate.in_gate
+              and any(x.gate.in_gate for x in tasks.values()))
+    if queued:
+        return "queued"
+    if t.state in _MERGED | {"blocked", "cancelled"} or not t.worker_sid:
+        return None
+    base = {t.id: max(_seconds(t.last_seen_ms) or _seconds(t.created_ms)
+                      or 0.0, act)}
+    if [c for c, _ in _stale_candidates({t.id: t}, now, base)]:
+        return "stale_candidate"
+    seen = _seconds(t.last_seen_ms)
+    ago = None if not seen else max(0, int(now - seen))
+    return "busy_round" if ago is None or ago > _STALE_AFTER else "fresh"
 
 
 def buckets(tasks):

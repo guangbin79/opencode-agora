@@ -721,11 +721,15 @@ class TestExternal(_Base):  # 断言6
         ev = len(self.events(tid))
         self.assertEqual(self.gate.run(tid), "skip")  # 残留直通不重验
         self.assertEqual(len(self.runner.calls), calls)
+        # Req: F144 skip 路径同占道＋门闩＋门入口通知审计（v2 run 同位）——
+        # 判据＝零重验（runner 零新调用）＋零重复 handoff 落账
+        self.assertGreater(len(self.events(tid)), ev)
+        self.assertEqual(self.events(tid).count("awaiting_external"), 1)
         self.gate.recover()
         t = self.storage.get_task(tid)
         self.assertEqual((t.state, t.delivery.status),
                          ("done", "awaiting_external"))  # 恢复面零接触
-        self.assertEqual(len(self.events(tid)), ev)
+        self.assertEqual(self.events(tid).count("awaiting_external"), 1)
 
     def test_missing_target_branch_terminal(self):
         tid = self.seed("ag-e9", delivery="external", target_branch=None,
@@ -1063,8 +1067,9 @@ class TestSchemaUpgrade(unittest.TestCase):  # 评审环 R1 B1：v3→v4 补列�
             cols = {r[1] for r in st.open_reader().execute(
                 "PRAGMA table_info(task_delivery)")}
             self.assertIn("conflict_files_json", cols)
+            self.assertIn("delivered_at_ms", cols)  # Req: F144 v5 迁移
             self.assertEqual(st.open_reader().execute(
-                "PRAGMA user_version").fetchone()[0], 4)
+                "PRAGMA user_version").fetchone()[0], 5)
             with st.uow():
                 st.upsert_task(domain.Task(
                     id="ag-u1", state="done",

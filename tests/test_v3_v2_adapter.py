@@ -494,5 +494,79 @@ class TestAliasEquivalence(unittest.TestCase):
             self.assertIn(field, cm.exception.message, legacy)
 
 
+class TestDetailRowF144(unittest.TestCase):
+    """Req: F144 — board 单任务明细全字段行＋v2 三态判读镜像。"""
+
+    _FULL = {
+        "state", "title", "goal", "worker_sid", "dispatcher_sid", "root_sid",
+        "chain_depth", "last_seen", "created", "updated", "project_dir",
+        "target_branch", "req_id", "model", "quick", "deliverable",
+        "client_key", "after", "delivery", "env_dir", "env_base", "commit",
+        "rebased_from", "verify", "verify_pending", "verify_base_exempt",
+        "review_cmd", "waiting_on", "fail_streak", "in_gate", "gate_env"}
+
+    def test_full_row_key_set(self):
+        t = domain.Task(id="ag-9", state="closed", title="t", goal="g",
+                        root_sid="root", dispatcher_sid="root",
+                        worker_sid="w1", chain_depth=1, created_ms=1000200,
+                        updated_ms=1000400, project_dir="/repo",
+                        target_branch="main", commit="c" * 40,
+                        verify=domain.VerifySpec(
+                            cmd="true", state="registered",
+                            registered_by="root", registered_at_ms=1000300),
+                        delivery=domain.DeliveryState(
+                            status="delivered", delivered_at_ms=1000500),
+                        gate=domain.GateState(
+                            gate_resource={"waiting": False, "resource": "/r",
+                                           "limit": 1, "slot": 0},
+                            gate_artifact=domain.Artifact(
+                                task_id="ag-9", phase="verify", path="/p",
+                                rc=0, failure_kind="green", bytes=0)))
+        row = adapter.task_row_detail(t)
+        self.assertEqual(set(row), self._FULL | {"gate_resource",
+                                                 "gate_artifact"})
+        self.assertEqual(row["verify"]["registered_at"], 1000.3)
+        self.assertEqual(row["delivery"]["delivered_at"], 1000.5)
+        self.assertEqual(row["fail_streak"], 0)
+        self.assertNotIn("review_fail_streak", row)
+        self.assertNotIn("verify_budget", row)
+        self.assertIsNone(adapter.task_row_detail(
+            domain.Task(id="ag-x"))["delivery"])
+
+    def test_classification_v2_mirror(self):
+        tasks = _scenario()
+        fresh = tasks["ag-2"]  # running＋last_seen 新
+        self.assertEqual(adapter.detail_classification(
+            fresh, tasks, now=1697940300.0 + 60, act=0.0), "fresh")
+        self.assertEqual(adapter.detail_classification(  # 超窗＋无 env 活性＝僵态候选
+            fresh, tasks, now=1697940300.0 + 1300, act=0.0),
+            "stale_candidate")
+        self.assertEqual(adapter.detail_classification(  # last_seen 老＋env 活跃＝busy
+            fresh, tasks, now=1697940300.0 + 1300, act=1697940300.0 + 1250),
+            "busy_round")
+        self.assertIsNone(adapter.detail_classification(  # 终态＝None
+            tasks["ag-3"], tasks, now=1697940300.0, act=0.0))
+        self.assertIsNone(adapter.detail_classification(  # 无 worker＝None
+            tasks["ag-1"], tasks, now=1697940300.0, act=0.0))
+        stale = domain.Task(id="ag-7", state="running", dispatcher_sid="d1",
+                            worker_sid="w9", created_ms=1697000000000,
+                            project_dir="/repo", goal="g")
+        self.assertEqual(adapter.detail_classification(
+            stale, {stale.id: stale}, now=1697940300.0, act=0.0),
+            "stale_candidate")
+        queued = domain.Task(id="ag-8", state="done", dispatcher_sid="d1",
+                             worker_sid="w8", created_ms=1697940000000,
+                             last_seen_ms=1697940300000, project_dir="/repo",
+                             goal="g")
+        busy = {queued.id: queued,
+                "ag-9": domain.Task(
+                    id="ag-9", state="done", dispatcher_sid="d1",
+                    worker_sid="wz", created_ms=1697940000001,
+                    goal="g", project_dir="/repo",
+                    gate=domain.GateState(in_gate=True))}
+        self.assertEqual(adapter.detail_classification(
+            queued, busy, now=1697940300.0, act=0.0), "queued")
+
+
 if __name__ == "__main__":
     unittest.main()

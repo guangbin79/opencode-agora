@@ -254,28 +254,34 @@ class GateDeliveryService(GateVerifyService):
 
     def _close_out_of_band(self, tid):
         """review-only 直接收口：merged（note=out_of_band 零合入留痕）→closed
-        两跳同事务＋撤牌回收（口径对齐 _land）。"""
+        两跳同事务＋撤牌回收（口径对齐 _land）。Req: F144 closed ts=merged+1ms
+        ＋merged 窗双通道（result→disp＋milestone→worker，v2 同款）。"""
         now, msgs = self._now(), []
         with self._store.uow():
             fresh = self._store.get_task(tid)
             task = task_transition(fresh, "merged", now_ms=now)
             task = reset_fail_streak(task, now_ms=now)
-            task = task_transition(task, "closed", now_ms=now)
+            task = task_transition(task, "closed", now_ms=now + 1)
             self._store.upsert_task(task)
             self._store.append_event(self._ev(
                 now, "gate", "merged", tid, {"note": "out_of_band"}))
-            self._store.append_event(self._ev(now, "gate", "closed", tid))
-            if self._msg is not None and task.dispatcher_sid:
-                for state, text in (
-                        ("merged", "review-only 交付（verify 绿，零合入）"),
-                        ("closed", f"任务 {tid} 已 closed；交付物引用见 done "
-                         "审计")):
+            self._store.append_event(
+                self._ev(now + 1, "gate", "closed", tid))
+            if self._msg is not None:
+                for ts_ms, kind, to_sid, text in (
+                        (now, "result", task.dispatcher_sid,
+                         f"任务 {tid} merged review-only 交付（verify 绿，零合入）"),
+                        (now, "milestone", task.worker_sid,
+                         "review-only 交付在案（零合入）——环境已回收"),
+                        (now + 1, "result", task.dispatcher_sid,
+                         f"任务 {tid} 已 closed；交付物引用见 done 审计")):
+                    if not to_sid:
+                        continue
                     msgs.append(self._msg.record(
-                        ts_ms=now, from_sid="gate",
-                        to_sid=task.dispatcher_sid, task_id=tid, kind="result",
-                        body=text,
-                        dedup_key=f"transition:{tid}:{state}:"
-                        f"{task.updated_ms}")[0])
+                        ts_ms=ts_ms, from_sid="gate", to_sid=to_sid,
+                        task_id=tid, kind=kind, body=text,
+                        dedup_key=f"transition:{tid}:{kind}:{ts_ms}"
+                        if kind != "milestone" else None)[0])
         for m in msgs:
             self._msg.dispatch(m.id)
         self._revoke(tid, task)
@@ -544,32 +550,43 @@ class GateDeliveryService(GateVerifyService):
         """绿 handoff 唯一出口：投影 awaiting_external（commit/base/attempt
         机器可读、local_status=not_required——外部权威，本地无同步义务）＋
         驻留 done＋env/凭据保留；通知面带齐四要素，确认权在外部派发方
-        （task_deliver）。"""
-        now, msg = self._now(), None
+        （task_deliver）。Req: F144 补 worker milestone（v2 handoff 双通道）。"""
+        now, msgs = self._now(), []
+        msg = None
         with self._store.uow():
             fresh = self._store.get_task(tid)
             nd = dataclasses.replace(
                 fresh.delivery, status="awaiting_external", commit=sha,
                 base=base, attempt=attempt, local_status="not_required",
-                error=None,
-                conflict_files=None)  # Req: F105 上轮终局残值必清（B1）
+                error=None, conflict_files=None,
+                handoff_at_ms=now)  # Req: F144 v2 handoff_at 驻留龄投影
             task = reset_fail_streak(fresh, now_ms=now)
             task = dataclasses.replace(task, delivery=nd)
             self._store.upsert_task(task)
             self._store.append_event(self._ev(
                 now, "gate", "awaiting_external", tid,
                 {"commit": sha, "base": base, "attempt": attempt}))
-            if self._msg is not None and task.dispatcher_sid:
-                msg, _ = self._msg.record(
-                    ts_ms=now, from_sid="gate", to_sid=task.dispatcher_sid,
-                    task_id=tid, kind="result",
-                    body=f"任务 {tid} handoff 就绪（awaiting_external）："
-                         f"commit={sha} target={branch} base={base} "
-                         f"attempt={attempt}"
-                         "——外部确认经 task_deliver(delivered/non_ff/failed)",
-                    dedup_key=f"awaiting_external:{tid}:{sha}")
+            if self._msg is not None:
+                if task.dispatcher_sid:
+                    msg, _ = self._msg.record(
+                        ts_ms=now, from_sid="gate", to_sid=task.dispatcher_sid,
+                        task_id=tid, kind="result",
+                        body=f"任务 {tid} handoff 就绪（awaiting_external）："
+                             f"commit={sha} target={branch} base={base} "
+                             f"attempt={attempt}"
+                             "——外部确认经 task_deliver(delivered/non_ff/failed)",
+                        dedup_key=f"awaiting_external:{tid}:{sha}")
+                if task.worker_sid:
+                    msgs.append(self._msg.record(
+                        ts_ms=now, from_sid=task.dispatcher_sid,
+                        to_sid=task.worker_sid, task_id=tid, kind="milestone",
+                        body=f"handoff 就绪 @{sha[:7]}（base {base[:7]}，"
+                             f"第 {attempt} 次）——等待外部派发方 task_deliver"
+                             "(delivered/non_ff/failed)")[0])
         if msg is not None:
             self._msg.dispatch(msg.id)
+        for m in msgs:
+            self._msg.dispatch(m.id)
         return "awaiting_external"
 
     # ---- 终局/成功公共面 ----
@@ -614,19 +631,22 @@ class GateDeliveryService(GateVerifyService):
     def _finish_delivered(self, tid, sha, base, attempt):
         """managed 本地权威落地唯一成功出口（F100）：投影 delivered/synced
         →merged→closed 两跳同事务（tasksvc._deliver_ok 同款）＋撤牌回收；
-        base=None＝崩溃窗口补终态（保留在案基线与尝试计数）。"""
+        base=None＝崩溃窗口补终态（保留在案基线与尝试计数）。Req: F144
+        closed ts=merged+1ms＋merged 窗双通道（result→disp＋milestone→worker
+        ，v2 同款）＋delivery.delivered_at 落账。"""
         now, msgs = self._now(), []
         with self._store.uow():
             fresh = self._store.get_task(tid)
             nd = dataclasses.replace(
                 fresh.delivery or DeliveryState(), status="delivered",
                 commit=sha, local_status="synced", error=None,
-                attempt=attempt, conflict_files=None)
+                attempt=attempt, conflict_files=None,
+                delivered_at_ms=now)
             if base is not None:
                 nd = dataclasses.replace(nd, base=base)
             task = task_transition(fresh, "merged", now_ms=now)
             task = reset_fail_streak(task, now_ms=now)
-            task = task_transition(task, "closed", now_ms=now)
+            task = task_transition(task, "closed", now_ms=now + 1)
             task = dataclasses.replace(task, delivery=nd, commit=sha)
             self._store.upsert_task(task)
             detail = {"commit": sha}
@@ -634,18 +654,25 @@ class GateDeliveryService(GateVerifyService):
                 detail["rebased_from"] = task.rebased_from
             self._store.append_event(self._ev(
                 now, "gate", "merged", tid, detail))
-            self._store.append_event(self._ev(now, "gate", "closed", tid))
-            if self._msg is not None and task.dispatcher_sid:
-                for state, text in (
-                        ("merged", f"@{sha[:7]} local=synced——本地目标支已"
-                         "交付，环境已回收"),
-                        ("closed", f"任务 {tid} 已 closed；commit={sha}")):
+            self._store.append_event(
+                self._ev(now + 1, "gate", "closed", tid))
+            if self._msg is not None:
+                for ts_ms, kind, to_sid, text in (
+                        (now, "result", task.dispatcher_sid,
+                         f"任务 {tid} merged @{sha[:7]} local=synced——沉淀: "
+                         "聚本任务 note/task page 走 knowledge ingest"),
+                        (now, "milestone", task.worker_sid,
+                         f"merged @{sha[:7]}——本地目标支已交付，环境已回收"),
+                        (now + 1, "result", task.dispatcher_sid,
+                         f"任务 {tid} 已 closed；commit={sha}")):
+                    if not to_sid:
+                        continue
                     msgs.append(self._msg.record(
-                        ts_ms=now, from_sid="gate",
-                        to_sid=task.dispatcher_sid, task_id=tid,
-                        kind="result", body=text,
-                        dedup_key=f"transition:{tid}:{state}:"
-                        f"{task.updated_ms}")[0])
+                        ts_ms=ts_ms, from_sid="gate", to_sid=to_sid,
+                        task_id=tid, kind=kind, body=text,
+                        # Req: F144 键掺 kind＋时点：merged/closed 双 result 不
+                        # 撞键（撞键回读原行＝closed 通知被吞——覆盖矩阵破口）
+                        dedup_key=f"transition:{tid}:{kind}:{ts_ms}")[0])
         for m in msgs:
             self._msg.dispatch(m.id)
         self._revoke(tid, task)
