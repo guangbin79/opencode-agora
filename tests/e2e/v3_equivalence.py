@@ -198,10 +198,9 @@ class Normalizer:
             for k in sorted(table, key=len, reverse=True):
                 if k in s:  # 具体别名先行（env 路径内嵌 tid/root，先整体替换）
                     s = s.replace(k, table[k])
-        if self.root and self.root in s:  # sandbox 根（含 repos/env）蒙版
+        # sandbox 根蒙版（含 home/repos/env——home 恒为 root 前缀，无需独立蒙版）
+        if self.root and self.root in s:
             s = s.replace(self.root, "<SANDBOX>")
-        if self.home and self.home in s:
-            s = s.replace(self.home, "<HOME>")
         for k, alias in self.sid.items():
             if _RESERVED_SID.match(k):  # B 册 R1：main/root 等保留字只替换
                 # 信封语境（"from <sid>"）——防分支名 "main" 等通用词被吞
@@ -325,6 +324,7 @@ def message_list_diffs(va, vb, where, with_ids):
                             ensure_ascii=False) for m in na)
     sb = Counter(json.dumps(_msg_semantic(m), sort_keys=True,
                             ensure_ascii=False) for m in nb)
+    n0 = len(out)
     for k in sorted(set(sa) - set(sb)):
         rec = json.loads(k)
         cls = ("Outbox消息化(A)" if _is_cred_pointer(rec)
@@ -335,7 +335,7 @@ def message_list_diffs(va, vb, where, with_ids):
         cls = ("Outbox消息化(A)" if _is_cred_pointer(rec)
                else "通知文案/命名(B)")
         out.append((cls, f"{where}.notify.missing", None, rec))
-    if sa == sb and sum(sa.values()) != sum(sb.values()):
+    if len(out) == n0 and sa != sb:  # 键集相等仅计数差＝at-least-once
         out.append(("at-least-once重复投递", f"{where}.notify.multiplicity",
                     sum(sa.values()), sum(sb.values())))
     if with_ids:  # id 漂移：语义多重集相等而 id 计数不等（A——消息化挪位）
@@ -692,6 +692,7 @@ class Side:
         通道＝dispatcher/worker（消息 to 归属）；窗＝本迁移 ts 至下一迁移 ts；
         通知＝kind∈NOTIFY_KINDS 或 credential（A 类持久指针）到该通道。"""
         out = {}
+        raw_ts = self._notify_ts()  # 一次扫描（任务间共享，勿入循环）
         for alias in sorted(set(self.norm.tid.values())):
             raw = self.detail(alias)  # detail 收别名（内部自行转真 tid）
             evs = sorted((e for e in raw.get("events", [])
@@ -702,7 +703,6 @@ class Side:
             disp, worker = row.get("dispatcher_sid"), row.get("worker_sid")
             if not disp or not worker:
                 continue
-            raw_ts = self._notify_ts()
             for j, e in enumerate(evs):
                 lo = e["ts"]
                 hi = evs[j + 1]["ts"] if j + 1 < len(evs) else float("inf")
