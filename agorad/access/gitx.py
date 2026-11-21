@@ -34,6 +34,21 @@ class DirtyWorktree(RuntimeError):
         self.records = list(records)
 
 
+def worktree_location_error(repo_toplevel, worktree_path):  # Req: F129
+    """落位闸（纯路径判定）：worktree 不在仓工作树内（含等位仓根本身）＝
+    合规返回 None；落仓内返回拒因文案（必含 canonical 期望落位＝仓根同级）。
+    模块级函数＝唯一真源：_build_env 创建闸与外部程序面共用（access 孤岛
+    铁律禁兄弟 import，巡检 CLI 在 wtscan.py 各自 stdlib 自持）。"""
+    repo = Path(repo_toplevel).resolve()
+    wt = Path(worktree_path).resolve()
+    try:
+        wt.relative_to(repo)
+    except ValueError:
+        return None  # 仓外任意落位均合规；canonical 仅在拒因中给出
+    return (f"worktree 落位 {wt} 在仓工作树内（{repo}）——"
+            f"canonical 期望落位为仓根同级目录：{repo.parent}")
+
+
 class Gitx:
     _SHA40 = re.compile(r"[0-9a-fA-F]{40}")
 
@@ -110,6 +125,10 @@ class Gitx:
         repo = Path(project_dir).resolve()
         name = self._env_name(repo, tid)
         env = repo.parent / name  # repo 同级父目录＝../ 相对拓扑等价
+        # Req: F129 落位闸：name 逃逸等致 env 落仓工作树内时触 git 前拒
+        err = worktree_location_error(repo, env)
+        if err:
+            raise RuntimeError(err)
         self._git(["worktree", "add", "-b", name, str(env), *startpoint], cwd=repo)
         return str(env)
 

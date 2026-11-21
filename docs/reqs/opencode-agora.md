@@ -721,3 +721,10 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **边界**：不锁实现内部结构（仅外部/边缘可观测契约）；不含 Bun 侧测试（归 v3 后续任务）；不改既有测试语义；不引入新依赖；新增合计 ≤600 行。
 **落点**：tests/test_v3_characterization.py（新，Req: F128）、tests/fixtures/v3_contract_golden.json（新）、tests/fixtures/v3_envelope.json（新）、docs/reqs/opencode-agora.md（本条）。
 **验收**：`python3 -m pytest tests/test_v3_characterization.py -q` 全绿；全量 `python3 -m pytest tests/ -q` 不回归。
+
+### F129 worktree 落位校验——创建拦截＋存量巡检（2026-11-21，ag-cdc785）
+**现状**：env 落位由 `_build_env` 单点计算（`repo.parent / name`），落位正确性无独立校验面——name 含遍历成分（如 tid 通道污染）或未来改动致 env 落进仓工作树内时将静默创建嵌套 worktree 污染仓未跟踪面，且无工具发现存量错位（人肉 ls 同级目录）。
+**裁定**：①纯校验 `agorad/access/gitx.py::worktree_location_error(repo_toplevel, worktree_path)`（模块级唯一真源）——worktree 落在仓工作树内（含等位仓根本身）即不合规，返回拒因文案（必含 canonical 期望落位＝仓根同级父目录），仓外任意落位＝None 合规；②`_build_env` 建 worktree 前过闸，不合规触 git 前 RuntimeError（拒因带 canonical 路径）且零副作用，合规路径行为零变化；③巡检 `agorad/access/wtscan.py::scan_misplaced_worktrees(repo)`——经 `git ls-files --others --directory --exclude-standard` 列仓内未跟踪 `*__wt-*` 目录（.gitignore 命中不计，与 git status 未跟踪口径一致；`--directory` 折叠层以下嵌套不展开＝已知限制），CLI 面 `python -m agorad.access.wtscan <repo>`：发现逐行打印 exit 1、零发现无输出 exit 0、用法/仓错 stderr＋exit 2。wtscan 纯 stdlib 自持（access 孤岛铁律禁兄弟 import，F2），git 接触仅此一处只读探针（与 main.payload_drift_note 同豁免形态）。
+**边界**：不移动/删除任何存量真实 worktree；不改合规路径行为；不进 `agora` HTTP CLI 子命令（本地只读探针零服务依赖）；代码＋测试 ≤300 行。
+**落点**：agorad/access/gitx.py（worktree_location_error＋_build_env 落位闸）、agorad/access/wtscan.py（新，巡检＋CLI）、tests/test_worktree_location.py（新，Req: F129 十锚）、docs/reqs/opencode-agora.md（本条）。
+**验收**：`python3 -m pytest tests/test_worktree_location.py -q` 绿；全量 `python3 -m pytest tests/ -q` 绿；`req-check` 退出码 0。
