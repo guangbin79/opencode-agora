@@ -40,7 +40,7 @@ import time
 from agorad.domain import (Artifact, BaseProbe, Credential, DeliveryReceipt,
                            DeliveryState, Event, GateState, MailCursor,
                            Message, Task, Timer, TimerState, VerifySpec,
-                           epoch_ms)
+                           dispatch_secret_key, epoch_ms)
 from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 
 SCHEMA_VERSION = 1
@@ -963,12 +963,20 @@ class GitStore:
         path = self._secret_path(cred)
         if not self._secret_ok(path, digest):
             prior = self._prior_secret(sid, digest)
-            if prior is None:
-                raise CredentialSecretError(
-                    f"{sid}: 外部 secret 文件缺席/牌值不符"
-                    f"（{os.path.join(self._home, path)}）"
-                    "——签发铁则＝文件先落盘后记账")
-            path = prior
+            if prior is not None:
+                path = prior
+            else:
+                # Req: F152——派发签牌 per-dispatch 唯一键位（tasksvc 先落盘
+                # 后记账；本尊键位留作提交后 BOOT 指针回填，不入 canonical）
+                cand = (None if cred.task_id is None else os.path.join(
+                    "credentials",
+                    dispatch_secret_key(cred.task_id, cred.token)))
+                if cand is None or not self._secret_ok(cand, digest):
+                    raise CredentialSecretError(
+                        f"{sid}: 外部 secret 文件缺席/牌值不符"
+                        f"（{os.path.join(self._home, path)}）"
+                        "——签发铁则＝文件先落盘后记账")
+                path = cand
         cur = self._cred_view(sid)
         fv = cur[0] if cur is not None else 0
         v = self._alloc_version("credential", sid, fv)

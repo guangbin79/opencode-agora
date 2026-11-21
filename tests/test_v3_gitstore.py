@@ -26,6 +26,8 @@ pull 必须可持久化 credential）与 append_event——按同款 bucket 方�
 对象族 objects/credentials/<bucket>/<sid>/<v>.json、objects/events/<bucket>/
 <seq>.json，保持「单 tx＋全部变更对象版本」提交不变量统一。
 """
+import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -33,6 +35,7 @@ import socket
 import subprocess
 import unittest
 
+from agorad.contracts import ContractError
 from agorad.domain import (Credential, DeliveryReceipt, Event, Message, Task,
                            Timer, TimerState, timer_transition)
 from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretError,
@@ -40,8 +43,13 @@ from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretErro
                              JournalCorruptionError, check_verb)
 from agorad.messaging import MessagingService
 from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
+from agorad.tasksvc import TaskService
 from agorad.timersvc import TimerService
 from tests import v3_harness as harness
+from tests.test_v3_task_service import (GitxStub as TaskGitxStub,
+                                        OcStub as TaskOcStub,
+                                        flip_state_on_second_read,
+                                        make_task_spec)
 
 TID = "ag-f147"
 GIT_FAILPOINTS = ("write-object", "write-tree", "commit-tree", "update-ref",
@@ -1323,6 +1331,315 @@ class TestCredentialSecretSafety(_Base):  # Req: F151——secret 外置安全�
                 st.put_credential(Credential(sid="ses-x", token="tk",
                                              task_id="../evil"))
         self.assertIsNone(st.head)  # 零提交
+
+
+class TestTaskServiceOnGitPort(unittest.TestCase):
+    """Req: F152——TaskService 契约移植 Git 后端（spec gitstore-phase2-
+    task-service）：生命周期代表路径（create/update_verify/dispatch/
+    transition/wait/bump_fail_streak/deliver/touch_seen）＋F151 redispatch
+    外部 secret 风险封堵——per-dispatch 唯一 secret 键位：旧活牌文件在
+    新 canonical 落账（tombstone 旧＋install 新同一 UoW）前绝不销毁，
+    失败重派只清未用新 secret，本尊键位（插件 pin 面）提交后回填。"""
+
+    D = "ses-d1"
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.injector = harness.FaultInjector()
+        for fp in GIT_FAILPOINTS + ("dispatch",):
+            self.injector.register(fp)
+        self.clock = FakeClock()
+        self.store = GitStore(self.home.state, injector=self.injector)
+        self.gitx = TaskGitxStub()
+        self.oc = TaskOcStub()
+        self.messaging = MessagingService(
+            self.store, self.oc, home=str(self.home.path),
+            clock=self.clock, injector=self.injector)
+        self.timers = TimerService(self.store, self.messaging,
+                                   clock=self.clock)
+        self.svc = TaskService(
+            self.store, self.gitx, self.oc, messaging=self.messaging,
+            home=str(self.home.path), clock=self.clock, timers=self.timers)
+
+    def _mk(self, **kw):
+        kw.setdefault("verify", {"cmd": "true"})
+        return self.svc.create(self.D, "dispatcher", make_task_spec(**kw))
+
+    def _staging(self, tid, token):
+        d = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+        return self.home.credentials / f"{tid}.{d}.token"
+
+    def _tx_with(self, obs, *ops):
+        return next(t for t in obs.txs().values()
+                    if set(ops) <= {op["op"] for op in t["operations"]})
+
+    def _cred_files(self):
+        return sorted(p.name for p in self.home.credentials.glob("*.token"))
+
+    def _block(self, tid):
+        for _ in range(3):
+            self.svc.bump_fail_streak(tid)
+        self.assertEqual(self.store.get_task(tid).state, "blocked")
+
+    def _seed_awaiting(self, tid, commit):
+        self.svc.transition(tid, "running", actor="gate")
+        self.svc.transition(tid, "done", actor="gate")
+        with self.store.uow():  # awaiting_external 驻留形归 T9 门体——直种子
+            t = self.store.get_task(tid)
+            self.store.upsert_task(dataclasses.replace(
+                t, delivery=dataclasses.replace(
+                    t.delivery, status="awaiting_external", commit=commit)))
+
+    def test_create_forms_verify_registration_and_update_on_git(self):
+        managed = self._mk()
+        ob = self._mk(delivery={"deliverable": "out_of_band"})
+        ext = self._mk(delivery={"deliverable": "external_branch",
+                                 "target_branch": "v3-runtime"})
+        for tid, mode in ((managed, "managed"), (ob, None),
+                          (ext, "external_branch")):
+            t = self.store.get_task(tid)
+            self.assertEqual(t.state, "todo")
+            self.assertEqual(t.delivery.mode if t.delivery else None, mode)
+            self.assertEqual(t.verify.state, "registered")
+        evs = [e.event for e in self.store.events_all()]
+        self.assertEqual(evs.count("task_created"), 3)
+        self.assertEqual(evs.count("verify_registered"), 3)
+        pend = self._mk(verify={"verify_pending": True})  # 探索路补登
+        self.assertTrue(self.store.get_task(pend).verify_pending)
+        self.assertEqual(self.svc.update_verify(pend, self.D, "dispatcher",
+                                                "pytest -q"), {"ok": True})
+        self.assertEqual(self.store.get_task(pend).verify.cmd, "pytest -q")
+        with self.assertRaises(ContractError) as cm:  # worker 永拒登记
+            self.svc.update_verify(pend, "ses-w9", "worker", "x")
+        self.assertEqual(cm.exception.code, "forbidden")
+        fresh = GitStore(self.home.state)  # 重启重放等价
+        self.assertEqual(fresh.get_task(managed).delivery.mode, "managed")
+        self.assertEqual(fresh.get_task(pend).verify.cmd, "pytest -q")
+
+    def test_first_dispatch_composite_tx_pointer_and_restart_hydration(self):
+        tid = self._mk()
+        obs = harness.GitJournalObserver(self.home.state)
+        n0 = len(obs.txs())
+        res = self.svc.dispatch(tid, self.D, "dispatcher")
+        t = self.store.get_task(tid)
+        self.assertEqual((t.state, t.worker_sid, t.env_dir),
+                         ("dispatched", "ses-w1", f"/tmp/envs/{tid}"))
+        self.assertEqual(t.env_base, "e" * 40)
+        self.assertGreater(max(obs.txs()), n0)  # dispatch 产生新 tx
+        self.assertEqual(len(obs.commits()), len(obs.txs()))  # 每 tx 恰一 commit
+        dtx = self._tx_with(obs, "put_credential")  # 派发复合 tx
+        self.assertEqual({op["op"] for op in dtx["operations"]},
+                         {"upsert_task", "put_credential", "append_event",
+                          "insert_message", "upsert_receipt"})
+        cred = self.store.get_credential("ses-w1")
+        self.assertEqual((cred.token, cred.task_id), (res["token"], tid))
+        conv = self.home.credentials / f"{tid}.token"  # 指针本尊（插件 pin）
+        self.assertTrue(conv.is_file())
+        self.assertEqual(json.loads(
+            conv.read_text("utf-8"))["token"], res["token"])
+        self.assertEqual(os.stat(conv).st_mode & 0o777, 0o600)
+        self.assertTrue(self._staging(tid, res["token"]).is_file())
+        [cpath] = [p for p in _head_files(self.home.state)
+                   if p.startswith("objects/credentials/")]
+        reg = json.loads(_blob(self.home.state,
+                               _head_files(self.home.state)[cpath]))["data"]
+        # canonical 只记 per-dispatch 唯一键（不裸记本尊键位）
+        self.assertEqual(reg["secret_path"],
+                         f"credentials/{tid}."
+                         f"{hashlib.sha256(res['token'].encode()).hexdigest()[:16]}"
+                         ".token")
+        fresh = GitStore(self.home.state)  # 重启水合＝活牌在案
+        self.assertEqual(fresh.get_credential("ses-w1").token, res["token"])
+        body = self.messaging.pull("ses-w1")[0].body.decode("utf-8")
+        self.assertIn(f"file: {conv}", body)  # BOOT 凭据指针形态不动
+
+    def test_redispatch_replaces_credential_in_same_uow_and_cleans_old(self):
+        tid = self._mk()
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self._block(tid)
+        stg1 = self._staging(tid, r1["token"])
+        obs = harness.GitJournalObserver(self.home.state)
+        tx0 = max(obs.txs())
+        r2 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self.assertEqual(self.store.get_task(tid).worker_sid, "ses-w2")
+        rtx = self._tx_with(obs, "delete_credential")  # 重派复合 tx（单 UoW）
+        self.assertEqual(rtx["seq"], tx0 + 1)
+        self.assertEqual({op["op"] for op in rtx["operations"]},
+                         {"upsert_task", "put_credential", "delete_credential",
+                          "append_event", "insert_message", "upsert_receipt"})
+        self.assertIsNone(self.store.get_credential("ses-w1"))  # 旧牌 tombstone
+        self.assertEqual(self.store.get_credential("ses-w2").token,
+                         r2["token"])
+        self.assertFalse(stg1.exists())  # 旧 secret（既录键位）已清
+        self.assertTrue(self._staging(tid, r2["token"]).is_file())
+        conv = json.loads((self.home.credentials / f"{tid}.token").read_text(
+            "utf-8"))["token"]
+        self.assertEqual(conv, r2["token"])  # 本尊指针随新牌
+        fresh = GitStore(self.home.state)  # 重启重放：新键位水合、旧牌缺席
+        self.assertEqual(fresh.get_credential("ses-w2").token, r2["token"])
+        self.assertIsNone(fresh.get_credential("ses-w1"))
+
+    def test_redispatch_guard_conflict_preserves_old_credential_restart_safe(self):
+        tid = self._mk()
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self._block(tid)
+        with flip_state_on_second_read(self.store, tid, "running"):
+            with self.assertRaises(ContractError) as cm:
+                self.svc.dispatch(tid, self.D, "dispatcher")
+        self.assertEqual(cm.exception.code, "conflict")
+        self.assertIn("session_replaced", cm.exception.message)
+        # 旧活牌原封不动：canonical 未动＋本尊文件仍旧牌
+        self.assertEqual(self.store.get_credential("ses-w1").token,
+                         r1["token"])
+        self.assertEqual(json.loads(
+            (self.home.credentials / f"{tid}.token").read_text("utf-8")
+        )["token"], r1["token"])
+        # 只清未用新 secret：凭据目录不留孤儿 per-dispatch 文件
+        self.assertEqual(self._cred_files(),
+                         [self._staging(tid, r1["token"]).name, f"{tid}.token"])
+        self.assertIn("dispatch_rejected",
+                      [e.event for e in self.store.events_all()])
+        fresh = GitStore(self.home.state)  # 重启不砖（F151 风险封堵锚）
+        self.assertEqual(fresh.get_credential("ses-w1").token, r1["token"])
+
+    def test_dispatch_exception_window_cleans_only_new_secret(self):
+        tid = self._mk()
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self._block(tid)
+        self.injector.arm("write-object", "before")  # UoW 提交前崩
+        with self.assertRaises(harness.FaultInjected):
+            self.svc.dispatch(tid, self.D, "dispatcher")
+        self.injector.disarm("write-object")
+        self.assertEqual(self.store.get_credential("ses-w1").token,
+                         r1["token"])
+        self.assertEqual(json.loads(
+            (self.home.credentials / f"{tid}.token").read_text("utf-8")
+        )["token"], r1["token"])
+        self.assertEqual(self._cred_files(),
+                         [self._staging(tid, r1["token"]).name, f"{tid}.token"])
+        fresh = GitStore(self.home.state)  # 重启不砖：旧活牌照常水合
+        self.assertEqual(fresh.get_credential("ses-w1").token, r1["token"])
+        self.assertEqual(fresh.get_task(tid).state, "blocked")  # 零状态改写
+
+    def test_cancel_terminal_cleanup_tombstones_credential_timers_files(self):
+        tid = self._mk()
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self.timers.create(self.D, "dispatcher",
+                           {"task": tid, "target": "worker",
+                            "after_seconds": 60})
+        obs = harness.GitJournalObserver(self.home.state)
+        tx0 = max(obs.txs())
+        self.assertEqual(self.svc.cancel(tid, self.D, "dispatcher",
+                                         reason="testing"), {"cancelled": 1})
+        ctx = self._tx_with(obs, "delete_credential")  # 结算单 UoW
+        self.assertEqual(ctx["seq"], tx0 + 1)
+        ops = {op["op"] for op in ctx["operations"]}
+        self.assertEqual(ops, {"upsert_task", "append_event",
+                               "delete_credential", "upsert_timer",
+                               "insert_message",
+                               "upsert_receipt"})  # F145 timer 同 UoW 取消
+        self.assertEqual(self.store.get_task(tid).state, "cancelled")
+        self.assertIsNone(self.store.get_credential("ses-w1"))
+        self.assertEqual([t.state for t in self.store.timers_all()],
+                         [TimerState.CANCELLED])
+        self.assertFalse((self.home.credentials / f"{tid}.token").exists())
+        self.assertFalse(self._staging(tid, r1["token"]).exists())
+        self.assertEqual(self._cred_files(), [])
+        fresh = GitStore(self.home.state)  # 无悬挂 secret 引用：重启不砖
+        self.assertIsNone(fresh.get_credential("ses-w1"))
+        self.assertEqual(fresh.get_task(tid).state, "cancelled")
+        self.assertEqual(len([m for m in fresh.messages_all()
+                              if m.kind == "result"]), 1)  # 终态通知恰一条
+
+    def test_task_wait_resolution_and_terminal_notify_dedup_on_git(self):
+        dep = self._mk()
+        self.svc.cancel(dep, self.D, "dispatcher")  # 前任务终态
+        tid = self._mk()
+        self.svc.dispatch(tid, self.D, "dispatcher")
+        self.svc.transition(tid, "running", actor="gate")
+        out = self.svc.wait(tid, self.D, "dispatcher", dep)  # 立即 resolved
+        self.assertEqual((out["resolved"], out["dependency_state"]),
+                         (True, "cancelled"))
+        pairs = sorted(
+            (m.kind, m.to_sid) for m in self.store.messages_all()
+            if "受控等待解除".encode() in m.body)  # 双消息：worker＋dispatcher
+        self.assertEqual(pairs, [("process", "ses-w1"), ("result", self.D)])
+        self.svc.transition(tid, "done", actor="gate")
+        self.svc.transition(tid, "merged", actor="gate")
+        n = len([m for m in self.store.messages_all() if m.kind == "result"])
+        with self.assertRaises(ContractError):
+            self.svc.transition(tid, "merged", actor="gate")  # merged→merged
+        self.assertEqual(len([m for m in self.store.messages_all()
+                              if m.kind == "result"]), n)  # 零新通知
+        self.assertEqual(self.store.get_task(tid).state, "merged")
+
+    def test_touch_seen_throttled_flush_and_restart_visibility(self):
+        tid = self._mk()
+        self.svc.dispatch(tid, self.D, "dispatcher")
+        self.svc.transition(tid, "running", actor="gate")
+        obs = harness.GitJournalObserver(self.home.state)
+        tx0 = max(obs.txs())
+        self.assertTrue(self.svc.touch_seen(tid, worker_sid="ses-w1"))  # 首刷
+        self.assertEqual(max(obs.txs()), tx0 + 1)
+        self.assertFalse(self.svc.touch_seen(tid, worker_sid="ses-w9"))
+        self.clock.advance(1_000)
+        self.assertTrue(self.svc.touch_seen(tid, worker_sid="ses-w1"))
+        self.assertEqual(max(obs.txs()), tx0 + 1)  # 窗内纯内存零提交
+        self.clock.advance(5_000)
+        self.assertTrue(self.svc.touch_seen(tid, worker_sid="ses-w1"))
+        self.assertEqual(max(obs.txs()), tx0 + 2)  # 过窗恰一次持久
+        t = self.store.get_task(tid)
+        self.assertIsNotNone(t.last_seen_ms)
+        self.assertEqual(GitStore(self.home.state).get_task(tid).last_seen_ms,
+                         t.last_seen_ms)  # 重启重放可见
+
+    def test_deliver_external_lifecycle_on_git(self):
+        tid = self._mk(delivery={"deliverable": "external_branch",
+                                 "target_branch": "v3-runtime"})
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self._seed_awaiting(tid, "c" * 40)
+        with self.assertRaises(ContractError) as cm:  # stale handoff 拒
+            self.svc.deliver(tid, self.D, "dispatcher", "delivered", "d" * 40)
+        self.assertEqual(cm.exception.code, "conflict")
+        obs = harness.GitJournalObserver(self.home.state)
+        tx0 = max(obs.txs())
+        out = self.svc.deliver(tid, self.D, "dispatcher", "delivered",
+                               "c" * 40)
+        self.assertEqual(out["outcome"], "delivered")
+        t = self.store.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status, t.commit),
+                         ("closed", "delivered", "c" * 40))
+        dtx = self._tx_with(obs, "delete_credential")  # 全链同一 UoW
+        self.assertEqual(dtx["seq"], tx0 + 1)
+        self.assertEqual({op["op"] for op in dtx["operations"]},
+                         {"upsert_task", "append_event", "delete_credential",
+                          "insert_message", "upsert_receipt"})
+        self.assertIsNone(self.store.get_credential("ses-w1"))
+        self.assertEqual(self._cred_files(), [])  # 本尊＋staging 全清
+        self.assertFalse(self._staging(tid, r1["token"]).exists())
+        fresh = GitStore(self.home.state)  # 重启不砖：终态零悬挂
+        self.assertEqual(fresh.get_task(tid).state, "closed")
+        self.assertIsNone(fresh.get_credential("ses-w1"))
+
+    def test_deliver_failed_blocks_and_keeps_credential_on_git(self):
+        tid = self._mk(delivery={"deliverable": "external_branch",
+                                 "target_branch": "v3-runtime"})
+        r1 = self.svc.dispatch(tid, self.D, "dispatcher")
+        self._seed_awaiting(tid, "d" * 40)
+        out = self.svc.deliver(tid, self.D, "dispatcher", "failed", "d" * 40,
+                               reason="push rejected")
+        self.assertEqual((out["outcome"], out["error"]),
+                         ("failed", "push rejected"))
+        t = self.store.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status, t.delivery.error),
+                         ("blocked", "failed", "push rejected"))
+        self.assertEqual(self.store.get_credential("ses-w1").token,
+                         r1["token"])  # 交付失败非撤牌面（blocked 重派路）
+        self.assertTrue((self.home.credentials / f"{tid}.token").is_file())
+        self.assertTrue(self._staging(tid, r1["token"]).is_file())
+        self.assertEqual(GitStore(self.home.state)
+                         .get_credential("ses-w1").token, r1["token"])
 
 
 if __name__ == "__main__":

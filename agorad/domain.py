@@ -8,6 +8,7 @@ core.state.LEGAL 全量平移（tests/test_v3_domain.py 与 v2 活码对照锁�
 """
 import dataclasses
 import enum
+import hashlib
 import time
 
 # ---- 时间规范（设计 §3：epoch 毫秒 INTEGER；v2 适配输出浮点秒）----
@@ -308,6 +309,17 @@ class Credential:
     task_id: str | None = None  # 签发任务
     lineage: tuple[str, ...] = ()  # 血统先代 sid 链（F16 换号补拉）
     created_ms: int | None = None
+
+
+def dispatch_secret_key(task_id: str, token: str) -> str:
+    """Req: F152 — 派发签牌外部 secret 键位（home 相对文件名）：
+    ``<task_id>.<sha256(token) 前 16 位>.token``。per-dispatch 唯一——
+    token 变即键变，重派永不覆写旧活牌文件（F151 redispatch 风险封堵）；
+    同 token 幂等同键重写。tasksvc 写盘/清理与 gitstore put 验证/记账共一
+    派生面（两侧皆可达 domain，stdlib 层铁则不破）。本尊键位
+    ``<task_id>.token`` 保留给 BOOT 指针回填（插件 pin 面），不入 canonical。"""
+    return (f"{task_id}."
+            f"{hashlib.sha256(token.encode('utf-8')).hexdigest()[:16]}.token")
 
 
 # ---- 状态机（纯函数：非法抛 InvalidTransition，frozen 实体天然零变更）----

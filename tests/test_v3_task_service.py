@@ -15,6 +15,8 @@ dependency_failed/二次确认）；8 task_wait（F124：仅 running/成环报�
 临时 home 复用 v3_harness；消息面接真 MessagingService（Notifier Protocol
 结构化满足的活证）。
 """
+import contextlib
+import dataclasses
 import os
 import stat
 import unittest
@@ -28,6 +30,47 @@ from agorad.tasksvc import TaskService
 from tests import v3_harness as harness
 
 DISPATCHER, ROOT, WORKER = "ses-d1", "ses-root", "ses-w1"
+
+
+def make_task_spec(goal="g", execution=None, verify=None, delivery=None,
+                   title=None):
+    """契约形建单 spec（_Base.spec 的模块级共享面——Req: F152 Git 端口/
+    差分测试复用；_Base.spec 保持原样不动）。"""
+    nested = {"goal": goal, "title": title,
+              "execution": {"model": None, "after": None, "req_id": None,
+                            "project_dir": "/repo", "client_key": None,
+                            "quick": None},
+              "verify": {"cmd": None, "review_cmd": None,
+                         "verify_pending": None,
+                         "verify_base_exempt": None, "timeout": None},
+              "delivery": {"deliverable": None, "target_branch": None}}
+    for group, over in (("execution", execution), ("verify", verify),
+                        ("delivery", delivery)):
+        nested[group].update(over or {})
+    return nested
+
+
+@contextlib.contextmanager
+def flip_state_on_second_read(store, tid, state="running"):
+    """制造 dispatch 卫兵冲突窗（Req: F152）：对 tid 的第二次 get_task 读
+    改写 state——读-判-写竞态的确定性注入（首读＝入口判定、次读＝UoW 内
+    复审），离开上下文即还原。"""
+    orig = store.get_task
+    seen = []
+
+    def _flaky(tid_):
+        t = orig(tid_)
+        if t is not None and tid_ == tid:
+            seen.append(1)
+            if len(seen) == 2:
+                return dataclasses.replace(t, state=state)
+        return t
+
+    store.get_task = _flaky
+    try:
+        yield
+    finally:
+        del store.get_task  # 去实例属性＝还原绑定方法（Storage/GitStore 同面）
 
 
 class GitxStub:

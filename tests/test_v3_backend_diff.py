@@ -2,6 +2,11 @@
 Req: F150 — 扩非空 timer 场景（spec gitstore-phase2-timers「Tests」2）：
 create/幂等 client_key/cancel/due 键集翻页/fire 事务/timer_id 消息幂等/
 message_for_timer/重启重放投影等价——差异零新增（既有五条 allowlist 不动）。
+Req: F152 — TaskService 任务场景差分（spec gitstore-phase2-task-service
+「Backend differential」）：create/cancel 终态依赖/dispatch/transition/
+wait/touch_seen/bump/重派成功/卫兵冲突失败＋读面与错误形状双后端严格差分，
+重启重放投影等价＋Git journal 不变量（复合单 tx 单 commit/只增）——零新增
+allowlist。
 
 断言清单（spec「Required work」逐条机械判定）：
 1 make_store 工厂（BACKENDS 单常量；sqlite/git 双选、未知拒）；
@@ -20,6 +25,8 @@ message_for_timer/重启重放投影等价——差异零新增（既有五条 a
 """
 import dataclasses
 import hashlib
+import itertools
+import os
 import re
 import sqlite3
 import unittest
@@ -27,7 +34,14 @@ from pathlib import Path
 from unittest import mock
 
 from agorad import domain
+from agorad.messaging import MessagingService
+from agorad.tasksvc import TaskService
 from tests import v3_harness as harness
+from tests.test_v3_task_service import (FakeClock,
+                                        GitxStub as TaskGitxStub,
+                                        OcStub as TaskOcStub,
+                                        flip_state_on_second_read,
+                                        make_task_spec)
 
 ROOT = Path(__file__).resolve().parent.parent
 TID = "ag-diff"
@@ -737,6 +751,221 @@ class TestCredentialDifferential(unittest.TestCase):
         finally:
             for home in homes.values():
                 home.cleanup()  # run_backend_diff 已收口两侧 store
+
+
+class _TaskSide:
+    """Req: F152——TaskService 场景侧：store 面透传（run_ops/project_state
+    照常消费），svc/gitx/oc/clock/det_hex 挂属性供 op 使用；messages_all
+    归一化字节体（home 绝对路径→<HOME>——两侧 tmp 路径天然互异）。"""
+
+    def __init__(self, home, backend):
+        self.home = home
+        self.store = harness.make_store(home, backend=backend)
+        self.gitx = TaskGitxStub()
+        self.oc = TaskOcStub()
+        self.clock = FakeClock()
+        self.messaging = MessagingService(
+            self.store, self.oc, home=str(home.path), clock=self.clock)
+        self.svc = TaskService(
+            self.store, self.gitx, self.oc, messaging=self.messaging,
+            home=str(home.path), clock=self.clock)
+        c = itertools.count()
+        self.det_hex = lambda nbytes: f"{next(c):0{2 * nbytes}x}"
+
+    def __getattr__(self, name):
+        store = self.__dict__.get("store")
+        if store is None:
+            raise AttributeError(name)
+        return getattr(store, name)
+
+    def messages_all(self):
+        home = str(self.home.path)
+
+        def _n(m):
+            body = m.body.decode("utf-8", "replace").replace(home, "<HOME>")
+            return dataclasses.replace(m, body=body.encode("utf-8"))
+        return [_n(m) for m in self.store.messages_all()]
+
+    def close(self):
+        close = getattr(self.store, "close", None)
+        if close is not None:
+            close()
+
+
+def _det(st, fn):
+    """op 内确定性牌面（Req: F152）：token/tid 派生改经侧内计数器——两侧
+    op 序列同构即取值同构（差分面不吃 secrets 随机性）。"""
+    with mock.patch("agorad.tasksvc.secrets.token_hex",
+                    side_effect=st.det_hex):
+        return fn(st)
+
+
+def task_scenario_ops():
+    """Req: F152——非空任务场景：双后端 create×3/cancel 终态依赖/dispatch×3
+    /transition/wait 立即 resolved/touch_seen 两窗/bump 连败/running 拒派
+    （错误形状）/blocked 重派成功/卫兵冲突失败（错误形状）＋读面。"""
+
+    def _create(st, key, **kw):
+        kw.setdefault("verify", {"cmd": "true"})
+        tid = st.svc.create("ses-d1", "dispatcher", make_task_spec(**kw))
+        setattr(st, key, tid)
+        return tid
+
+    def _dispatch(st, key):
+        out = dict(st.svc.dispatch(getattr(st, key), "ses-d1", "dispatcher"))
+        out["credential"] = os.path.relpath(out["credential"],
+                                            str(st.home.path))
+        return out
+
+    def _guard_conflict(st, key):
+        tid = getattr(st, key)
+        with flip_state_on_second_read(st.store, tid, "running"):
+            return st.svc.dispatch(tid, "ses-d1", "dispatcher")
+
+    return [
+        ("task_create_t1", lambda st: _det(st, lambda s: _create(s, "t1"))),
+        ("task_create_t2_dep", lambda st: _det(st, lambda s: _create(s, "t2"))),
+        ("task_cancel_dep_terminal",
+         lambda st: _det(st, lambda s: s.svc.cancel(s.t2, "ses-d1",
+                                                    "dispatcher"))),
+        ("task_dispatch_t1", lambda st: _det(st, lambda s: _dispatch(s, "t1"))),
+        ("task_transition_running",
+         lambda st: _det(st, lambda s: s.svc.transition(s.t1, "running",
+                                                        actor="gate"))),
+        ("task_wait_terminal_dep",
+         lambda st: _det(st, lambda s: s.svc.wait(s.t1, "ses-d1",
+                                                  "dispatcher", s.t2))),
+        ("task_touch_seen_first",
+         lambda st: _det(st, lambda s: s.svc.touch_seen(s.t1,
+                                                        worker_sid="ses-w1"))),
+        ("task_touch_seen_window",
+         lambda st: _det(st, lambda s: (s.clock.advance(1_000),
+                                        s.svc.touch_seen(
+                                            s.t1, worker_sid="ses-w1"))[1])),
+        ("task_bump_fail_streak_once",
+         lambda st: _det(st, lambda s: s.svc.bump_fail_streak(s.t1))),
+        ("task_redispatch_running_rejected",
+         lambda st: _det(st, lambda s: s.svc.dispatch(s.t1, "ses-d1",
+                                                      "dispatcher"))),
+        ("task_create_t3", lambda st: _det(st, lambda s: _create(s, "t3"))),
+        ("task_dispatch_t3", lambda st: _det(st, lambda s: _dispatch(s, "t3"))),
+        ("task_bump_x3_to_blocked",
+         lambda st: _det(st, lambda s: [s.svc.bump_fail_streak(s.t3)
+                                        for _ in range(3)])),
+        ("task_redispatch_t3_success",
+         lambda st: _det(st, lambda s: _dispatch(s, "t3"))),
+        ("task_bump_x3_again_to_blocked",
+         lambda st: _det(st, lambda s: [s.svc.bump_fail_streak(s.t3)
+                                        for _ in range(3)])),
+        ("task_redispatch_t3_guard_conflict",
+         lambda st: _det(st, lambda s: _guard_conflict(s, "t3"))),
+        ("reads_tasks_all", lambda st: st.tasks_all()),
+        ("reads_events_all", lambda st: st.events_all()),
+        ("reads_messages_all", lambda st: st.messages_all()),
+        ("reads_worker_credentials",
+         lambda st: (st.get_credential("ses-w1"), st.get_credential("ses-w3"),
+                     st.get_credential("ses-w2"))),
+    ]
+
+
+class TestTaskDifferential(unittest.TestCase):
+    """Req: F152——任务场景双后端差分：外结果＋终态投影严格相等（零新增
+    allowlist）、恰两条期望错误面（running 拒派＋卫兵冲突）、重启重放投影
+    等价（F151 redispatch 风险封堵的重启面）、Git journal 不变量（每 tx
+    恰一 commit/重派复合单 tx/canonical 只增）。"""
+
+    def _sides(self):
+        homes, sides = {}, {}
+        try:
+            for backend in harness.BACKENDS:
+                homes[backend] = harness.TempAgoraHome()
+                sides[backend] = _TaskSide(homes[backend], backend)
+            return homes, sides
+        except BaseException:
+            for st in sides.values():
+                st.close()
+            for home in homes.values():
+                home.cleanup()
+            raise
+
+    def test_task_scenario_strict_differential(self):
+        homes, sides = self._sides()
+        try:
+            report = run_backend_diff(ops=task_scenario_ops(),
+                                      sids=("ses-w1", "ses-w2", "ses-w3"),
+                                      allow=ALLOWED_DIFFERENCES, sides=sides)
+        finally:  # 侧收口归 run_backend_diff（其 finally 恒关两侧 store）
+            for home in homes.values():
+                home.cleanup()
+        self.assertEqual(report["status"], "PASS", report["mismatches"])
+        self.assertGreaterEqual(report["ops"], 15)
+        self.assertEqual(report["suppressed"], [])  # 零新增已知差异
+        self.assertEqual(report["errors"], {  # 恰两条期望错误面（双侧同形）
+            "sqlite": ["task_redispatch_running_rejected",
+                       "task_redispatch_t3_guard_conflict"],
+            "git": ["task_redispatch_running_rejected",
+                    "task_redispatch_t3_guard_conflict"]})
+
+    def test_task_projection_equivalent_after_restart(self):
+        homes, sides = self._sides()
+        fresh = {}
+        try:
+            report = run_backend_diff(ops=task_scenario_ops(),
+                                      sids=("ses-w1", "ses-w2", "ses-w3"),
+                                      allow=ALLOWED_DIFFERENCES, sides=sides)
+            self.assertEqual(report["status"], "PASS", report["mismatches"])
+            for b in harness.BACKENDS:  # 重启重放（Git 侧构造即 F151 封堵锚）
+                fresh[b] = harness.make_store(homes[b], backend=b)
+            self.addCleanup(fresh["sqlite"].close)
+            raw = []
+            for family in ("tasks", "credentials", "events"):
+                _leaf_diff(norm([dataclasses.asdict(x)
+                                 for x in getattr(fresh["sqlite"],
+                                                  family + "_all")()]),
+                           norm([dataclasses.asdict(x)
+                                 for x in getattr(fresh["git"],
+                                                  family + "_all")()]),
+                           f"state:{family}", raw)
+            smsgs = [dataclasses.asdict(m) | {
+                "body": m.body.decode("utf-8", "replace").replace(
+                    str(homes["sqlite"].path), "<HOME>")}
+                for m in fresh["sqlite"].messages_all()]
+            gmsgs = [dataclasses.asdict(m) | {
+                "body": m.body.decode("utf-8", "replace").replace(
+                    str(homes["git"].path), "<HOME>")}
+                for m in fresh["git"].messages_all()]
+            _leaf_diff(smsgs, gmsgs, "state:messages", raw)
+            self.assertEqual(raw, [])  # 重启投影零失配
+        finally:  # 侧收口归 run_backend_diff（其 finally 恒关两侧 store）
+            close = getattr(fresh.get("git"), "close", None)
+            if close is not None:
+                close()
+            for home in homes.values():
+                home.cleanup()
+
+    def test_git_journal_invariants_for_task_scenario(self):
+        homes, sides = self._sides()
+        try:
+            report = run_backend_diff(ops=task_scenario_ops(),
+                                      sids=("ses-w1", "ses-w2", "ses-w3"),
+                                      allow=ALLOWED_DIFFERENCES, sides=sides)
+            self.assertEqual(report["status"], "PASS", report["mismatches"])
+            obs = harness.GitJournalObserver(homes["git"].state)
+            txs = obs.txs()
+            self.assertEqual(len(obs.commits()), len(txs))  # 每 tx 恰一 commit
+            self.assertTrue(obs.additions_only())  # canonical 只增
+            rtx = next(t for t in txs.values()  # 重派复合：撤旧牌＋新牌＋迁移
+                       if {"delete_credential", "put_credential"} <= {
+                           op["op"] for op in t["operations"]})
+            self.assertLessEqual({"upsert_task", "append_event",
+                                  "insert_message"},
+                                 {op["op"] for op in rtx["operations"]})
+            files = obs.paths()
+            for op in rtx["operations"]:  # tx 引用对象俱在单 commit 树
+                self.assertIn(op["path"], files)
+        finally:  # 侧收口归 run_backend_diff（其 finally 恒关两侧 store）
+            for home in homes.values():
+                home.cleanup()
 
 
 if __name__ == "__main__":

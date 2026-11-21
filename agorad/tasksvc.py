@@ -32,7 +32,8 @@ import typing
 from agorad.contracts import ContractError
 from agorad.domain import (Credential, DeliveryState, Event, InvalidTransition,
                            Task, VerifySpec, bump_fail_streak, epoch_ms,
-                           reset_fail_streak, task_transition)
+                           reset_fail_streak, task_transition,
+                           dispatch_secret_key)
 
 _MAX_DEPTH = 3
 _QUOTA = 6  # F41/F45：池并发配额
@@ -409,8 +410,16 @@ class TaskService:
         token = secrets.token_hex(16)
         now = self._now()
         msg = None
+        old_token = None  # Req: F152 重派旧牌文本（提交后按既录键位清旧 secret）
+        if t.worker_sid:
+            old = self._store.get_credential(t.worker_sid)
+            old_token = old.token if old is not None else None
+        # BOOT 凭据指针本尊键位（插件 pin 面）——staging 提交后回填此键
+        cred_path = str(pathlib.Path(self._home) / "credentials"
+                        / f"{tid}.token")
         try:
-            cred_path = self._write_credential(tid, token)  # 先落盘（败＝零残局）
+            self._write_credential(tid, token)  # 先落盘（败＝零残局；Req: F152
+            # ＝per-dispatch 唯一键位，旧活牌本尊文件零覆写）
             with self._store.uow():
                 fresh = self._store.get_task(tid)  # 身份卫兵（read-decide-write）
                 if (fresh.state not in ("todo", "blocked")
@@ -450,15 +459,20 @@ class TaskService:
                         body=f"[agora] credential {tid}\nfile: {cred_path}",
                         dedup_key=f"credential:{tid}:{wsid}")
         except _GuardConflict as exc:  # 卫兵拒：补审计行（原报因保持）
-            self._remove_credential_file(tid)  # 牌已废（DB 行随回滚消失）
+            self._clean_secret(tid, token)  # 牌已废（DB 行随回滚消失）——
+            # 只清本次未用新 secret（Req: F152：本尊键位＝旧活牌在用）
             if new_env:
                 self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_guard")  # Req: ag-0e6ca3
             self._reject(tid, actor_sid, exc.code, exc.message)
         except BaseException:  # 清理窗全覆盖（存储/注入器/落盘异常同回收）
-            self._remove_credential_file(tid)
+            self._clean_secret(tid, token)
             if new_env:
                 self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_cleanup")  # Req: ag-0e6ca3
             raise
+        self._install_pointer(tid, token)  # 本尊指针回填（Req: F152——提交后
+        # 复制 staging 到 <tid>.token；窗内读旧由半条缓存拉取自愈兜底）
+        if old_token is not None:  # 旧牌已 tombstone：按既录键位清旧 secret
+            self._unlink_secret(dispatch_secret_key(tid, old_token))
         if msg is not None:
             self._msg.dispatch(msg.id)  # 提交后 at-least-once 补投
         return {"token": token, "worker_sid": wsid, "env": env,
@@ -597,7 +611,9 @@ class TaskService:
                 now, sid, EV_CANCELLED, tid,
                 {"reason": reason} if reason else None))
             self._cancel_task_timers(tid, "cancelled", now)  # Req: F145
+            revoke = None
             if task.worker_sid:
+                revoke = self._store.get_credential(task.worker_sid)
                 self._store.delete_credential(task.worker_sid)
                 if self._msg is not None and task.dispatcher_sid:
                     msg, _ = self._msg.record(
@@ -608,7 +624,9 @@ class TaskService:
                         dedup_key=f"transition:{tid}:cancelled")
         if msg is not None:
             self._msg.dispatch(msg.id)
-        self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
+        # 撤牌双删（DB 行外同清 secret 文件；Req: F152＝本尊＋既录键位）
+        self._remove_credential_file(
+            tid, revoke.token if revoke is not None else None)
         self._reclaim_env(tid, task.env_dir, sid, "tasksvc:settle_cancel")  # Req: ag-0e6ca3
         return True
 
@@ -898,7 +916,9 @@ class TaskService:
             self._store.append_event(self._ev(now + 1, sid, "closed", tid))
             self._cancel_task_timers(tid, "closed", now)  # Req: F145（merged→
             # closed 全链同 UoW——一次收口，幂等面由 pending 过滤承担）
+            revoke = None
             if fresh.worker_sid:
+                revoke = self._store.get_credential(fresh.worker_sid)
                 self._store.delete_credential(fresh.worker_sid)
             if self._msg is not None and task.dispatcher_sid:
                 # Req: F144 closed ts=merged+1ms（merged 窗通知可落窗内）；
@@ -917,7 +937,9 @@ class TaskService:
                         f"{task.updated_ms}")[0])
         for m in msgs:
             self._msg.dispatch(m.id)
-        self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
+        # 撤牌双删（DB 行外同清 secret 文件；Req: F152＝本尊＋既录键位）
+        self._remove_credential_file(
+            tid, revoke.token if revoke is not None else None)
         self._reclaim_env(tid, task.env_dir, sid, "tasksvc:deliver_ack")  # Req: ag-0e6ca3
         return {"ok": True, "outcome": "delivered"}
 
@@ -1114,11 +1136,14 @@ class TaskService:
                      "quick 验收按账本历史动态判定：证据不足" + evid)
 
     def _write_credential(self, tid, token):
-        """原子建 0600（os.open 带模式——无「先建后 chmod」世界可读窗；同
+        """Req: F152 — per-dispatch 唯一键位先落盘（<tid>.<摘要16>.token：
+        token 变即键变——旧活牌本尊文件零覆写，失败窗只留孤儿文件）；原子建
+        0600（os.open 带模式——无「先建后 chmod」世界可读窗，同
         access.store.write_ephemeral 口径）；tid 形态断言（纵深：防迁移器
         引入外部 id 后路径逃逸）。"""
         self._check_tid(tid)
-        p = pathlib.Path(self._home) / "credentials" / f"{tid}.token"
+        p = pathlib.Path(self._home) / "credentials" / dispatch_secret_key(
+            tid, token)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             data = (json.dumps({"token": token}) + "\n").encode("utf-8")
@@ -1131,11 +1156,50 @@ class TaskService:
             self._reject(tid, "agorad", "internal", f"credential_write: {e}")
         return str(p)
 
-    def _remove_credential_file(self, tid):
+    def _install_pointer(self, tid, token):
+        """Req: F152 — 本尊键位回填：UoW 提交后把 staging 内容复制到
+        credentials/<tid>.token（BOOT 指针本尊——插件 pin 面）。提交前不写
+        本尊＝重派永不销毁旧活牌 secret；窗内旧/缺读由既有半条缓存拉取
+        自愈兜底（F25）。复制败＝审计行留痕不拦链（canonical 已指向
+        staging，restart 安全；sweep 视本尊为孤儿回收）。"""
         self._check_tid(tid)
+        stage = (pathlib.Path(self._home) / "credentials"
+                 / dispatch_secret_key(tid, token))
+        conv = pathlib.Path(self._home) / "credentials" / f"{tid}.token"
         try:
-            (pathlib.Path(self._home) / "credentials"
-             / f"{tid}.token").unlink()
+            data = stage.read_bytes()
+            fd = os.open(conv, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            try:
+                with self._store.uow():
+                    self._store.append_event(self._ev(
+                        self._now(), "agorad", "credential_pointer_failed",
+                        tid, {"note": str(e)[:200]}))
+            except Exception:
+                pass  # 尽力而为（观测面病不断权威回收链）
+
+    def _clean_secret(self, tid, token):
+        """失败重派清理（Req: F152）：只清本次未用新 secret（per-dispatch
+        键位）——本尊键位不动（旧活牌可能在用）。"""
+        self._unlink_secret(dispatch_secret_key(tid, token))
+
+    def _remove_credential_file(self, tid, token=None):
+        """终局撤牌文件清理：本尊键位＋（token 在手时）per-dispatch 既录
+        键位（Req: F152）；幂等（缺文件静默）。"""
+        self._check_tid(tid)
+        self._unlink_secret(f"{tid}.token")
+        if token is not None:
+            self._unlink_secret(dispatch_secret_key(tid, token))
+
+    def _unlink_secret(self, key):
+        """键位删文件（home 相对；幂等——缺文件静默）。键位恒内部派生
+        （tid＋摘要/tid），非调用方输入——无穿越面。"""
+        try:
+            (pathlib.Path(self._home) / "credentials" / key).unlink()
         except OSError:
             pass
 
