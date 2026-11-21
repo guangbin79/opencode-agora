@@ -237,9 +237,10 @@ class GateVerifyService:
                  artifacts: ArtifactSink | None = None,
                  home="", clock=None, injector=None,
                  verify_timeout=300, verify_ceiling=None,
-                 verify_profiles=None):
+                 verify_profiles=None, timers=None):
         self._store, self._gitx, self._runner = store, gitx, runner
         self._msg, self._tasksvc = messaging, tasksvc
+        self._timers = timers  # Req: F145 门体终态路径自动取消 pending timer
         self._anchors = anchors or (lambda env_dir: None)
         self._artifacts = artifacts
         self._home = str(home)
@@ -252,6 +253,17 @@ class GateVerifyService:
         self._verify_ceiling = verify_ceiling
         self._verify_profiles = verify_profiles or {}
         self._lane = {}  # Req: F144 F116 内存 lane 投影（tid→dict，v2 同款不落盘）
+
+    def _autocancel_timers(self, tid, state, now):
+        """Req: F145 任务终态自动取消 pending timer（身处调用方 UoW；
+        timersvc.cancel_task_timers_uow 同款幂等——无 pending 零写入）。"""
+        if (self._timers is not None
+                and state in ("merged", "closed", "cancelled")):
+            self._timers.cancel_task_timers_uow(tid, now, f"task_{state}")
+
+    def _fire(self, name, phase, **context):
+        if self._injector is not None:
+            self._injector.fire(name, phase, **context)
 
     # ---- done 受理（前置六拒；锚族计连败） ----
 
@@ -923,6 +935,7 @@ class GateVerifyService:
             task = reset_fail_streak(task, now_ms=now)
             task = task_transition(task, "closed", now_ms=now + 1)
             self._store.upsert_task(task)
+            self._autocancel_timers(tid, "closed", now + 1)  # Req: F145
             self._store.append_event(self._ev(
                 now, "gate", "merged", tid, {"commit": task.commit}))
             self._store.append_event(
@@ -968,6 +981,7 @@ class GateVerifyService:
                 if reason:
                     task = dataclasses.replace(task, cancel_reason=reason)
                 cancelled = True
+                self._autocancel_timers(tid, "cancelled", now)  # Req: F145
                 self._store.append_event(self._ev(
                     now, "gate", "cancelled", tid,
                     {"reason": reason} if reason else None))
@@ -981,6 +995,7 @@ class GateVerifyService:
                         dedup_key=f"transition:{tid}:cancelled:{now}")[0])
             elif task.state == "merged":
                 task = task_transition(task, "closed", now_ms=now)
+                self._autocancel_timers(tid, "closed", now)  # Req: F145
                 self._store.append_event(self._ev(now, "gate", "closed", tid))
                 if self._msg is not None and task.dispatcher_sid:
                     msgs.append(self._msg.record(

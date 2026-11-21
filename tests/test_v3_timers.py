@@ -37,6 +37,7 @@ from agorad.storage import Storage
 from agorad.tasksvc import TaskService
 from agorad.timersvc import TimerService
 from tests import v3_harness as harness
+from tests.test_v3_server import C, AnchorStub, GitxStub, RunnerStub
 
 DISPATCHER, WORKER, WORKER2, ROOT = ("ses-d1", "ses-w1", "ses-w2", "root")
 FIRING_MSG_WINDOW = ("timer_firing", "after")  # 崩窗2：消息已提交、fired 未落
@@ -363,10 +364,10 @@ class TestTargetAddressing(_SvcBase):  # 断言3
                               messaging=self.messaging, home=str(self.home.path),
                               clock=self.clock, timers=self.svc)
         for to in ("merged", "closed"):  # 终态两条链（closed＝merged 后续跳）
+            with self.storage.uow():  # 上一轮终态后回 done（建 timer 须非终态）
+                self.storage.upsert_task(mk_task(state="done"))
             self.create(after=10 ** 6)
             self.create(after=10 ** 6, target="dispatcher")
-            with self.storage.uow():
-                self.storage.upsert_task(mk_task(state="done"))
             tasksvc.transition("ag-t01", "merged", actor="gate")
             if to == "closed":
                 tasksvc.transition("ag-t01", "closed", actor="gate")
@@ -433,6 +434,22 @@ class TestScan(_SvcBase):  # 断言4
         self.clock.advance(10_000)
         self.assertEqual(self.svc.catch_up(), 0)
         self.assertEqual(self.svc.next_wait_seconds(), 30.0)
+
+    def test_stuck_overdue_does_not_starve_later_due(self):
+        # 评审环 R2：门控行不消耗触发额度——32 条僵死 overdue 占满批头后，
+        # 后发的可发 timer 仍被翻页选中触发（键集游标防队头阻塞）
+        for t, tid in enumerate(("ag-t01", "ag-t02")):
+            self.seed_task(tid, state="done")  # done 态：永不触发
+            for i in range(16):
+                self.create(tid=tid, after=1 + i)
+        self.seed_task("ag-t03")  # running：可触发，due 排在全部僵死之后
+        self.create(tid="ag-t03", after=100)
+        self.clock.advance(200_000)
+        self.assertEqual(self.svc.catch_up(), 1)
+        fired = [x for x in self.storage.timers_all()
+                 if x.state is TimerState.FIRED]
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0].task_id, "ag-t03")
 
     def test_forward_jump_fires_once_rollback_no_refire(self):
         self.create(after=10)
@@ -560,6 +577,44 @@ class TestCancelRaces(_SvcBase):  # 断言6
             self.svc.cancel(DISPATCHER, "dispatcher", "tm-nope")
         self.assertEqual(cm.exception.code, "not_found")
 
+    def test_create_on_terminal_task_rejected(self):
+        # 评审环 R2：终态任务拒建（事后建无人取消——永久滞留 overdue）
+        for state in ("merged", "closed", "cancelled"):
+            with self.storage.uow():
+                self.storage.upsert_task(mk_task(state=state))
+            with self.assertRaises(contracts.ContractError) as cm:
+                self.create(after=60)
+            self.assertEqual(cm.exception.code, "conflict", state)
+        with self.storage.uow():  # blocked/todo 非终态：照收（保持 pending 面）
+            self.storage.upsert_task(mk_task(state="blocked"))
+        self.assertIn("timer", self.create(after=60))
+
+
+class _ServerOc:
+    def create(self, env, boot, title=None, model=None):
+        return WORKER
+
+    def inject(self, sid, text):
+        return True
+
+    def inject_silent(self, sid, text):
+        return True
+
+    def inject_notify(self, sid, text):
+        return True
+
+    def session(self, sid):
+        return {"model": None}
+
+    def alive(self, sid):
+        return True
+
+    def probe(self):
+        return {}
+
+    def models(self):
+        return []
+
 
 class _HttpBase(unittest.TestCase):
     """HTTP 级基座（test_v3_server 同款装配，压缩版）。"""
@@ -569,9 +624,13 @@ class _HttpBase(unittest.TestCase):
         self.addCleanup(self.home.cleanup)
         self.clock = FakeClock()
         self.oc = _ServerOc()
+        self.runner = RunnerStub()
+        self.gitx = GitxStub()
+        self.anchors = AnchorStub()
         self.stack = compose.V3Stack(
-            self.home.path, oc=self.oc, gitx=_GitxNothing(), runner=_run_noop,
-            clock=self.clock)
+            self.home.path, oc=self.oc, gitx=self.gitx, runner=self.runner,
+            anchor_reader=self.anchors, clock=self.clock)
+        self.runner.storage = self.stack.storage  # UoW 外调用断言面接线
         self.stack.start()
         self.addCleanup(self.stack.close)
         self.server = serverv3.make_server_v3(self.stack)
@@ -605,43 +664,61 @@ class _HttpBase(unittest.TestCase):
         self.assertEqual(s, 200, b)
         return b["task"]
 
+    def dispatch(self, tid):
+        s, b = self.call("task_dispatch", {"task": tid}, self.root)
+        self.assertEqual(s, 200, b)
+        row = self.stack.storage.get_task(tid)
+        s, b = self.call("cred_for_sid", {"sid": row.worker_sid})
+        self.assertEqual(s, 200, b)
+        return row.worker_sid, b["token"]
 
-class _ServerOc:
-    def create(self, env, boot, title=None, model=None):
-        return WORKER
+    def to_running(self, tid):
+        wsid, wtok = self.dispatch(tid)
+        s, b = self.call("post", {"task": tid, "kind": "question",
+                                  "body": "开工"}, wtok)
+        self.assertEqual(s, 200, b)
+        return wsid, wtok
 
-    def inject(self, sid, text):
-        return True
-
-    def inject_silent(self, sid, text):
-        return True
-
-    def inject_notify(self, sid, text):
-        return True
-
-    def session(self, sid):
-        return {"model": None}
-
-    def alive(self, sid):
-        return True
-
-    def probe(self):
-        return {}
-
-    def models(self):
-        return []
+    def wait_state(self, tid, states, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            t = self.stack.storage.get_task(tid)
+            if t is not None and t.state in states:
+                return t.state
+            time.sleep(0.02)
+        return self.stack.storage.get_task(tid).state
 
 
-def _run_noop(env_dir, cmd, *, timeout=None, ceiling=None, on_soft=None):
-    return 0, ""
+class TestGateTerminalAutocancel(_HttpBase):  # 评审环 R2：门体终态路径钩
+    def test_green_chain_cancels_pending_timers(self):
+        self.runner.script = [(1, "base-red"), (0, "ok"), (0, "ok")]
+        tid = self.mk()
+        wsid, wtok = self.to_running(tid)
+        s, r = self.call("v3/timer_create",
+                         {"task": tid, "target": "worker",
+                          "after_seconds": 10 ** 6}, wtok)
+        self.assertEqual(s, 200, r)
+        s, b = self.call("post", {"task": tid, "kind": "done", "body": C},
+                         wtok)
+        self.assertEqual((s, b), (200, {"result": "accepted"}))
+        self.assertEqual(self.wait_state(tid, ("closed",)), "closed")
+        rows = self.stack.storage.timers_for_task(tid)
+        self.assertTrue(all(x.state is TimerState.CANCELLED for x in rows))
+        self.assertIn("timer_autocancelled",
+                      [e.event for e in self.stack.storage.events_for_task(tid)])
 
-
-class _GitxNothing:
-    def symref(self, repo_dir):
-        return "main"
-
-    def env_on_disk(self, env_dir):
-        return True
+    def test_gate_tail_cancel_consumes_pending_timers(self):
+        tid = self.mk()
+        wsid, wtok = self.to_running(tid)
+        s, r = self.call("v3/timer_create",
+                         {"task": tid, "target": "worker",
+                          "after_seconds": 10 ** 6}, wtok)
+        self.assertEqual(s, 200, r)
+        s, b = self.call("task_cancel", {"task": tid}, self.root)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(self.wait_state(tid, ("cancelled",)), "cancelled")
+        self.assertEqual(self.stack.storage.timers_for_task(tid)[0].state,
+                         TimerState.CANCELLED)
 
 
 class TestV3Endpoints(_HttpBase):  # 断言7

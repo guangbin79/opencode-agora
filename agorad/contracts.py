@@ -159,8 +159,9 @@ CATALOG = {
         "body": _f("string"), "client_key": _f("string")},
         _ANY, "task", _TASK_ERR),  # Req: F145 互斥/上限/幂等归服务层细判
     "timer_cancel": ToolSpec("timer_cancel", {"timer_id": _f("string", True)},
-                             _ANY, "global",
-                             _BASE_ERR + ("not_found", "forbidden")),
+                             _ANY, "global",  # Req: F145 firing/fired 409 面
+                             _BASE_ERR + ("not_found", "forbidden",
+                                          "conflict")),
     "approval_request": ToolSpec("approval_request", {
         "business_action": _f("string", True), "task": _f("string"),
         "reason": _f("string"), "timeout_seconds": _f("integer"),
