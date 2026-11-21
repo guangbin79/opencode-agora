@@ -87,6 +87,10 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/tasksvc.py",
                     may_import=["agorad.domain", "agorad.contracts"])
 
+    def test_v3_timersvc_layer(self):  # Req: F145——timer 服务仅 stdlib＋domain＋contracts（仓库/Notifier 全 Protocol 注入，不 import access/storage；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/timersvc.py",
+                    may_import=["agorad.domain", "agorad.contracts"])
+
     def test_v3_gateverify_layer(self):  # Req: F136——verify/review 门执行体仅 stdlib＋domain＋contracts（仓库/gitx/runner/锚/产物/Notifier/streak 全 Protocol 注入，不 import access/storage；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
         assert_only("agorad/gateverify.py",
                     may_import=["agorad.domain", "agorad.contracts"])
@@ -123,7 +127,7 @@ class TestLayering(unittest.TestCase):
                                 "agorad.cutover", "agorad.tasksvc",
                                 "agorad.messaging", "agorad.authsvc",
                                 "agorad.healthsvc", "agorad.gateverify",
-                                "agorad.gatedelivery"])
+                                "agorad.gatedelivery", "agorad.timersvc"])
 
     def test_v3_serverv3_layer(self):  # Req: F142——v3 传输层仅 contracts/adapter/domain＋application 服务（不 import storage/access——存储经 V3Stack 注入；board/doctor/消息形状经 adapter 翻译）；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖
         assert_only("agorad/serverv3.py",

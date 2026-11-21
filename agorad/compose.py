@@ -44,6 +44,7 @@ from agorad.healthsvc import HealthService
 from agorad.messaging import MessagingService
 from agorad.storage import Storage
 from agorad.tasksvc import TaskService
+from agorad.timersvc import TimerService
 
 # F32 门环境消毒（压缩版）：剥服务自身态变量后显式副本传子进程
 _GATE_ENV_STRIP = frozenset({"AGORA_HOME", "AGORAD_URL", "AGORA_OC_URL",
@@ -440,8 +441,11 @@ class V3Stack:
             repo, oc, home=self.home, clock=self.clock, injector=injector,
             exporter=exporter)
         self.auth = AuthService(repo, home=self.home, clock=self.clock, oc=oc)
+        self.timers = TimerService(repo, self.messaging, clock=self.clock,
+                                   injector=injector)
         self.tasks = TaskService(repo, gitx, oc, messaging=self.messaging,
-                                 home=self.home, clock=self.clock)
+                                 home=self.home, clock=self.clock,
+                                 timers=self.timers)
         self.verify_profiles = load_verify_profiles(self.home)
         self.gate = GateDeliveryService(
             repo, gitx, runner or subprocess_runner, messaging=self.messaging,
@@ -491,6 +495,11 @@ class V3Stack:
         except Exception as e:
             print(f"agorad-v3 gate recover failed: {e}", file=sys.stderr,
                   flush=True)  # 无痕即失察（B 册 R1：留 stderr 兜底）
+        try:  # Req: F145 overdue 启动即补发（分批；门控不过零写入）
+            self.timers.catch_up()
+        except Exception as e:
+            print(f"agorad-v3 timer catch-up failed: {e}", file=sys.stderr,
+                  flush=True)
         for t in self.storage.tasks_all():
             if t.state == "done":
                 self.enqueue(t.id)  # 重启重排（v2 make_server 同款）
@@ -540,6 +549,23 @@ class V3Stack:
             target=loop, daemon=True, name="v3-health")
         self._health_thread.start()
         return self._health_thread
+
+    def start_timer_thread(self, interval=30):
+        """Req: F145 两级扫描的 timer 级（§6：30s 或 next due 提前醒）——
+        首轮立即扫（启动补发兜底），其后按 next_wait_seconds 收敛醒点。"""
+        def loop():
+            while not self._stop.is_set():
+                try:
+                    self.timers.catch_up()
+                except Exception as e:
+                    print(f"agorad-v3 timer tick failed: {e}",
+                          file=sys.stderr, flush=True)
+                if self._stop.wait(
+                        max(self.timers.next_wait_seconds(interval), 0.05)):
+                    break
+        thread = threading.Thread(target=loop, daemon=True, name="v3-timer")
+        thread.start()
+        return thread
 
     def close(self):
         """收口：队列哨兵→join→持写锁 checkpoint(TRUNCATE)＋关连接

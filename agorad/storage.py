@@ -30,7 +30,7 @@ from agorad.domain import (Approval, ApprovalState, Artifact, BaseProbe,
                            GateState, MailCursor, Message, Task, Timer,
                            TimerState, VerifySpec, epoch_ms)
 
-SCHEMA_VERSION = 5  # v5＝task_delivery.delivered_at_ms（Req: F144）；v4＝conflict_files_json（F137）；v3＝14 表基线
+SCHEMA_VERSION = 6  # v6＝timers.body/created_by/client_key（Req: F145）；v5＝task_delivery.delivered_at_ms（F144）；v4＝conflict_files_json（F137）；v3＝14 表基线
 BUSY_TIMEOUT_MS = 5000
 
 # 设计 §4 表清单（枚举权威，14 名；任务页计数「15」系笔误）
@@ -83,7 +83,9 @@ CREATE TABLE IF NOT EXISTS timers(
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   target_role TEXT NOT NULL DEFAULT 'worker',
   due_ms INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
-  created_ms INTEGER, fired_ms INTEGER);
+  created_ms INTEGER, fired_ms INTEGER,
+  body TEXT NOT NULL DEFAULT '',  -- Req: F145 触发消息正文
+  created_by TEXT, client_key TEXT);  -- Req: F145 创建者/幂等键
 CREATE INDEX IF NOT EXISTS idx_timers_status_due ON timers(status, due_ms);
 CREATE TABLE IF NOT EXISTS approvals(
   id TEXT PRIMARY KEY,
@@ -250,10 +252,22 @@ class Storage:
                     if "handoff_at_ms" not in cols:  # v5（Req: F144）
                         conn.execute("ALTER TABLE task_delivery "
                                      "ADD COLUMN handoff_at_ms INTEGER")
+                    tcols = {r[1] for r in conn.execute(
+                        "PRAGMA table_info(timers)")}
+                    if "body" not in tcols:  # v6（Req: F145）
+                        conn.execute("ALTER TABLE timers "
+                                     "ADD COLUMN body TEXT NOT NULL "
+                                     "DEFAULT ''")
+                    if "created_by" not in tcols:
+                        conn.execute("ALTER TABLE timers "
+                                     "ADD COLUMN created_by TEXT")
+                    if "client_key" not in tcols:
+                        conn.execute("ALTER TABLE timers "
+                                     "ADD COLUMN client_key TEXT")
                     conn.execute(
                         "INSERT OR IGNORE INTO schema_migrations "
                         "VALUES(?,?,?)",
-                        (SCHEMA_VERSION, "v5-delivered-at",
+                        (SCHEMA_VERSION, "v6-timers-clientkey",
                          epoch_ms(time.time())))
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -471,29 +485,83 @@ class Storage:
         # fire 后补 fired／§6 按 timer_id 对账路径必需（评审环 R1 修2）
         self._conn.execute(
             "INSERT INTO timers(id,task_id,target_role,due_ms,status,"
-            "created_ms,fired_ms) VALUES(?,?,?,?,?,?,?) "
+            "created_ms,fired_ms,body,created_by,client_key) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET target_role=excluded.target_role,"
             "due_ms=excluded.due_ms,status=excluded.status,"
-            "created_ms=excluded.created_ms,fired_ms=excluded.fired_ms",
+            "created_ms=excluded.created_ms,fired_ms=excluded.fired_ms,"
+            "body=excluded.body,created_by=excluded.created_by,"
+            "client_key=excluded.client_key",
             (tm.id, tm.task_id, tm.target_role, tm.due_ms, tm.state.value,
-             tm.created_ms, tm.fired_ms))
+             tm.created_ms, tm.fired_ms, tm.body, tm.created_by, tm.client_key))
         return tm  # 孤儿 task（无主行）→sqlite3.IntegrityError（FK 拒）
 
     @staticmethod
     def _timer(row):
         return Timer(id=row[0], task_id=row[1], target_role=row[2],
                      due_ms=row[3], state=TimerState(row[4]),
-                     created_ms=row[5], fired_ms=row[6])
+                     created_ms=row[5], fired_ms=row[6],
+                     body=row[7] or "", created_by=row[8],
+                     client_key=row[9])
 
     def get_timer(self, tid):
         read = self._read_conn()
         try:
             row = read.execute(
-                "SELECT id,task_id,target_role,due_ms,status,created_ms,fired_ms "
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
+                "fired_ms,body,created_by,client_key "
                 "FROM timers WHERE id=?", (tid,)).fetchone()
         finally:
             self._read_done(read)
         return self._timer(row) if row is not None else None
+
+    def timers_due(self, now_ms, limit=32):
+        """到期待发批（Req: F145 §6：status='pending' AND due_ms<=now，按
+        due/id 升序、每批 ≤limit——idx_timers_status_due 命中）。"""
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
+                "fired_ms,body,created_by,client_key FROM timers "
+                "WHERE status='pending' AND due_ms<=? "
+                "ORDER BY due_ms, id LIMIT ?", (now_ms, limit)).fetchall()
+        finally:
+            self._read_done(read)
+        return [self._timer(r) for r in rows]
+
+    def timers_by_status(self, status):
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
+                "fired_ms,body,created_by,client_key FROM timers "
+                "WHERE status=? ORDER BY id", (status,)).fetchall()
+        finally:
+            self._read_done(read)
+        return [self._timer(r) for r in rows]
+
+    def timers_for_task(self, task_id):
+        read = self._read_conn()
+        try:
+            rows = read.execute(
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
+                "fired_ms,body,created_by,client_key FROM timers "
+                "WHERE task_id=? ORDER BY created_ms, id",
+                (task_id,)).fetchall()
+        finally:
+            self._read_done(read)
+        return [self._timer(r) for r in rows]
+
+    def next_due_ms(self):
+        """最早 pending due（提前醒计算）；无 pending→None。"""
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                "SELECT MIN(due_ms) FROM timers WHERE status='pending'"
+            ).fetchone()
+        finally:
+            self._read_done(read)
+        return row[0] if row is not None else None
 
     def upsert_approval(self, ap: Approval) -> Approval:
         self._require_uow()
@@ -578,6 +646,18 @@ class Storage:
         finally:
             self._read_done(read)
         return self._message(row)
+
+    def message_for_timer(self, timer_id):
+        """按 timer_id 对账（Req: F145 §6 崩窗：消息提交后补记 fired 判据）；
+        messages.timer_id 唯一约束至多一行。"""
+        read = self._read_conn()
+        try:
+            row = read.execute(
+                f"SELECT {self._MSG_COLS} FROM messages WHERE timer_id=?",
+                (timer_id,)).fetchone()
+        finally:
+            self._read_done(read)
+        return self._message(row) if row is not None else None
 
     def messages_for_sid(self, sid, after_id=0):
         read = self._read_conn()
@@ -832,7 +912,8 @@ class Storage:
         read = self._read_conn()
         try:
             rows = read.execute(
-                "SELECT id,task_id,target_role,due_ms,status,created_ms,fired_ms "
+                "SELECT id,task_id,target_role,due_ms,status,created_ms,"
+                "fired_ms,body,created_by,client_key "
                 "FROM timers ORDER BY id").fetchall()
         finally:
             self._read_done(read)

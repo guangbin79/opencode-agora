@@ -4,8 +4,8 @@
 旧名 reverify/post/check_mail 亦收——壳路由零翻译）；鉴权两段＝
 X-Agora-Token→authsvc.identify→may 矩阵（归属细判在服务层）；结构化
 错误 error{code,message,details,retryable}＋HTTP 码一处映射（contracts.
-ERROR_TABLE）；timer/approval 四端点 501 not_implemented 占位（服务本体
-归 T14/T16 接线——文档注明，非语义缺失）。
+ERROR_TABLE）；timer 两端点真接线（Req: F145）；approval 两端点 501
+not_implemented 占位（服务本体归 T16 接线——文档注明，非语义缺失）。
 
 legacy 根路由（v2 兼容面，经 F141 适配层→v3 服务）：15 旧工具＋
 cred_for_sid/task_nudge/task_alarm＋GET /view、/health；响应形状对
@@ -45,10 +45,8 @@ from agorad.healthsvc import KIND_STALLED
 
 _VERSION = "0.1.0"
 _SERVICE_JSON = ".agora/service.json"
-_NOT_IMPLEMENTED = frozenset({"timer_create", "timer_cancel",
-                              "approval_request", "approval_reply"})
-_PLACEHOLDER_BY = {"timer_create": "T14", "timer_cancel": "T14",
-                   "approval_request": "T16", "approval_reply": "T16"}
+_NOT_IMPLEMENTED = frozenset({"approval_request", "approval_reply"})
+_PLACEHOLDER_BY = {"approval_request": "T16", "approval_reply": "T16"}
 _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                           "reopened", "blocked"})  # v2 cred 拉取面在飞口径
 _ACTIVE = frozenset({"dispatched", "running", "done", "verify_failed",
@@ -62,6 +60,9 @@ _TOOL_DESC = {
     "task_deliver": "external_branch 外部交付确认（delivered/non_ff/failed）",
     "task_reverify": "done 驻留重排回验证门（v2 旧名 reverify）",
     "task_wait": "受控等待登记/清除（wait_on null/空＝清除）",
+    "timer_create": "建定时器（after_seconds/due_at 恰传其一、30 天上限；"
+                    "worker 限本任务、dispatcher 归属终审、root 放行）",
+    "timer_cancel": "取消定时器（仅 pending 可取消；firing/fired 拒）",
     "message_post": "链边发消息（v2 旧名 post；kind=done 完成回填）",
     "message_pull": "拉取本会话收件（v2 旧名 check_mail）",
     "board": "看板快照（默认三键/full 五键/单任务明细）",
@@ -201,7 +202,14 @@ class _V3Handler(BaseHTTPRequestHandler):
                     "details": {"tool": name}, "retryable": False}})
             params = (validate_task_create(body) if name == "task_create"
                       else validate_params(name, body))
-            return self._json(200, self._dispatch(name, sid, role, params))
+            result = self._dispatch(name, sid, role, params)
+            # Req: F145 timer 观测投影挂 /v3 正名面（legacy 兼容面形状钉死
+            # ——v2 无 timer，差分/金锚面零扰动）
+            if name == "board" and "task" in params:
+                result["timers"] = stack.timers.projection(params["task"])
+            elif name == "doctor":
+                result["timers_overdue"] = stack.timers.overdue_rows()
+            return self._json(200, result)
         except ContractError as e:
             return self._json(http_status(e.code), {"error": e.to_dict()})
         except FileNotFoundError as e:
@@ -312,6 +320,10 @@ class _V3Handler(BaseHTTPRequestHandler):
         if name == "task_wait":
             return stack.tasks.wait(tid, sid, role,
                                     params.get("wait_on") or "")
+        if name == "timer_create":  # Req: F145 真接线（替换 T13a 占位）
+            return stack.timers.create(sid, role, params)
+        if name == "timer_cancel":
+            return stack.timers.cancel(sid, role, params["timer_id"])
         if name == "message_post":
             return self._message_post(sid, role, params, row)
         if name == "message_pull":
@@ -622,11 +634,12 @@ def make_server_v3(stack, port=0):
     return server
 
 
-def serve_forever_v3(stack, port=0, health_interval=300):
+def serve_forever_v3(stack, port=0, health_interval=300, timer_interval=30):
     """进程主循环（装配起点；测试直用 make_server_v3 自驱）。"""
     stack.start()  # 幂等：root bootstrap/清扫恢复/done 重排＋gate 线程
     server = make_server_v3(stack, port)
     stack.start_health_thread(health_interval)
+    stack.start_timer_thread(timer_interval)  # Req: F145 timer 级扫描
     print(f"agorad-v3 ready port={server.server_address[1]} api=3",
           flush=True)
     try:

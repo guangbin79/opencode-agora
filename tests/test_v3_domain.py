@@ -63,7 +63,8 @@ class TestEntities(unittest.TestCase):
                                "review_cache", "review_fail_streak",
                                "gate_resource"},
             domain.Timer: {"id", "task_id", "target_role", "due_ms",
-                           "state", "created_ms", "fired_ms"},
+                           "state", "created_ms", "fired_ms", "body",  # F145
+                           "created_by", "client_key"},
             domain.Approval: {"id", "task_id", "requester_sid", "backend",
                               "state", "question", "metadata",
                               "native_request_id", "attempted_decision",
