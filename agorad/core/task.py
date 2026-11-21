@@ -414,7 +414,7 @@ class TaskService:
                 report = self._gitx.materialize_checkout(
                     env, t["project_dir"])  # Req: ag-0d2daa
             except Exception as e:  # 物化败＝拒派并回收新 env（不交残树给 worker）
-                self._gitx.remove_env(env)
+                self._reclaim_env(tid, env, sid, "task:dispatch_materialize")  # Req: ag-0e6ca3
                 self._reject(tid, sid, f"checkout_materialize: {e}")
             if report:  # 检出后即物化，worker 首轮构建与 gate env verify 不再撞空依赖
                 self._store.append_event({"ts": time.time(), "actor": sid,
@@ -434,7 +434,7 @@ class TaskService:
                                     model=t.get("model"))  # F55：boot prompt 逐回合携
         except Exception as e:  # can_spawn 名册：会话创建失败即熔断（不 import access 异常）
             if new_env:  # Req: F71 本轮新建/重建 env 归本轮——失败回收不留孤儿（在盘既有 env 不动）
-                self._gitx.remove_env(env)
+                self._reclaim_env(tid, env, sid, "task:dispatch_spawn")  # Req: ag-0e6ca3
             self._reject(tid, sid, f"can_spawn: {e}")
         token = self._auth.issue(wsid, "worker")
         try:
@@ -442,7 +442,7 @@ class TaskService:
         except Exception as e:  # 落盘败＝派发零副作用回滚（新牌即废、新建 env 回收），不交无凭据残局
             self._revoke_worker(wsid)
             if new_env:  # Req: F71 同 can_spawn 口径——只回收本轮新建/重建的 env
-                self._gitx.remove_env(env)
+                self._reclaim_env(tid, env, sid, "task:dispatch_credential")  # Req: ag-0e6ca3
             self._reject(tid, sid, f"credential_write: {e}")
         fresh = self._state.get(tid)
         if fresh["state"] not in ("todo", "blocked", "running") \
@@ -605,6 +605,19 @@ class TaskService:
                 return None, "session_young"
         return base, ("stale" if base is not None else "fresh")
 
+    def _reclaim_env(self, tid, env_dir, actor, site):  # Req: ag-0e6ca3
+        """env 回收前置审计（gate._reclaim_env 同款）：任务 id＋resolve 后路径
+        ＋调用点标签先落事件流再 remove_env。审计尽力而为（败不断回收——
+        B 册终闸：审计 I/O 病跳过回收会被覆盖点误标 reclaim_failed）。"""
+        try:
+            self._store.append_event({"ts": time.time(), "actor": actor,
+                                      "event": "env_removed", "task": tid,
+                                      "env": str(pathlib.Path(env_dir).resolve()),
+                                      "site": site})
+        except Exception:
+            pass  # 观测面病不断权威回收链；顺序仍先审计后动手
+        self._gitx.remove_env(env_dir)
+
     def _cancel_one(self, tid, sid, cancel_reason=None):
         """中止单任务并递归下级；返回级联取消数（merged/closed/cancelled 不动）。"""
         t = self._state.get(tid)
@@ -627,7 +640,7 @@ class TaskService:
                 self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断凭据作废
                 if t.get("env_dir"):
                     try:
-                        self._gitx.remove_env(t["env_dir"])
+                        self._reclaim_env(tid, t["env_dir"], sid, "task:cancel_one")  # Req: ag-0e6ca3
                     except Exception as e:  # 回收败留痕后继续：级联与通知不被拦断（同 gate._tail 口径）
                         self._store.append_event({"ts": time.time(), "actor": sid,
                                                   "event": "reclaim_failed", "task": tid,
@@ -902,7 +915,7 @@ class TaskService:
             self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
             if t.get("env_dir"):
                 try:
-                    self._gitx.remove_env(t["env_dir"])
+                    self._reclaim_env(tid, t["env_dir"], sid, "task:deliver_ack_delivered")  # Req: ag-0e6ca3
                 except Exception as e:  # 回收败不逆转终局：留痕人工清理
                     self._store.append_event(
                         {"ts": time.time(), "actor": sid, "task": tid,

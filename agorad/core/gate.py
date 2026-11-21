@@ -726,7 +726,7 @@ class Gate:
                 self._router.notify_transition(  # ag-acae3b 直投；closed 门尾邻对窗吞
                     tid, "merged", "review-only 交付（verify 绿，零合入）")
                 self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
-                self._gitx.remove_env(t["env_dir"])
+                self._reclaim_env(tid, t["env_dir"], "gate:out_of_band")  # Req: ag-0e6ca3
                 self._post(tid, "review-only 交付在案（零合入）——环境已回收")
                 return
             # Req: F100 managed 判据拆分：delivery.mode=managed＋钉死目标支即入
@@ -753,7 +753,7 @@ class Gate:
                     f"@{(t.get('commit') or '')[:7]} external delivered"
                     "（崩窗补终态）")
                 self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
-                self._gitx.remove_env(t["env_dir"])
+                self._reclaim_env(tid, t["env_dir"], "gate:external_recovery")  # Req: ag-0e6ca3
                 return
             if (managed or external) and delivery.get("status") == "failed":
                 # Req: F100 崩窗收敛：failed 已落账而 blocked 迁移未达——补迁移，
@@ -1173,7 +1173,7 @@ class Gate:
             pass
         self._router.notify_transition(tid, "merged", detail)  # Req: F60/F110
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
-        self._gitx.remove_env(t["env_dir"])
+        self._reclaim_env(tid, t["env_dir"], "gate:finish_local_delivered")  # Req: ag-0e6ca3
         self._post(tid, f"merged @{sha}——本地目标支已交付，环境已回收")
 
     def _deliver_external(self, tid, branch, env, integration, target,
@@ -1364,7 +1364,7 @@ class Gate:
         self._router.notify_transition(  # ag-acae3b：merged 实时直达 dispatcher
             tid, "merged", detail)
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断（merged 路径牌无其他作废点）
-        self._gitx.remove_env(t["env_dir"])
+        self._reclaim_env(tid, t["env_dir"], "gate:succeed")  # Req: ag-0e6ca3
         self._post(tid, f"merged @{t.get('commit')}——环境已回收")
         # F109：origin 同步与远端任务支清理归派发方自理——门尾零网络
 
@@ -1757,6 +1757,19 @@ class Gate:
             except Exception:
                 pass
 
+    def _reclaim_env(self, tid, env_dir, site):  # Req: ag-0e6ca3
+        """env 回收前置审计：任务 id＋resolve 后路径＋调用点标签先落事件流再
+        remove_env——0f7d7f 事故（仓外 glob rm+prune 冒名服务回收）事后无从
+        定谳，自此服务侧每次回收在事件流可与服务外删除区分。审计尽力而为
+        （B 册终闸：审计失败拦断回收＝凭据已删/终态已落而 env 无痕滞留），
+        顺序仍先审计后动手——正常路径先落账，审计面病只缺观测不缺回收。"""
+        try:
+            self._audit(tid, "env_removed",
+                        env=str(Path(env_dir).resolve()), site=site)
+        except Exception:
+            pass  # F54 尽力而为口径：观测面病不断权威回收链
+        self._gitx.remove_env(env_dir)
+
     def _tail(self, tid):
         """门走完：pending-cancel 经 State.gate_tail 原子结算（merged 不逆转历史）；副作用随终态。"""
         t = self._state.gate_tail(tid)
@@ -1764,7 +1777,7 @@ class Gate:
             self._audit(tid, "cancelled")
             if t.get("env_dir"):  # 同 T7 直路径口径：cancelled 即环境回收
                 try:
-                    self._gitx.remove_env(t["env_dir"])
+                    self._reclaim_env(tid, t["env_dir"], "gate:tail_cancel")  # Req: ag-0e6ca3
                 except Exception as e:  # 回收败留痕后继续：终止通知＋凭据作废不得被拦断
                     self._audit(tid, "reclaim_failed", note=str(e)[:200])
             self._store.remove_credential(tid)  # F43：门尾取消同删牌文件
