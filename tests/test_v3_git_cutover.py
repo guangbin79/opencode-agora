@@ -315,25 +315,35 @@ class TestGitCutoverBackup(_Scratch):
 
     def test_tmp_cleanup_on_failure(self):
         import unittest.mock
+        from agorad.gitcutover import _precreate_private
         tmp = self.dest.with_name(self.dest.name + ".tmp")
+        victim = self.work / "victim.txt"
+        victim.write_text("do-not-truncate")
+        tmp.symlink_to(victim)  # 预置符号链接（C 册 R1）
+        with self.assertRaises(OSError):  # O_EXCL＋O_NOFOLLOW 独占闸
+            _precreate_private(tmp)
+        self.assertEqual(victim.read_text(), "do-not-truncate")  # 未写穿
+        r = backup_home(self.home, self.dest)  # 全流程：预清自愈残件后成功
+        self.assertTrue(r["verified"])
+        self.assertFalse(tmp.is_symlink())
         with unittest.mock.patch.object(
                 GitStore, "bundle_journal",
                 side_effect=StorageError("boom")):
             with self.assertRaises(CutoverError) as cm:
-                backup_home(self.home, self.dest)
+                backup_home(self.home, self.work / "b2.bundle")
         self.assertEqual(cm.exception.code, "backup_failed")
-        self.assertFalse(tmp.exists())  # 失败零残件
-        self.assertFalse(self.dest.exists())
+        self.assertFalse((self.work / "b2.bundle.tmp").exists())  # 零残件
+        self.assertFalse((self.work / "b2.bundle").exists())
         with unittest.mock.patch.object(
                 GitStore, "verify_bundle",
                 side_effect=StorageError("bad")):
             with self.assertRaises(CutoverError) as cm:
-                backup_home(self.home, self.dest)
+                backup_home(self.home, self.work / "b3.bundle")
         self.assertEqual(cm.exception.code, "backup_verify_failed")
-        self.assertFalse(tmp.exists())  # 未过校验零目的地件
-        self.assertFalse(self.dest.exists())
+        self.assertFalse((self.work / "b3.bundle.tmp").exists())
+        self.assertFalse((self.work / "b3.bundle").exists())
         r = agora("backup", "--backend", "git", "--home", str(self.home),
-                  "--out", str(self.dest))
+                  "--out", str(self.work / "b4.bundle"))
         self.assertEqual(r.returncode, 0, r.stderr)  # 失败后重试可成功
 
     def test_existing_destination_refused(self):
@@ -452,6 +462,24 @@ class TestGitCutoverSwitchRollback(_Scratch):
         self.assertEqual(cm.exception.code, "switch_manifest_missing")
         self.assertTrue((old / "state" / "journal.git").is_dir())
         old2, new2 = git_pair(self.work, "2")
+        switch(old2, new2)
+        (old2 / SWITCH_MANIFEST).write_text("[1, 2, 3]", encoding="utf-8")
+        with self.assertRaises(CutoverError) as cm:  # 合法 JSON 非对象
+            rollback(old2, new2)
+        self.assertEqual(cm.exception.code, "switch_manifest_missing")
+        self.assertTrue((old2 / "state" / "journal.git").is_dir())
+        old3, new3 = git_pair(self.work, "3")
+        switch(old3, new3)
+        bad = json.loads((old3 / SWITCH_MANIFEST).read_text("utf-8"))
+        bad["txs"] = True  # bool 不冒充 int 锚（真值相等也不放行）
+        (old3 / SWITCH_MANIFEST).write_text(
+            json.dumps(bad, sort_keys=True), encoding="utf-8")
+        with self.assertRaises(CutoverError) as cm:
+            rollback(old3, new3)
+        self.assertEqual(cm.exception.code, "switch_manifest_missing")
+        self.assertTrue((old3 / "state" / "journal.git").is_dir())
+        self.assertFalse(new3.exists())
+        old2, new2 = git_pair(self.work, "2b")
         switch(old2, new2)
         new2.mkdir()
         with self.assertRaises(CutoverError) as cm:

@@ -121,6 +121,16 @@ def _clean_bundle_tmp(tmp: pathlib.Path):
         pathlib.Path(str(tmp) + suffix).unlink(missing_ok=True)
 
 
+def _precreate_private(path: pathlib.Path):
+    """tmp 位预建 0600 普通文件（O_EXCL＋O_NOFOLLOW——预置符号链接即拒，
+    评审环 C 册 R1；与 _atomic_write_bytes 同口径）。git 仍按自身口径重开
+    该路径（0664 重建——chmod 收口不可省）。
+    shortcut: dest.parent 可写攻击者的主动竞态（unlink＋换链）不设防，dirfd 级收口待与 SQLite 备份面统一。"""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.close(fd)
+
+
 def backup_home(home, dest):
     """canonical journal bundle 备份（spec backup_home）：tmp 创建→
     git bundle verify＋head 对账→0600 原子落位；失败/未过校验零目的地
@@ -143,6 +153,12 @@ def backup_home(home, dest):
         _clean_bundle_tmp(tmp)  # kill -9 残件预清
         try:
             try:
+                _precreate_private(tmp)
+            except OSError as exc:  # 被占/符号链接预置＝不可信 tmp 位
+                raise CutoverError("backup_failed",
+                                   f"备份 tmp 位不可独占（被占/符号链接）"
+                                   f" {tmp}: {exc}") from exc
+            try:
                 st.bundle_journal(tmp)
             except StorageError as exc:
                 raise CutoverError("backup_failed",
@@ -157,8 +173,8 @@ def backup_home(home, dest):
                     "backup_verify_failed",
                     f"bundle 记录 {JOURNAL_REF}={heads.get(JOURNAL_REF)}"
                     f" 与账本 head {head} 不符")
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, dest)  # 校验过后才原子落位
+            os.chmod(tmp, 0o600)  # git 以 0664 重建件——落位前收紧
+            os.replace(tmp, dest)  # 校验过后才原子落位（rename 不跟 dest 链）
         except BaseException:
             _clean_bundle_tmp(tmp)
             raise
@@ -259,6 +275,18 @@ def rollback(old, new):
             "switch_manifest_missing",
             f"{path}: 切换清单缺席/不可解析——拒绝无锚点回滚（防丢写）"
             f": {exc}") from exc
+    if not isinstance(manifest, dict):  # 合法 JSON 非对象＝坏形清单
+        raise CutoverError(
+            "switch_manifest_missing",
+            f"{path}: 切换清单非对象形态——拒绝无锚点回滚（防丢写）")
+    anchor_head, anchor_txs = manifest.get("head"), manifest.get("txs")
+    if not isinstance(anchor_head, str) or type(anchor_txs) is not int:
+        # bool/float 不冒充 str/int 锚（评审环 C 册——与 gitstore 重放面
+        # 同款严格定型；坏形清单＝锚不可信，一律拒）
+        raise CutoverError(
+            "switch_manifest_missing",
+            f"{path}: 切换清单锚字段（head/txs）形态不符——"
+            "拒绝无锚点回滚（防丢写）")
     _require_journal(old)
     try:
         st = GitStore(old / "state")
@@ -267,12 +295,11 @@ def rollback(old, new):
                            f"canonical 重放校验拒绝（零动作）: {exc}"
                            ) from exc
     try:
-        if (st.head != manifest.get("head")
-                or st.tx_count != manifest.get("txs")):
+        if st.head != anchor_head or st.tx_count != anchor_txs:
             raise CutoverError(
                 "rollback_blocked",
-                f"journal 已前移（清单 {manifest.get('head')}/"
-                f"{manifest.get('txs')} 对 当前 {st.head}/{st.tx_count}"
+                f"journal 已前移（清单 {anchor_head}/{anchor_txs}"
+                f" 对 当前 {st.head}/{st.tx_count}"
                 "）——业务写入已在 git home，互换即丢写；双侧目录保持"
                 "零动作；确需回滚：停服后手工互换目录（业务写入随 git "
                 "home 目录走）", recoverable=False)
