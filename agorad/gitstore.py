@@ -7,13 +7,15 @@ canonical 对象（tasks/messages/receipts/mail-cursors＋credentials/events 两
 
 UoW 语义（§4 同 storage 面）：写必须身处 uow；overlay 读己之写，外部读者
 只见 HEAD；提交＝临时 GIT_INDEX_FILE 自 HEAD read-tree→逐变更 update-index
-→write-tree→commit-tree(-p HEAD)→update-ref CAS；CAS 败抛 CommitConflict
-弃 overlay 不静默重放。标识符（消息 id/事件 seq/tx seq/对象版本）自高水位
-分配，失败/CAS 弃单不复用。外来账本（agora.db/tasks.jsonl 在而 journal 缺
-席）构造即拒且零动土。启动重放校验 tx↔对象一致性，canonical 损毁/重复
-seq/缺引用对象 fail-closed。git 子进程圈禁本模块：谓词白名单精确（仅
-plumbing，网络/业务动词拒），UoW 守卫禁网络/业务子进程（自有 git 调用经
-import 时捕获的真 Popen 旁路）。
+→write-tree→commit-tree(-p HEAD)→update-ref CAS（空历史首笔传零旧值断言
+ref 不在——首笔也是 CAS）；CAS 败抛 CommitConflict 弃 overlay 不静默重放。
+标识符（消息 id/事件 seq/tx seq/对象版本）自高水位分配，失败/CAS 弃单不
+复用。外来账本（agora.db/tasks.jsonl 在而 journal 缺席）构造即拒且零动土。
+启动重放校验 tx↔对象一致性（含对象头/bucket/tx 序号/operations 形状与
+meta↔body 双向配对），canonical 损毁/重复 seq/缺引用对象 fail-closed（专用
+错不外逃裸异常）。git 子进程圈禁本模块：谓词白名单精确（仅 plumbing，网络/
+业务动词拒），UoW 守卫禁网络/业务子进程（自有 git 调用经 import 时捕获的
+真 Popen 旁路）。基线发布＝单次赋值原子切换快照（读者无锁不撕裂）。
 """
 import contextlib
 import dataclasses
@@ -34,6 +36,7 @@ from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 SCHEMA_VERSION = 1
 EPOCH = 1
 JOURNAL_REF = "refs/agora/journal"
+_MISSING = "0" * 40  # update-ref 零旧值＝断言 ref 不在（空历史首笔也 CAS）
 
 # spec §Repository model 初始化配置（精确六键）
 JOURNAL_CONFIG = {
@@ -108,10 +111,16 @@ def _bucket(key) -> str:
     return f"{h[:2]}/{h[2:4]}"
 
 
+# canonical 路径段白字符集（引号/非 ASCII/控制符不入路径——ls-tree 转义面
+# 与重放往返一致性的写入面闸；真 sid/tid 形如 ses-xxx/ag-xxxx 天然在集内）
+_ID_CHARSET = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:@+-]*")
+
+
 def _safe(name) -> str:
     name = str(name)
-    if not name or "/" in name or "\x00" in name or name in (".", ".."):
-        raise StorageError(f"非法 canonical 路径段: {name!r}")
+    if not _ID_CHARSET.fullmatch(name):
+        raise StorageError(
+            f"非法 canonical 路径段（白字符集外）: {name!r}")
     return name
 
 
@@ -168,6 +177,12 @@ def _obj_bytes(kind, ident, version, seq, data) -> bytes:
         ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
+def _empty_state():
+    return {"head": None, "tasks": {}, "messages": {}, "receipts": {},
+            "cursors": {}, "credentials": {}, "events": {}, "txs": {},
+            "dedup": {}, "timers": {}}
+
+
 class GitStore:
     """Git 记账后备（MessageStore/task 垂直仓库面；同构可替换 Storage）。
 
@@ -187,24 +202,15 @@ class GitStore:
         self._owner = None
         self._lock = threading.Lock()
         self._idx_n = 0
-        self._head = None
-        self._tasks = {}        # tid -> (version, Task)
-        self._messages = {}     # mid -> {"msg": Message, "timer_id": str|None}
-        self._receipts = {}     # mid -> (version, DeliveryReceipt)
-        self._cursors = {}      # sid -> (version, MailCursor)
-        self._credentials = {}  # sid -> (version, Credential)
-        self._events = {}       # seq -> Event
-        self._txs = {}          # seq -> tx dict
-        self._dedup = {}        # dedup_key -> mid
-        self._timer_ids = {}    # timer_id -> mid
-        self._hwm = {}          # 标识符高水位（message/event/tx）——弃单不复用
-        self._vhwm = {}         # (kind, id) -> 已分配最高版本
+        self._snap = _empty_state()  # 已提交基线（单次赋值原子切换）
+        self._hwm = {}               # 标识符高水位（message/event/tx）——弃单不复用
+        self._vhwm = {}              # (kind, id) -> 已分配最高版本
         self._init_or_refuse()
         self._replay()
 
     @property
     def head(self):
-        return self._head
+        return self._snap["head"]
 
     # ---- git 子进程（谓词白名单＋最小环境）----
 
@@ -243,12 +249,14 @@ class GitStore:
                 raise ForeignLedgerError(
                     f"{self._state}: 外来账本在位 {foreign} 而 journal.git 缺席"
                     "——拒建（防 split-brain），构造零动土")
-            os.makedirs(os.path.join(self._journal, "objects"), exist_ok=True)
-            os.makedirs(os.path.join(self._journal, "refs"), exist_ok=True)
-            head = os.path.join(self._journal, "HEAD")
-            if not os.path.exists(head):
-                with open(head, "w", encoding="utf-8") as f:
-                    f.write(f"ref: {JOURNAL_REF}\n")
+        # 骨架幂等补齐（初始化崩溃窗半建自愈：HEAD/objects/refs 恒确保）
+        for sub in ("objects", "refs"):
+            os.makedirs(os.path.join(self._journal, sub), exist_ok=True)
+        head = os.path.join(self._journal, "HEAD")
+        if not os.path.exists(head):
+            with open(head, "w", encoding="utf-8") as f:
+                f.write(f"ref: {JOURNAL_REF}\n")
+        if fresh:
             os.chmod(self._journal, 0o700)
         cfg_path = os.path.join(self._journal, "config")
         text = ""
@@ -266,14 +274,16 @@ class GitStore:
         rc, out, _ = self._git(("rev-parse", "--verify", JOURNAL_REF),
                                check=False)
         if rc != 0:
-            self._head = None
-            return
+            return  # 空历史：保持现快照（重载场景高水位已在 _hwm 只升不降）
         head = out.decode().strip()
-        _, out, _ = self._git(("ls-tree", "-r", head))
+        _, out, _ = self._git(("ls-tree", "-r", "-z", head))
         entries = {}
-        for line in out.decode("utf-8").splitlines():
-            meta, path = line.split("\t", 1)
-            entries[path] = meta.split()[2]
+        for chunk in out.split(b"\x00"):  # -z：路径不转义（quotePath 免疫）
+            if not chunk:
+                continue
+            meta, _, path = chunk.partition(b"\t")
+            entries[path.decode("utf-8", "surrogateescape")] = (
+                meta.split()[2].decode())
 
         def bad(path, why):
             raise JournalCorruptionError(
@@ -281,15 +291,19 @@ class GitStore:
 
         def obj_of(sha, path):
             try:
-                return json.loads(
+                obj = json.loads(
                     self._git(("cat-file", "blob", sha))[1].decode("utf-8"))
             except (StorageError, UnicodeDecodeError, ValueError):
                 bad(path, "canonical JSON 不可解析")
+            if not isinstance(obj, dict):
+                bad(path, "canonical JSON 非对象")
+            return obj
 
         def checked(obj, path, kind, ident, version, bucket):
             if (obj.get("schema_version") != SCHEMA_VERSION
                     or obj.get("epoch") != EPOCH or obj.get("kind") != kind
                     or obj.get("id") != ident or obj.get("version") != version
+                    or not isinstance(obj.get("seq"), int)
                     or _bucket(ident) != bucket):
                 bad(path, "对象头/路径不一致")
             return obj
@@ -387,12 +401,16 @@ class GitStore:
                 obj = obj_of(sha, path)
                 if (obj.get("schema_version") != SCHEMA_VERSION
                         or obj.get("epoch") != EPOCH
-                        or obj.get("seq") != int(m["seq"])):
-                    bad(path, "tx 序号/头与路径不符（含重复 seq 冒称）")
+                        or obj.get("seq") != int(m["seq"])
+                        or _bucket(int(m["seq"])) != m.group(1)
+                        or not isinstance(obj.get("operations"), list)):
+                    bad(path, "tx 头/序号/bucket/operations 与路径不符")
+                if int(m["seq"]) in txs:
+                    bad(path, "tx seq 重复")
                 txs[int(m["seq"])] = obj
                 continue
             # 非 canonical 路径：前瞻兼容忽略
-        # 交叉校验：tx↔对象引用闭合
+        # 交叉校验：tx↔对象引用闭合＋meta↔body 双向配对
         seen_tx = set(txs)
         for seq in obj_seqs:
             if seq not in seen_tx:
@@ -401,10 +419,15 @@ class GitStore:
             if mid not in bodies:
                 bad(f"objects/messages/*/{_v(mid)}/body.txt",
                     "消息字节体缺席")
+        for mid in bodies:
+            if mid not in metas:
+                bad(f"objects/messages/*/{_v(mid)}/body.txt",
+                    "孤儿字节体（meta 缺席）")
         for obj in txs.values():
-            for op in obj.get("operations") or ():
-                if op.get("path") not in entries:
-                    bad(op.get("path", "<无路径>"), "tx 操作引用对象缺席")
+            for op in obj["operations"]:
+                path = op.get("path") if isinstance(op, dict) else None
+                if path not in entries:
+                    bad(path or "<非对象操作/无路径>", "tx 操作引用对象缺席")
         # 落内存（对象/消息字典本体）——坏 meta 一律 fail-closed 专用错
         messages = {}
         for mid, d in metas.items():
@@ -424,12 +447,11 @@ class GitStore:
                  if r["msg"].dedup_key is not None}
         timers = {r["timer_id"]: mid for mid, r in messages.items()
                   if r["timer_id"] is not None}
-        # 合入（重载场景高水位只升不降——弃单不复用）
-        self._head = head
-        self._tasks, self._receipts = tasks, receipts
-        self._cursors, self._credentials = cursors, creds
-        self._events, self._txs = events, txs
-        self._messages, self._dedup, self._timer_ids = messages, dedup, timers
+        # 原子切换快照（重载场景高水位只升不降——弃单不复用）
+        self._snap = {"head": head, "tasks": tasks, "messages": messages,
+                      "receipts": receipts, "cursors": cursors,
+                      "credentials": creds, "events": events, "txs": txs,
+                      "dedup": dedup, "timers": timers}
         for key, top in (("message", max(messages, default=0)),
                          ("event", max(events, default=0)),
                          ("tx", max(txs, default=0))):
@@ -529,7 +551,7 @@ class GitStore:
         writes = ov["writes"]
         if not writes:
             return  # 只读 UoW：零提交零 tx
-        old = self._head
+        old = self._snap["head"]
         tx_seq = self._alloc("tx")
         files, ops = [], []
         for w in writes:
@@ -577,8 +599,8 @@ class GitStore:
             new = self._git(tuple(cargs), index=index)[1].decode().strip()
             self._fire("commit-tree", "after", tx=tx_seq, commit=new)
             self._fire("update-ref", "before", tx=tx_seq)
-            rargs = ("update-ref", JOURNAL_REF, new) + ((old,) if old
-                                                        else ())
+            rargs = ("update-ref", JOURNAL_REF, new,
+                     old if old is not None else _MISSING)  # 首笔也 CAS
             rc, _, err = self._git(rargs, check=False)
             if rc != 0:
                 self._replay()  # 重载基线（高水位只升不降），弃单不复用
@@ -594,16 +616,13 @@ class GitStore:
                 os.unlink(index)
 
     def _publish(self, ov, tx_seq, new, tx):
-        self._tasks.update(ov["tasks"])
-        self._messages.update(ov["messages"])
-        self._receipts.update(ov["receipts"])
-        self._cursors.update(ov["cursors"])
-        self._credentials.update(ov["credentials"])
-        self._events.update(ov["events"])
-        self._dedup.update(ov["dedup"])
-        self._timer_ids.update(ov["timers"])
-        self._txs[tx_seq] = tx
-        self._head = new
+        """触达族 copy-on-write 合成新快照，单次赋值原子发布（读者不撕裂）。"""
+        s = self._snap
+        ns = {"head": new, "txs": {**s["txs"], tx_seq: tx}}
+        for key in ("tasks", "messages", "receipts", "cursors",
+                    "credentials", "events", "dedup", "timers"):
+            ns[key] = {**s[key], **ov[key]} if ov[key] else s[key]
+        self._snap = ns
 
     # ---- 标识符/版本分配（高水位只升不降）----
 
@@ -633,14 +652,14 @@ class GitStore:
     def _task_view(self, tid):
         if self._in_uow() and tid in self._ov["tasks"]:
             return self._ov["tasks"][tid]
-        return self._tasks.get(tid)
+        return self._snap["tasks"].get(tid)
 
     def get_task(self, tid):
         cur = self._task_view(tid)
         return cur[1] if cur is not None else None
 
     def tasks_all(self):
-        merged = dict(self._tasks)
+        merged = dict(self._snap["tasks"])
         if self._in_uow():
             merged.update(self._ov["tasks"])
         return [merged[k][1] for k in sorted(merged)]
@@ -655,7 +674,8 @@ class GitStore:
             if key is None:
                 continue
             index = ov[column] if column == "dedup" else ov["timers"]
-            base = self._dedup if column == "dedup" else self._timer_ids
+            base = (self._snap["dedup"] if column == "dedup"
+                    else self._snap["timers"])
             hit = index.get(key, base.get(key))
             if hit is not None:  # 幂等：回原消息零新建零新 tx
                 return self._message_view(hit)["msg"]
@@ -681,10 +701,10 @@ class GitStore:
     def _message_view(self, mid):
         if self._in_uow() and mid in self._ov["messages"]:
             return self._ov["messages"][mid]
-        return self._messages.get(mid)
+        return self._snap["messages"].get(mid)
 
     def _messages_view(self):
-        merged = dict(self._messages)
+        merged = dict(self._snap["messages"])
         if self._in_uow():
             merged.update(self._ov["messages"])
         return merged
@@ -721,14 +741,14 @@ class GitStore:
     def _receipt_view(self, mid):
         if self._in_uow() and mid in self._ov["receipts"]:
             return self._ov["receipts"][mid]
-        return self._receipts.get(mid)
+        return self._snap["receipts"].get(mid)
 
     def get_receipt(self, mid):
         cur = self._receipt_view(mid)
         return cur[1] if cur is not None else None
 
     def receipts_by_status(self, status):
-        merged = dict(self._receipts)
+        merged = dict(self._snap["receipts"])
         if self._in_uow():
             merged.update(self._ov["receipts"])
         return [merged[k][1] for k in sorted(merged)
@@ -752,7 +772,7 @@ class GitStore:
     def _cursor_view(self, sid):
         if self._in_uow() and sid in self._ov["cursors"]:
             return self._ov["cursors"][sid]
-        return self._cursors.get(sid)
+        return self._snap["cursors"].get(sid)
 
     def get_cursor(self, sid):
         cur = self._cursor_view(sid)
@@ -777,7 +797,7 @@ class GitStore:
     def _cred_view(self, sid):
         if self._in_uow() and sid in self._ov["credentials"]:
             return self._ov["credentials"][sid]
-        return self._credentials.get(sid)
+        return self._snap["credentials"].get(sid)
 
     def get_credential(self, sid):
         cur = self._cred_view(sid)
@@ -802,10 +822,10 @@ class GitStore:
     def _event_view(self, seq):
         if self._in_uow() and seq in self._ov["events"]:
             return self._ov["events"][seq]
-        return self._events.get(seq)
+        return self._snap["events"].get(seq)
 
     def events_all(self):
-        merged = dict(self._events)
+        merged = dict(self._snap["events"])
         if self._in_uow():
             merged.update(self._ov["events"])
         return [merged[k] for k in sorted(merged)]

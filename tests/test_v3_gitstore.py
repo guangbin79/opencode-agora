@@ -533,6 +533,48 @@ class TestFaultInjection(_Base):  # spec §Fault injection：update-ref 两相�
         return 0
 
 
+class TestWriteBoundary(_Base):  # R1 锚：canonical 路径段白字符集
+    def test_quote_and_non_ascii_rejected_legal_set_passes(self):
+        st = self.store()
+        with self.assertRaises(StorageError):
+            with st.uow():
+                st.upsert_task(Task(id='ag-q"x'))  # 引号＝ls-tree 转义面拒于写入
+        with self.assertRaises(StorageError):
+            with st.uow():
+                st.upsert_cursor("ses-é", 1)  # 非 ASCII 同拒
+        with st.uow():  # 合法字符集（字母数字._:@+-）放行且可重开
+            st.upsert_cursor("ses_ok.1", 1)
+        self.assertEqual(self.store().get_cursor("ses_ok.1").last_read_ms, 1)
+
+
+class TestBootstrapCas(_Base):  # R1 锚：空历史首笔也 CAS
+    def test_concurrent_first_commit_conflicts_no_silent_loss(self):
+        s1 = self.store()
+        s2 = self.store()  # 都在 ref 未生前重放（bootstrap 竞态窗）
+        with s1.uow():
+            s1.insert_message(ts_ms=1, task_id=TID, kind="note",
+                              from_sid="w", to_sid="d", body="first")
+        with self.assertRaises(CommitConflict):
+            with s2.uow():
+                s2.insert_message(ts_ms=2, task_id=TID, kind="note",
+                                  from_sid="w", to_sid="d", body="second")
+        fresh = self.store()
+        self.assertEqual([m.body for m in fresh.messages_all()],
+                         [b"first"])  # 后写者不得静默覆盖先写者
+
+
+class TestHalfInitHealing(_Base):  # R1 锚：初始化崩溃窗骨架自愈
+    def test_journal_dir_without_head_heals_and_writes(self):
+        j = self.home.state / "journal.git"
+        (j / "objects").mkdir(parents=True)
+        (j / "refs").mkdir()  # 模拟 objects/refs 已建、HEAD 未写的崩溃窗
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+        self.assertIsNotNone(st.head)
+        self.assertIsNotNone(self.store().get_task(TID))
+
+
 class TestCorruptionFailClosed(_Base):  # 断言10
     def _seed(self):
         st = self.store()
@@ -579,6 +621,45 @@ class TestCorruptionFailClosed(_Base):  # 断言10
         obj["id"] = "ag-other"  # 内容 id 与路径 id 不符
         _mutate_head(self.home.state,
                      {task_path: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_orphan_body_without_meta_fails_closed(self):  # R1 锚
+        self._seed()
+        files = _head_files(self.home.state)
+        [meta] = [p for p in files if p.endswith("meta.json")]
+        _mutate_head(self.home.state, {meta: None})  # 删 meta 留字节体
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_non_dict_object_fails_closed_dedicated_error(self):  # R1
+        self._seed()
+        files = _head_files(self.home.state)
+        [task_path] = [p for p in files if p.startswith("objects/tasks/")]
+        _mutate_head(self.home.state, {task_path: b"5"})  # 合法 JSON 非对象
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_non_list_operations_fails_closed_dedicated_error(self):  # R1
+        self._seed()
+        files = _head_files(self.home.state)
+        [tx_path] = [p for p in files if p.startswith("tx/")]
+        tx = json.loads(_blob(self.home.state, files[tx_path]))
+        tx["operations"] = {"a": 1}  # operations 非列表
+        _mutate_head(self.home.state,
+                     {tx_path: json.dumps(tx).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_tx_wrong_bucket_fails_closed(self):  # R1 锚：tx 落位 bucket 校验
+        self._seed()
+        files = _head_files(self.home.state)
+        [tx1] = [p for p in files if p.endswith("tx/%s/%020d.json"
+                                               % (_bucket_of(1), 1))]
+        tx = json.loads(_blob(self.home.state, files[tx1]))
+        tx["seq"] = 3  # 路径序号自洽但落错 bucket
+        _mutate_head(self.home.state, {
+            "tx/de/ad/%020d.json" % 3: json.dumps(tx).encode()})
         with self.assertRaises(JournalCorruptionError):
             self.store()
 
