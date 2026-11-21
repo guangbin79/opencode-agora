@@ -242,10 +242,14 @@ class GitLegacyMigrator(LegacyMigrator):
             path = art["path"]
             for prefix in prefixes:
                 subtree = prefix + os.sep + os.path.join(
-                    "state", "gate-artifacts") + os.sep
-                if path.startswith(subtree):
-                    art["path"] = str(self._tgt / os.path.relpath(path,
-                                                                  prefix))
+                    "state", "gate-artifacts")
+                if path == subtree or path.startswith(subtree + os.sep):
+                    rel = os.path.relpath(path, prefix)
+                    if rel == "." or ".." in pathlib.PurePath(rel).parts:
+                        # 词法前缀可被 ".." 绕过（评审环 R2）——按子树外处理
+                        self._art_stats["in_home_untouched"] += 1
+                        break
+                    art["path"] = str(self._tgt / rel)
                     self._art_stats["remapped"] += 1
                     self._art_evidence.append((path, art["path"]))
                     break

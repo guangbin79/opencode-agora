@@ -298,6 +298,8 @@ class TestGitLegacyMigration(_GitCase):
         ln_dir = self.src.state / "gate-artifacts" / "gt-ln"
         ln_dir.mkdir(parents=True)
         (ln_dir / "dir").symlink_to(outsider, target_is_directory=True)
+        subtree_root = self.src.state / "gate-artifacts"
+        traversal = str(subtree_root / ".." / "..")  # 词法在前缀内、归一出源根
         victim = self.src.credentials / "secret.token"  # 家内子树外敏感件
         victim.write_text('{"token": "x"}\n', encoding="utf-8")
         rows = {"gt-ok": harness.full_field_row(
@@ -311,7 +313,13 @@ class TestGitLegacyMigration(_GitCase):
                                                   "phase": "verify", "rc": 0}),
                 "gt-ln": harness.full_field_row(
                     tid="gt-ln", gate_artifact={"path": str(ln_dir / "dir"),
-                                                "phase": "verify", "rc": 0})}
+                                                "phase": "verify", "rc": 0}),
+                "gt-sub": harness.full_field_row(  # 子树根等值——应改写
+                    tid="gt-sub", gate_artifact={"path": str(subtree_root),
+                                                 "phase": "verify", "rc": 0}),
+                "gt-dot": harness.full_field_row(  # ".." 穿越——不拷不改
+                    tid="gt-dot", gate_artifact={"path": traversal,
+                                                 "phase": "verify", "rc": 0})}
         harness._append_snapshot(self.src, rows)
         report = self.run_migrate()
         st = self.open_git()
@@ -324,11 +332,14 @@ class TestGitLegacyMigration(_GitCase):
         self.assertFalse((self.tgt.state / "tasks.jsonl").exists())
         self.assertFalse((self.tgt.path / "outside").exists())  # 零反噬
         self.assertTrue(victim.exists())  # 源件原封
-        self.assertFalse((self.tgt.state / "gate-artifacts" / "gt-ln" /
-                          "dir" / "loot.txt").exists())  # 链接不跟随
+        linked = self.tgt.state / "gate-artifacts" / "gt-ln" / "dir"
+        self.assertTrue(linked.is_symlink())  # 链接本体保全（symlinks=True
+        # 不跟随——真拷会把 loot.txt 落成普通文件而非链接）
+        self.assertEqual(st.get_task("gt-dot").gate.gate_artifact.path,
+                         traversal)  # ".." 穿越按子树外处理（不拷不改）
         self.assertEqual(report["gate_artifacts"],
-                         {"remapped": 2, "copied": 1, "missing": 1,
-                          "in_home_untouched": 2})
+                         {"remapped": 3, "copied": 2, "missing": 1,
+                          "in_home_untouched": 3})
 
     def test_wiki_symlinks_not_followed(self):
         """评审环 C 册 R1：源 wiki 符号链接目录/文件不跟随不计数。"""
