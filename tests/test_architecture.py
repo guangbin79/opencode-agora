@@ -145,6 +145,11 @@ class TestLayering(unittest.TestCase):
         assert_only("agorad/gitstore.py",
                     may_import=["agorad.domain", "agorad.storage"])
 
+    def test_v3_gitmigrate_layer(self):  # Req: F156——Git 迁移面仅 stdlib＋domain＋storage＋migrator＋gitstore（解析/映射复用 migrator，写入经 GitStore UoW，不 import access；SQL/git 子进程圈禁由 test_sql_confined_to_storage/test_git_subprocess_confined_to_gitstore 自动覆盖）
+        assert_only("agorad/gitmigrate.py",
+                    may_import=["agorad.domain", "agorad.storage",
+                                "agorad.migrator", "agorad.gitstore"])
+
     def test_git_subprocess_confined_to_gitstore(self):  # Req: F147——journal git 子进程圈禁 gitstore：journal.git 字样全 agorad 唯一落点；v3 应用层（含 storage/服务/装配/传输）零 git 子进程自起（业务 git 归 access/gitx 注入与 v2 main.py/access，不在本守卫面）
         v3_modules = {
             "contracts.py", "domain.py", "storage.py", "messaging.py",

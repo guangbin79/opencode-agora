@@ -585,6 +585,13 @@ class LegacyMigrator:
         免 copy2 的 umask 窗）；配置文件按源 mode 保真复制。
         """
         self._fire("files", "before")
+        config = self._copy_configs()
+        secrets, root_kept = self._copy_secrets()
+        self._fire("files", "after")
+        return config, secrets, root_kept
+
+    def _copy_configs(self):
+        """配置保 mode 照拷（Req: F156 抽取面——Git 后端 files 批次复用）。"""
         config = {}
         for name in CONFIG_FILES:
             src = self._src / ".agora" / name
@@ -599,6 +606,12 @@ class LegacyMigrator:
                 config[name] = "copied"
             else:
                 config[name] = "missing"
+        return config
+
+    def _copy_secrets(self):
+        """credentials/*.token＋root.token 0600 随迁（孤儿照迁——清扫归
+        AuthService.sweep，迁移不代跑）。Req: F156 抽取面——Git 后端凭据
+        put 前先拷（spec gitstore-phase3-legacy-migration §5）。"""
         secrets = 0
         cdir = self._src / "credentials"
         if cdir.is_dir():
@@ -611,8 +624,7 @@ class LegacyMigrator:
         if root.is_file():
             self._copy_secret(root, self._tgt / ".agora" / "root.token")
             root_kept = True
-        self._fire("files", "after")
-        return config, secrets, root_kept
+        return secrets, root_kept
 
     @staticmethod
     def _copy_secret(src: pathlib.Path, dst: pathlib.Path):
@@ -633,6 +645,16 @@ class LegacyMigrator:
         self._write_private(self._tgt / QUARANTINE_DIR / "manifest.json",
                             json.dumps(manifest, ensure_ascii=False,
                                        indent=1))
+        report = self._report(**parts)
+        self._write_private(self._tgt / REPORT_PATH,
+                            json.dumps(report, ensure_ascii=False, indent=1,
+                                       sort_keys=True))
+        self._fire("finalize", "after")
+        (self._tgt / MARKER).write_text("complete\n", encoding="utf-8")
+        return report
+
+    def _report(self, **parts) -> dict:
+        """结构化报告装配（纯函数面；Req: F156 抽取——Git 后端增补复用）。"""
         rows = parts["rows"]
         by_state = collections.Counter(r["state"] for r in rows.values())
         verify_states = collections.Counter(
@@ -687,11 +709,6 @@ class LegacyMigrator:
             "quarantine": {"messages": len(parts["msg_quar"]),
                            "events": len(parts["ev_quar"])},
         }
-        self._write_private(self._tgt / REPORT_PATH,
-                            json.dumps(report, ensure_ascii=False, indent=1,
-                                       sort_keys=True))
-        self._fire("finalize", "after")
-        (self._tgt / MARKER).write_text("complete\n", encoding="utf-8")
         return report
 
     @staticmethod

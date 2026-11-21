@@ -51,6 +51,7 @@ from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 SCHEMA_VERSION = 1
 EPOCH = 1
 JOURNAL_REF = "refs/agora/journal"
+JOURNAL_DIRNAME = "journal.git"  # Req: F156——canonical journal 目录名（字面量圈禁本模块，迁移面经此常量复用）
 BACKEND = "git"  # compose 后端选择名（Req: F155——名字常量随实现走）
 _MISSING = "0" * 40  # update-ref 零旧值＝断言 ref 不在（空历史首笔也 CAS）
 
@@ -317,7 +318,7 @@ class GitStore:
                  clock=None):
         self._state = os.fspath(state_path)
         self._journal = os.path.join(os.path.abspath(self._state),
-                                     "journal.git")
+                                     JOURNAL_DIRNAME)
         self._home = os.path.dirname(os.path.abspath(self._state))  # secret 文件根（Req: F151）
         self._injector = injector
         self._actor = actor
@@ -335,6 +336,11 @@ class GitStore:
     @property
     def head(self):
         return self._snap["head"]
+
+    @property
+    def tx_count(self):
+        """已提交 tx 数（Req: F156——迁移活性判据等只读面）。"""
+        return len(self._snap["txs"])
 
     # ---- git 子进程（谓词白名单＋最小环境）----
 
