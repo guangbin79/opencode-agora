@@ -37,6 +37,19 @@ _ENV_KEYS = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD",
              "AGORA_API_VERSION", "AGORA_BACKEND")
 
 
+def _stub_bin(base):
+    """临时 no-op 工具位（opencode/bun）：install.sh 依赖检查只 command -v
+    从不执行它们；真实运行冒烟归 agorad 进程测试——隔离安装不依赖宿主 CLI
+    （gate verify 子进程 PATH 无 opencode 的环境差异面，派发方裁定）。"""
+    b = Path(base) / "stubbin"
+    b.mkdir(parents=True, exist_ok=True)
+    for name in ("opencode", "bun"):
+        p = b / name
+        p.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        p.chmod(0o755)
+    return str(b)
+
+
 def _clean_env(**extra):
     """服务态 env 继承消毒（test_install.sh 同 juris：只认显式注入）。"""
     env = dict(os.environ)
@@ -113,8 +126,11 @@ def _stop_daemon(p):
         p.stdout.close()
 
 
-def _run_install(home, plaza, extra_env=None):
+def _run_install(home, plaza, extra_env=None, path_prefix=()):
     env = _clean_env(HOME=str(home), AGORA_HOME=str(plaza))
+    if path_prefix:
+        env["PATH"] = os.pathsep.join(
+            [*path_prefix, env.get("PATH", os.defpath)])
     if extra_env:
         env.update(extra_env)
     return subprocess.run(["bash", str(ROOT / "install.sh")], env=env,
@@ -287,10 +303,12 @@ class TestInstallGitV3Deployment(unittest.TestCase):
         self.addCleanup(shutil.rmtree, fix, ignore_errors=True)
         self.fix, self.home, self.plaza = fix, fix / "home", fix / "plaza"
         self.home.mkdir(parents=True)
+        self.path_prefix = (_stub_bin(fix),)
 
     def test_isolated_v3_git_install_and_payload_launch(self):  # Req: F158
         r = _run_install(self.home, self.plaza,
-                         {"AGORA_API_VERSION": "3", "AGORA_BACKEND": "git"})
+                         {"AGORA_API_VERSION": "3", "AGORA_BACKEND": "git"},
+                         path_prefix=self.path_prefix)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         # 安装载荷指纹（P2-13）＋插件/CLI 在位
         pay = self.plaza / ".agora" / "agorad"
@@ -366,9 +384,10 @@ class TestInstallDefaultV2Unchanged(unittest.TestCase):
         self.addCleanup(shutil.rmtree, fix, ignore_errors=True)
         self.fix, self.home, self.plaza = fix, fix / "home", fix / "plaza"
         self.home.mkdir(parents=True)
+        self.path_prefix = (_stub_bin(fix),)
 
     def test_default_install_launch_contract(self):  # Req: F158
-        r = _run_install(self.home, self.plaza)
+        r = _run_install(self.home, self.plaza, path_prefix=self.path_prefix)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         log = (self.plaza / ".agora" / "install-agorad.log").read_text()
         self.assertIn("agorad ready", log)  # v2 ready 行（非 -v3）
@@ -395,7 +414,7 @@ class TestInstallDefaultV2Unchanged(unittest.TestCase):
         ag.mkdir(parents=True)
         (ag / "agorad.env").write_text("AGORA_API_VERSION=3\n",
                                        encoding="utf-8")
-        r = _run_install(self.home, self.plaza)
+        r = _run_install(self.home, self.plaza, path_prefix=self.path_prefix)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         log = (ag / "install-agorad.log").read_text()
         self.assertIn("agorad-v3 ready", log)  # daemon 经 env 文件跑 v3
