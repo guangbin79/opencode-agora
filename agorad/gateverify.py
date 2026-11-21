@@ -1008,7 +1008,7 @@ class GateVerifyService:
             self._msg.dispatch(m.id)
         if cancelled:  # 终止副作用与 tasksvc._settle_cancel 同款（断言9锚）
             self._remove_credential_file(tid)
-            self._reclaim_env(tid, task.env_dir)
+            self._reclaim_env(tid, task.env_dir, "gateverify:tail_cancel")  # Req: ag-0e6ca3
         self._fire("settle", "after", tid=tid)
 
     # ---- 执行面（runner＋artifact；恒在 UoW 外） ----
@@ -1132,11 +1132,20 @@ class GateVerifyService:
             with self._store.uow():
                 self._store.delete_credential(task.worker_sid)
         self._remove_credential_file(tid)
-        self._reclaim_env(tid, task.env_dir)
+        self._reclaim_env(tid, task.env_dir, "gateverify:revoke")  # Req: ag-0e6ca3
 
-    def _reclaim_env(self, tid, env_dir):
+    def _reclaim_env(self, tid, env_dir, site):  # Req: ag-0e6ca3
+        """env 回收前置审计（task._reclaim_env 同款）：任务 id＋resolve 后路径
+        ＋调用点标签先落事件流再 remove_env。审计尽力而为（B 册终闸：审计
+        uow 竞争失败置于保护外＝回收未执行且无 reclaim_failed 痕的无归因
+        孤儿 env）——败不断回收，顺序仍先审计后动手。"""
         if not env_dir:
             return
+        try:
+            self._audit(tid, "env_removed",
+                        env=str(pathlib.Path(env_dir).resolve()), site=site)
+        except Exception:
+            pass  # F54 尽力而为口径：观测面病不断权威回收链
         try:
             self._gitx.remove_env(env_dir)
         except Exception as e:

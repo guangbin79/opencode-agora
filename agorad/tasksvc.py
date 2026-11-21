@@ -388,13 +388,13 @@ class TaskService:
                 env_base = self._gitx.head(env)  # F111 评审链根锚
             except Exception as e:
                 if new_env:
-                    self._gitx.remove_env(env)
+                    self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_head")  # Req: ag-0e6ca3
                 self._reject(tid, actor_sid, "conflict", f"env_head: {e}")
             try:  # Req: ag-0d2daa 检出后即物化（worker 首轮构建不撞空依赖）
                 report = self._gitx.materialize_checkout(env, t.project_dir)
             except Exception as e:  # 物化败＝拒派并回收新 env（不交残树）
                 if new_env:
-                    self._gitx.remove_env(env)
+                    self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_materialize")  # Req: ag-0e6ca3
                 self._reject(tid, actor_sid, "conflict",
                              f"checkout_materialize: {e}")
         boot = (f"[agora] {tid}: {t.title}\nenv: {env}\n"
@@ -404,7 +404,7 @@ class TaskService:
                                    model=t.model)
         except Exception as e:  # can_spawn 熔断：本轮新建 env 归本轮回收
             if new_env:
-                self._gitx.remove_env(env)
+                self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_spawn")  # Req: ag-0e6ca3
             self._reject(tid, actor_sid, "conflict", f"can_spawn: {e}")
         token = secrets.token_hex(16)
         now = self._now()
@@ -452,12 +452,12 @@ class TaskService:
         except _GuardConflict as exc:  # 卫兵拒：补审计行（原报因保持）
             self._remove_credential_file(tid)  # 牌已废（DB 行随回滚消失）
             if new_env:
-                self._gitx.remove_env(env)
+                self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_guard")  # Req: ag-0e6ca3
             self._reject(tid, actor_sid, exc.code, exc.message)
         except BaseException:  # 清理窗全覆盖（存储/注入器/落盘异常同回收）
             self._remove_credential_file(tid)
             if new_env:
-                self._gitx.remove_env(env)
+                self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_cleanup")  # Req: ag-0e6ca3
             raise
         if msg is not None:
             self._msg.dispatch(msg.id)  # 提交后 at-least-once 补投
@@ -609,7 +609,7 @@ class TaskService:
         if msg is not None:
             self._msg.dispatch(msg.id)
         self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
-        self._reclaim_env(tid, task.env_dir, sid)
+        self._reclaim_env(tid, task.env_dir, sid, "tasksvc:settle_cancel")  # Req: ag-0e6ca3
         return True
 
     def stop_after_failed(self, tid):
@@ -918,7 +918,7 @@ class TaskService:
         for m in msgs:
             self._msg.dispatch(m.id)
         self._remove_credential_file(tid)  # 撤牌双删（DB 行外同清 secret 文件）
-        self._reclaim_env(tid, task.env_dir, sid)
+        self._reclaim_env(tid, task.env_dir, sid, "tasksvc:deliver_ack")  # Req: ag-0e6ca3
         return {"ok": True, "outcome": "delivered"}
 
     def _deliver_fail(self, tid, sid, d, error, reason=""):
@@ -1145,9 +1145,22 @@ class TaskService:
             raise ContractError("invalid_argument",
                                 f"tid 形态非法（收到 {tid!r}）", {"task": tid})
 
-    def _reclaim_env(self, tid, env_dir, actor):
+    def _reclaim_env(self, tid, env_dir, actor, site):  # Req: ag-0e6ca3
+        """env 回收前置审计（task._reclaim_env 同款）：任务 id＋resolve 后路径
+        ＋调用点标签先落事件流再 remove_env。
+        须在 UoW 外调用（内部开自持 uow 落审计，嵌套即 StorageError）；审计
+        尽力而为（B 册终闸：多线程 uow 竞争下审计失败拦断回收＝终局已落账
+        而 env 无痕滞留/取消对账面报错）——败不断回收，顺序仍先审计后动手。"""
         if not env_dir:
             return
+        try:
+            with self._store.uow():
+                self._store.append_event(self._ev(
+                    self._now(), actor, "env_removed", tid,
+                    {"env": str(pathlib.Path(env_dir).resolve()),
+                     "site": site}))
+        except Exception:
+            pass  # F54 尽力而为口径：观测面病不断权威回收链
         try:
             self._gitx.remove_env(env_dir)
         except Exception as e:  # 回收败留痕后继续，不拦断级联/通知
