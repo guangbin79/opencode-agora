@@ -10,6 +10,12 @@ re-put 更晚版本/overlay 读己之写/重启外部文件水合/换号继用�
 TestCredentialSecretSafety（canonical 只含摘要＋secret_path、全 Git 对象
 零明文牌、put 先验文件缺/不符 fail-closed 零提交、重开缺/错文件专用错、
 存储不写不删外部文件、坏摘要/错型 fail-closed）。
+Req: F153 — Phase 2 artifact/event 仓库面＋GateVerify 移植（spec
+gitstore-phase2-artifacts-gate-verify）：TestArtifactRepository（events_
+for_task 归一化/seq 序、insert/artifacts_for_task newest-first＋overlay、
+弃单 id 不复用＋重启重放）、TestArtifactCorruption（损毁/重号/错型/缺引用
+fail-closed）、TestGateVerifyOnGitPort（受理拒因/分类路由/门审缓存与独立
+连败/集成全绿产物投影/复合门事务不变量/崩窗结算撤牌回收——服务零改动）。
 
 断言清单（wiki/spec/gitstore-phase0-1.md「Tests required」逐条机械判定）：
 1 init/config/head/ref＋零 SQLite 件；2 外来账本（agora.db/tasks.jsonl）拒建
@@ -36,9 +42,10 @@ import subprocess
 import unittest
 
 from agorad.contracts import ContractError
-from agorad.domain import (Credential, DeliveryReceipt, Event, Message, Task,
-                           Timer, TimerState, dispatch_secret_key,
-                           timer_transition)
+from agorad.domain import (Artifact, Credential, DeliveryReceipt, Event,
+                           Message, Task, Timer, TimerState, VerifySpec,
+                           dispatch_secret_key, timer_transition)
+from agorad.gateverify import DiskArtifactSink, DoneReject, GateVerifyService
 from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretError,
                              ForeignLedgerError, GitStore,
                              JournalCorruptionError, check_verb)
@@ -47,6 +54,13 @@ from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 from agorad.tasksvc import TaskService
 from agorad.timersvc import TimerService
 from tests import v3_harness as harness
+from tests.test_v3_gate_port import (BRANCH as GATE_BRANCH,
+                                     C as GATE_C, E as GATE_E,
+                                     TIP as GATE_TIP,
+                                     DISPATCHER as GATE_DISP,
+                                     WORKER as GATE_WORKER,
+                                     GitxGateStub as GateGitxStub,
+                                     OcStub as GateOcStub)
 from tests.test_v3_task_service import (GitxStub as TaskGitxStub,
                                         OcStub as TaskOcStub,
                                         flip_state_on_second_read,
@@ -1661,6 +1675,420 @@ class TestTaskServiceOnGitPort(unittest.TestCase):
         self.assertTrue((self.home.credentials / f"{tid}.token").is_file())
         fresh = GitStore(self.home.state)  # 清扫后重启照常水合
         self.assertEqual(fresh.get_credential("ses-w1").token, r1["token"])
+
+
+class TestArtifactRepository(_Base):  # Req: F153——artifact/event 仓库面
+    OTHER = "ag-o1"
+
+    def _seed_task(self, st, tid=TID):
+        with st.uow():
+            st.upsert_task(Task(id=tid, state="running"))
+
+    def _ev(self, ts, name, task=TID):
+        return Event(seq=0, ts_ms=ts, actor="a", event=name, task=task)
+
+    def test_events_for_task_ordering_and_normalization(self):
+        st = self.store()
+        self._seed_task(st)
+        self._seed_task(st, self.OTHER)
+        with st.uow():
+            for ev in (self._ev(1, "e1"), self._ev(2, "e2", task=None),
+                       self._ev(3, "e3", task=self.OTHER), self._ev(4, "e4"),
+                       self._ev(5, "e5", task="")):
+                st.append_event(ev)
+        self.assertEqual([e.event for e in st.events_for_task(TID)],
+                         ["e1", "e4"])  # 全局 seq 升序，跨任务事件不混入
+        self.assertEqual([e.event for e in st.events_for_task(self.OTHER)],
+                         ["e3"])
+        # SQLite 同语义：_null("")→NULL 且 SQL NULL 不等任何参数——空/None
+        # tid 恒空集；空 task 事件（""/None）不可按任务命中
+        self.assertEqual(st.events_for_task(""), [])
+        self.assertEqual(st.events_for_task(None), [])
+        self.assertEqual(st.events_for_task("ag-none"), [])
+
+    def test_insert_requires_uow_newest_first_and_overlay(self):
+        st = self.store()
+        self._seed_task(st)
+        self._seed_task(st, self.OTHER)
+        with self.assertRaises(NoActiveUnitOfWork):
+            st.insert_artifact(Artifact(task_id=TID, phase="verify"))
+        with st.uow():
+            st.insert_artifact(Artifact(task_id=TID, phase="verify", rc=0,
+                                        bytes=10))
+            st.insert_artifact(Artifact(task_id=TID, phase="integration",
+                                        rc=1, bytes=20, duration_s=1.5))
+            st.insert_artifact(Artifact(task_id=self.OTHER, phase="verify"))
+            self.assertEqual(  # overlay 读己之写：未提交即见 newest-first
+                [a.phase for a in st.artifacts_for_task(TID)],
+                ["integration", "verify"])
+        self.assertEqual([a.phase for a in st.artifacts_for_task(TID)],
+                         ["integration", "verify"])  # 提交后口径不变
+        self.assertEqual([a.phase for a in st.artifacts_for_task(self.OTHER)],
+                         ["verify"])
+        self.assertEqual(st.artifacts_for_task("ag-none"), [])
+
+    def test_ids_monotonic_after_failed_uow_and_replay(self):
+        st = self.store()
+        self._seed_task(st)
+        self.injector.arm("write-object", "before")
+        with self.assertRaises(harness.FaultInjected):
+            with st.uow():
+                st.insert_artifact(Artifact(task_id=TID, phase="a1"))
+        self.injector.disarm("write-object")
+        with st.uow():
+            st.insert_artifact(Artifact(task_id=TID, phase="a2"))
+            st.append_event(self._ev(1, "e"))
+        paths = [p for p in _head_files(self.home.state)
+                 if p.startswith("objects/artifacts/")]
+        self.assertEqual(len(paths), 1)  # 弃单对象不入树
+        self.assertTrue(paths[0].endswith("%020d.json" % 2))  # 弃单 id 不复用
+        fresh = GitStore(self.home.state)  # 重启重放等价
+        self.assertEqual([a.phase for a in fresh.artifacts_for_task(TID)],
+                         ["a2"])
+        self.assertEqual([e.event for e in fresh.events_for_task(TID)], ["e"])
+        with fresh.uow():  # 重启后派号接续（高水位只升不降）
+            fresh.insert_artifact(Artifact(task_id=TID, phase="a3"))
+        self.assertEqual([a.phase for a in fresh.artifacts_for_task(TID)],
+                         ["a3", "a2"])
+
+
+class TestArtifactCorruption(_Base):  # Req: F153——artifact canonical fail-closed
+    def _seed(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+            st.insert_artifact(Artifact(task_id=TID, phase="verify", rc=0))
+            st.insert_artifact(Artifact(task_id=TID, phase="review", rc=1))
+        return st
+
+    def _paths(self):
+        return sorted(p for p in _head_files(self.home.state)
+                      if p.startswith("objects/artifacts/"))
+
+    def test_malformed_entity_fails_closed(self):
+        self._seed()
+        files = _head_files(self.home.state)
+        p1 = self._paths()[0]
+        obj = json.loads(_blob(self.home.state, files[p1]))
+        obj["data"] = {"bad": 1}  # 实体字段缺形
+        _mutate_head(self.home.state, {p1: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_id_path_mismatch_fails_closed(self):
+        self._seed()
+        files = _head_files(self.home.state)
+        p1 = self._paths()[0]
+        obj = json.loads(_blob(self.home.state, files[p1]))
+        obj["id"] = 99  # 内容 id 与路径 id 不符
+        _mutate_head(self.home.state, {p1: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_duplicate_id_wrong_bucket_fails_closed(self):
+        self._seed()
+        files = _head_files(self.home.state)
+        blob = _blob(self.home.state, files[self._paths()[0]])
+        _mutate_head(self.home.state, {
+            "objects/artifacts/de/ad/%020d.json" % 1: blob})  # 冒位重号
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_scalar_type_mismatch_fails_closed(self):
+        self._seed()
+        files = _head_files(self.home.state)
+        p1, p2 = self._paths()
+        o1 = json.loads(_blob(self.home.state, files[p1]))
+        o1["data"]["bytes"] = "10"  # 错型标量（字符串）
+        o2 = json.loads(_blob(self.home.state, files[p2]))
+        o2["data"]["bytes"] = None  # 错型标量（null）
+        _mutate_head(self.home.state, {
+            p1: json.dumps(o1).encode(), p2: json.dumps(o2).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_missing_referenced_object_fails_closed(self):
+        self._seed()
+        _mutate_head(self.home.state, {self._paths()[0]: None})  # 留 tx 引用
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+
+class GateRunnerStub:
+    """runner 桩（Git 口径，SQLite 桩同约）：调用点必在 UoW 外——断言走
+    GitStore overlay 面（SQLite 侧 _depth 探针在 Git 后备无对应）。"""
+
+    def __init__(self, store, script=(), before=None):
+        self.store, self.script, self.before = store, list(script), before
+        self.calls = []
+
+    def __call__(self, env_dir, cmd, *, timeout=None, ceiling=None,
+                 on_soft=None):
+        if self.store is not None and self.store._in_uow():
+            raise AssertionError("runner 调用点身处 UoW 写事务内（§4 禁子进程）")
+        if self.before is not None:
+            self.before(self)
+        self.calls.append({"env": env_dir, "cmd": cmd, "timeout": timeout,
+                           "ceiling": ceiling, "on_soft": on_soft})
+        return self.script.pop(0) if self.script else (0, "")
+
+    def by_env(self, env_dir):
+        return [c for c in self.calls if c["env"] == env_dir]
+
+
+class TestGateVerifyOnGitPort(unittest.TestCase):
+    """Req: F153——GateVerifyService 契约移植 Git 后端（服务零改动；不复制
+    SQLite 全套——择受理/分类/门审/集成/产物/崩窗结算代表性路径＋复合门
+    事务不变量；gitx/锚/runner 沿用 SQLite 桩约）。"""
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.injector = harness.FaultInjector()
+        for fp in GIT_FAILPOINTS + ("uow", "dispatch", "verify", "settle"):
+            self.injector.register(fp)  # Git 提交面 failpoint 须先注册
+        self.storage = GitStore(self.home.state, injector=self.injector)
+        self.clock = FakeClock()
+        self.gitx = GateGitxStub()
+        self.oc = GateOcStub()
+        self.messaging = MessagingService(
+            self.storage, self.oc, home=str(self.home.path),
+            clock=self.clock, injector=self.injector)
+        self.tasksvc = TaskService(
+            self.storage, self.gitx, self.oc, messaging=self.messaging,
+            home=str(self.home.path), clock=self.clock)
+        self.runner = GateRunnerStub(self.storage)
+        self.sink = DiskArtifactSink(self.home.state / "gate-artifacts")
+        self.gate = GateVerifyService(
+            self.storage, self.gitx, self.runner, messaging=self.messaging,
+            tasksvc=self.tasksvc,
+            anchors=lambda env: self._anchor_rows.get(env),
+            artifacts=self.sink, home=str(self.home.path),
+            clock=self.clock, injector=self.injector, verify_timeout=300)
+        self._anchor_rows = {}
+
+    def set_anchor(self, tid, head=GATE_C, base=GATE_E, clean=True):
+        self._anchor_rows[f"/tmp/envs/{tid}"] = (None if head is None else
+                                                 {"head": head, "base": base,
+                                                  "clean": clean})
+
+    def seed(self, tid, state="done", **over):
+        row = dict(id=tid, state=state, title=tid, goal="g",
+                   project_dir="/repo", target_branch=GATE_BRANCH,
+                   env_dir=f"/tmp/envs/{tid}", env_base=GATE_E,
+                   dispatcher_sid=GATE_DISP, root_sid=GATE_DISP,
+                   worker_sid=GATE_WORKER, chain_depth=1, created_ms=1,
+                   updated_ms=1, commit=GATE_C,
+                   verify=VerifySpec(cmd="true", state="registered",
+                                     registered_by=GATE_DISP,
+                                     registered_at_ms=1))
+        row.update(over)
+        with self.storage.uow():
+            self.storage.upsert_task(Task(**row))
+        return tid
+
+    def requeue(self, tid, commit=GATE_C):
+        self.tasksvc.transition(tid, "running", actor=GATE_WORKER)
+        self.set_anchor(tid, head=commit)
+        self.gitx.contained.discard((commit, GATE_BRANCH))
+        return self.gate.accept_done(tid, GATE_WORKER, commit)
+
+    def events(self, tid):
+        return [e.event for e in self.storage.events_for_task(tid)]
+
+    def messages(self, sid):
+        return self.storage.messages_for_sid(sid)
+
+    @staticmethod
+    def text(m):
+        return (m.body.decode("utf-8", "replace")
+                if isinstance(m.body, (bytes, bytearray)) else str(m.body))
+
+    def test_accept_done_flow_double_done_and_reject_codes(self):
+        tid = self.seed("ag-g1", state="running")
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.accept_done(tid, GATE_WORKER, GATE_C),
+                         "accepted")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.commit, t.rebased_from),
+                         ("done", GATE_C, None))
+        self.assertIn("done", self.events(tid))
+        self.assertIsInstance(self.gate.accept_done(tid, GATE_WORKER, GATE_C),
+                              DoneReject)  # 二次 done：state 拒
+        cases = [("ag-g2", "dispatched", {}, GATE_C, "state"),
+                 ("ag-g3", "running",
+                  {"verify": VerifySpec(state="pending")}, GATE_C,
+                  "verify-unregistered"),
+                 ("ag-g4", "running",
+                  {"verify": VerifySpec(cmd="", state="registered",
+                                        registered_by=GATE_DISP,
+                                        registered_at_ms=1)}, GATE_C,
+                  "verify-empty"),
+                 ("ag-g5", "running", {}, "zz", "body-format"),
+                 ("ag-g6", "running", {}, GATE_C, "anchor")]
+        for tid, state, over, commit, code in cases:
+            tid = self.seed(tid, state=state, **over)
+            r = self.gate.accept_done(tid, GATE_WORKER, commit)
+            self.assertIsInstance(r, DoneReject, (tid, code))
+            self.assertEqual(r.code, code, (tid, r.code))
+            t = self.storage.get_task(tid)
+            self.assertEqual(t.fail_streak,
+                             1 if code == "anchor" else 0, (tid, code))
+            self.assertIn("done_rejected", self.events(tid))
+            self.assertEqual(t.state, state)  # 拒收零状态改写
+        tid = self.seed("ag-g7", state="running")  # 子任务闸：先于锚单点
+        self.seed("ag-kid", state="dispatched", dispatcher_sid=GATE_WORKER)
+        r = self.gate.accept_done(tid, GATE_WORKER, GATE_C)
+        self.assertEqual((r.code, self.storage.get_task(tid).fail_streak),
+                         ("children", 0))
+        self.seed("ag-kid", state="closed", dispatcher_sid=GATE_WORKER)  # 结案
+        tid = self.seed("ag-g8", state="running", commit=None)  # 空集且无在案交付
+        self.set_anchor(tid)
+        self.gitx.contained.add((GATE_C, GATE_BRANCH))
+        r = self.gate.accept_done(tid, GATE_WORKER, GATE_C)
+        self.assertEqual((r.code, self.storage.get_task(tid).fail_streak),
+                         ("vacuous-done", 1))
+
+    def test_verify_classification_and_streak_blocked(self):
+        tid = self.seed("ag-v1")
+        self.runner.script = [(1, ""), (1, "FAIL-tail")]
+        self.assertEqual(self.gate.run(tid), "verify_failed")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.fail_streak), ("verify_failed", 1))
+        self.assertTrue(any(m.kind == "process" and "FAIL-tail" in self.text(m)
+                            for m in self.messages(GATE_WORKER)))
+        for _ in range(2):  # 两轮续修再败 → 三连败自动 blocked
+            self.assertEqual(self.requeue(tid), "accepted")
+            self.runner.script = [(1, ""), (1, "FAIL")]
+            self.gate.run(tid)
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.fail_streak), ("blocked", 3))
+        for tid, rc, outcome, evname in (  # 驻留分类：dead/infra/overrun
+                ("ag-v2", 126, "dead", "verify_dead"),
+                ("ag-v3", -9, "infra", "verify_infra_failed"),
+                ("ag-v4", 124, "overrun", "verify_overrun")):
+            self.runner.script = [(1, "red-base"), (rc, "boom")]
+            self.assertEqual(self.gate.run(self.seed(tid)), outcome)
+            t = self.storage.get_task(tid)
+            self.assertEqual((t.state, t.fail_streak), ("done", 0))
+            self.assertIn(evname, self.events(tid))
+
+    def test_review_green_caches_cmd_head(self):
+        tid = self.seed("ag-r1", review_cmd="ocr .")
+        self.runner.script = [(1, ""), (0, ""), (0, "REVIEW"), (0, "")]
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "green")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.gate.review_cache["cmd"],
+                          t.gate.review_cache["commit"],
+                          t.gate.review_cache["ok"],
+                          t.gate.review_fail_streak),
+                         ("ocr .", GATE_E, True, 0))
+        calls = [c for c in self.runner.calls
+                 if "AGORA_REVIEW_BASE" in c["cmd"]]
+        self.gate.run(tid)  # 再跑：缓存命中零重审
+        self.assertEqual(len([c for c in self.runner.calls
+                              if "AGORA_REVIEW_BASE" in c["cmd"]]), len(calls))
+        self.assertIn("gate_review_cached", self.events(tid))
+
+    def test_review_red_independent_streak_and_blocked_at_three(self):
+        tid = self.seed("ag-r2", review_cmd="ocr .")
+        for i, expect in enumerate((1, 2, 3)):
+            # 首轮探针实跑；reopen 重排队后探针缓存命中＝脚本少一发
+            self.runner.script = ([(1, "")] if i == 0 else []) + \
+                [(0, ""), (1, "REVIEW-RED")]
+            self.set_anchor(tid)
+            outcome = self.gate.run(tid)
+            t = self.storage.get_task(tid)
+            if expect < 3:
+                self.assertEqual(outcome, "reopened")
+                self.assertEqual((t.gate.review_fail_streak, t.fail_streak),
+                                 (expect, 0))  # 独立计数：不烧质量连败
+                self.requeue(tid)
+            else:
+                self.assertEqual(outcome, "blocked")
+                self.assertEqual(
+                    (t.state, t.gate.review_fail_streak, t.fail_streak),
+                    ("blocked", 3, 0))
+                self.assertTrue(any("三轮分歧" in self.text(m)
+                                    for m in self.messages(GATE_DISP)))
+
+    def test_integration_green_pipeline_artifacts_and_projection(self):
+        # 全绿一轮（探针红→env 绿→门审绿→集成绿）：export 前缀、artifact
+        # 行逐轮落账 newest-first、任务行投影最新一条
+        tid = self.seed("ag-i1", review_cmd="ocr .")
+        self.runner.script = [(1, "base"), (0, "env"), (0, "rev"), (0, "int")]
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "green")
+        int_cmds = [c["cmd"] for c in
+                    self.runner.by_env(f"/tmp/envs/{tid}__gate")
+                    if "AGORA_INTEGRATION_BASE" in c["cmd"]]
+        self.assertEqual(
+            int_cmds, [f"export AGORA_INTEGRATION_BASE={GATE_TIP}; true"])
+        rows = self.storage.artifacts_for_task(tid)
+        self.assertEqual([r.phase for r in rows],
+                         ["integration_verify", "review", "verify",
+                          "base_probe"])
+        self.assertEqual(
+            self.storage.get_task(tid).gate.gate_artifact.path, rows[0].path)
+        self.assertIn("gate_artifact_written", self.events(tid))
+        ev = self.events(tid)
+        i = (ev.index("phase_base_probe"), ev.index("phase_verify"),
+             ev.index("phase_review"), ev.index("phase_integration"),
+             ev.index("verify_green"))
+        self.assertEqual(i, tuple(sorted(i)))  # 逐点有序落 events
+
+    def test_artifact_tx_one_commit_all_changed_objects(self):
+        # 产物复合事务不变量：insert_artifact＋任务行投影＋事件恰一 tx
+        # ＝恰一 commit 含全部变更对象版本；整账本 canonical 只增
+        tid = self.seed("ag-q1")
+        self.runner.script = [(1, ""), (1, "FAIL")]
+        self.assertEqual(self.gate.run(tid), "verify_failed")
+        obs = harness.GitJournalObserver(self.home.state)
+        txs = obs.txs()
+        self.assertEqual(len(obs.commits()), len(txs))  # 每 tx 恰一 commit
+        self.assertTrue(obs.additions_only())  # canonical 只增
+        atx = next(t for t in txs.values()
+                   if any(op["op"] == "insert_artifact"
+                          for op in t["operations"]))
+        self.assertEqual({op["op"] for op in atx["operations"]},
+                         {"insert_artifact", "upsert_task", "append_event"})
+        files = obs.paths()
+        for op in atx["operations"]:  # tx 引用对象俱在单 commit 树
+            self.assertIn(op["path"], files)
+
+    def test_cancel_queued_in_gate_settles_at_tail(self):
+        # 崩窗结算：门内排队取消在门尾消费——迁移＋事件＋消息同 UoW、
+        # 撤牌（get/delete_credential Git 面）＋env 回收
+        tid = self.seed("ag-w1")
+        self.runner = GateRunnerStub(self.storage, before=lambda r: (
+            self.tasksvc.cancel(tid, GATE_DISP, "dispatcher")))
+        self.gate._runner = self.runner
+        self.runner.script = [(1, ""), (0, ""), (0, "")]
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "green")  # verify 结果不被取消吞
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.gate.pending_cancel), ("cancelled", False))
+        self.assertIsNone(self.storage.get_credential(GATE_WORKER))
+        self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)
+        self.assertTrue(any("cancelled at gate tail" in self.text(m)
+                            for m in self.messages(GATE_DISP)))
+
+    def test_landed_residue_settles_merged_closed_and_revokes(self):
+        tid = self.seed("ag-w2")
+        self.gitx.contained.add((GATE_C, GATE_BRANCH))  # 权威已含交付
+        self.home.write_credential(tid, "tok")
+        with self.storage.uow():
+            self.storage.put_credential(Credential(
+                sid=GATE_WORKER, token="tok", task_id=tid))
+        self.assertEqual(self.gate.run(tid), "merged")
+        t = self.storage.get_task(tid)
+        self.assertEqual(t.state, "closed")  # merged→closed 一事务收口
+        self.assertIsNone(self.storage.get_credential(GATE_WORKER))  # 撤牌
+        self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)  # 回收
+        n_events = len(self.events(tid))
+        self.assertEqual(self.gate.run(tid), "skip")  # 重排恰一次零重复迁移
+        self.assertEqual(len(self.events(tid)), n_events + 3)  # 唯车道审计
 
 
 if __name__ == "__main__":

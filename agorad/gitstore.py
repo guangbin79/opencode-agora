@@ -7,6 +7,11 @@ canonical 凭据对象只记 token 摘要＋外部 secret 引用（明文牌不�
 对象），secret 文件按 AuthService 路径约定留在 journal.git 之外；put 先验
 外部文件后记账，get/credentials_all 水合并验摘要；删除＝下一版本 tombstone
 （历史版本仍在树可审计）；AuthService 零改动跑 Git 后端。
+Req: F153 — Phase 2 artifact/event 仓库面（spec gitstore-phase2-artifacts-
+gate-verify）：objects/artifacts/<bucket>/<id>.json 不可变追加族（服务端
+单调派号，artifact.path 不入 canonical 路径）＋insert_artifact/
+artifacts_for_task（newest-first）/events_for_task（SQLite _null("")→NULL
+同归一化）；GateVerifyService 零改动跑 Git 后端。
 
 裸仓 state/journal.git（HEAD 符号指向 refs/agora/journal）作不可变文本账本：
 canonical 对象（tasks/messages/receipts/mail-cursors＋credentials/events/
@@ -189,6 +194,38 @@ def _timer_from_data(tid: str, d: dict) -> Timer:
     return tm
 
 
+def _artifact_from_data(d) -> Artifact:
+    """canonical artifact data → domain Artifact（Req: F153）；错型
+    fail-closed（重放面，SQLite 列约束同语义：bytes/rc/started/ended
+    精确 int——bool 不冒充、duration_s 数值、str 列不可 null）。"""
+    if not isinstance(d, dict):
+        raise TypeError("data 非对象")
+    try:
+        art = Artifact(task_id=d["task_id"], phase=d["phase"],
+                       path=d["path"], cmd=d["cmd"], rc=d["rc"],
+                       failure_kind=d["failure_kind"],
+                       duration_s=d["duration_s"], bytes=d["bytes"],
+                       error=d["error"], started_at_ms=d["started_at_ms"],
+                       ended_at_ms=d["ended_at_ms"])
+    except (TypeError, KeyError) as exc:
+        raise TypeError(f"artifact 字段不符: {exc}")
+    if (not isinstance(art.task_id, str) or not isinstance(art.phase, str)
+            or not isinstance(art.path, str) or not isinstance(art.cmd, str)
+            or type(art.bytes) is not int
+            or not (art.rc is None or type(art.rc) is int)
+            or not (art.failure_kind is None
+                    or isinstance(art.failure_kind, str))
+            or not (art.duration_s is None
+                    or (isinstance(art.duration_s, (int, float))
+                        and not isinstance(art.duration_s, bool)))
+            or not (art.error is None or isinstance(art.error, str))
+            or not (art.started_at_ms is None
+                    or type(art.started_at_ms) is int)
+            or not (art.ended_at_ms is None or type(art.ended_at_ms) is int)):
+        raise ValueError("artifact 标量字段类型不符")
+    return art
+
+
 _RE_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -237,6 +274,7 @@ _RE_RECEIPT = re.compile(rf"^objects/receipts/{_H}/(?P<id>[0-9]{{20}})/(?P<v>[0-
 _RE_CURSOR = re.compile(rf"^objects/mail-cursors/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
 _RE_CRED = re.compile(rf"^objects/credentials/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
 _RE_TIMER = re.compile(rf"^objects/timers/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
+_RE_ARTIFACT = re.compile(rf"^objects/artifacts/{_H}/(?P<id>[0-9]{{20}})\.json$")
 _RE_EVENT = re.compile(rf"^objects/events/{_H}/(?P<seq>[0-9]{{20}})\.json$")
 _RE_TX = re.compile(rf"^tx/{_H}/(?P<seq>[0-9]{{20}})\.json$")
 
@@ -263,7 +301,8 @@ def _obj_bytes(kind, ident, version, seq, data) -> bytes:
 def _empty_state():
     return {"head": None, "tasks": {}, "messages": {}, "receipts": {},
             "cursors": {}, "credentials": {}, "events": {}, "txs": {},
-            "dedup": {}, "timers": {}, "timer_ents": {}, "cred_reg": {}}
+            "dedup": {}, "timers": {}, "timer_ents": {}, "cred_reg": {},
+            "artifacts": {}}
 
 
 class GitStore:
@@ -393,7 +432,8 @@ class GitStore:
                 bad(path, "对象头/路径不一致")
             return obj
 
-        tasks, receipts, cursors, creds, timer_ents = {}, {}, {}, {}, {}
+        tasks, receipts, cursors, creds, timer_ents, artifacts = (
+            {}, {}, {}, {}, {}, {})
         metas, bodies, events, txs = {}, {}, {}, {}
         obj_seqs = []
         for path, sha in entries.items():
@@ -477,6 +517,18 @@ class GitStore:
                 if cur is None or int(m["v"]) > cur[0]:
                     timer_ents[m["id"]] = (int(m["v"]), ent)
                 continue
+            m = _RE_ARTIFACT.match(path)
+            if m:  # artifact 不可变追加族：路径唯一即 id 唯一——冒位重号由
+                # bucket/头校验 fail-closed；每对象即一实体（无版本折叠）
+                obj = checked(obj_of(sha, path), path, "artifact",
+                              int(m["id"]), 1, m.group(1))
+                obj_seqs.append(obj["seq"])
+                try:  # Req: F153——错型 fail-closed
+                    ent = _artifact_from_data(obj["data"])
+                except (TypeError, KeyError, ValueError) as exc:
+                    bad(path, f"artifact 实体还原失败: {exc}")
+                artifacts[int(m["id"])] = ent
+                continue
             m = _RE_EVENT.match(path)
             if m:
                 obj = checked(obj_of(sha, path), path, "event",
@@ -557,9 +609,11 @@ class GitStore:
                       "receipts": receipts, "cursors": cursors,
                       "credentials": creds, "events": events, "txs": txs,
                       "dedup": dedup, "timers": timers,
-                      "timer_ents": timer_ents, "cred_reg": cred_reg}
+                      "timer_ents": timer_ents, "cred_reg": cred_reg,
+                      "artifacts": artifacts}
         for key, top in (("message", max(messages, default=0)),
                          ("event", max(events, default=0)),
+                         ("artifact", max(artifacts, default=0)),
                          ("tx", max(txs, default=0))):
             self._hwm[key] = max(self._hwm.get(key, 0), top)
         for table, kind in ((tasks, "task"), (receipts, "receipt"),
@@ -582,7 +636,7 @@ class GitStore:
             self._ov = {"writes": [], "tasks": {}, "messages": {},
                         "receipts": {}, "cursors": {}, "credentials": {},
                         "events": {}, "dedup": {}, "timers": {},
-                        "timer_ents": {}, "cred_reg": {}}
+                        "timer_ents": {}, "cred_reg": {}, "artifacts": {}}
             self._owner = threading.get_ident()
             try:
                 self._install_guard()
@@ -655,6 +709,8 @@ class GitStore:
         if kind == "timer":
             return (f"objects/timers/{_bucket(_safe(ident))}/"
                     f"{_safe(ident)}/{_v(version)}.json")
+        if kind == "artifact":
+            return f"objects/artifacts/{_bucket(ident)}/{_v(ident)}.json"
         return f"objects/events/{_bucket(ident)}/{_v(ident)}.json"  # event
 
     def _commit(self):
@@ -732,7 +788,7 @@ class GitStore:
         ns = {"head": new, "txs": {**s["txs"], tx_seq: tx}}
         for key in ("tasks", "messages", "receipts", "cursors",
                     "credentials", "events", "dedup", "timers",
-                    "timer_ents", "cred_reg"):
+                    "timer_ents", "cred_reg", "artifacts"):
             ns[key] = {**s[key], **ov[key]} if ov[key] else s[key]
         self._snap = ns
 
@@ -1141,3 +1197,36 @@ class GitStore:
         if self._in_uow():
             merged.update(self._ov["events"])
         return [merged[k] for k in sorted(merged)]
+
+    def events_for_task(self, tid):
+        """按任务事件流（全局 seq 升序）；task 归一化同 SQLite：_null("")
+        →NULL 且 SQL NULL 不等任何参数——空/None tid 恒空集，空 task
+        事件不可按任务命中。"""
+        merged = dict(self._snap["events"])
+        if self._in_uow():
+            merged.update(self._ov["events"])
+        if not tid:
+            return []
+        return [merged[k] for k in sorted(merged)
+                if merged[k].task == tid]
+
+    # ---- artifacts（Req: F153——不可变追加族，同 SQLite 语义面）----
+
+    def insert_artifact(self, a: Artifact):
+        """不可变追加（永不物理删除/更新）；服务端单调派号——artifact.path
+        不入 canonical 路径（不编码不可信路径片段）；SQLite 同形无返回值；
+        合法性（task 存在性等 FK 面）归服务层，storage 同口径不复查。"""
+        self._require_uow()
+        aid = self._alloc("artifact")
+        self._ov["artifacts"][aid] = a
+        self._ov["writes"].append(_Write(
+            "insert_artifact", "artifact", aid, 1, dataclasses.asdict(a)))
+        return None
+
+    def artifacts_for_task(self, tid):
+        """newest-first（id 降序，SQLite ORDER BY id DESC 同形）。"""
+        merged = dict(self._snap["artifacts"])
+        if self._in_uow():
+            merged.update(self._ov["artifacts"])
+        return [merged[k] for k in sorted(merged, reverse=True)
+                if merged[k].task_id == tid]

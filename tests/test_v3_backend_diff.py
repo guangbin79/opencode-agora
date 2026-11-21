@@ -7,6 +7,10 @@ Req: F152 — TaskService 任务场景差分（spec gitstore-phase2-task-service
 wait/touch_seen/bump/重派成功/卫兵冲突失败＋读面与错误形状双后端严格差分，
 重启重放投影等价＋Git journal 不变量（复合单 tx 单 commit/只增）——零新增
 allowlist。
+Req: F153 — artifact/event 场景差分（spec gitstore-phase2-artifacts-gate-
+verify「Differential」）：多任务事件流/events_for_task 归一化、多 artifact
+落账/artifacts_for_task newest-first、事务外写错误形状＋重启重放投影等价
+——零新增 allowlist。
 
 断言清单（spec「Required work」逐条机械判定）：
 1 make_store 工厂（BACKENDS 单常量；sqlite/git 双选、未知拒）；
@@ -48,6 +52,9 @@ TID = "ag-diff"
 DISP = "disp-diff"
 SID = "ses-diff"
 STATUSES = ("pending", "inflight", "delivered")
+# Req: F153——artifact 终态投影预置任务枚举（既有场景零 artifact 行＝
+# 两侧恒 []，不生新差异）
+ART_TIDS = ("ag-diff5", "ag-diff6")
 
 
 # ---- 归一化＋叶子级比较器 ----
@@ -313,6 +320,8 @@ def project_state(st, sids=(SID,)):
                         for s in sids],
         "events": [dataclasses.asdict(e) for e in st.events_all()],
         "timers": [dataclasses.asdict(t) for t in st.timers_all()],
+        "artifacts": [dataclasses.asdict(a) for tid in ART_TIDS
+                      for a in st.artifacts_for_task(tid)],
     }
 
 
@@ -964,6 +973,104 @@ class TestTaskDifferential(unittest.TestCase):
             for op in rtx["operations"]:  # tx 引用对象俱在单 commit 树
                 self.assertIn(op["path"], files)
         finally:  # 侧收口归 run_backend_diff（其 finally 恒关两侧 store）
+            for home in homes.values():
+                home.cleanup()
+
+
+class TestArtifactEventDifferential(unittest.TestCase):
+    """Req: F153——artifact/event 双后端差分：多任务事件流＋events_for_task
+    归一化、多 artifact 落账＋artifacts_for_task newest-first、事务外写
+    错误形状＋重启重放投影等价——零新增 allowlist。"""
+
+    TID_A, TID_B = ART_TIDS
+
+    def _ops(self):
+        def _events(st):
+            with st.uow():
+                for tid, name in ((self.TID_A, "ea1"), (self.TID_B, "eb1"),
+                                  (self.TID_A, "ea2"), (self.TID_B, "eb2"),
+                                  (self.TID_A, "ea3")):
+                    st.append_event(domain.Event(
+                        seq=0, ts_ms=1, actor="w", event=name, task=tid))
+
+        return [
+            ("seed_tasks", lambda st: _uow(st, lambda s: (
+                s.upsert_task(domain.Task(id=self.TID_A, state="running")),
+                s.upsert_task(domain.Task(id=self.TID_B, state="running"))))),
+            ("events_append_multi", _events),
+            ("events_for_task_a", lambda st: st.events_for_task(self.TID_A)),
+            ("events_for_task_b", lambda st: st.events_for_task(self.TID_B)),
+            ("events_for_task_empty_tid", lambda st: st.events_for_task("")),
+            ("events_for_task_missing",
+             lambda st: st.events_for_task("ag-none")),
+            ("artifact_insert_multi",
+             lambda st: _uow(st, lambda s: (
+                 s.insert_artifact(domain.Artifact(
+                     task_id=self.TID_A, phase="verify", rc=0, bytes=10)),
+                 s.insert_artifact(domain.Artifact(
+                     task_id=self.TID_B, phase="verify", rc=1)),
+                 s.insert_artifact(domain.Artifact(
+                     task_id=self.TID_A, phase="integration", rc=0,
+                     duration_s=1.5))))),
+            ("artifacts_for_task_a",
+             lambda st: st.artifacts_for_task(self.TID_A)),
+            ("artifacts_for_task_b",
+             lambda st: st.artifacts_for_task(self.TID_B)),
+            ("artifacts_for_task_missing",
+             lambda st: st.artifacts_for_task("ag-none")),
+            ("err_artifact_outside_uow",
+             lambda st: st.insert_artifact(domain.Artifact(
+                 task_id=self.TID_A, phase="verify"))),
+            ("err_event_outside_uow",
+             lambda st: st.append_event(domain.Event(
+                 seq=0, ts_ms=1, actor="w", event="x", task=self.TID_A))),
+        ]
+
+    def _report(self, **over):
+        kw = dict(ops=self._ops(), allow=ALLOWED_DIFFERENCES)
+        kw.update(over)
+        return run_backend_diff(**kw)
+
+    def test_artifact_event_strict_differential(self):
+        report = self._report()
+        self.assertEqual(report["status"], "PASS", report["mismatches"])
+        self.assertEqual(report["ops"], 12)
+        self.assertEqual(report["suppressed"], [])  # 零新增已知差异
+        self.assertEqual(report["errors"], {  # 恰两条期望错误面
+            "sqlite": ["err_artifact_outside_uow", "err_event_outside_uow"],
+            "git": ["err_artifact_outside_uow", "err_event_outside_uow"]})
+
+    def test_artifact_event_projection_equivalent_after_restart(self):
+        report = self._report()  # run_backend_diff 自管两侧收口
+        self.assertEqual(report["status"], "PASS", report["mismatches"])
+        homes, fresh = {}, {}
+        try:
+            for backend in harness.BACKENDS:
+                # 重启重放需保留 home——重跑一侧单店场景（复用同款 ops）
+                homes[backend] = harness.TempAgoraHome()
+                fresh[backend] = harness.make_store(homes[backend],
+                                                    backend=backend)
+            run_ops(fresh["sqlite"], self._ops())
+            run_ops(fresh["git"], self._ops())
+            raw = []
+            for family, proj in (
+                    ("events", lambda s: norm([
+                        dataclasses.asdict(e)
+                        for e in s.events_for_task(self.TID_A)])),
+                    ("artifacts", lambda s: norm([
+                        dataclasses.asdict(a)
+                        for a in s.artifacts_for_task(self.TID_A)])),
+                    ("artifacts_b", lambda s: norm([
+                        dataclasses.asdict(a)
+                        for a in s.artifacts_for_task(self.TID_B)]))):
+                _leaf_diff(proj(fresh["sqlite"]), proj(fresh["git"]),
+                           f"state:{family}", raw)
+            self.assertEqual(raw, [])  # 重启重放投影零失配（无 allowlist 面）
+        finally:
+            for st in fresh.values():
+                close = getattr(st, "close", None)
+                if close is not None:
+                    close()
             for home in homes.values():
                 home.cleanup()
 
