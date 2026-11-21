@@ -158,12 +158,12 @@ def _select_storage(home, backend, injector):
     （fail-closed 零动土）。选择集中装配层——服务/传输零复制（分层守卫
     禁其 import 存储后端）；生产启动面（daemon/env/config）本切片零改动。"""
     state = pathlib.Path(home) / "state"
+    if backend != "sqlite" and backend != GIT_BACKEND:  # 先拒后动土（零残留空目录）
+        raise ValueError(f"未知 backend {backend!r}（可用: sqlite、{GIT_BACKEND}）")
     state.mkdir(parents=True, exist_ok=True)  # Req: F158 部署面裸 home 自举（Storage 不建父目录）
     if backend == "sqlite":
         return Storage(state / "agora.db", injector=injector)
-    if backend == GIT_BACKEND:
-        return GitStore(state, injector=injector)
-    raise ValueError(f"未知 backend {backend!r}（可用: sqlite、{GIT_BACKEND}）")
+    return GitStore(state, injector=injector)
 
 
 def _env_activity(env_dir):

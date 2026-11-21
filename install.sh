@@ -222,7 +222,10 @@ import json, sys, urllib.request
 port = json.load(open(sys.argv[1]))["port"]
 token = open(sys.argv[2]).read().strip()
 if token.startswith("{"):  # Req: F158 v3 authsvc JSON 形（v2 install 纯文本）——两形同读
-    token = json.loads(token)["token"]
+    try:
+        token = json.loads(token)["token"]
+    except (ValueError, KeyError, TypeError) as e:
+        sys.exit(f"install: root.token JSON 坏形或缺 token 键: {e}")  # 清洁报因非 traceback（评审环 A2）
 req = urllib.request.Request(
     f"http://127.0.0.1:{port}/health",
     headers={"X-Agora-Token": token})

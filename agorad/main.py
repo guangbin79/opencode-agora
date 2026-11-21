@@ -478,10 +478,16 @@ def main_v3(backend):
                         verify_ceiling=verify_ceiling,
                         quick_max_files=quick_files,
                         quick_max_lines=quick_lines, backend=backend)
-    except (ValueError, StorageError) as e:  # 画像坏/外来账本拒开（GitStore split-brain＝StorageError 族）
+    except (ValueError, StorageError, OSError) as e:
+        # 画像坏/外来账本拒开（StorageError 族）/git 缺席·坏权限·盘满等环境面
+        # （OSError 族）——一律干净 rc=2 报因，不泼 traceback（评审环 B-F1）
         print(str(e), file=sys.stderr)
         return 2
-    stack.start()  # 幂等；root bootstrap＋root.token 落盘先于牌行
+    try:  # start 内 root 落盘/DB 提交同受环境保护（评审环 B-F2）
+        stack.start()  # 幂等；root bootstrap＋root.token 落盘先于牌行
+    except (StorageError, OSError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if stack.root_token:
         print(f"AGORA_ROOT_TOKEN: {stack.root_token}", flush=True)  # T4 捕获位
     return serve_forever_v3(

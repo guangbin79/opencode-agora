@@ -55,6 +55,12 @@ def _read_root_token(home):
     return raw
 
 
+def _scrub(lines):
+    """失败消息抹牌行（评审环 C1：真牌不入断言输出/转录）。"""
+    return ["AGORA_ROOT_TOKEN: <scrubbed>" if l.startswith("AGORA_ROOT_TOKEN: ")
+            else l for l in lines]
+
+
 def _get_health(port, token):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/health", headers={"X-Agora-Token": token})
@@ -86,7 +92,7 @@ def _boot_daemon(script, home, ready_marker, timeout=30.0, extra_env=None):
                     if part.startswith("port="):
                         port = int(part[5:])
                 return p, lines, port
-        raise AssertionError(f"未等到 {ready_marker!r}：{lines}")
+        raise AssertionError(f"未等到 {ready_marker!r}：{_scrub(lines)}")
     except BaseException:
         _stop_daemon(p)
         raise
@@ -183,6 +189,16 @@ class TestAgoradV3Entrypoint(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("外来账本", err)
 
+    def test_oserror_env_failures_exit_clean(self):  # Req: F158（评审环 B-F1）
+        # git 缺席/坏权限/盘满等环境面（OSError 族）＝干净 rc=2 报因，非 traceback；
+        # 夹具：state 路径被文件占位 → mkdir FileExistsError
+        home = Path(tempfile.mkdtemp(prefix="agora-os-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        (home / "state").write_text("occupied", encoding="utf-8")
+        rc, err = self._main_v3_rc(home, "")
+        self.assertEqual(rc, 2)
+        self.assertTrue(err.strip())
+
     def test_bad_verify_profiles_fail_before_storage_artifacts(self):  # Req: F158
         # v2 纪律：旋钮配置坏＝先于存储动土失败（不留半建 agora.db/journal）
         home = Path(tempfile.mkdtemp(prefix="agora-vp-"))
@@ -251,6 +267,8 @@ class TestAgoradV3Entrypoint(unittest.TestCase):
         base, token = agora_cli.discover(str(home))
         self.assertEqual((base, token),
                          ("http://127.0.0.1:45678", "tok-v3-json"))
+        import board_tui  # 评审环 A1：同形发现面（agora-board 控制台脚本）
+        self.assertEqual(board_tui.discover(str(home))[1], "tok-v3-json")
         (ag / "root.token").write_text("tok-v2-plain\n", encoding="utf-8")
         self.assertEqual(agora_cli.discover(str(home))[1], "tok-v2-plain")
         with self.assertRaises(ValueError):  # 对象缺 token 键＝坏形归口 ValueError
@@ -323,7 +341,8 @@ class TestInstallGitV3Deployment(unittest.TestCase):
                 lines.append(line.rstrip("\n"))
                 if "agorad-v3 ready" in line:
                     break
-            self.assertTrue(any("agorad-v3 ready" in l for l in lines), lines)
+            self.assertTrue(any("agorad-v3 ready" in l for l in lines),
+                            _scrub(lines))
             self.assertFalse(
                 [l for l in lines if l.startswith("AGORA_ROOT_TOKEN: ")])
             sj2 = json.loads(

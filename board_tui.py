@@ -449,6 +449,11 @@ def discover(home=None):
                 or Path.home() / ".opencode-agora-plaza")
     sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
+    if token.startswith("{"):  # Req: F158 v3 authsvc 落 JSON 形（v2 install 纯文本）——两形同读
+        try:
+            token = str(json.loads(token)["token"])
+        except (ValueError, KeyError, TypeError) as e:
+            raise ValueError(f"root.token JSON 坏形或缺 token 键: {e}") from None
     return f"http://127.0.0.1:{sj['port']}", token
 
 
