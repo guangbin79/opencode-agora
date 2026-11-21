@@ -5,7 +5,7 @@ TimerService 零改动跑 Git 后端。
 Req: F151 — Phase 2 凭据生命周期（spec gitstore-phase2-credentials）：
 canonical 凭据对象只记 token 摘要＋外部 secret 引用（明文牌不进任何 Git
 对象），secret 文件按 AuthService 路径约定留在 journal.git 之外；put 先验
-外部文件后记账，get/credentials_all 水化验摘要；删除＝下一版本 tombstone
+外部文件后记账，get/credentials_all 水合并验摘要；删除＝下一版本 tombstone
 （历史版本仍在树可审计）；AuthService 零改动跑 Git 后端。
 
 裸仓 state/journal.git（HEAD 符号指向 refs/agora/journal）作不可变文本账本：
@@ -206,8 +206,16 @@ def _cred_reg_from_data(d) -> dict | None:
     digest, spath = d.get("token_sha256"), d.get("secret_path")
     if not isinstance(digest, str) or not _RE_SHA256.fullmatch(digest):
         raise ValueError("token_sha256 摘要形态非法")
-    if not isinstance(spath, str) or not spath:
-        raise ValueError("secret_path 缺席")
+    if not isinstance(spath, str) or not spath.endswith(".token"):
+        raise ValueError("secret_path 缺席/形态非法")
+    # 键位白名单（评审环 C 册 R1）：canonical 只许派生键位——绝对路径与
+    # ../ 穿越一律拒（_hydrate join home 后直开，防任意文件绑定/存在性神谕）
+    if not (spath == ".agora/root.token"
+            or (spath.startswith("credentials/")
+                and _ID_CHARSET.fullmatch(
+                    spath[len("credentials/"):-len(".token")]))):
+        raise ValueError("secret_path 须为派生键位（.agora/root.token 或 "
+                         "credentials/<白名单键>.token）")
     tid, lineage, created = d.get("task_id"), d.get("lineage"), d.get("created_ms")
     if not (tid is None or isinstance(tid, str)):
         raise TypeError("task_id 类型不符")
@@ -887,22 +895,28 @@ class GitStore:
     def _secret_path(self, cred) -> str:
         """AuthService 路径约定三形态（authsvc.issue 同款；root 牌钉死
         sid="root"）：root→.agora/root.token、worker→credentials/<task_id>、
-        dispatcher→credentials/<sid>。"""
+        dispatcher→credentials/<sid>。返回 home 相对键位——canonical 持久
+        面机器无关（整树搬迁/备份还原后重放照常水合），打开时再 join home。"""
         if cred.sid == "root":
-            return os.path.join(self._home, ".agora", "root.token")
-        return os.path.join(self._home, "credentials",
-                            f"{cred.task_id or cred.sid}.token")
+            return os.path.join(".agora", "root.token")
+        return os.path.join("credentials", f"{cred.task_id or cred.sid}.token")
 
     def _read_secret_token(self, path, sid) -> str:
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            token = data["token"] if isinstance(data, dict) else None
-        except (OSError, ValueError, KeyError, TypeError):
+        full = os.path.join(self._home, path)  # 相对键位join；键位形态重放已拒
+        try:  # O_NOFOLLOW 同 authsvc._write_secret 口径——不跟符号链接
+            fd = os.open(full, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
             token = None
+        else:
+            try:
+                with os.fdopen(fd, encoding="utf-8") as f:
+                    data = json.load(f)
+                token = data["token"] if isinstance(data, dict) else None
+            except (OSError, ValueError, KeyError, TypeError):
+                token = None
         if not isinstance(token, str):
             raise CredentialSecretError(
-                f"{sid}: 外部 secret 文件缺席/不可解析（{path}）")
+                f"{sid}: 外部 secret 文件缺席/不可解析（{full}）")
         return token
 
     def _secret_ok(self, path, digest) -> bool:
@@ -943,13 +957,16 @@ class GitStore:
         if not isinstance(cred.token, str) or not cred.token:
             raise StorageError("credential token 缺席（fail-closed）")
         sid = _safe(cred.sid)
+        if cred.task_id is not None:
+            _safe(cred.task_id)  # secret 键位路径穿越纵深（同 authsvc/tasksvc）
         digest = _sha256_hex(cred.token)
         path = self._secret_path(cred)
         if not self._secret_ok(path, digest):
             prior = self._prior_secret(sid, digest)
             if prior is None:
                 raise CredentialSecretError(
-                    f"{sid}: 外部 secret 文件缺席/牌值不符（{path}）"
+                    f"{sid}: 外部 secret 文件缺席/牌值不符"
+                    f"（{os.path.join(self._home, path)}）"
                     "——签发铁则＝文件先落盘后记账")
             path = prior
         cur = self._cred_view(sid)

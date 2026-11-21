@@ -28,6 +28,7 @@ pull 必须可持久化 credential）与 append_event——按同款 bucket 方�
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import unittest
@@ -1165,6 +1166,19 @@ class TestCredentialLifecycle(_Base):  # Req: F151——仓库面生命周期
         self.assertEqual(fresh.get_credential("ses-d2").token, "tok-d")
         self.assertIsNone(fresh.get_credential("ses-d1"))
 
+    def test_home_relocation_replays_from_relative_secret_path(self):
+        # 评审环 OCR R1：canonical secret_path 须 home 相对——整树搬迁后
+        # 绝对路径即陈旧（重放 fail-closed 砖死），相对键位照常水合
+        st = self.store()
+        self._put(st)
+        moved = self.home.path.with_name(self.home.path.name + "-moved")
+        os.rename(self.home.path, moved)
+        try:
+            fresh = GitStore(os.path.join(moved, "state"))
+            self.assertEqual(fresh.get_credential(self.SID).token, self.TOK)
+        finally:
+            shutil.rmtree(moved, ignore_errors=True)
+
 
 class TestCredentialSecretSafety(_Base):  # Req: F151——secret 外置安全性
     SID, TOK = "ses-s1", "tok-s1"
@@ -1278,6 +1292,37 @@ class TestCredentialSecretSafety(_Base):  # Req: F151——secret 外置安全�
         _mutate_head(self.home.state, {v1: json.dumps(obj).encode()})
         with self.assertRaises(JournalCorruptionError):
             self.store()
+        obj["data"]["created_ms"] = 5
+        obj["data"]["secret_path"] = "/etc/passwd"  # 绝对路径重放拒（join 逃逸）
+        _mutate_head(self.home.state, {v1: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+        # 评审环 C 册 R1：../ 穿越与任意键位同拒（canonical 只认派生键位）
+        for bad in ("../../escape.token", "credentials/../escape.token",
+                    "elsewhere/x.token"):
+            obj["data"]["secret_path"] = bad
+            _mutate_head(self.home.state, {v1: json.dumps(obj).encode()})
+            with self.assertRaises(JournalCorruptionError):
+                self.store()
+
+    def test_secret_file_symlink_rejected_at_read(self):
+        # 评审环 C 册 R1：读面 O_NOFOLLOW——符号链接换牌文件 fail-closed
+        self._write("real", self.TOK)
+        (self.home.credentials / f"{self.SID}.token").symlink_to(
+            self.home.credentials / "real.token")
+        st = self.store()
+        with self.assertRaises(CredentialSecretError):
+            with st.uow():
+                st.put_credential(Credential(sid=self.SID, token=self.TOK))
+
+    def test_task_id_path_traversal_rejected_at_put(self):
+        # 评审环 OCR R1：secret 键位派生自 task_id——同 sid 白名单纵深
+        st = self.store()
+        with self.assertRaises(StorageError):
+            with st.uow():
+                st.put_credential(Credential(sid="ses-x", token="tk",
+                                             task_id="../evil"))
+        self.assertIsNone(st.head)  # 零提交
 
 
 if __name__ == "__main__":
