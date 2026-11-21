@@ -28,6 +28,7 @@ from agorad import domain
 from agorad.authsvc import TASK_DOMAIN, AuthService, _TASK_ROW_OPTIONAL
 from agorad.contracts import CATALOG, ContractError
 from agorad.domain import Credential, DeliveryState, GateState, VerifySpec
+from agorad.gitstore import GitStore
 from agorad.healthsvc import (CAP_MS, GAP0_MS, KIND_DISPATCHER_DEAD,
                               KIND_ENV_GONE, KIND_EXT_STALE, KIND_REINJECT,
                               KIND_STALLED, KIND_UNPUBLISHED,
@@ -970,6 +971,125 @@ class TestRecoverHook(_Base):  # 断言12
         self.assertEqual(self.escalate_kinds("ag-r"), [])  # 不误杀
         self.assertEqual(self.escalate_kinds("ag-x"), [])  # 僵态整体免判
         self.assertEqual(self.storage.get_task("ag-r").state, "running")
+
+
+class TestAuthGitPort(unittest.TestCase):
+    """Req: F151——AuthService 零改动跑 GitStore 后端（不复制 SQLite 套件：
+    择签发/识别/撤销/轮换/改绑/清扫代表路径＋重启重放与 secret 文件对账）。"""
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.injector = harness.FaultInjector().register("uow")
+        for fp in ("write-object", "write-tree", "commit-tree",
+                   "update-ref", "memory-publish"):  # GitStore 提交面 failpoints
+            self.injector.register(fp)
+        self.clock = FakeClock()
+        self.oc = OcStub()
+        # 单实例贯穿用例（GitStore 跨实例不自动跟随——CAS 单写者面）
+        self.gitstore = GitStore(self.home.state, injector=self.injector)
+
+    def auth(self, store=None):
+        return AuthService(store or self.gitstore, home=str(self.home.path),
+                           clock=self.clock, oc=self.oc)
+
+    def seed(self, tid, **over):
+        row = dict(id=tid, state="todo", title=tid, goal="g",
+                   project_dir="/repo", target_branch="v3-runtime",
+                   dispatcher_sid=DISPATCHER, root_sid=DISPATCHER,
+                   chain_depth=1, created_ms=self.clock.ms,
+                   updated_ms=self.clock.ms,
+                   verify=VerifySpec(cmd="true", state="registered",
+                                     registered_by=DISPATCHER,
+                                     registered_at_ms=1))
+        row.update(over)
+        with self.gitstore.uow():
+            self.gitstore.upsert_task(domain.Task(**row))
+        return tid
+
+    def test_issue_identify_token_for_revoke_and_restart_replay(self):
+        svc = self.auth()
+        tid = self.seed("ag-g1", state="running", worker_sid=WORKER)
+        tok_w, path_w = svc.issue(WORKER, "worker", task_id=tid)
+        tok_d, path_d = svc.issue("ses-dx", "dispatcher")
+        tok_r, path_r = svc.issue(ROOT, "root")
+        self.assertEqual(_mode(path_w), 0o600)  # secret 文件铁则同口径
+        for path in (path_w, path_d, path_r):
+            self.assertEqual(_mode(path), 0o600)
+        self.assertEqual(svc.identify(tok_w), (WORKER, "worker"))
+        self.assertEqual(svc.identify(tok_d), ("ses-dx", "dispatcher"))
+        self.assertEqual(svc.identify(tok_r), ("root", "root"))
+        self.assertEqual(svc.token_for(WORKER), tok_w)
+        self.assertTrue(svc.revoke(tok_d))
+        self.assertIsNone(svc.identify(tok_d))
+        self.assertFalse(svc.revoke(tok_d))  # 再撤＝False
+        self.assertTrue(svc.revoke_session(WORKER))
+        self.assertIsNone(svc.identify(tok_w))
+        # 重启重放：新仓库实例从外部 secret 文件水合，牌面续用
+        svc2 = self.auth(GitStore(self.home.state))
+        self.assertEqual(svc2.identify(tok_r), ("root", "root"))
+        self.assertEqual([c.sid for c in svc2._creds], ["root"])
+
+    def test_rotate_root_revokes_old_and_replays_after_restart(self):
+        svc = self.auth()
+        old, _ = svc.issue(ROOT, "root")
+        new, path = svc.rotate_root()
+        self.assertIsNone(svc.identify(old))  # 旧 root 牌即废
+        self.assertEqual(svc.identify(new), ("root", "root"))
+        self.assertEqual(json.loads(open(path, encoding="utf-8").read())
+                         ["token"], new)
+        self.assertIn("root_rotated",
+                      [e.event for e in self.gitstore.events_all()])
+        svc2 = self.auth(GitStore(self.home.state))  # 重启：外部文件水合
+        self.assertEqual(svc2.identify(new), ("root", "root"))
+        self.assertIsNone(svc2.identify(old))
+
+    def test_rebind_dispatcher_lineage_keeps_secret_at_old_key(self):
+        svc = self.auth()
+        token, _ = svc.issue("ses-d1", "dispatcher")
+        self.assertEqual(svc.rebind("ses-d1", "ses-d2"), token)
+        self.assertEqual(svc.identify(token), ("ses-d2", "dispatcher"))
+        self.assertTrue(svc.same_lineage("ses-d2", "ses-d1"))
+        self.assertFalse(svc.same_lineage("ses-d1", "ses-d2"))
+        # 文件留在旧键位（服务不移文件）；GitStore 按同摘要继用既录路径
+        self.assertTrue((self.home.credentials / "ses-d1.token").exists())
+        self.assertFalse((self.home.credentials / "ses-d2.token").exists())
+        svc2 = self.auth()  # 重启重放：改绑牌照常水合
+        self.assertEqual(svc2.identify(token), ("ses-d2", "dispatcher"))
+        self.assertEqual(svc2.token_for("ses-d2"), token)
+
+    def test_bind_worker_rebind_and_task_row_overwrite(self):
+        svc = self.auth()
+        self.seed("ag-bw", state="running", worker_sid="ses-wold")
+        token, _ = svc.issue("ses-wold", "worker", task_id="ag-bw")
+        self.assertEqual(svc.bind_worker("ses-wold", "ses-wnew"), "ses-wnew")
+        self.assertEqual(self.gitstore.get_task("ag-bw").worker_sid,
+                         "ses-wnew")
+        cred = self.gitstore.get_credential("ses-wnew")
+        self.assertEqual((cred.token, cred.lineage), (token, ("ses-wold",)))
+        self.assertIn("worker_rebound",
+                      [e.event for e in self.gitstore.events_all()])
+        self.assertEqual(svc.identify(token), ("ses-wnew", "worker"))
+
+    def test_sweep_secret_file_reconciliation_on_git(self):
+        svc = self.auth()
+        live_tid = self.seed("ag-live", state="running", worker_sid="ses-wl")
+        dead_tid = self.seed("ag-dead", state="closed", worker_sid="ses-wd")
+        svc.issue("ses-wl", "worker", task_id=live_tid)  # 在册活件：留
+        # 终态任务牌文件：清（F43）
+        (self.home.credentials / f"{dead_tid}.token").write_text(
+            json.dumps({"token": "tok-dead"}) + "\n", encoding="utf-8")
+        # 孤儿（DB 无同牌）：清
+        (self.home.credentials / "ag-junk.token").write_text(
+            json.dumps({"token": "tok-junk"}) + "\n", encoding="utf-8")
+        # 孤儿 root.token（无 root 牌）：清
+        (self.home.agora / "root.token").write_text(
+            json.dumps({"token": "tok-orphan"}) + "\n", encoding="utf-8")
+        self.assertEqual(svc.sweep(), 3)
+        self.assertTrue((self.home.credentials / f"{live_tid}.token").exists())
+        for name in (f"{dead_tid}.token", "ag-junk.token"):
+            self.assertFalse((self.home.credentials / name).exists())
+        self.assertFalse((self.home.agora / "root.token").exists())
 
 
 if __name__ == "__main__":

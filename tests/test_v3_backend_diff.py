@@ -78,6 +78,14 @@ CRED_REASON = ("SQLite get_credential 读回 None→''（_null 逆映射不对�
 EVENT_REASON = ("SQLite events_all 读回 None→''（r[4] or ''），GitStore 保"
                 " None——同义「非任务事件」")
 
+# scenario_ops 凭据操作的外部 secret 预置（Req: F151——Git 侧 put 先验文件
+# 存在且牌值匹配；SQLite 侧无文件语义、预置无感）
+SID_TOKEN = "tk"
+
+
+def seed_scenario_secrets(home):
+    home.write_credential(SID, SID_TOKEN)
+
 # 已知有意差异（spec：意图差异须显式 allowlist＋理由；此外一律严格相等）。
 # 实证来源：F149 差分探针＋去 allowlist 全投影 diff 恰此五条（同一底层
 # 不对称会在逐步结果面（op:）与终态投影面（state:）各现一条）。
@@ -297,11 +305,12 @@ def project_state(st, sids=(SID,)):
 # ---- 差分主入口 ----
 
 def run_backend_diff(ops=None, sids=(SID,), allow=ALLOWED_DIFFERENCES,
-                     sides=None):
+                     sides=None, seed=seed_scenario_secrets):
     """双后端差分：ops 空＝INFRA_ERROR（空场景无从对齐，禁冒充 PASS）。
     返回 {"status","ops","errors","mismatches","suppressed"}；mismatches
     非空即红；errors＝各侧实际报错的 op 名单（期望错误面断言用——两侧
-    同崩不得冒充绿，评审环 B 册 R2）。"""
+    同崩不得冒充绿，评审环 B 册 R2）。seed＝内部建 home 后、make_store 前
+    的外部 secret 预置（Req: F151——凭据 put 先验文件）。"""
     ops = scenario_ops() if ops is None else ops
     homes = []
     try:
@@ -314,6 +323,8 @@ def run_backend_diff(ops=None, sids=(SID,), allow=ALLOWED_DIFFERENCES,
             for backend in harness.BACKENDS:
                 home = harness.TempAgoraHome()
                 homes.append(home)
+                if seed is not None:
+                    seed(home)
                 sides[backend] = harness.make_store(home, backend=backend)
         raw = []
         recs_a = run_ops(sides["sqlite"], ops)
@@ -452,6 +463,7 @@ class TestJournalObserver(unittest.TestCase):  # 断言2
                 "Git 模式禁开 SQLite")):
             home = harness.TempAgoraHome()
             self.addCleanup(home.cleanup)
+            seed_scenario_secrets(home)  # Req: F151——凭据 put 先验外部文件
             st = harness.make_store(home, backend="git")
             run_ops(st, scenario_ops())
             project_state(st, (SID,))
@@ -517,6 +529,7 @@ class TestGitOnlyInvariants(unittest.TestCase):  # 断言4
     def _git_home(self):
         home = harness.TempAgoraHome()
         self.addCleanup(home.cleanup)
+        seed_scenario_secrets(home)  # Req: F151——scenario_ops 含凭据 put
         return home, harness.make_store(home, backend="git")
 
     def test_git_backend_creates_no_sqlite_files(self):
@@ -595,6 +608,7 @@ class TestTimerRestartReplay(unittest.TestCase):
             sides = {}
             for backend in harness.BACKENDS:
                 homes[backend] = harness.TempAgoraHome()
+                seed_scenario_secrets(homes[backend])  # Req: F151
                 sides[backend] = harness.make_store(homes[backend],
                                                     backend=backend)
             try:
@@ -624,6 +638,105 @@ class TestTimerRestartReplay(unittest.TestCase):
         finally:
             for home in homes.values():
                 home.cleanup()
+
+
+class TestCredentialDifferential(unittest.TestCase):
+    """Req: F151——凭据生命周期双后端差分：put/read/credentials_all/delete
+    （幂等）/re-put/overlay 读己之写/事务外写错误形状＋重启重放投影等价。
+    场景全用 worker 形态（task_id 非空）——避开既有 None↻"" 已知不对称，
+    本差分零新增 allowlist。"""
+
+    WSID, WTID, WTOK = "ses-wdiff", "ag-diff2", "tk-w"
+
+    def _cred(self, **over):
+        base = dict(sid=self.WSID, token=self.WTOK, task_id=self.WTID,
+                    lineage=("ses-old-w",), created_ms=7)
+        base.update(over)
+        return domain.Credential(**base)
+
+    def _ops(self):
+        return [
+            ("credential_put_read",
+             lambda st: _uow(st, lambda s: (s.put_credential(self._cred()),
+                                            s.get_credential(self.WSID)))),
+            ("credential_credentials_all", lambda st: st.credentials_all()),
+            ("credential_delete_live",
+             lambda st: _uow(st, lambda s: s.delete_credential(self.WSID))),
+            ("credential_deleted_views",
+             lambda st: (st.get_credential(self.WSID), st.credentials_all())),
+            ("credential_delete_idempotent",
+             lambda st: _uow(st, lambda s: (s.delete_credential(self.WSID),
+                                            s.delete_credential("ses-none")))),
+            ("credential_reput",
+             lambda st: _uow(st, lambda s: (
+                 s.put_credential(self._cred(
+                     lineage=("ses-old-w", "ses-older-w"))),
+                 s.get_credential(self.WSID)))),
+            ("credential_overlay_combo",  # 同一 UoW：put→见→删→缺→重删 False
+             lambda st: _uow(st, lambda s: (  # →re-put→见（读己之写全链）
+                 s.put_credential(self._cred(created_ms=9)),
+                 s.get_credential(self.WSID),
+                 s.delete_credential(self.WSID),
+                 s.get_credential(self.WSID),
+                 s.delete_credential(self.WSID),
+                 s.put_credential(self._cred(created_ms=10)),
+                 s.credentials_all()))),
+            ("err_delete_outside_uow",
+             lambda st: st.delete_credential(self.WSID)),
+            ("reads_missing_credential",
+             lambda st: (st.get_credential("ses-none"), st.credentials_all())),
+        ]
+
+    def _report(self, **over):
+        kw = dict(ops=self._ops(), sids=(self.WSID,), allow=ALLOWED_DIFFERENCES)
+        kw.update(over)
+        homes = {}
+        try:
+            sides = {}
+            for backend in harness.BACKENDS:
+                homes[backend] = harness.TempAgoraHome()
+                homes[backend].write_credential(self.WTID, self.WTOK)  # worker 键位
+                sides[backend] = harness.make_store(homes[backend],
+                                                    backend=backend)
+            return run_backend_diff(sides=sides, **kw), homes, sides
+        except BaseException:
+            for home in homes.values():
+                home.cleanup()
+            raise
+
+    def test_credential_lifecycle_strict_differential(self):
+        report, homes, _ = self._report()  # 侧收口归 run_backend_diff
+        try:
+            self.assertEqual(report["status"], "PASS",
+                             report["mismatches"])
+            self.assertGreaterEqual(report["ops"], 9)
+            self.assertEqual(report["suppressed"], [])  # 零新增已知差异
+            self.assertEqual(report["errors"], {  # 恰一条期望错误面
+                "sqlite": ["err_delete_outside_uow"],
+                "git": ["err_delete_outside_uow"]})
+        finally:
+            for home in homes.values():
+                home.cleanup()
+
+    def test_credential_projection_equivalent_after_restart(self):
+        report, homes, _ = self._report()
+        try:
+            self.assertEqual(report["status"], "PASS", report["mismatches"])
+            fresh = {b: harness.make_store(homes[b], backend=b)
+                     for b in harness.BACKENDS}
+            self.addCleanup(fresh["sqlite"].close)
+            raw = []
+            _leaf_diff(norm([dataclasses.asdict(c)
+                             for c in fresh["sqlite"].credentials_all()]),
+                       norm([dataclasses.asdict(c)
+                             for c in fresh["git"].credentials_all()]),
+                       "state:credentials", raw)
+            self.assertEqual(raw, [])  # 重启水合投影零失配
+            self.assertEqual(fresh["git"].get_credential(self.WSID).token,
+                             self.WTOK)
+        finally:
+            for home in homes.values():
+                home.cleanup()  # run_backend_diff 已收口两侧 store
 
 
 if __name__ == "__main__":

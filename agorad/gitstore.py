@@ -2,6 +2,11 @@
 Req: F150 — Phase 2 timer 仓库面（spec gitstore-phase2-timers）：objects/
 timers/ 同款扩族＋九仓库方法（due 键集游标/next_due/message_for_timer），
 TimerService 零改动跑 Git 后端。
+Req: F151 — Phase 2 凭据生命周期（spec gitstore-phase2-credentials）：
+canonical 凭据对象只记 token 摘要＋外部 secret 引用（明文牌不进任何 Git
+对象），secret 文件按 AuthService 路径约定留在 journal.git 之外；put 先验
+外部文件后记账，get/credentials_all 水化验摘要；删除＝下一版本 tombstone
+（历史版本仍在树可审计）；AuthService 零改动跑 Git 后端。
 
 裸仓 state/journal.git（HEAD 符号指向 refs/agora/journal）作不可变文本账本：
 canonical 对象（tasks/messages/receipts/mail-cursors＋credentials/events/
@@ -100,6 +105,11 @@ class JournalCorruptionError(StorageError):
     """重放校验失败（canonical 损毁/重复 seq/缺引用对象）——fail-closed。"""
 
 
+class CredentialSecretError(StorageError):
+    """活牌外部 secret 文件缺席/牌值不符（Req: F151）——fail-closed，
+    不静默空牌。"""
+
+
 def check_verb(verb):
     """argv 谓词白名单闸（fetch/push/clone/remote/add/commit/merge/rebase 拒）。"""
     if verb not in ALLOWED_VERBS:
@@ -179,6 +189,37 @@ def _timer_from_data(tid: str, d: dict) -> Timer:
     return tm
 
 
+_RE_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _sha256_hex(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _cred_reg_from_data(d) -> dict | None:
+    """canonical 凭据 data → 注册面 dict（tombstone→None）；错型/坏摘要
+    形态抛错（重放面 fail-closed，Req: F151）。"""
+    if not isinstance(d, dict):
+        raise TypeError("data 非对象")
+    if d.get("deleted") is True:
+        return None
+    digest, spath = d.get("token_sha256"), d.get("secret_path")
+    if not isinstance(digest, str) or not _RE_SHA256.fullmatch(digest):
+        raise ValueError("token_sha256 摘要形态非法")
+    if not isinstance(spath, str) or not spath:
+        raise ValueError("secret_path 缺席")
+    tid, lineage, created = d.get("task_id"), d.get("lineage"), d.get("created_ms")
+    if not (tid is None or isinstance(tid, str)):
+        raise TypeError("task_id 类型不符")
+    if not isinstance(lineage, list) or not all(
+            isinstance(x, str) for x in lineage):
+        raise TypeError("lineage 类型不符")
+    if not (created is None or type(created) is int):
+        raise TypeError("created_ms 类型不符")
+    return {"token_sha256": digest, "secret_path": spath, "task_id": tid,
+            "lineage": lineage, "created_ms": created}
+
+
 # canonical 路径（bucket＝sha256(id/seq) 前两字节拆两个 hex 目录）
 _H = r"([0-9a-f]{2}/[0-9a-f]{2})"
 _RE_TASK = re.compile(rf"^objects/tasks/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
@@ -214,7 +255,7 @@ def _obj_bytes(kind, ident, version, seq, data) -> bytes:
 def _empty_state():
     return {"head": None, "tasks": {}, "messages": {}, "receipts": {},
             "cursors": {}, "credentials": {}, "events": {}, "txs": {},
-            "dedup": {}, "timers": {}, "timer_ents": {}}
+            "dedup": {}, "timers": {}, "timer_ents": {}, "cred_reg": {}}
 
 
 class GitStore:
@@ -229,6 +270,7 @@ class GitStore:
         self._state = os.fspath(state_path)
         self._journal = os.path.join(os.path.abspath(self._state),
                                      "journal.git")
+        self._home = os.path.dirname(os.path.abspath(self._state))  # secret 文件根（Req: F151）
         self._injector = injector
         self._actor = actor
         self._clock = clock or (lambda: epoch_ms(time.time()))
@@ -405,17 +447,13 @@ class GitStore:
                 obj = checked(obj_of(sha, path), path, "credential", m["id"],
                               int(m["v"]), m.group(1))
                 obj_seqs.append(obj["seq"])
-                d = obj["data"]
-                try:
-                    ent = Credential(sid=m["id"], token=d["token"],
-                                     task_id=d.get("task_id"),
-                                     lineage=tuple(d.get("lineage") or ()),
-                                     created_ms=d.get("created_ms"))
-                except (KeyError, TypeError) as exc:
+                try:  # Req: F151——tombstone→None；错型/坏摘要 fail-closed
+                    reg = _cred_reg_from_data(obj["data"])
+                except (TypeError, KeyError, ValueError) as exc:
                     bad(path, f"credential 实体还原失败: {exc}")
                 cur = creds.get(m["id"])
                 if cur is None or int(m["v"]) > cur[0]:
-                    creds[m["id"]] = (int(m["v"]), ent)
+                    creds[m["id"]] = (int(m["v"]), reg)
                 continue
             m = _RE_TIMER.match(path)
             if m:  # timer 版本族：路径唯一即 (id,version) 唯一——重版冒位
@@ -498,12 +536,20 @@ class GitStore:
                  if r["msg"].dedup_key is not None}
         timers = {r["timer_id"]: mid for mid, r in messages.items()
                   if r["timer_id"] is not None}
+        # Req: F151——最新版本定 live/tombstone；活牌读外部 secret 文件水合
+        # 并验摘要（缺/不符 CredentialSecretError fail-closed，不静默空牌）
+        cred_reg = {}
+        for sid, (v, reg) in creds.items():
+            if reg is None:
+                continue  # tombstone 最新版＝牌缺席（历史版本仍在树可审计）
+            creds[sid] = (v, self._hydrate(sid, reg))
+            cred_reg[sid] = reg
         # 原子切换快照（重载场景高水位只升不降——弃单不复用）
         self._snap = {"head": head, "tasks": tasks, "messages": messages,
                       "receipts": receipts, "cursors": cursors,
                       "credentials": creds, "events": events, "txs": txs,
                       "dedup": dedup, "timers": timers,
-                      "timer_ents": timer_ents}
+                      "timer_ents": timer_ents, "cred_reg": cred_reg}
         for key, top in (("message", max(messages, default=0)),
                          ("event", max(events, default=0)),
                          ("tx", max(txs, default=0))):
@@ -528,7 +574,7 @@ class GitStore:
             self._ov = {"writes": [], "tasks": {}, "messages": {},
                         "receipts": {}, "cursors": {}, "credentials": {},
                         "events": {}, "dedup": {}, "timers": {},
-                        "timer_ents": {}}
+                        "timer_ents": {}, "cred_reg": {}}
             self._owner = threading.get_ident()
             try:
                 self._install_guard()
@@ -678,7 +724,7 @@ class GitStore:
         ns = {"head": new, "txs": {**s["txs"], tx_seq: tx}}
         for key in ("tasks", "messages", "receipts", "cursors",
                     "credentials", "events", "dedup", "timers",
-                    "timer_ents"):
+                    "timer_ents", "cred_reg"):
             ns[key] = {**s[key], **ov[key]} if ov[key] else s[key]
         self._snap = ns
 
@@ -836,21 +882,104 @@ class GitStore:
         cur = self._cursor_view(sid)
         return cur[1] if cur is not None else None
 
-    # ---- credentials（lineage 补拉持久面）----
+    # ---- credentials（Req: F151——外部 secret＋tombstone 生命周期）----
+
+    def _secret_path(self, cred) -> str:
+        """AuthService 路径约定三形态（authsvc.issue 同款；root 牌钉死
+        sid="root"）：root→.agora/root.token、worker→credentials/<task_id>、
+        dispatcher→credentials/<sid>。"""
+        if cred.sid == "root":
+            return os.path.join(self._home, ".agora", "root.token")
+        return os.path.join(self._home, "credentials",
+                            f"{cred.task_id or cred.sid}.token")
+
+    def _read_secret_token(self, path, sid) -> str:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            token = data["token"] if isinstance(data, dict) else None
+        except (OSError, ValueError, KeyError, TypeError):
+            token = None
+        if not isinstance(token, str):
+            raise CredentialSecretError(
+                f"{sid}: 外部 secret 文件缺席/不可解析（{path}）")
+        return token
+
+    def _secret_ok(self, path, digest) -> bool:
+        try:
+            token = self._read_secret_token(path, "?")
+        except CredentialSecretError:
+            return False
+        return _sha256_hex(token) == digest
+
+    def _hydrate(self, sid, reg) -> Credential:
+        """canonical 注册面 → domain Credential（读外部 secret 文件验摘要）。"""
+        token = self._read_secret_token(reg["secret_path"], sid)
+        if _sha256_hex(token) != reg["token_sha256"]:
+            raise CredentialSecretError(
+                f"{sid}: 外部 secret 牌值与 canonical 摘要不符"
+                f"（{reg['secret_path']}）")
+        return Credential(sid=sid, token=token, task_id=reg["task_id"],
+                          lineage=tuple(reg["lineage"]),
+                          created_ms=reg["created_ms"])
+
+    def _prior_secret(self, sid, digest):
+        """换号继用（authsvc.rebind 不移 secret 文件）：同摘要活牌的既录
+        secret_path——token 不变时文件留在旧键位。"""
+        merged = dict(self._snap["cred_reg"])
+        merged.update(self._ov["cred_reg"])
+        for other, reg in merged.items():
+            if (other != sid and reg is not None
+                    and reg["token_sha256"] == digest
+                    and self._secret_ok(reg["secret_path"], digest)):
+                return reg["secret_path"]
+        return None
 
     def put_credential(self, cred: Credential) -> Credential:
+        """staging 前先验外部 secret 文件（缺/不符 fail-closed 且零提交）；
+        canonical 只记摘要＋secret_path（明文牌不进 Git 对象）；不写不删
+        外部文件（清理权归 AuthService/TaskService sweep）。"""
         self._require_uow()
+        if not isinstance(cred.token, str) or not cred.token:
+            raise StorageError("credential token 缺席（fail-closed）")
         sid = _safe(cred.sid)
+        digest = _sha256_hex(cred.token)
+        path = self._secret_path(cred)
+        if not self._secret_ok(path, digest):
+            prior = self._prior_secret(sid, digest)
+            if prior is None:
+                raise CredentialSecretError(
+                    f"{sid}: 外部 secret 文件缺席/牌值不符（{path}）"
+                    "——签发铁则＝文件先落盘后记账")
+            path = prior
         cur = self._cred_view(sid)
         fv = cur[0] if cur is not None else 0
         v = self._alloc_version("credential", sid, fv)
+        reg = {"token_sha256": digest, "secret_path": path,
+               "task_id": cred.task_id, "lineage": list(cred.lineage),
+               "created_ms": cred.created_ms}
         self._ov["credentials"][sid] = (v, cred)
+        self._ov["cred_reg"][sid] = reg
         self._ov["writes"].append(_Write(
-            "put_credential", "credential", sid, v,
-            {"token": cred.token, "task_id": cred.task_id,
-             "lineage": list(cred.lineage), "created_ms": cred.created_ms},
-            from_version=fv))
+            "put_credential", "credential", sid, v, reg, from_version=fv))
         return cred
+
+    def delete_credential(self, sid) -> bool:
+        """删除＝下一不可变版本 tombstone（显式 deleted 标记；历史版本仍
+        在对象树/tx 可审计，不作物理抹除）；live 才 True、重删 False；
+        外部 secret 文件不在此清理。"""
+        self._require_uow()
+        sid = _safe(sid)
+        cur = self._cred_view(sid)
+        if cur is None or cur[1] is None:
+            return False
+        v = self._alloc_version("credential", sid, cur[0])
+        self._ov["credentials"][sid] = (v, None)
+        self._ov["cred_reg"][sid] = None
+        self._ov["writes"].append(_Write(
+            "delete_credential", "credential", sid, v,
+            {"deleted": True}, from_version=cur[0]))
+        return True
 
     def _cred_view(self, sid):
         if self._in_uow() and sid in self._ov["credentials"]:
@@ -860,6 +989,14 @@ class GitStore:
     def get_credential(self, sid):
         cur = self._cred_view(sid)
         return cur[1] if cur is not None else None
+
+    def credentials_all(self) -> list[Credential]:
+        """全量活牌投影（auth 服务内存索引装载/重载面）；tombstone 缺席。"""
+        merged = dict(self._snap["credentials"])
+        if self._in_uow():
+            merged.update(self._ov["credentials"])
+        return [merged[k][1] for k in sorted(merged)
+                if merged[k][1] is not None]
 
     # ---- timers（Req: F150——同 SQLite Storage 语义面）----
 

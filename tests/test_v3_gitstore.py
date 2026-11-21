@@ -4,6 +4,12 @@ Req: F150 — Phase 2 timer 仓库面（spec gitstore-phase2-timers）：九仓�
 <id>/<v>.json 不可变版本＋tx from/to_version、取消是状态非删除、重放恢复
 最新版本、弃单版本不复用、timer canonical 损毁 fail-closed、TimerService
 契约移植（create/cancel/fire/catch-up＋崩窗对账）。
+Req: F151 — Phase 2 凭据生命周期（spec gitstore-phase2-credentials）：
+TestCredentialLifecycle（put/read/credentials_all/delete tombstone/幂等/
+re-put 更晚版本/overlay 读己之写/重启外部文件水合/换号继用既录 secret）＋
+TestCredentialSecretSafety（canonical 只含摘要＋secret_path、全 Git 对象
+零明文牌、put 先验文件缺/不符 fail-closed 零提交、重开缺/错文件专用错、
+存储不写不删外部文件、坏摘要/错型 fail-closed）。
 
 断言清单（wiki/spec/gitstore-phase0-1.md「Tests required」逐条机械判定）：
 1 init/config/head/ref＋零 SQLite 件；2 外来账本（agora.db/tasks.jsonl）拒建
@@ -28,8 +34,9 @@ import unittest
 
 from agorad.domain import (Credential, DeliveryReceipt, Event, Message, Task,
                            Timer, TimerState, timer_transition)
-from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, ForeignLedgerError,
-                             GitStore, JournalCorruptionError, check_verb)
+from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretError,
+                             ForeignLedgerError, GitStore,
+                             JournalCorruptionError, check_verb)
 from agorad.messaging import MessagingService
 from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 from agorad.timersvc import TimerService
@@ -474,7 +481,8 @@ class TestMessagingVertical(unittest.TestCase):  # 断言9
         self.assertEqual([m.id for m in self.svc.pull("ses-old")], [1, 2])
         self.assertEqual(self.svc.pull("ses-old"), [])
         self.assertEqual(self.svc.pull("ses-other"), [])  # 无血统不可见
-        with self.store.uow():
+        with self.store.uow():  # Req: F151——put 前先落外部 secret（服务铁则）
+            self.home.write_credential("ses-new", "t")
             self.store.put_credential(Credential(
                 sid="ses-new", token="t", lineage=("ses-old",)))
         got = self.svc.pull("ses-new")  # 新 sid cursor=0 全量血统补拉
@@ -1034,6 +1042,242 @@ class TestTimerServiceOnGitPort(unittest.TestCase):
         self.assertEqual(len(fresh.messages_all()), 1)  # 不产第二消息
         self.assertIn("timer_reconciled",
                       [e.event for e in fresh.events_all()])
+
+
+class TestCredentialLifecycle(_Base):  # Req: F151——仓库面生命周期
+    SID, TOK = "ses-c1", "tok-c1"
+
+    def _put(self, st, sid=SID, token=TOK, task_id=None, lineage=(),
+             created_ms=5):
+        # 服务铁则镜像：secret 文件先落盘（键位＝task_id or sid）后记账
+        self.home.write_credential(task_id or sid, token)
+        cred = Credential(sid=sid, token=token, task_id=task_id,
+                          lineage=lineage, created_ms=created_ms)
+        with st.uow():
+            return st.put_credential(cred)
+
+    def _cred_files(self, sid=SID):
+        b = _bucket_of(sid)
+        return (f"objects/credentials/{b}/{sid}/{v:020d}.json"
+                for v in range(1, 10))
+
+    def test_put_read_roundtrip_and_restart_hydration(self):
+        st = self.store()
+        self._put(st, lineage=("ses-old",))
+        got = st.get_credential(self.SID)
+        self.assertEqual((got.token, got.task_id, got.lineage, got.created_ms),
+                         (self.TOK, None, ("ses-old",), 5))
+        self.assertEqual([c.sid for c in st.credentials_all()], [self.SID])
+        fresh = self.store()  # 重启重放：外部 secret 文件水合＋验摘要
+        self.assertEqual(fresh.get_credential(self.SID), got)
+        self.assertEqual([c.token for c in fresh.credentials_all()], [self.TOK])
+
+    def test_worker_and_root_secret_key_forms(self):
+        st = self.store()
+        self._put(st, sid="ses-wx", token="tok-w", task_id="ag-cw")  # worker 键
+        p = self.home.agora / "root.token"  # root 键＝.agora/root.token
+        p.write_text(json.dumps({"token": "tok-r"}) + "\n", encoding="utf-8")
+        os.chmod(p, 0o600)
+        with st.uow():
+            st.put_credential(Credential(sid="root", token="tok-r"))
+        self.assertEqual(st.get_credential("ses-wx").token, "tok-w")
+        self.assertEqual(st.get_credential("root").token, "tok-r")
+        fresh = self.store()
+        self.assertEqual({c.sid: c.token for c in fresh.credentials_all()},
+                         {"ses-wx": "tok-w", "root": "tok-r"})
+
+    def test_delete_tombstone_idempotent_then_reput_later_version(self):
+        st = self.store()
+        self._put(st)                                    # v1 live
+        with st.uow():
+            self.assertTrue(st.delete_credential(self.SID))  # v2 tombstone
+        self.assertIsNone(st.get_credential(self.SID))
+        self.assertEqual(st.credentials_all(), [])
+        with st.uow():
+            self.assertFalse(st.delete_credential(self.SID))  # 重删 False
+            self.assertFalse(st.delete_credential("ses-none"))
+        files = _head_files(self.home.state)
+        v1, v2 = list(self._cred_files())[:2]
+        self.assertIn(v1, files)   # 历史版本仍在树（可审计不抹除）
+        self.assertIn(v2, files)
+        [tx2] = [p for p in files if p.startswith("tx/")
+                 and p.endswith("%s/%020d.json" % (_bucket_of(2), 2))]
+        tx = json.loads(_blob(self.home.state, files[tx2]))
+        [op] = [o for o in tx["operations"] if o["op"] == "delete_credential"]
+        self.assertEqual((op["from_version"], op["to_version"]), (1, 2))
+        fresh = self.store()  # tombstone 重放＝缺席
+        self.assertIsNone(fresh.get_credential(self.SID))
+        self.assertEqual(fresh.credentials_all(), [])
+        self._put(fresh, token="tok-c1b")                 # re-put＝v3
+        self.assertEqual(fresh.get_credential(self.SID).token, "tok-c1b")
+        files = _head_files(self.home.state)
+        v3 = list(self._cred_files())[2]
+        self.assertIn(v3, files)
+        again = self.store()  # v3 活牌重放（文件已被 re-put 前覆写为新牌）
+        self.assertEqual(again.get_credential(self.SID).token, "tok-c1b")
+
+    def test_overlay_read_your_writes_for_put_delete_reput(self):
+        st = self.store()
+        reader = self.store()
+        self.home.write_credential(self.SID, self.TOK)
+        with st.uow():
+            st.put_credential(Credential(sid=self.SID, token=self.TOK))
+            self.assertIsNotNone(st.get_credential(self.SID))  # overlay 先见
+            self.assertIsNone(reader.get_credential(self.SID))  # 外部只见 HEAD
+            self.assertTrue(st.delete_credential(self.SID))
+            self.assertIsNone(st.get_credential(self.SID))  # overlay tombstone
+            self.assertEqual(st.credentials_all(), [])
+            self.assertFalse(st.delete_credential(self.SID))  # 重删 False
+            st.put_credential(Credential(sid=self.SID, token=self.TOK,
+                                         created_ms=9))  # re-put 同 UoW
+            self.assertEqual(st.get_credential(self.SID).created_ms, 9)
+        fresh = self.store()  # 提交后重开重放：v3 活牌在案
+        self.assertEqual(fresh.get_credential(self.SID).created_ms, 9)
+        self.assertEqual([c.created_ms for c in fresh.credentials_all()], [9])
+
+    def test_aborted_put_version_not_reused(self):
+        st = self.store()
+        self._put(st)                                     # v1
+        self.home.write_credential(self.SID, "tok-x")     # 新牌文件先落
+        self.injector.arm("write-object", "before")
+        with self.assertRaises(harness.FaultInjected):
+            with st.uow():
+                st.put_credential(Credential(sid=self.SID, token="tok-x"))
+        self.injector.disarm("write-object")
+        with st.uow():  # 重试取 v3——弃单版本不复用
+            st.put_credential(Credential(sid=self.SID, token="tok-x"))
+        files = _head_files(self.home.state)
+        v2, v3 = list(self._cred_files())[1:3]
+        self.assertNotIn(v2, files)
+        self.assertIn(v3, files)
+
+    def test_rebind_reuses_prior_secret_path_without_new_file(self):
+        st = self.store()
+        self._put(st, sid="ses-d1", token="tok-d")  # 文件＝credentials/ses-d1
+        with st.uow():  # authsvc.rebind 形态：同牌换 sid 不写新文件
+            st.put_credential(Credential(sid="ses-d2", token="tok-d",
+                                         lineage=("ses-d1",)))
+            st.delete_credential("ses-d1")
+        self.assertEqual(st.get_credential("ses-d2").lineage, ("ses-d1",))
+        self.assertIsNone(st.get_credential("ses-d1"))
+        self.assertFalse((self.home.credentials / "ses-d2.token").exists())
+        fresh = self.store()  # 重启：按既录 secret_path 水合（无 ses-d2 文件）
+        self.assertEqual(fresh.get_credential("ses-d2").token, "tok-d")
+        self.assertIsNone(fresh.get_credential("ses-d1"))
+
+
+class TestCredentialSecretSafety(_Base):  # Req: F151——secret 外置安全性
+    SID, TOK = "ses-s1", "tok-s1"
+
+    def _put_two(self):
+        st = self.store()
+        self._write(self.SID, self.TOK)
+        with st.uow():
+            st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        self._write("ag-cw2", "tok-s2")  # worker 键位
+        with st.uow():
+            st.put_credential(Credential(sid="ses-w2", token="tok-s2",
+                                         task_id="ag-cw2"))
+        with st.uow():
+            st.delete_credential(self.SID)  # tombstone 也进对象树
+        return st
+
+    def _write(self, key, token):
+        self.home.write_credential(key, token)
+
+    def _all_objects(self):
+        r = _plumb(self.home.state, "cat-file", "--batch-all-objects",
+                   "--batch-check")
+        assert r.returncode == 0, r.stderr
+        return [line.split()[:2] for line in r.stdout.decode().splitlines()
+                if line.strip()]
+
+    def test_canonical_carry_digest_and_path_no_token_anywhere(self):
+        self._put_two()
+        files = _head_files(self.home.state)
+        cred_paths = [p for p in files if p.startswith("objects/credentials/")]
+        self.assertEqual(len(cred_paths), 3)  # v1+tombstone＋worker v1
+        for path in cred_paths:
+            data = json.loads(_blob(self.home.state, files[path]))["data"]
+            if data.get("deleted") is True:
+                continue
+            self.assertNotIn("token", data)  # 明文牌不入 canonical
+            self.assertRegex(data["token_sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(data["secret_path"].endswith(".token"))
+        for sha, typ in self._all_objects():  # 全对象扫描（blob/tx/commit）
+            content = _plumb(self.home.state, "cat-file", typ, sha).stdout
+            for token in (self.TOK, "tok-s2"):
+                self.assertNotIn(token.encode(), content, (typ, sha))
+
+    def test_put_verifies_external_secret_fail_closed_zero_commit(self):
+        st = self.store()
+        with self.assertRaises(CredentialSecretError):  # 无文件
+            with st.uow():
+                st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        self.assertIsNone(st.head)  # 零提交零 tx
+        self._write(self.SID, "other-token")  # 文件在而牌值不符
+        with self.assertRaises(CredentialSecretError):
+            with st.uow():
+                st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        self.assertIsNone(st.head)
+        self.assertIsInstance(CredentialSecretError("x"), StorageError)
+        self._write(self.SID, self.TOK)  # 匹配 → 放行
+        with st.uow():
+            st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        self.assertIsNotNone(st.head)
+
+    def test_missing_or_mismatched_secret_fails_closed_on_restart(self):
+        st = self.store()
+        self._write(self.SID, self.TOK)
+        with st.uow():
+            st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        path = self.home.credentials / f"{self.SID}.token"
+        path.unlink()  # 文件丢失：不静默空牌/不凭据消失
+        with self.assertRaises(CredentialSecretError):
+            self.store()
+        self._write(self.SID, "tampered")  # 牌值被换：摘要不符
+        with self.assertRaises(CredentialSecretError):
+            self.store()
+        self._write(self.SID, self.TOK)  # 复原即启
+        self.assertIsNotNone(self.store().get_credential(self.SID))
+        st2 = self.store()
+        with st2.uow():  # tombstone 后不再依赖文件
+            st2.delete_credential(self.SID)
+        path.unlink()
+        st3 = self.store()  # 最新版＝tombstone：缺席而非炸启动
+        self.assertIsNone(st3.get_credential(self.SID))
+
+    def test_storage_never_writes_or_deletes_secret_files(self):
+        st = self.store()
+        self._write(self.SID, self.TOK)
+        p = self.home.credentials / f"{self.SID}.token"
+        raw = p.read_bytes()
+        with st.uow():
+            st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        with st.uow():
+            st.delete_credential(self.SID)  # 删除不清理文件（清理权归 sweep）
+        self.assertTrue(p.exists())
+        self.assertEqual(p.read_bytes(), raw)  # 内容未被存储改写
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+
+    def test_bad_digest_format_and_scalar_type_fail_closed(self):
+        st = self.store()
+        self._write(self.SID, self.TOK)
+        with st.uow():
+            st.put_credential(Credential(sid=self.SID, token=self.TOK))
+        files = _head_files(self.home.state)
+        [v1] = [p for p in files if p.startswith("objects/credentials/")
+                and p.endswith("%020d.json" % 1)]
+        obj = json.loads(_blob(self.home.state, files[v1]))
+        obj["data"]["token_sha256"] = "zz" * 32  # 坏摘要形态
+        _mutate_head(self.home.state, {v1: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+        obj["data"]["token_sha256"] = "a" * 64  # 摘要复原、标量错型
+        obj["data"]["created_ms"] = "5"
+        _mutate_head(self.home.state, {v1: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
 
 
 if __name__ == "__main__":
