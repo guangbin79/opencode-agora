@@ -49,7 +49,9 @@ def main(argv=None):
         print(str(e), file=sys.stderr)
         return 2
     for path in found:
-        print(path)
+        # C 册终闸：目录名内嵌换行会把一行拆两行、次行成伪发现注入逐行
+        # 输出面（解析面 -z/bytes 已收口，打印面同口径）——转义保一行一发现
+        print(path.replace("\r", "\\r").replace("\n", "\\n"))
     return 1 if found else 0
 
 

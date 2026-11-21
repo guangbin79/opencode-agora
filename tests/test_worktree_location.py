@@ -95,6 +95,15 @@ def test_scan_bad_bytes_name_no_crash(repo, capsys):  # Req: F129
     assert main([str(repo)]) == 1  # CLI 面照常报发现，不 traceback
 
 
+def test_cli_newline_name_stays_single_line(repo, capsys):  # Req: F129
+    # 目录名内嵌换行不得拆行注入伪发现（终闸 C 册锚：解析单条目＝打印单行）
+    name = "ev__wt-a\nFAKE LINE injected"
+    (repo / name).mkdir()
+    assert scan_misplaced_worktrees(str(repo)) == [name]
+    assert main([str(repo)]) == 1
+    assert capsys.readouterr().out == "ev__wt-a\\nFAKE LINE injected\n"
+
+
 def test_scan_ignores_tracked_wt_named_dir(repo):  # Req: F129
     tracked = repo / "docs__wt-kept"
     tracked.mkdir()
