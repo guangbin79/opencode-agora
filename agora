@@ -12,6 +12,8 @@ reverify 子命令（ag-d68faf）薄代理 /reverify 把 done 驻留任务重排
 F140 离线动词（export/backup/migrate/switch/rollback）：v3 切换/导出/备份
 （设计 §8/§9）——数据面＝本地 SQLite 权威（经 agorad.cutover 延迟导入），
 不连服务不触网络；退出码与 HTTP 谓词同契约（0 成功/1 可恢复/2 异常）。
+F157 --backend git：同一动词族的 GitStore 后端（agorad.gitcutover 动态
+导入——sqlite 缺省面零 git 模块触达；未知 backend 拒，exit 2 零动作）。
 取数照抄 board_tui.py 形态：
 $AGORA_HOME/.agora/{root.token,service.json}，零直读状态文件、零格式逆向。
 非 MCP agora sleep（那是 agent 回合内本地睡眠，两者不互替）。
@@ -347,39 +349,48 @@ def _offline(a, build):
         return 1 if e.recoverable else 2
 
 
+def _backend_mod(a):
+    """F157 离线动词后端选择点（同 compose._select_storage 语义）：sqlite
+    缺省＝agorad.cutover（零 git 模块触达，现有命令行为不变）；git＝
+    agorad.gitcutover（importlib 动态面——入口静态依赖仍仅 agorad.cutover）；
+    未知值 argparse choices 已拒（exit 2 零动作），此处兜底 fail-closed。"""
+    import importlib
+    backend = getattr(a, "backend", "sqlite")
+    if backend not in ("sqlite", "git"):
+        raise ValueError(f"未知 backend {backend!r}（可用: sqlite、git）")
+    return importlib.import_module(
+        "agorad.gitcutover" if backend == "git" else "agorad.cutover")
+
+
 def run_export(a):
     def go():
-        from agorad.cutover import export_home
-        return export_home(_home_from(a), out=a.out)
+        return _backend_mod(a).export_home(_home_from(a), out=a.out)
     return _offline(a, go)
 
 
 def run_backup(a):
     def go():
-        from agorad.cutover import backup_home
-        return backup_home(_home_from(a), a.out)
+        return _backend_mod(a).backup_home(_home_from(a), a.out)
     return _offline(a, go)
 
 
 def run_migrate(a):
     def go():
-        from agorad.cutover import migrate_cmd
-        return migrate_cmd(a.source, a.target, apply=a.apply,
-                           report_path=a.report)
+        return _backend_mod(a).migrate_cmd(a.source, a.target,
+                                           apply=a.apply,
+                                           report_path=a.report)
     return _offline(a, go)
 
 
 def run_switch(a):
     def go():
-        from agorad.cutover import switch
-        return switch(a.old, a.new)
+        return _backend_mod(a).switch(a.old, a.new)
     return _offline(a, go)
 
 
 def run_rollback(a):
     def go():
-        from agorad.cutover import rollback
-        return rollback(a.old, a.new)
+        return _backend_mod(a).rollback(a.old, a.new)
     return _offline(a, go)
 
 
@@ -479,20 +490,30 @@ def _cutover_parsers(sub):
         description="§8 派生导出：state/messages/*.md（补零文件名＋v2 兼容"
                     " frontmatter＋body 字节）＋events.jsonl（按 seq）＋"
                     "state/ledger.json（记账快照 canonical JSON）——全部从"
-                    " SQLite 权威派生，删件重跑即修复，库外孤儿件清扫。",
+                    " SQLite 权威派生，删件重跑即修复，库外孤儿件清扫。"
+                    "--backend git＝自 GitStore 权威重建（零 SQLite 件）。",
         epilog=epilog, formatter_class=fmt)
     x.add_argument("--home", help="AGORA_HOME（缺省 $AGORA_HOME/指针/缺省 plaza）")
     x.add_argument("--out", help="导出根目录（缺省＝home 本位重建）")
+    x.add_argument("--backend", choices=("sqlite", "git"), default="sqlite",
+                   help="记账后端（缺省 sqlite；git 需 canonical journal"
+                        "（state/journal.git）在位——migrate --backend git"
+                        " --apply 产物）")
     x.set_defaults(fn=run_export)
     b = sub.add_parser(
         "backup", help="SQLite backup API 一致性热备（凭据不入备份件）",
         description="一致性热备（断言3）：backup API 快照→credentials 清扫"
                     "（牌可重签，token 字节不驻备份暗面）→integrity/"
                     "foreign_key 体检→0600 落盘；从备份恢复的库可读且"
-                    " 记账计数与源一致（凭据除外——不入备份件）。",
+                    " 记账计数与源一致（凭据除外——不入备份件）。"
+                    "--backend git＝canonical journal bundle（refs/agora/"
+                    "journal 可达对象自包含包，校验过后原子落位）。",
         epilog=epilog, formatter_class=fmt)
     b.add_argument("--home", help="AGORA_HOME（缺省 $AGORA_HOME/指针/缺省 plaza）")
     b.add_argument("--out", required=True, help="备份件路径（拒覆写已存在件）")
+    b.add_argument("--backend", choices=("sqlite", "git"), default="sqlite",
+                   help="记账后端（缺省 sqlite 热备；git＝journal bundle，"
+                        "需 canonical journal（state/journal.git）在位）")
     b.set_defaults(fn=run_backup)
     m = sub.add_parser(
         "migrate", help="v2 home→v3 home 一次性迁移（T11 迁移器集成）",
@@ -507,29 +528,43 @@ def _cutover_parsers(sub):
                    help="实迁（缺省 dry-run 只产报告）")
     m.add_argument("--report", metavar="PATH",
                    help="报告 JSON 落盘位（缺省仅 stdout）")
+    m.add_argument("--backend", choices=("sqlite", "git"), default="sqlite",
+                   help="目标记账后端（缺省 sqlite＝agora.db；git＝"
+                        "state/journal.git，切换须另备 .home-complete 标记）")
     m.set_defaults(fn=run_migrate)
     s = sub.add_parser(
         "switch", help="切换：完整性门→WAL 收卷→同级目录两步互换",
         description="切换流程（断言5，§9）：完整性门（integrity/FK/最小冒烟）"
                     "不过即拒互换零动作；过门后 wal_checkpoint(TRUNCATE)＋"
                     "关闭全部连接（无 -wal/-shm 残留）→同级两步 rename 互换"
-                    "——旧 home 驻 <old>.swapped（rollback 对端）。",
+                    "——旧 home 驻 <old>.swapped（rollback 对端）。"
+                    "--backend git＝重放完整性门＋切换清单（state/"
+                    "switch-manifest.json，rollback 防丢锚点）。",
         epilog=epilog, formatter_class=fmt)
     s.add_argument("--old", required=True, metavar="PATH",
                    help="现行 home 目录（切换后被挪至 <old>.swapped）")
     s.add_argument("--new", required=True, metavar="PATH",
                    help="迁移完成的 v3 home（须与 --old 同级）")
+    s.add_argument("--backend", choices=("sqlite", "git"), default="sqlite",
+                   help="切换目标后端（缺省 sqlite；git 需 canonical "
+                        "journal（state/journal.git）在位＋.home-complete "
+                        "完成标记）")
     s.set_defaults(fn=run_switch)
     r = sub.add_parser(
         "rollback", help="互换回旧 home（v3 新写入随 v3 目录走，不回灌旧侧）",
         description="回滚（断言6，§9）：switch 的逆互换——v3 home 归位原名、"
                     "旧 home 回原名。切换后产生的 v3 新写入随 v3 目录离开，"
-                    "旧侧（v2 结构）零沾染；回滚后 v2 侧按原结构可启动。",
+                    "旧侧（v2 结构）零沾染；回滚后 v2 侧按原结构可启动。"
+                    "--backend git＝先对切换清单验 journal 未前移（业务 "
+                    "tx 已在＝拒，防丢写），再互换。",
         epilog=epilog, formatter_class=fmt)
     r.add_argument("--old", required=True, metavar="PATH",
                    help="切换后现行位（原 v2 home 名）")
     r.add_argument("--new", required=True, metavar="PATH",
                    help="v3 home 原名位（须为空，让位于回迁）")
+    r.add_argument("--backend", choices=("sqlite", "git"), default="sqlite",
+                   help="回滚侧后端（缺省 sqlite；git 需切换清单 state/"
+                        "switch-manifest.json 在位且 journal 未前移）")
     r.set_defaults(fn=run_rollback)
 
 

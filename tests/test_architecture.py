@@ -150,6 +150,12 @@ class TestLayering(unittest.TestCase):
                     may_import=["agorad.domain", "agorad.storage",
                                 "agorad.migrator", "agorad.gitstore"])
 
+    def test_v3_gitcutover_layer(self):  # Req: F157——Git cutover 服务面仅 stdlib＋domain＋storage＋gitstore＋gitmigrate＋migrator＋cutover（派生件格式/迁移壳/互换原语复用 cutover；bundle git 子进程经 GitStore；gitcutover 属 git 机械面不入 v3_modules 禁 git 面；SQL/sqlite 字样圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/gitcutover.py",
+                    may_import=["agorad.domain", "agorad.storage",
+                                "agorad.migrator", "agorad.gitstore",
+                                "agorad.gitmigrate", "agorad.cutover"])
+
     def test_git_subprocess_confined_to_gitstore(self):  # Req: F147——journal git 子进程圈禁 gitstore：journal.git 字样全 agorad 唯一落点；v3 应用层（含 storage/服务/装配/传输）零 git 子进程自起（业务 git 归 access/gitx 注入与 v2 main.py/access，不在本守卫面）
         v3_modules = {
             "contracts.py", "domain.py", "storage.py", "messaging.py",

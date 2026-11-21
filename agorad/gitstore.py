@@ -12,6 +12,9 @@ gate-verify）：objects/artifacts/<bucket>/<id>.json 不可变追加族（服�
 单调派号，artifact.path 不入 canonical 路径）＋insert_artifact/
 artifacts_for_task（newest-first）/events_for_task（SQLite _null("")→NULL
 同归一化）；GateVerifyService 零改动跑 Git 后端。
+Req: F157 — Phase 3 cutover 面（spec gitstore-phase3-cutover）：bundle
+谓词＋bundle 打包/校验方法（refs/agora/journal 可达对象自包含包）＋
+receipts/cursors 全量投影（Storage 同形——git 导出面）。
 
 裸仓 state/journal.git（HEAD 符号指向 refs/agora/journal）作不可变文本账本：
 canonical 对象（tasks/messages/receipts/mail-cursors＋credentials/events/
@@ -65,11 +68,12 @@ JOURNAL_CONFIG = {
     "gc.autoDetach": "false",
 }
 
-# spec §UoW/read：精确谓词白名单——查 argv 谓词不查可执行名
+# spec §UoW/read：精确谓词白名单——查 argv 谓词不查可执行名（bundle＝
+# Req: F157 离线备份打包/校验，自包含无网络面）
 ALLOWED_VERBS = frozenset({
     "hash-object", "mktree", "read-tree", "update-index", "write-tree",
     "commit-tree", "update-ref", "ls-tree", "cat-file", "rev-parse",
-    "config", "symbolic-ref", "show-ref"})
+    "config", "symbolic-ref", "show-ref", "bundle"})
 
 # UoW 守卫面（§4 同 storage：禁网络/子进程/文件遍历）；本模块自有 git 调用
 # 走 _Popen（import 时捕获原件）旁路换装
@@ -929,6 +933,14 @@ class GitStore:
         return [merged[k][1] for k in sorted(merged)
                 if merged[k][1].status == status]
 
+    def receipts_all(self):
+        """全量回执投影（Req: F157——Storage.receipts_all 同形，排序
+        message_id；git 导出/备份记账面）。"""
+        merged = dict(self._snap["receipts"])
+        if self._in_uow():
+            merged.update(self._ov["receipts"])
+        return [merged[k][1] for k in sorted(merged)]
+
     # ---- mail cursors（值＝last-read message id）----
 
     def upsert_cursor(self, sid, last_read_ms) -> MailCursor:
@@ -952,6 +964,13 @@ class GitStore:
     def get_cursor(self, sid):
         cur = self._cursor_view(sid)
         return cur[1] if cur is not None else None
+
+    def cursors_all(self):
+        """全量游标投影（Req: F157——Storage.cursors_all 同形，排序 sid）。"""
+        merged = dict(self._snap["cursors"])
+        if self._in_uow():
+            merged.update(self._ov["cursors"])
+        return [merged[k][1] for k in sorted(merged)]
 
     # ---- credentials（Req: F151——外部 secret＋tombstone 生命周期）----
 
@@ -1259,3 +1278,24 @@ class GitStore:
                 f"{self._journal}: 账本有历史而 {JOURNAL_REF} 未解析"
                 "——checkpoint 拒绝静默放行（fail-closed）")
         return None
+
+    # ---- canonical journal bundle（Req: F157——离线备份打包/校验面）----
+
+    def bundle_journal(self, dest):
+        """journal 可达对象自包含打包：refs/agora/journal 全历史（无
+        prerequisites）——仅 ref 可达 Git 对象入包，外部 secret 文件与
+        home 内无关件天然排除（明文牌不进任何 canonical 对象）。"""
+        self._git(("bundle", "create", os.fspath(dest), JOURNAL_REF))
+
+    def verify_bundle(self, path):
+        """bundle 校验＋ref/head 读回：git bundle verify 过（对象/前提
+        完整）后 list-heads 解析 {ref: head}；坏件/未过校验 raise
+        StorageError（调用方清理残件）。"""
+        self._git(("bundle", "verify", os.fspath(path)))
+        _, out, _ = self._git(("bundle", "list-heads", os.fspath(path)))
+        heads = {}
+        for line in out.decode("utf-8", "replace").splitlines():
+            sha, _, ref = line.partition(" ")
+            if sha and ref:
+                heads[ref] = sha
+        return heads

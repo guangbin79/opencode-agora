@@ -7,6 +7,9 @@ SQLite 权威→派生物全量重建、backup API 热备＋凭据清扫、T11 �
 分层（断言10）：仅 stdlib＋domain＋storage＋migrator——SQL 圈禁 storage
 （backup/checkpoint/体检/全量扫描全走 Storage 面），不 import access；
 无网络；迁移源目录只读（migrator 契约，digest_tree 锚定在测试侧）。
+Req: F157——派生落盘/_migrate_cmd 壳/同级两步互换原语抽为共用面（git
+后端 agorad.gitcutover 复用；SQLite 行为/报告字节序不变），git 特有面
+不入本模块（分层守卫镜像）。
 
 安全（断言8）：导出派生物/报告/备份件不含 token 明文——ledger.json 不含
 credentials 面；备份件 DELETE credentials＋VACUUM 压实（牌值字节不驻
@@ -153,6 +156,15 @@ def export_home(home, out=None):
         ledger["counts"]["tasks"] = len(ledger["tasks"])
     finally:
         st.close()
+    _write_derived(dest, msgs, events, ledger)
+    return {"home": str(home), "out": str(dest),
+            "messages": len(msgs), "events": len(events),
+            "ledger": LEDGER_PATH, "counts": ledger["counts"]}
+
+
+def _write_derived(dest, msgs, events, ledger):
+    """派生件落盘＋孤儿清扫（Req: F157 抽取面——git 后端导出复用，格式
+    面与 SQLite 完全同构）。"""
     exporter = MessageFileExporter(dest)
     for m in msgs:
         exporter.export(m)
@@ -173,9 +185,6 @@ def export_home(home, out=None):
     _atomic_write_bytes(dest / LEDGER_PATH,
                         json.dumps(ledger, ensure_ascii=False, sort_keys=True,
                                    indent=1).encode("utf-8"), private=True)
-    return {"home": str(home), "out": str(dest),
-            "messages": len(msgs), "events": len(events),
-            "ledger": LEDGER_PATH, "counts": ledger["counts"]}
 
 
 # ---- backup（断言3：backup API 一致性热备＋体检＋凭据清扫）----
@@ -230,15 +239,22 @@ def migrate_cmd(source, target, *, apply=False, report_path=None):
     """dry-run＝探针临时目录全流程验证（source/target 零写入）后报告改指
     真实 target；apply＝LegacyMigrator 全量迁移（报告落 target/state/
     migration-report.json，重跑幂等＝T11 契约）。"""
+    return _migrate_cmd(LegacyMigrator, source, target, apply=apply,
+                        report_path=report_path)
+
+
+def _migrate_cmd(migrator_cls, source, target, *, apply, report_path):
+    """迁移壳通用面（Req: F157 抽取——git 后端（GitLegacyMigrator）经此
+    复用 dry-run 探针/错误归一/报告落盘语义，行为逐字节同构）。"""
     source, target = pathlib.Path(source), pathlib.Path(target)
     report_path = pathlib.Path(report_path) if report_path else None
     try:
         if apply:
-            report = LegacyMigrator(source, target).migrate()
+            report = migrator_cls(source, target).migrate()
         else:
             with tempfile.TemporaryDirectory(
                     prefix="agora-migrate-dryrun-") as scratch:
-                report = LegacyMigrator(
+                report = migrator_cls(
                     source, pathlib.Path(scratch) / "probe").migrate()
             report["dry_run"] = True
             report["target"] = str(target)
@@ -306,6 +322,16 @@ def switch(old, new):
         if pathlib.Path(str(db) + suffix).exists():
             raise CutoverError("wal_residue",
                                f"{db}{suffix}: 收卷后仍活跃——拒互换")
+    report = _switch_swap(old, new)
+    report["smoke_tasks"] = smoke
+    report["checkpoint"] = list(ckpt)
+    report["gate_counts"] = gate["counts"]
+    return report
+
+
+def _switch_swap(old, new):
+    """同级两步互换（Req: F157 抽取面——git 后端复用同款失败恢复语义：
+    第二步败＝第一步回退；回退也败＝裸现场给手工恢复指令）。"""
     swapped = old.with_name(old.name + SWAPPED_SUFFIX)
     if swapped.exists():
         raise CutoverError(
@@ -325,9 +351,7 @@ def switch(old, new):
                 recoverable=False) from back
         raise CutoverError("swap_failed", f"互换第二步失败（已回退）: {exc}",
                            recoverable=False) from exc
-    return {"switched_to": str(old), "old_home_at": str(swapped),
-            "smoke_tasks": smoke, "checkpoint": list(ckpt),
-            "gate_counts": gate["counts"]}
+    return {"switched_to": str(old), "old_home_at": str(swapped)}
 
 
 def rollback(old, new):
@@ -340,6 +364,12 @@ def rollback(old, new):
     if new.exists():
         raise CutoverError("rollback_target_exists",
                            f"{new}: v3 home 原名位非空（先清让）")
+    return _rollback_swap(old, new)
+
+
+def _rollback_swap(old, new):
+    """回滚互换原语（Req: F157 抽取面——git 后端复用同款失败恢复语义）。"""
+    swapped = old.with_name(old.name + SWAPPED_SUFFIX)
     os.rename(old, new)
     try:
         os.rename(swapped, old)

@@ -217,7 +217,8 @@ class TestVerbAllowlist(unittest.TestCase):  # 断言3
         self.assertEqual(ALLOWED_VERBS, frozenset({
             "hash-object", "mktree", "read-tree", "update-index", "write-tree",
             "commit-tree", "update-ref", "ls-tree", "cat-file", "rev-parse",
-            "config", "symbolic-ref", "show-ref"}))  # 精确＝不多不少
+            "config", "symbolic-ref", "show-ref",
+            "bundle"}))  # 精确＝不多不少（bundle＝F157 离线备份打包/校验）
         for verb in ALLOWED_VERBS:
             check_verb(verb)  # plumbing 全收
         for verb in ("fetch", "push", "clone", "remote", "add", "commit",
