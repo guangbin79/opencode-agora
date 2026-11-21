@@ -449,7 +449,9 @@ class GitJournalObserver:
         env = {"PATH": os.environ.get("PATH", ""), "GIT_DIR": self._git_dir,
                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                "LC_ALL": "C"}
-        r = subprocess.run(["git", *args], env=env, capture_output=True)
+        # timeout：挂死 git 有界炸出（评审环 B/C 册——测试面不输生产面）
+        r = subprocess.run(["git", *args], env=env, capture_output=True,
+                           timeout=60)
         if check and r.returncode != 0:
             raise RuntimeError(
                 f"observer git {args[0]} rc={r.returncode}: "

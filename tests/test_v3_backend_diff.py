@@ -6,11 +6,11 @@
    tx JSON；Git 模式零 SQLite 开库——sqlite3.connect 全局换装探针）；
 3 同一非空操作脚本双后端跑公共仓库方法，逐步结果＋终态投影严格差分
    （tasks/messages 含字节体/receipts/cursors/credentials 血统/events/
-   错误形状）；差异必须命中显式 allowlist（三条已知有意差异，非虚设）；
+   错误形状）；差异必须命中显式 allowlist（五条已知有意差异，非虚设）；
 4 Git-only 不变量（零 agora.db/-wal/-shm；复合操作恰一 tx＋期望对象版本
    ＝恰一 commit；canonical diff 只增）；
 5 harness 自检（空操作清单 INFRA_ERROR 不冒充 PASS；故意分叉假件必红；
-   去 allowlist 恰现三条已知差异——证明比较器能红且 allowlist 有据）；
+   去 allowlist 恰现五条已知差异——证明比较器能红且 allowlist 有据）；
 6 知识沉淀（docs/agents/knowledge 记 F147/F148）。
 现有 SQLite 测试零改动；生产码零改动（spec：差分暴露具体缺陷才先红测
 最小修——本差分未暴露，gitstore/storage 语义面未动）。
@@ -219,13 +219,16 @@ def project_state(st, sids=(SID,)):
 def run_backend_diff(ops=None, sids=(SID,), allow=ALLOWED_DIFFERENCES,
                      sides=None):
     """双后端差分：ops 空＝INFRA_ERROR（空场景无从对齐，禁冒充 PASS）。
-    返回 {"status","ops","mismatches","suppressed"}；mismatches 非空即红。"""
+    返回 {"status","ops","errors","mismatches","suppressed"}；mismatches
+    非空即红；errors＝各侧实际报错的 op 名单（期望错误面断言用——两侧
+    同崩不得冒充绿，评审环 B 册 R2）。"""
     ops = scenario_ops() if ops is None else ops
-    if not ops:
-        return {"status": "INFRA_ERROR", "ops": 0, "mismatches": [],
-                "suppressed": [], "detail": "空操作清单——差分须非空场景"}
     homes = []
     try:
+        if not ops:
+            return {"status": "INFRA_ERROR", "ops": 0, "mismatches": [],
+                    "suppressed": [], "errors": {},
+                    "detail": "空操作清单——差分须非空场景"}
         if sides is None:
             sides = {}
             for backend in harness.BACKENDS:
@@ -235,6 +238,8 @@ def run_backend_diff(ops=None, sids=(SID,), allow=ALLOWED_DIFFERENCES,
         raw = []
         recs_a = run_ops(sides["sqlite"], ops)
         recs_b = run_ops(sides["git"], ops)
+        errors = {b: [r["op"] for r in recs if "error" in r]
+                  for b, recs in (("sqlite", recs_a), ("git", recs_b))}
         if len(recs_a) != len(recs_b):
             raw.append(("op[len]", len(recs_a), len(recs_b)))
         for ra, rb in zip(recs_a, recs_b):
@@ -256,7 +261,8 @@ def run_backend_diff(ops=None, sids=(SID,), allow=ALLOWED_DIFFERENCES,
             else:
                 mismatches.append(entry)
         return {"status": "PASS" if not mismatches else "MISMATCH",
-                "ops": len(ops), "mismatches": mismatches,
+                "ops": len(ops), "errors": errors,
+                "mismatches": mismatches,
                 "suppressed": suppressed}
     finally:
         for st in (sides or {}).values():
@@ -265,6 +271,11 @@ def run_backend_diff(ops=None, sids=(SID,), allow=ALLOWED_DIFFERENCES,
                 close()
         for home in homes:
             home.cleanup()
+
+
+class _SqliteOpened(BaseException):
+    """探针专用（B 册 R2）：继承 BaseException——run_ops 的 except Exception
+    吞不掉，op 执行期开库即当场炸红（盲窗封死）。"""
 
 
 class _DivergentStore:
@@ -355,9 +366,10 @@ class TestJournalObserver(unittest.TestCase):  # 断言2
 
     def test_git_mode_never_opens_sqlite(self):
         # sqlite3.connect 全局换装探针：Git 模式全程（构造/重放/提交/读面
-        # /观察器）开库即炸——零 SQLite 触达的机械证明。
-        with mock.patch("sqlite3.connect",
-                        side_effect=AssertionError("Git 模式禁开 SQLite")):
+        # /观察器）开库即炸——零 SQLite 触达的机械证明；探针异常走
+        # BaseException（run_ops 吞不掉，op 期也炸红）。
+        with mock.patch("sqlite3.connect", side_effect=_SqliteOpened(
+                "Git 模式禁开 SQLite")):
             home = harness.TempAgoraHome()
             self.addCleanup(home.cleanup)
             st = harness.make_store(home, backend="git")
@@ -374,7 +386,12 @@ class TestDifferential(unittest.TestCase):  # 断言3
         self.assertEqual(report["status"], "PASS", report["mismatches"])
         self.assertGreaterEqual(report["ops"], 12)  # 操作清单非空且覆盖面足
         self.assertEqual({s["path"] for s in report["suppressed"]},
-                         set(ALLOWED_DIFFERENCES))  # 恰三条已知差异
+                         set(ALLOWED_DIFFERENCES))  # 恰五条已知差异
+        # 期望错误面恰两条（B 册 R2：两侧同崩不得冒充绿——多出的意外
+        # AttributeError 同形记录照样过形状比对，须在此点名暴露）
+        self.assertEqual(report["errors"], {
+            "sqlite": ["err_write_outside_uow", "err_nested_uow"],
+            "git": ["err_write_outside_uow", "err_nested_uow"]})
 
     def test_without_allowlist_exactly_known_differences_surface(self):
         report = run_backend_diff(allow={})
