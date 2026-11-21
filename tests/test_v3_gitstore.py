@@ -35,6 +35,7 @@ pull 必须可持久化 credential）与 append_event——按同款 bucket 方�
 import dataclasses
 import hashlib
 import json
+from collections import Counter
 import os
 import shutil
 import socket
@@ -42,9 +43,10 @@ import subprocess
 import unittest
 
 from agorad.contracts import ContractError
-from agorad.domain import (Artifact, Credential, DeliveryReceipt, Event,
-                           Message, Task, Timer, TimerState, VerifySpec,
+from agorad.domain import (Artifact, Credential, DeliveryReceipt, DeliveryState,
+                           Event, Message, Task, Timer, TimerState, VerifySpec,
                            dispatch_secret_key, timer_transition)
+from agorad.gatedelivery import GateDeliveryService
 from agorad.gateverify import DiskArtifactSink, DoneReject, GateVerifyService
 from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, CredentialSecretError,
                              ForeignLedgerError, GitStore,
@@ -65,6 +67,11 @@ from tests.test_v3_task_service import (GitxStub as TaskGitxStub,
                                         OcStub as TaskOcStub,
                                         flip_state_on_second_read,
                                         make_task_spec)
+from tests.test_v3_gate_delivery import (BRANCH as D_BRANCH, C as D_C,
+                                        DISPATCHER as D_DISP, E as D_E,
+                                        R as D_R, TIP as D_TIP,
+                                        TIP2 as D_TIP2, WORKER as D_WORKER,
+                                        GitxDeliveryStub)
 
 TID = "ag-f147"
 GIT_FAILPOINTS = ("write-object", "write-tree", "commit-tree", "update-ref",
@@ -2090,6 +2097,462 @@ class TestGateVerifyOnGitPort(unittest.TestCase):
         self.assertEqual(self.gate.run(tid), "skip")  # 重排恰一次零重复迁移
         self.assertEqual(len(self.events(tid)), n_events + 3)  # 唯车道审计
 
+
+
+class GitxDeliveryGitStub(GitxDeliveryStub):
+    """gitx 交付桩（Git 口径，桩约同 SQLite 版）：UoW 外断言走 GitStore
+    overlay 面（SQLite 侧 _depth 探针在 Git 后备无对应）。"""
+
+    def _ok(self):
+        if self.storage is not None and self.storage._in_uow():
+            raise AssertionError("gitx 调用点身处 UoW 写事务内（§4 禁子进程）")
+
+
+class TestGateDeliveryOnGitPort(unittest.TestCase):
+    """Req: F154 — GateDeliveryService 契约移植 Git 后端（服务零改动；不
+    复制 SQLite 全套——managed 绿收口/CAS 重试与耗尽/dirty·busy 终局/幻影
+    双守卫/假冲突自愈、external awaiting→确认三面、out_of_band 直收口、
+    崩窗重启重放恰一次、交付收口复合单事务不变量；gitx/锚/runner 桩约沿
+    tests/test_v3_gate_delivery.py）。"""
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.injector = harness.FaultInjector()
+        for fp in GIT_FAILPOINTS + ("uow", "dispatch", "verify", "settle"):
+            self.injector.register(fp)  # Git 提交面 failpoint 须先注册
+        self.storage = GitStore(self.home.state, injector=self.injector)
+        self.clock = FakeClock()
+        self.gitx = GitxDeliveryGitStub(storage=self.storage)
+        self.oc = GateOcStub()
+        self.messaging = MessagingService(
+            self.storage, self.oc, home=str(self.home.path),
+            clock=self.clock, injector=self.injector)
+        self.tasksvc = TaskService(
+            self.storage, self.gitx, self.oc, messaging=self.messaging,
+            home=str(self.home.path), clock=self.clock)
+        self.timers = TimerService(self.storage, self.messaging,
+                                   clock=self.clock)
+        self.runner = GateRunnerStub(self.storage)
+        self.gate = GateDeliveryService(
+            self.storage, self.gitx, self.runner, messaging=self.messaging,
+            tasksvc=self.tasksvc, timers=self.timers,
+            anchors=lambda env: self._anchor_rows.get(env),
+            artifacts=None, home=str(self.home.path),
+            clock=self.clock, injector=self.injector, verify_timeout=300,
+            lock_wait_s=0)
+        self._anchor_rows = {}
+
+    # ---- 桩约助手（同 test_v3_gate_delivery._Base 形状） ----
+
+    def set_anchor(self, tid, head=D_C, base=D_E, clean=True):
+        if head is not None:
+            self._anchor_rows[f"/tmp/envs/{tid}"] = {"head": head,
+                                                     "base": base,
+                                                     "clean": clean}
+
+    def seed(self, tid, state="done", delivery="managed", deliverable=None,
+             delivery_extra=None, **over):
+        dl = {"managed": DeliveryState(mode="managed",
+                                       target_branch=D_BRANCH),
+              "external": DeliveryState(mode="external_branch",
+                                        target_branch=D_BRANCH),
+              "none": None}[delivery]
+        if dl is not None and delivery_extra:
+            dl = dataclasses.replace(dl, **delivery_extra)
+        row = dict(id=tid, state=state, title=tid, goal="g",
+                   project_dir="/repo", target_branch=D_BRANCH,
+                   env_dir=f"/tmp/envs/{tid}", env_base=D_E,
+                   dispatcher_sid=D_DISP, root_sid=D_DISP,
+                   worker_sid=D_WORKER, chain_depth=1, created_ms=1,
+                   updated_ms=1, commit=D_C,
+                   verify=VerifySpec(cmd="true", state="registered",
+                                     registered_by=D_DISP,
+                                     registered_at_ms=1),
+                   deliverable=deliverable, delivery=dl)
+        row.update(over)
+        with self.storage.uow():
+            self.storage.upsert_task(Task(**row))
+        return tid
+
+    def green_script(self, probe_rc=1, n=1):
+        """全绿交付一轮：探针红→env 绿→交付循环集成绿×n 次。"""
+        self.runner.script = ([(probe_rc, "base-out")] if probe_rc is not None
+                              else []) + [(0, "env-ok")] + [(0, "int-ok")] * n
+
+    def events(self, tid):
+        return [e.event for e in self.storage.events_for_task(tid)]
+
+    def messages(self, sid):
+        return self.storage.messages_for_sid(sid)
+
+    @staticmethod
+    def text(m):
+        return (m.body.decode("utf-8", "replace")
+                if isinstance(m.body, (bytes, bytearray)) else str(m.body))
+
+    def put_credential(self, tid):
+        self.home.write_credential(tid, "tok")
+        with self.storage.uow():
+            self.storage.put_credential(Credential(
+                sid=D_WORKER, token="tok", task_id=tid))
+
+    def advance_args(self):
+        return [(c[3], c[4]) for c in self.gitx.calls
+                if c[0] == "advance_local_target"]
+
+    def integration_cmds(self):
+        return [c for c in self.runner.calls
+                if "AGORA_INTEGRATION_BASE" in c["cmd"]]
+
+    # ---- managed（断言1：三形态在 Git 后备保持 SQLite 服务语义） ----
+
+    def test_managed_green_settles_revokes_and_autocancels_timer(self):
+        tid = self.seed("ag-dm1")
+        self.put_credential(tid)
+        with self.storage.uow():  # Req: F145——终态自动取消 pending timer
+            self.storage.upsert_timer(Timer(
+                id="tm-dm1", task_id=tid, target_role="worker",
+                due_ms=self.clock.ms + 60_000, state=TimerState.PENDING,
+                created_ms=self.clock.ms, body="b", created_by=D_DISP))
+        self.green_script()
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "merged")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.commit, t.fail_streak),
+                         ("closed", D_C, 0))
+        d = t.delivery
+        self.assertEqual((d.status, d.local_status, d.commit, d.base,
+                          d.attempt, d.error, d.conflict_files),
+                         ("delivered", "synced", D_C, D_TIP, 1, None, None))
+        # 推进前复跑集成 verify（恰一次）＋CAS expected-old 前置
+        self.assertEqual(len(self.integration_cmds()), 1)
+        self.assertEqual(self.advance_args(), [(D_C, D_TIP)])
+        self.assertIn("merged", self.events(tid))
+        self.assertIn("closed", self.events(tid))
+        self.assertIsNone(self.storage.get_credential(D_WORKER))  # 撤牌
+        self.assertFalse(
+            self.home.credentials.joinpath(f"{tid}.token").exists())
+        self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)  # 回收
+        self.assertEqual(self.storage.get_timer("tm-dm1").state,
+                         TimerState.CANCELLED)  # 终态自动取消（Git 后备）
+        self.assertIn("timer_autocancelled", self.events(tid))
+        self.assertTrue(any("local=synced" in self.text(m)
+                            for m in self.messages(D_DISP)))
+        # Git 不变量：每 tx 恰一 commit＋canonical 只增＋交付收口单事务
+        # （task/delivery/event/message/timer 迁移同一 tx 同一 commit）
+        obs = harness.GitJournalObserver(self.home.state)
+        txs = obs.txs()
+        self.assertEqual(len(obs.commits()), len(txs))
+        self.assertTrue(obs.additions_only())
+        settle = next(t for t in txs.values()
+                      if {"upsert_task", "insert_message", "upsert_timer"}
+                      <= {op["op"] for op in t["operations"]})
+        # task1＋timer1＋message3（含 receipt3＋posted 事件3）＋merged/
+        # closed/autocancel 事件——全部变更对象版本同一 tx 同一 commit
+        self.assertEqual(Counter(op["op"] for op in settle["operations"]),
+                         {"upsert_task": 1, "upsert_timer": 1,
+                          "insert_message": 3, "upsert_receipt": 3,
+                          "append_event": 6})
+        files = obs.paths()
+        for op in settle["operations"]:  # 全部变更对象版本同 commit 树
+            self.assertIn(op["path"], files)
+
+    def test_managed_non_ff_retries_then_exhausts(self):
+        tid = self.seed("ag-dm2")
+        self.green_script(n=3)
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["non-ff", "non-ff", "non-ff"]
+        self.assertEqual(self.gate.run(tid), "blocked")
+        t = self.storage.get_task(tid)
+        d = t.delivery
+        self.assertEqual((t.state, d.status, d.error, d.attempt,
+                          t.fail_streak),
+                         ("blocked", "failed", "retry_exhausted", 3, 0))
+        ev = self.events(tid)
+        self.assertEqual(ev.count("delivery_nonff"), 3)
+        self.assertEqual(ev.count("delivery_failed"), 1)
+        self.assertEqual(len(self.integration_cmds()), 3)  # 每次重验
+        self.assertEqual(self.advance_args(), [(D_C, D_TIP)] * 3)
+
+    def test_managed_dirty_and_busy_terminal(self):
+        tid = self.seed("ag-dm3")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["dirty"]
+        self.assertEqual(self.gate.run(tid), "blocked")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.error, t.fail_streak),
+                         ("blocked", "local_target_dirty", 0))
+        self.assertNotIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)  # 留现场
+        tid = self.seed("ag-dm4")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["failed"]
+        self.assertEqual(self.gate.run(tid), "blocked")
+        self.assertEqual(self.storage.get_task(tid).delivery.error,
+                         "local_target_busy")
+
+    def test_rebase_conflict_same_base_and_false_heal(self):
+        # 同基内容冲突：终局 rebase_conflict＋conflict_files（禁盲试恰一次）
+        tid = self.seed("ag-dc1")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.merge_ff_result = "non-ff"
+        self.gitx.rebase_script = ["conflict"]
+        self.assertEqual(self.gate.run(tid), "blocked")
+        t = self.storage.get_task(tid)
+        d = t.delivery
+        self.assertEqual((d.status, d.error, d.conflict_files, d.attempt),
+                         ("failed", "rebase_conflict", ["src/x.py"], 1))
+        self.assertIn("rebase_conflict_same_base", self.events(tid))
+        self.assertEqual(len([c for c in self.gitx.calls
+                              if c[0] == "rebase_onto"]), 1)
+        self.assertTrue(any("冲突文件: src/x.py" in self.text(m)
+                            for m in self.messages(D_DISP)))
+        # F105 假冲突自愈：基前进→最新基重建再 rebase 恰一次（attempt 不变）
+        tid = self.seed("ag-dc2")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.merge_ff_result = "non-ff"
+        self.gitx.rebase_script = ["conflict", "ok"]
+        self.gitx.rebase_head = D_R
+        self.gitx.on_rebase = lambda: setattr(self.gitx, "tip", D_TIP2)
+        self.assertEqual(self.gate.run(tid), "merged")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.commit, t.rebased_from),
+                         ("closed", D_R, D_C))  # 重放先落账
+        d = t.delivery
+        self.assertEqual((d.status, d.attempt, d.base, d.commit),
+                         ("delivered", 1, D_TIP2, D_R))  # attempt 不变
+        self.assertIn("rebase_conflict_retry", self.events(tid))
+        self.assertEqual(self.advance_args(), [(D_R, D_TIP2)])
+
+    def test_phantom_guards_bounce_without_merge(self):
+        # G1 空集 rebase：零交付弹回（不 advance）
+        tid = self.seed("ag-dp1")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.merge_ff_result = "non-ff"
+        self.gitx.rebase_script = ["ok"]
+        self.gitx.rebase_head = None
+        self.assertEqual(self.gate.run(tid), "reopened")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.fail_streak, t.delivery.status),
+                         ("reopened", 1, "pending"))
+        self.assertIn("empty_rebase_noop", self.events(tid))
+        self.assertEqual(self.advance_args(), [])
+        # G2 推进后终检不含：已 advance 但绝不 merged
+        tid = self.seed("ag-dp2")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.merge_ff_result = "ok"  # 复位 G1 残面：本例走 ff 直通
+        self.gitx.sync_marks_contained = False
+        self.assertEqual(self.gate.run(tid), "reopened")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status),
+                         ("reopened", "pending"))
+        self.assertIn("phantom_merge_blocked", self.events(tid))
+        self.assertEqual(len(self.advance_args()), 1)  # advance 已发不重复
+
+    # ---- external_branch（断言2：驻留＋确认面） ----
+
+    def test_external_awaiting_then_delivered_and_failed_confirm(self):
+        tid = self.seed("ag-de1", delivery="external")
+        self.put_credential(tid)
+        self.green_script()
+        self.set_anchor(tid)
+        self.assertEqual(self.gate.run(tid), "awaiting_external")
+        t = self.storage.get_task(tid)
+        d = t.delivery
+        self.assertEqual((t.state, d.status, d.commit, d.base, d.attempt,
+                          d.local_status), ("done", "awaiting_external", D_C,
+                                            D_TIP, 1, "not_required"))
+        self.assertEqual(self.advance_args(), [])  # 零目标支动作
+        self.assertNotIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)
+        self.assertIsNotNone(self.storage.get_credential(D_WORKER))  # 保留
+        res = self.tasksvc.deliver(tid, D_DISP, "dispatcher", "delivered",
+                                   D_C)
+        self.assertEqual(res, {"ok": True, "outcome": "delivered"})
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status,
+                          t.delivery.local_status, t.commit),
+                         ("closed", "delivered", "not_required", D_C))
+        self.assertIsNone(self.storage.get_credential(D_WORKER))  # 回收
+        self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)
+        # failed 确认桶：经真 handoff 建立 awaiting 后 blocked（残值清）
+        tid = self.seed("ag-de2", delivery="external")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gate.run(tid)
+        res = self.tasksvc.deliver(tid, D_DISP, "dispatcher", "failed", D_C)
+        self.assertEqual((res["outcome"], res["error"]),
+                         ("failed", "external_delivery_failed"))
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status,
+                          t.delivery.conflict_files),
+                         ("blocked", "failed", None))
+        # non_ff 确认面：祖先预判失败＝结构性 diverged（F110，零改写）
+        tid = self.seed("ag-de3", delivery="external")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gate.run(tid)
+        res = self.tasksvc.deliver(tid, D_DISP, "dispatcher", "non_ff", D_C,
+                                   base="d" * 40)
+        self.assertEqual((res["outcome"], res["error"]),
+                         ("failed", "diverged"))
+        self.assertEqual(self.storage.get_task(tid).state, "blocked")
+
+    # ---- out_of_band（断言3：零 Git 交付动作直收口） ----
+
+    def test_out_of_band_direct_close_without_git_delivery(self):
+        tid = self.seed("ag-do1", state="running", delivery="none",
+                        deliverable="out_of_band", commit=None)
+        self.set_anchor(tid, head=None)  # 无锚要求
+        self.assertEqual(self.gate.accept_done(tid, D_WORKER,
+                                               "docs/report.md #结论"),
+                         "accepted")
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.commit), ("done", None))  # 零提交
+        self.runner.script = [(1, "base"), (0, "env")]
+        self.assertEqual(self.gate.run(tid), "merged")
+        t = self.storage.get_task(tid)
+        self.assertEqual(t.state, "closed")
+        self.assertIn("merged", self.events(tid))
+        detail = [e.detail for e in self.storage.events_for_task(tid)
+                  if e.event == "done"][0]
+        self.assertIn("docs/report.md", detail["note"])  # 引用留痕
+        ops = self.gitx.ops()
+        self.assertNotIn("advance_local_target", ops)  # 零 Git 交付动作
+        self.assertNotIn("merge_ff", ops)
+        self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)  # 回收
+
+    # ---- 崩窗＋重启重放（断言4：恰一次、零半态、零重复推进） ----
+
+    def test_publish_crash_after_advance_restart_replay_settles_once(self):
+        tid = self.seed("ag-dw1")
+        self.put_credential(tid)
+        self.green_script()
+        self.set_anchor(tid)
+        self.injector.arm("publish", "after")  # advance 已落地、收口前崩溃
+        self.assertEqual(self.gate.run(tid), "reopened")  # 门内崩弹回
+        self.assertEqual(self.storage.get_task(tid).state, "reopened")
+        self.assertEqual(len(self.advance_args()), 1)
+        self.injector.disarm("publish")
+        # 重启重放：fresh GitStore＋新服务栈——重受理（vacuous 放行：在案
+        # commit==C）→landed 探针直收口，绝不重复推进
+        storage2 = GitStore(self.home.state)
+        self.assertEqual(storage2.get_task(tid).state, "reopened")  # 重放
+        clock2 = FakeClock()
+        gitx2 = GitxDeliveryGitStub(storage=storage2)
+        oc2 = GateOcStub()
+        msg2 = MessagingService(storage2, oc2, home=str(self.home.path),
+                                clock=clock2)
+        tsvc2 = TaskService(storage2, gitx2, oc2, messaging=msg2,
+                            home=str(self.home.path), clock=clock2)
+        gate2 = GateDeliveryService(
+            storage2, gitx2, GateRunnerStub(storage2), messaging=msg2,
+            tasksvc=tsvc2, anchors=lambda env: self._anchor_rows.get(env),
+            artifacts=None, home=str(self.home.path), clock=clock2,
+            verify_timeout=300, lock_wait_s=0)
+        tsvc2.transition(tid, "running", actor=D_WORKER)
+        gitx2.contained.add((D_C, D_BRANCH))  # 首轮 advance 已落地（真仓）
+        self.assertEqual(gate2.accept_done(tid, D_WORKER, D_C), "accepted")
+        self.assertEqual(gate2.run(tid), "merged")
+        t = storage2.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status, t.delivery.local_status,
+                          t.delivery.commit),
+                         ("closed", "delivered", "synced", D_C))
+        self.assertEqual([c for c in gitx2.calls
+                          if c[0] == "advance_local_target"],
+                         [])  # 绝不重复推进
+
+    def test_publish_crash_before_advance_then_full_cycle(self):
+        # 评审环 A1 闭包：before-publication 崩窗直接点名（镜像 SQLite
+        # ag-w9）——推进前崩：目标支未动；重排队后续跑完整交付恰一次
+        tid = self.seed("ag-dw5")
+        self.green_script()
+        self.set_anchor(tid)
+        self.injector.arm("publish", "before")
+        self.assertEqual(self.gate.run(tid), "reopened")  # 门内崩弹回
+        self.assertEqual(self.storage.get_task(tid).state, "reopened")
+        self.assertEqual(self.advance_args(), [])  # 推进前崩：目标支未动
+        self.injector.disarm("publish")
+        self.tasksvc.transition(tid, "running", actor=D_WORKER)
+        self.set_anchor(tid, head=D_C)
+        self.gitx.contained.discard((D_C, D_BRANCH))
+        self.assertEqual(self.gate.accept_done(tid, D_WORKER, D_C), "accepted")
+        self.runner.script = [(0, ""), (0, "int")]  # 探针缓存命中
+        self.assertEqual(self.gate.run(tid), "merged")  # 完整续跑一轮交付
+        self.assertEqual(len(self.advance_args()), 1)
+
+    def test_settle_commit_crash_zero_half_state_then_replay(self):
+        tid = self.seed("ag-dw2")
+        self.green_script()
+        self.set_anchor(tid)
+        orig = self.gitx.contains
+
+        def arm_at_final_probe(repo, commit, branch=None):
+            hit = orig(repo, commit, branch)
+            if hit and commit == D_C:  # G2 终检：advance 后、收口 tx 前
+                self.injector.arm("update-ref", "before")
+            return hit
+
+        self.gitx.contains = arm_at_final_probe
+        # 收口 tx 在 update-ref 崩（GitStore 提交窗）→弹回链路各 UoW 同点
+        # 再崩——FaultInjected 逃出门体，收口零半态（overlay 弃、ref 未动）
+        with self.assertRaises(harness.FaultInjected):
+            self.gate.run(tid)
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status),
+                         ("done", "pending"))  # 零半态：终局未落账
+        self.assertNotIn("merged", self.events(tid))
+        self.assertEqual(len(self.advance_args()), 1)  # advance 已落地
+        self.injector.disarm("update-ref")
+        self.gitx.contains = orig
+        self.runner.script = []
+        self.assertEqual(self.gate.run(tid), "merged")  # landed 直收：零重验
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status,
+                          t.delivery.local_status), ("closed", "delivered",
+                                                     "synced"))
+        self.assertEqual(len(self.advance_args()), 1)  # 恰一次推进
+        fresh = GitStore(self.home.state)  # 重启重放：终态投影等价
+        ft = fresh.get_task(tid)
+        self.assertEqual((ft.state, ft.delivery.status),
+                         ("closed", "delivered"))
+
+    def test_recover_pending_done_landed_closes_without_advance(self):
+        tid = self.seed("ag-dw4",
+                        delivery_extra=dict(status="pending", attempt=2,
+                                            base=D_TIP))
+        self.put_credential(tid)
+        self.gitx.contained.add((D_C, D_BRANCH))  # 目标支已含（崩窗残留）
+        self.gate.recover()
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status, t.delivery.attempt,
+                          t.delivery.base),
+                         ("closed", "delivered", 2, D_TIP))  # 在案基线保真
+        self.assertIn("delivery_recovered", self.events(tid))
+        self.assertNotIn("advance_local_target", self.gitx.ops())  # 零推进
+        self.assertIsNone(self.storage.get_credential(D_WORKER))  # 撤牌
+        self.assertIn(f"/tmp/envs/{tid}", self.gitx.removed_envs)  # 回收
+
+    def test_failed_done_residue_patches_blocked_never_retries(self):
+        tid = self.seed("ag-dw3",
+                        delivery_extra=dict(status="failed", attempt=2,
+                                            error="rebase_conflict"))
+        self.put_credential(tid)
+        self.gate.recover()
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.status), ("blocked", "failed"))
+        self.assertEqual(self.gitx.ops() & {"advance_local_target",
+                                            "merge_ff"}, set())  # 绝不重试
+        self.assertEqual(self.runner.calls, [])  # 不烧 verify
+        self.assertIn("delivery_failed_recovery", self.events(tid))
+        n = len(self.events(tid))
+        self.gate.recover()  # 幂等：终局行零接触
+        self.assertEqual(len(self.events(tid)), n)
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,10 @@ Req: F153 — artifact/event 场景差分（spec gitstore-phase2-artifacts-gate-
 verify「Differential」）：多任务事件流/events_for_task 归一化、多 artifact
 落账/artifacts_for_task newest-first、事务外写错误形状＋重启重放投影等价
 ——零新增 allowlist。
+Req: F154 — GateDelivery 场景差分（spec gitstore-phase2-gate-delivery
+「Tests」）：同一非空交付操作脚本（managed 绿收口/external 驻留→delivered
+确认/out_of_band 直收口/dirty 终局＋timer 终态取消＋撤牌）双后端严格差分
+——外结果/tasks/events/messages/credentials/timers 全投影零新增 allowlist。
 
 断言清单（spec「Required work」逐条机械判定）：
 1 make_store 工厂（BACKENDS 单常量；sqlite/git 双选、未知拒）；
@@ -38,9 +42,17 @@ from pathlib import Path
 from unittest import mock
 
 from agorad import domain
+from agorad.gatedelivery import GateDeliveryService
 from agorad.messaging import MessagingService
 from agorad.tasksvc import TaskService
+from agorad.timersvc import TimerService
 from tests import v3_harness as harness
+from tests.test_v3_gate_delivery import (BRANCH as D_BRANCH, C as D_C,
+                                         DISPATCHER as D_DISP, E as D_E,
+                                         TIP as D_TIP, WORKER as D_WORKER,
+                                         GitxDeliveryStub as DeliveryGitxStub,
+                                         OcStub as DeliveryOcStub,
+                                         RunnerStub as DeliveryRunnerStub)
 from tests.test_v3_task_service import (FakeClock,
                                         GitxStub as TaskGitxStub,
                                         OcStub as TaskOcStub,
@@ -1074,6 +1086,254 @@ class TestArtifactEventDifferential(unittest.TestCase):
             for home in homes.values():
                 home.cleanup()
 
+
+
+# ---- Req: F154 — GateDelivery 双后端差分 ----
+
+D_TID_M, D_TID_E, D_TID_O, D_TID_D = ("ag-dm", "ag-de", "ag-do", "ag-dd")
+D_TOKEN = "tk-d"
+
+
+def _delivery_task(tid, mode, *, state="done", deliverable=None,
+                   commit=D_C):
+    return domain.Task(
+        id=tid, state=state, title=tid, goal="g", project_dir="/repo",
+        target_branch=D_BRANCH, env_dir=f"/tmp/envs/{tid}", env_base=D_E,
+        dispatcher_sid=D_DISP, root_sid=D_DISP, worker_sid=D_WORKER,
+        chain_depth=1, created_ms=1, updated_ms=1, commit=commit,
+        verify=domain.VerifySpec(cmd="true", state="registered",
+                                 registered_by=D_DISP, registered_at_ms=1),
+        deliverable=deliverable,
+        delivery=(None if mode is None
+                  else domain.DeliveryState(mode=mode,
+                                            target_branch=D_BRANCH)))
+
+
+class _DeliverySide:
+    """Req: F154——GateDeliveryService 场景侧：store 面透传（run_ops/
+    project_state 照常消费），gate/gitx/runner/tasksvc/timers/anchor_rows
+    挂属性供 op 使用；桩约沿 test_v3_gate_delivery（storage=None——UoW
+    外调用点断言归 TestGateDeliveryOnGitPort，差分面不吃双后备探针差异）。"""
+
+    def __init__(self, home, backend):
+        self.home = home
+        self.store = harness.make_store(home, backend=backend)
+        self.gitx = DeliveryGitxStub()
+        self.oc = DeliveryOcStub()
+        self.clock = FakeClock()
+        self.messaging = MessagingService(
+            self.store, self.oc, home=str(home.path), clock=self.clock)
+        self.tasksvc = TaskService(
+            self.store, self.gitx, self.oc, messaging=self.messaging,
+            home=str(home.path), clock=self.clock)
+        self.timers = TimerService(self.store, self.messaging,
+                                   clock=self.clock)
+        self.runner = DeliveryRunnerStub()
+        self.gate = GateDeliveryService(
+            self.store, self.gitx, self.runner, messaging=self.messaging,
+            tasksvc=self.tasksvc, timers=self.timers,
+            anchors=lambda env: self.anchor_rows.get(env),
+            artifacts=None, home=str(home.path), clock=self.clock,
+            verify_timeout=300, lock_wait_s=0)
+        self.anchor_rows = {}
+
+    def __getattr__(self, name):
+        store = self.__dict__.get("store")
+        if store is None:
+            raise AttributeError(name)
+        return getattr(store, name)
+
+    def events_all(self):
+        return _norm_gate_events(self.store.events_all())
+
+    def close(self):
+        close = getattr(self.store, "close", None)
+        if close is not None:
+            close()
+
+
+def _norm_gate_events(events):
+    """环境噪声归一（同 _TaskSide <HOME> 口径）：车道事件 detail.duration
+    ＝真测墙钟（time.monotonic），两侧天然互异非后端语义——归一为固定
+    记号；repo/limit/slot 等语义键保留参与差分。"""
+    out = []
+    for e in events:
+        if (e.event in ("gate_resource_acquire", "gate_resource_release")
+                and isinstance(e.detail, dict) and "duration" in e.detail):
+            e = dataclasses.replace(
+                e, detail={**e.detail, "duration": "<DURATION>"})
+        out.append(e)
+    return out
+
+
+def delivery_scenario_ops():
+    """Req: F154——非空交付操作脚本：三形态（managed 绿收口＋终态 timer
+    自动取消＋撤牌、external 绿驻留→delivered 确认、out_of_band 引用受理
+    直收口）＋managed dirty 终局＋读面（差分基线＝SQLite 服务语义）。"""
+
+    def _seed(st, tid, mode, **kw):
+        with st.uow():
+            st.upsert_task(_delivery_task(tid, mode, **kw))
+        st.anchor_rows[f"/tmp/envs/{tid}"] = {"head": D_C, "base": D_E,
+                                              "clean": True}
+
+    def _seed_timer(st):
+        with st.uow():
+            st.upsert_timer(domain.Timer(
+                id="tm-deliv", task_id=D_TID_M, target_role="worker",
+                due_ms=st.clock.ms + 60_000,
+                state=domain.TimerState.PENDING, created_ms=st.clock.ms,
+                body="b", created_by=D_DISP))
+
+    def _put_cred(st):
+        with st.uow():
+            st.put_credential(domain.Credential(
+                sid=D_WORKER, token=D_TOKEN, task_id=D_TID_M))
+
+    def _green(st, n=1):
+        st.runner.script = [(1, "base"), (0, "env")] + [(0, "int")] * n
+
+    return [
+        ("seed_managed", lambda st: _seed(st, D_TID_M, "managed")),
+        ("seed_external", lambda st: _seed(st, D_TID_E, "external_branch")),
+        ("seed_oob", lambda st: _seed(st, D_TID_O, None, state="running",
+                                      deliverable="out_of_band",
+                                      commit=None)),
+        ("seed_dirty_terminal", lambda st: _seed(st, D_TID_D, "managed")),
+        ("credential_put", _put_cred),
+        ("timer_seed_pending", _seed_timer),
+        ("managed_green_run",
+         lambda st: (_green(st), st.gate.run(D_TID_M))[1]),
+        ("managed_terminal_views",
+         lambda st: (st.get_task(D_TID_M).state,
+                     st.get_task(D_TID_M).delivery.status,
+                     st.get_timer("tm-deliv").state.value,
+                     st.get_credential(D_WORKER) is None)),
+        ("external_green_run",
+         lambda st: (_green(st), st.gate.run(D_TID_E))[1]),
+        ("external_awaiting_views",
+         lambda st: (st.get_task(D_TID_E).state,
+                     st.get_task(D_TID_E).delivery.status,
+                     st.get_task(D_TID_E).delivery.local_status)),
+        ("oob_accept_ref", lambda st: st.gate.accept_done(
+            D_TID_O, D_WORKER, "docs/report.md")),
+        ("oob_run_close", lambda st: (
+            setattr(st.runner, "script", [(1, "base"), (0, "env")]),
+            st.gate.run(D_TID_O))[1]),
+        ("external_deliver_delivered",
+         lambda st: st.tasksvc.deliver(D_TID_E, D_DISP, "dispatcher",
+                                       "delivered", D_C)),
+        ("dirty_terminal_run", lambda st: (
+            setattr(st.gitx, "advance_script", ["dirty"]),
+            _green(st), st.gate.run(D_TID_D))[2]),
+        ("dirty_terminal_views",
+         lambda st: (st.get_task(D_TID_D).state,
+                     st.get_task(D_TID_D).delivery.error)),
+        ("reads_tasks_all", lambda st: st.tasks_all()),
+        ("reads_events_all", lambda st: st.events_all()),
+        ("reads_messages_all", lambda st: st.messages_all()),
+        ("reads_timers_all", lambda st: st.timers_all()),
+    ]
+
+
+class TestDeliveryDifferential(unittest.TestCase):
+    """Req: F154——GateDelivery 双后端差分：同一非空交付脚本（三形态＋
+    dirty 终局）外结果＋终态投影（tasks/messages/events/timers/
+    credentials）严格相等，零新增 allowlist；重启重放投影等价＋Git journal
+    不变量（交付收口复合单 tx 单 commit/canonical 只增）。"""
+
+    def _sides(self):
+        homes, sides = {}, {}
+        try:
+            for backend in harness.BACKENDS:
+                homes[backend] = harness.TempAgoraHome()
+                homes[backend].write_credential(D_TID_M, D_TOKEN)  # Git put 先验
+                sides[backend] = _DeliverySide(homes[backend], backend)
+            return homes, sides
+        except BaseException:
+            for st in sides.values():
+                st.close()
+            for home in homes.values():
+                home.cleanup()
+            raise
+
+    def _report(self, sides):
+        return run_backend_diff(ops=delivery_scenario_ops(),
+                                sids=(D_WORKER,), sides=sides,
+                                allow=ALLOWED_DIFFERENCES)
+
+    def test_delivery_scenario_strict_differential(self):
+        homes, sides = self._sides()
+        try:
+            report = self._report(sides)
+        finally:  # 侧收口归 run_backend_diff（其 finally 恒关两侧 store）
+            for home in homes.values():
+                home.cleanup()
+        self.assertEqual(report["status"], "PASS", report["mismatches"])
+        self.assertGreaterEqual(report["ops"], 15)  # 场景非空且覆盖三形态
+        self.assertEqual(report["suppressed"], [])  # 零新增已知差异
+        self.assertEqual(report["errors"], {"sqlite": [], "git": []})
+
+    def test_delivery_projection_equivalent_after_restart(self):
+        homes, sides = self._sides()
+        fresh = {}
+        try:
+            report = self._report(sides)
+            self.assertEqual(report["status"], "PASS", report["mismatches"])
+            for b in harness.BACKENDS:  # 重启重放（Git 侧构造即重放面）
+                fresh[b] = harness.make_store(homes[b], backend=b)
+            self.addCleanup(fresh["sqlite"].close)
+            raw = []
+            for family, proj in (
+                    ("tasks", lambda s: s.tasks_all()),
+                    ("events", lambda s: _norm_gate_events(s.events_all())),
+                    ("timers", lambda s: s.timers_all())):
+                _leaf_diff(norm([dataclasses.asdict(x)
+                                 for x in proj(fresh["sqlite"])]),
+                           norm([dataclasses.asdict(x)
+                                 for x in proj(fresh["git"])]),
+                           f"state:{family}", raw)
+            smsgs = [dataclasses.asdict(m) | {
+                "body": m.body.decode("utf-8", "replace").replace(
+                    str(homes["sqlite"].path), "<HOME>")}
+                for m in fresh["sqlite"].messages_all()]
+            gmsgs = [dataclasses.asdict(m) | {
+                "body": m.body.decode("utf-8", "replace").replace(
+                    str(homes["git"].path), "<HOME>")}
+                for m in fresh["git"].messages_all()]
+            _leaf_diff(smsgs, gmsgs, "state:messages", raw)
+            self.assertEqual(raw, [])  # 重启投影零失配
+        finally:
+            close = getattr(fresh.get("git"), "close", None)
+            if close is not None:
+                close()
+            for home in homes.values():
+                home.cleanup()
+
+    def test_git_journal_invariants_for_delivery_scenario(self):
+        homes, sides = self._sides()
+        try:
+            report = self._report(sides)
+            self.assertEqual(report["status"], "PASS", report["mismatches"])
+            obs = harness.GitJournalObserver(homes["git"].state)
+            txs = obs.txs()
+            self.assertEqual(len(obs.commits()), len(txs))  # 每 tx 恰一 commit
+            self.assertTrue(obs.additions_only())  # canonical 只增
+            # 交付收口复合事务：task/delivery 迁移＋timer 取消＋消息（含
+            # receipt/posted 事件）＋merged/closed 全变更对象版本单 commit
+            settle = next(
+                t for t in txs.values()
+                if {"upsert_task", "upsert_timer", "insert_message"}
+                <= {op["op"] for op in t["operations"]})
+            self.assertLessEqual(
+                {"append_event", "upsert_receipt"},
+                {op["op"] for op in settle["operations"]})
+            files = obs.paths()
+            for op in settle["operations"]:
+                self.assertIn(op["path"], files)
+        finally:
+            for home in homes.values():
+                home.cleanup()
 
 if __name__ == "__main__":
     unittest.main()
