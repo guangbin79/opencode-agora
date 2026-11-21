@@ -1,9 +1,13 @@
 """Req: F147 — v3 GitStore Phase 0/1：Git 记账垂直切片（spec gitstore-phase0-1）。
+Req: F150 — Phase 2 timer 仓库面（spec gitstore-phase2-timers）：objects/
+timers/ 同款扩族＋九仓库方法（due 键集游标/next_due/message_for_timer），
+TimerService 零改动跑 Git 后端。
 
 裸仓 state/journal.git（HEAD 符号指向 refs/agora/journal）作不可变文本账本：
-canonical 对象（tasks/messages/receipts/mail-cursors＋credentials/events 两个
-同款 bucket 扩族——get_credential/lineage pull 与 append_event 的持久面）＋
-每笔 UoW 恰一条 tx 记录与全部变更对象版本，合成一个 commit。
+canonical 对象（tasks/messages/receipts/mail-cursors＋credentials/events/
+timers 同款 bucket 扩族——get_credential/lineage pull、append_event 与
+timer 版本化的持久面）＋每笔 UoW 恰一条 tx 记录与全部变更对象版本，合成
+一个 commit。
 
 UoW 语义（§4 同 storage 面）：写必须身处 uow；overlay 读己之写，外部读者
 只见 HEAD；提交＝临时 GIT_INDEX_FILE 自 HEAD read-tree→逐变更 update-index
@@ -30,7 +34,8 @@ import time
 
 from agorad.domain import (Artifact, BaseProbe, Credential, DeliveryReceipt,
                            DeliveryState, Event, GateState, MailCursor,
-                           Message, Task, VerifySpec, epoch_ms)
+                           Message, Task, Timer, TimerState, VerifySpec,
+                           epoch_ms)
 from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
 
 SCHEMA_VERSION = 1
@@ -146,6 +151,34 @@ def _task_from_data(tid: str, d: dict) -> Task:
     return Task(**d)
 
 
+def _timer_data(t: Timer) -> dict:
+    return {"task_id": t.task_id, "target_role": t.target_role,
+            "due_ms": t.due_ms, "state": t.state.value,
+            "created_ms": t.created_ms, "fired_ms": t.fired_ms,
+            "body": t.body, "created_by": t.created_by,
+            "client_key": t.client_key}
+
+
+def _timer_from_data(tid: str, d: dict) -> Timer:
+    tm = Timer(id=tid, task_id=d["task_id"],
+               target_role=d["target_role"], due_ms=d["due_ms"],
+               state=TimerState(d["state"]), created_ms=d["created_ms"],
+               fired_ms=d["fired_ms"], body=d["body"],
+               created_by=d["created_by"], client_key=d["client_key"])
+    # 标量错型 fail-closed（重放面）：错型 due/created 会把 TypeError 延迟到
+    # 每次扫描且常驻不收敛——构造期即拒（storage 列类型同语义；bool 非本集）
+    if (type(tm.due_ms) is not int
+            or not (tm.created_ms is None or type(tm.created_ms) is int)
+            or not (tm.fired_ms is None or type(tm.fired_ms) is int)
+            or not isinstance(tm.body, str)
+            or not isinstance(tm.task_id, str)
+            or not isinstance(tm.target_role, str)
+            or not (tm.created_by is None or isinstance(tm.created_by, str))
+            or not (tm.client_key is None or isinstance(tm.client_key, str))):
+        raise ValueError("timer 标量字段类型不符")
+    return tm
+
+
 # canonical 路径（bucket＝sha256(id/seq) 前两字节拆两个 hex 目录）
 _H = r"([0-9a-f]{2}/[0-9a-f]{2})"
 _RE_TASK = re.compile(rf"^objects/tasks/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
@@ -154,6 +187,7 @@ _RE_MSG_BODY = re.compile(rf"^objects/messages/{_H}/(?P<id>[0-9]{{20}})/body\.tx
 _RE_RECEIPT = re.compile(rf"^objects/receipts/{_H}/(?P<id>[0-9]{{20}})/(?P<v>[0-9]{{20}})\.json$")
 _RE_CURSOR = re.compile(rf"^objects/mail-cursors/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
 _RE_CRED = re.compile(rf"^objects/credentials/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
+_RE_TIMER = re.compile(rf"^objects/timers/{_H}/(?P<id>.+)/(?P<v>[0-9]{{20}})\.json$")
 _RE_EVENT = re.compile(rf"^objects/events/{_H}/(?P<seq>[0-9]{{20}})\.json$")
 _RE_TX = re.compile(rf"^tx/{_H}/(?P<seq>[0-9]{{20}})\.json$")
 
@@ -180,7 +214,7 @@ def _obj_bytes(kind, ident, version, seq, data) -> bytes:
 def _empty_state():
     return {"head": None, "tasks": {}, "messages": {}, "receipts": {},
             "cursors": {}, "credentials": {}, "events": {}, "txs": {},
-            "dedup": {}, "timers": {}}
+            "dedup": {}, "timers": {}, "timer_ents": {}}
 
 
 class GitStore:
@@ -309,7 +343,7 @@ class GitStore:
                 bad(path, "对象头/路径不一致")
             return obj
 
-        tasks, receipts, cursors, creds = {}, {}, {}, {}
+        tasks, receipts, cursors, creds, timer_ents = {}, {}, {}, {}, {}
         metas, bodies, events, txs = {}, {}, {}, {}
         obj_seqs = []
         for path, sha in entries.items():
@@ -383,6 +417,20 @@ class GitStore:
                 if cur is None or int(m["v"]) > cur[0]:
                     creds[m["id"]] = (int(m["v"]), ent)
                 continue
+            m = _RE_TIMER.match(path)
+            if m:  # timer 版本族：路径唯一即 (id,version) 唯一——重版冒位
+                # 由 bucket/头校验 fail-closed；此处恢复每 id 最新版本
+                obj = checked(obj_of(sha, path), path, "timer", m["id"],
+                              int(m["v"]), m.group(1))
+                obj_seqs.append(obj["seq"])
+                try:
+                    ent = _timer_from_data(m["id"], obj["data"])
+                except (TypeError, KeyError, ValueError) as exc:
+                    bad(path, f"timer 实体还原失败: {exc}")
+                cur = timer_ents.get(m["id"])
+                if cur is None or int(m["v"]) > cur[0]:
+                    timer_ents[m["id"]] = (int(m["v"]), ent)
+                continue
             m = _RE_EVENT.match(path)
             if m:
                 obj = checked(obj_of(sha, path), path, "event",
@@ -454,13 +502,15 @@ class GitStore:
         self._snap = {"head": head, "tasks": tasks, "messages": messages,
                       "receipts": receipts, "cursors": cursors,
                       "credentials": creds, "events": events, "txs": txs,
-                      "dedup": dedup, "timers": timers}
+                      "dedup": dedup, "timers": timers,
+                      "timer_ents": timer_ents}
         for key, top in (("message", max(messages, default=0)),
                          ("event", max(events, default=0)),
                          ("tx", max(txs, default=0))):
             self._hwm[key] = max(self._hwm.get(key, 0), top)
         for table, kind in ((tasks, "task"), (receipts, "receipt"),
-                            (cursors, "cursor"), (creds, "credential")):
+                            (cursors, "cursor"), (creds, "credential"),
+                            (timer_ents, "timer")):
             for ident, (v, _e) in table.items():
                 k = (kind, str(ident))
                 self._vhwm[k] = max(self._vhwm.get(k, 0), v)
@@ -477,7 +527,8 @@ class GitStore:
                 raise StorageError("UoW 写者互斥冲突")
             self._ov = {"writes": [], "tasks": {}, "messages": {},
                         "receipts": {}, "cursors": {}, "credentials": {},
-                        "events": {}, "dedup": {}, "timers": {}}
+                        "events": {}, "dedup": {}, "timers": {},
+                        "timer_ents": {}}
             self._owner = threading.get_ident()
             try:
                 self._install_guard()
@@ -546,6 +597,9 @@ class GitStore:
                     f"{_safe(ident)}/{_v(version)}.json")
         if kind == "credential":
             return (f"objects/credentials/{_bucket(_safe(ident))}/"
+                    f"{_safe(ident)}/{_v(version)}.json")
+        if kind == "timer":
+            return (f"objects/timers/{_bucket(_safe(ident))}/"
                     f"{_safe(ident)}/{_v(version)}.json")
         return f"objects/events/{_bucket(ident)}/{_v(ident)}.json"  # event
 
@@ -623,7 +677,8 @@ class GitStore:
         s = self._snap
         ns = {"head": new, "txs": {**s["txs"], tx_seq: tx}}
         for key in ("tasks", "messages", "receipts", "cursors",
-                    "credentials", "events", "dedup", "timers"):
+                    "credentials", "events", "dedup", "timers",
+                    "timer_ents"):
             ns[key] = {**s[key], **ov[key]} if ov[key] else s[key]
         self._snap = ns
 
@@ -805,6 +860,98 @@ class GitStore:
     def get_credential(self, sid):
         cur = self._cred_view(sid)
         return cur[1] if cur is not None else None
+
+    # ---- timers（Req: F150——同 SQLite Storage 语义面）----
+
+    def upsert_timer(self, tm: Timer) -> Timer:
+        """UPSERT＝下一版本写（取消是终态非删除）；迁移合法性归服务层
+        timer_transition（storage 同口径不复查）。"""
+        self._require_uow()
+        tid = _safe(tm.id)
+        cur = self._timer_view(tid)
+        fv = cur[0] if cur is not None else 0
+        v = self._alloc_version("timer", tid, fv)
+        self._ov["timer_ents"][tid] = (v, tm)
+        self._ov["writes"].append(_Write(
+            "upsert_timer", "timer", tid, v, _timer_data(tm),
+            from_version=fv))
+        return tm
+
+    def _timer_view(self, tid):
+        if self._in_uow() and tid in self._ov["timer_ents"]:
+            return self._ov["timer_ents"][tid]
+        return self._snap["timer_ents"].get(tid)
+
+    def get_timer(self, tid):
+        cur = self._timer_view(tid)
+        return cur[1] if cur is not None else None
+
+    def _timers_view(self):
+        merged = dict(self._snap["timer_ents"])
+        if self._in_uow():
+            merged.update(self._ov["timer_ents"])
+        return merged
+
+    def timers_all(self):
+        merged = self._timers_view()
+        return [merged[k][1] for k in sorted(merged)]
+
+    def timers_by_status(self, status):
+        merged = self._timers_view()
+        return [merged[k][1] for k in sorted(merged)
+                if merged[k][1].state == status]  # str 枚举＝值等价
+
+    def timers_for_task(self, task_id):
+        merged = self._timers_view()
+        return sorted((merged[k][1] for k in merged
+                       if merged[k][1].task_id == task_id),
+                      key=lambda t: (t.created_ms or 0, t.id))
+
+    def timer_for_key(self, task_id, client_key):
+        """(task_id, client_key) 唯一索引查（至多一行；同 SQL 语义＝NULL
+        不等——None 键不命中）。"""
+        if client_key is None:
+            return None
+        merged = self._timers_view()
+        for k in sorted(merged):
+            tm = merged[k][1]
+            if tm.task_id == task_id and tm.client_key == client_key:
+                return tm
+        return None
+
+    def timers_due(self, now_ms, limit=32, after_due=None, after_id=None):
+        """到期待发批：pending 且 due<=now，(due,id) 升序每批 ≤limit；
+        after 键集游标翻页（越过的行不重出——防门控行队头阻塞）。"""
+        merged = self._timers_view()
+        rows = [v[1] for v in merged.values()
+                if v[1].state == TimerState.PENDING
+                and v[1].due_ms <= now_ms]
+        rows.sort(key=lambda t: (t.due_ms, t.id))
+        if after_due is not None:
+            if after_id is None:  # 同 SQL NULL 语义：仅 due 严格大于
+                rows = [t for t in rows if t.due_ms > after_due]
+            else:
+                rows = [t for t in rows
+                        if (t.due_ms, t.id) > (after_due, after_id)]
+        return rows[:limit]
+
+    def next_due_ms(self):
+        """最早 pending due（提前醒计算）；无 pending→None。"""
+        merged = self._timers_view()
+        return min((v[1].due_ms for v in merged.values()
+                    if v[1].state == TimerState.PENDING), default=None)
+
+    def message_for_timer(self, timer_id):
+        """按 timer_id 对账：消息 timer 索引（重放后与 UoW overlay 内均
+        可见——崩窗补记 fired 的判据面）。"""
+        mid = (self._ov["timers"].get(timer_id)
+               if self._in_uow() else None)
+        if mid is None:
+            mid = self._snap["timers"].get(timer_id)
+        if mid is None:
+            return None
+        rec = self._message_view(mid)
+        return rec["msg"] if rec is not None else None
 
     # ---- events（seq 全局单流派号）----
 

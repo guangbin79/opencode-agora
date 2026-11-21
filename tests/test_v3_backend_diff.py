@@ -1,4 +1,7 @@
 """Req: F149 — GitStore Phase 1 后端差分（spec gitstore-phase1-differential）。
+Req: F150 — 扩非空 timer 场景（spec gitstore-phase2-timers「Tests」2）：
+create/幂等 client_key/cancel/due 键集翻页/fire 事务/timer_id 消息幂等/
+message_for_timer/重启重放投影等价——差异零新增（既有五条 allowlist 不动）。
 
 断言清单（spec「Required work」逐条机械判定）：
 1 make_store 工厂（BACKENDS 单常量；sqlite/git 双选、未知拒）；
@@ -122,6 +125,31 @@ def _nested(st):
             pass
 
 
+def _timer(tid, due, task=TID, **over):
+    base = dict(id=tid, task_id=task, target_role="worker", due_ms=due,
+                state=domain.TimerState.PENDING, created_ms=10,
+                fired_ms=None, body="b", created_by=SID, client_key=None)
+    base.update(over)
+    return domain.Timer(**base)
+
+
+def _fire_uow(st, tid):
+    """timer fire 事务镜像（服务同构）：timer 迁移＋消息（dedup=timer id）
+    ＋receipt＋event 同一 UoW。"""
+    with st.uow():
+        tm = st.upsert_timer(domain.timer_transition(
+            st.get_timer(tid), domain.TimerState.FIRING))
+        m = st.insert_message(ts_ms=60, task_id=TID, kind="timer",
+                              from_sid="agorad", to_sid=SID,
+                              body=f"[agora] timer {tid}", dedup_key=tid,
+                              timer_id=tid)
+        rcpt = st.upsert_receipt(domain.DeliveryReceipt(
+            message_id=m.id, status="pending", updated_ms=60))
+        ev = st.append_event(domain.Event(
+            seq=0, ts_ms=60, actor="agorad", event="timer_fired", task=TID))
+    return (tm, m, rcpt, ev)
+
+
 def scenario_ops():
     """非空操作清单：写路径（task 两版/消息含非 UTF-8 字节体/receipt/
     event 含 detail/游标两版/凭据血统/dedup 幂等重放）＋读路径＋错误形状。"""
@@ -169,6 +197,57 @@ def scenario_ops():
                  sid=SID, token="tk", lineage=("ses-old", "ses-older"),
                  created_ms=7)),
              s.get_credential(SID)))),
+        ("timer_create_pending",
+         lambda st: _uow(st, lambda s: s.upsert_timer(
+             _timer("tm-a", 900, client_key="k1")))),
+        ("timer_get_read", lambda st: (st.get_timer("tm-a"),
+                                       st.get_timer("tm-none"))),
+        ("timer_key_lookup",
+         lambda st: (st.timer_for_key(TID, "k1"), st.timer_for_key(TID, "zz"),
+                     st.timer_for_key(TID, None))),
+        ("timer_key_idempotent_hit",  # 服务幂等路径的仓库判定面
+         lambda st: (st.timer_for_key(TID, "k1").id,
+                     len(st.timers_for_task(TID)))),
+        ("timer_more_pending",
+         lambda st: _uow(st, lambda s: (
+             s.upsert_timer(_timer("tm-b", 300, created_ms=5)),
+             s.upsert_timer(_timer("tm-c", 900, created_ms=5,
+                                   target_role="dispatcher"))))),
+        ("timers_due_keyset",
+         lambda st: (
+             [(t.due_ms, t.id) for t in st.timers_due(1000, 2)],
+             [(t.due_ms, t.id) for t in st.timers_due(
+                 1000, 5, after_due=300, after_id="tm-b")],
+             [(t.due_ms, t.id) for t in st.timers_due(1000, 5,
+                                                      after_due=300)],
+             [(t.due_ms, t.id) for t in st.timers_due(400)])),
+        ("timer_next_due_ms", lambda st: st.next_due_ms()),
+        ("timer_cancel",
+         lambda st: _uow(st, lambda s: s.upsert_timer(
+             domain.timer_transition(s.get_timer("tm-c"),
+                                     domain.TimerState.CANCELLED,
+                                     now_ms=50)))),
+        ("timer_fire_tx", lambda st: _fire_uow(st, "tm-a")),
+        ("timer_fire_idempotent_message",  # 重复 timer_id fire 回原消息
+         lambda st: _uow(st, lambda s: s.insert_message(
+             ts_ms=61, task_id=TID, kind="timer", from_sid="agorad",
+             to_sid=SID, body="retry", dedup_key="tm-a", timer_id="tm-a"))),
+        ("timer_message_for_timer",
+         lambda st: (st.message_for_timer("tm-a").id,
+                     st.message_for_timer("tm-x"))),
+        ("timer_fired_transition",
+         lambda st: _uow(st, lambda s: s.upsert_timer(
+             domain.timer_transition(s.get_timer("tm-a"),
+                                     domain.TimerState.FIRED, now_ms=62)))),
+        ("timers_lists",
+         lambda st: ([t.id for t in st.timers_all()],
+                     [t.id for t in st.timers_for_task(TID)],
+                     ([t.id for t in st.timers_by_status("pending")],
+                      [t.id for t in st.timers_by_status("firing")],
+                      [t.id for t in st.timers_by_status("fired")],
+                      [t.id for t in st.timers_by_status("cancelled")]))),
+        ("err_timer_outside_uow",
+         lambda st: st.upsert_timer(_timer("tm-zz", 1))),
         ("reads_tasks_all", lambda st: st.tasks_all()),
         ("reads_messages_for_sid", lambda st: st.messages_for_sid(DISP)),
         ("reads_messages_all", lambda st: st.messages_all()),
@@ -211,6 +290,7 @@ def project_state(st, sids=(SID,)):
                         else dataclasses.asdict(st.get_credential(s))
                         for s in sids],
         "events": [dataclasses.asdict(e) for e in st.events_all()],
+        "timers": [dataclasses.asdict(t) for t in st.timers_all()],
     }
 
 
@@ -387,11 +467,13 @@ class TestDifferential(unittest.TestCase):  # 断言3
         self.assertGreaterEqual(report["ops"], 12)  # 操作清单非空且覆盖面足
         self.assertEqual({s["path"] for s in report["suppressed"]},
                          set(ALLOWED_DIFFERENCES))  # 恰五条已知差异
-        # 期望错误面恰两条（B 册 R2：两侧同崩不得冒充绿——多出的意外
+        # 期望错误面恰三条（B 册 R2：两侧同崩不得冒充绿——多出的意外
         # AttributeError 同形记录照样过形状比对，须在此点名暴露）
         self.assertEqual(report["errors"], {
-            "sqlite": ["err_write_outside_uow", "err_nested_uow"],
-            "git": ["err_write_outside_uow", "err_nested_uow"]})
+            "sqlite": ["err_timer_outside_uow", "err_write_outside_uow",
+                       "err_nested_uow"],
+            "git": ["err_timer_outside_uow", "err_write_outside_uow",
+                    "err_nested_uow"]})
 
     def test_without_allowlist_exactly_known_differences_surface(self):
         report = run_backend_diff(allow={})
@@ -502,6 +584,46 @@ class TestKnowledgeIngest(unittest.TestCase):  # 断言6
         for text in (log, idx):
             self.assertIn("F147", text)
             self.assertIn("F148", text)
+
+
+class TestTimerRestartReplay(unittest.TestCase):
+    """Req: F150——timer 场景双后端重启后投影等价（重放恢复最新版本）。"""
+
+    def test_timer_projection_equivalent_after_restart(self):
+        homes = {}
+        try:
+            sides = {}
+            for backend in harness.BACKENDS:
+                homes[backend] = harness.TempAgoraHome()
+                sides[backend] = harness.make_store(homes[backend],
+                                                    backend=backend)
+            try:
+                run_ops(sides["sqlite"], scenario_ops())
+                run_ops(sides["git"], scenario_ops())
+            finally:
+                for st in sides.values():
+                    close = getattr(st, "close", None)
+                    if close is not None:
+                        close()
+            fresh = {b: harness.make_store(homes[b], backend=b)
+                     for b in harness.BACKENDS}
+            self.addCleanup(fresh["sqlite"].close)
+            raw = []
+            _leaf_diff(norm([dataclasses.asdict(t)
+                             for t in fresh["sqlite"].timers_all()]),
+                       norm([dataclasses.asdict(t)
+                             for t in fresh["git"].timers_all()]),
+                       "state:timers", raw)
+            self.assertEqual(raw, [])  # 重放投影零失配（无 allowlist 面）
+            self.assertEqual(fresh["git"].next_due_ms(),
+                             fresh["sqlite"].next_due_ms())
+            for tid in ("tm-a", "tm-b", "tm-c"):
+                g = fresh["git"].message_for_timer(tid)
+                s = fresh["sqlite"].message_for_timer(tid)
+                self.assertEqual(g and g.id, s and s.id)
+        finally:
+            for home in homes.values():
+                home.cleanup()
 
 
 if __name__ == "__main__":

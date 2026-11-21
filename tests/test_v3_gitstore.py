@@ -1,4 +1,9 @@
 """Req: F147 — v3 GitStore Phase 0/1：Git 记账垂直切片测试。
+Req: F150 — Phase 2 timer 仓库面（spec gitstore-phase2-timers）：九仓库
+方法逐面（含 due 键集游标/None 键 SQL 语义）、objects/timers/<bucket>/
+<id>/<v>.json 不可变版本＋tx from/to_version、取消是状态非删除、重放恢复
+最新版本、弃单版本不复用、timer canonical 损毁 fail-closed、TimerService
+契约移植（create/cancel/fire/catch-up＋崩窗对账）。
 
 断言清单（wiki/spec/gitstore-phase0-1.md「Tests required」逐条机械判定）：
 1 init/config/head/ref＋零 SQLite 件；2 外来账本（agora.db/tasks.jsonl）拒建
@@ -21,11 +26,13 @@ import socket
 import subprocess
 import unittest
 
-from agorad.domain import (Credential, DeliveryReceipt, Event, Message, Task)
+from agorad.domain import (Credential, DeliveryReceipt, Event, Message, Task,
+                           Timer, TimerState, timer_transition)
 from agorad.gitstore import (ALLOWED_VERBS, CommitConflict, ForeignLedgerError,
                              GitStore, JournalCorruptionError, check_verb)
 from agorad.messaging import MessagingService
 from agorad.storage import NoActiveUnitOfWork, StorageError, UnitOfWorkViolation
+from agorad.timersvc import TimerService
 from tests import v3_harness as harness
 
 TID = "ag-f147"
@@ -702,6 +709,331 @@ class TestCorruptionFailClosed(_Base):  # 断言10
             "tx/de/ad/%020d.json" % 3: json.dumps(tx).encode()})
         with self.assertRaises(JournalCorruptionError):
             self.store()
+
+
+class TestTimerRepository(_Base):  # Req: F150 断言1——九仓库方法逐面
+    @staticmethod
+    def _mk(tid="tm-a1", task=TID, due=900, **over):
+        base = dict(id=tid, task_id=task, target_role="worker", due_ms=due,
+                    state=TimerState.PENDING, created_ms=10, fired_ms=None,
+                    body="醒", created_by="ses-w1", client_key=None)
+        base.update(over)
+        return Timer(**base)
+
+    def test_every_repository_method_roundtrip(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+            a = st.upsert_timer(self._mk("tm-a1", due=500, client_key="k1"))
+            st.upsert_timer(self._mk("tm-b2", task="ag-orphan", due=300,
+                                     created_ms=5))
+            st.upsert_timer(self._mk("tm-c3", due=700,
+                                     target_role="dispatcher"))
+        self.assertEqual(st.get_timer("tm-a1"), a)
+        self.assertIsNone(st.get_timer("tm-none"))
+        self.assertEqual(st.timer_for_key(TID, "k1").id, "tm-a1")  # 命中
+        self.assertIsNone(st.timer_for_key(TID, "k2"))  # 未命中
+        self.assertIsNone(st.timer_for_key(TID, None))  # 同 SQL ＝NULL 不等
+        self.assertEqual([x.id for x in st.timers_for_task(TID)],
+                         ["tm-a1", "tm-c3"])  # created_ms,id 序
+        self.assertEqual([x.id for x in st.timers_for_task("ag-orphan")],
+                         ["tm-b2"])
+        self.assertEqual([x.id for x in st.timers_all()],
+                         ["tm-a1", "tm-b2", "tm-c3"])  # id 序
+        self.assertEqual([x.id for x in st.timers_by_status("pending")],
+                         ["tm-a1", "tm-b2", "tm-c3"])
+        self.assertEqual(st.timers_by_status("fired"), [])
+        self.assertEqual([x.id for x in st.timers_due(600)],
+                         ["tm-b2", "tm-a1"])  # due 升序、未到期不出
+        self.assertEqual([x.id for x in st.timers_due(10_000, 2)],
+                         ["tm-b2", "tm-a1"])  # limit
+        self.assertEqual(st.next_due_ms(), 300)  # 最早 pending
+        self.assertIsNone(st.message_for_timer("tm-a1"))
+
+    def test_timers_due_keyset_pagination(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_timer(self._mk("tm-b", due=100))
+            st.upsert_timer(self._mk("tm-a", due=100))
+            st.upsert_timer(self._mk("tm-c", due=200))
+            st.upsert_timer(self._mk("tm-d", due=300))
+        page1 = st.timers_due(400, 2)
+        self.assertEqual([x.id for x in page1], ["tm-a", "tm-b"])
+        page2 = st.timers_due(400, 2, after_due=page1[-1].due_ms,
+                              after_id=page1[-1].id)  # 键集游标翻页
+        self.assertEqual([x.id for x in page2], ["tm-c", "tm-d"])
+        self.assertEqual(
+            st.timers_due(400, 2, after_due=300, after_id="tm-d"), [])
+        self.assertEqual([x.id for x in st.timers_due(150)],
+                         ["tm-a", "tm-b"])
+        # 半游标（after_id 缺省）：同 SQL ＝NULL 语义——仅 due 严格大于
+        self.assertEqual([x.id for x in st.timers_due(400, 5, after_due=100)],
+                         ["tm-c", "tm-d"])
+
+    def test_overlay_read_your_writes(self):
+        st = self.store()
+        reader = self.store()
+        with st.uow():
+            st.upsert_timer(self._mk("tm-ov", due=800))
+            self.assertEqual(st.get_timer("tm-ov").due_ms, 800)  # overlay 先见
+            self.assertEqual(st.next_due_ms(), 800)
+            self.assertIsNone(reader.get_timer("tm-ov"))  # 外部读者只见 HEAD
+        self.assertIsNotNone(st.get_timer("tm-ov"))  # 提交后 base 见
+        self.assertIsNotNone(self.store().get_timer("tm-ov"))  # 重开重放见
+
+    def test_transition_versions_monotonic_paths_and_tx_versions(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+        with st.uow():
+            st.upsert_timer(self._mk("tm-v"))
+        with st.uow():
+            st.upsert_timer(timer_transition(
+                st.get_timer("tm-v"), TimerState.FIRING))
+        b = _bucket_of("tm-v")
+        files = _head_files(self.home.state)
+        self.assertIn("objects/timers/%s/tm-v/%020d.json" % (b, 1), files)
+        self.assertIn("objects/timers/%s/tm-v/%020d.json" % (b, 2), files)
+        # 第三笔 UoW＝v2 迁移（task v1→tx1、timer v1→tx2、v2→tx3）
+        [tx_path] = [p for p in files
+                     if p.endswith("tx/%s/%020d.json" % (_bucket_of(3), 3))]
+        tx = json.loads(_blob(self.home.state, files[tx_path]))
+        [op] = [o for o in tx["operations"] if o["op"] == "upsert_timer"]
+        self.assertEqual((op["from_version"], op["to_version"]), (1, 2))
+
+    def test_cancel_is_state_not_deletion(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+            st.upsert_timer(self._mk("tm-cl", due=100))
+        with st.uow():
+            st.upsert_timer(timer_transition(
+                st.get_timer("tm-cl"), TimerState.CANCELLED, now_ms=99))
+        tm = st.get_timer("tm-cl")
+        self.assertEqual(tm.state, TimerState.CANCELLED)
+        self.assertEqual(len(st.timers_all()), 1)  # 行仍在（不物理删除）
+        self.assertIsNone(st.next_due_ms())  # cancelled 非 pending
+        self.assertEqual(
+            self.store().get_timer("tm-cl").state, TimerState.CANCELLED)
+        b = _bucket_of("tm-cl")
+        v1 = "objects/timers/%s/tm-cl/%020d.json" % (b, 1)
+        self.assertIn(v1, _head_files(self.home.state))  # 旧版本仍在树
+
+    def test_replay_restores_latest_and_aborted_version_not_reused(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+            st.upsert_timer(self._mk("tm-r"))
+        with st.uow():
+            st.upsert_timer(timer_transition(
+                st.get_timer("tm-r"), TimerState.FIRING))
+        fresh = self.store()  # 重启重放：恢复最新版本（v2 firing）
+        self.assertEqual(fresh.get_timer("tm-r").state, TimerState.FIRING)
+        self.assertIsNone(fresh.next_due_ms())
+        self.injector.arm("write-object", "before")  # 弃单窗：v3 分配后失败
+        with self.assertRaises(harness.FaultInjected):
+            with st.uow():
+                st.upsert_timer(timer_transition(
+                    st.get_timer("tm-r"), TimerState.FIRED, now_ms=99))
+        self.injector.disarm("write-object")
+        with st.uow():  # 重试取 v4——弃单版本不复用
+            st.upsert_timer(timer_transition(
+                st.get_timer("tm-r"), TimerState.FIRED, now_ms=99))
+        b = _bucket_of("tm-r")
+        files = _head_files(self.home.state)
+        self.assertNotIn("objects/timers/%s/tm-r/%020d.json" % (b, 3), files)
+        self.assertIn("objects/timers/%s/tm-r/%020d.json" % (b, 4), files)
+
+    def test_message_for_timer_overlay_replay_and_idempotent(self):
+        st = self.store()
+        with st.uow():
+            m = st.insert_message(ts_ms=1, task_id=TID, kind="timer",
+                                  from_sid="a", to_sid="b", body="t1",
+                                  timer_id="tm-m")
+            self.assertEqual(st.message_for_timer("tm-m").id, m.id)  # overlay
+        self.assertEqual(st.message_for_timer("tm-m").id, m.id)
+        self.assertIsNone(st.message_for_timer("tm-none"))
+        with st.uow():  # 重复 timer_id fire：回原消息零新建
+            m2 = st.insert_message(ts_ms=2, task_id=TID, kind="timer",
+                                   from_sid="a", to_sid="b", body="t2",
+                                   timer_id="tm-m")
+        self.assertEqual((m2.id, m2.body), (m.id, b"t1"))
+        self.assertEqual(
+            self.store().message_for_timer("tm-m").id, m.id)  # 重放后
+
+
+class TestTimerCorruption(_Base):  # Req: F150——timer canonical fail-closed
+    def _seed(self):
+        st = self.store()
+        with st.uow():
+            st.upsert_task(Task(id=TID))
+            st.upsert_timer(TestTimerRepository._mk("tm-x"))
+        with st.uow():
+            st.upsert_timer(timer_transition(
+                st.get_timer("tm-x"), TimerState.FIRING))
+        return st
+
+    def _timer_paths(self):
+        return [p for p in _head_files(self.home.state)
+                if p.startswith("objects/timers/")]
+
+    def test_malformed_timer_entity_fails_closed(self):
+        self._seed()
+        [v2] = [p for p in self._timer_paths() if p.endswith("%020d.json" % 2)]
+        obj = json.loads(_blob(self.home.state, _head_files(self.home.state)[v2]))
+        obj["data"] = {"bad": 1}  # 实体字段缺形
+        _mutate_head(self.home.state,
+                     {v2: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_timer_id_path_mismatch_fails_closed(self):
+        self._seed()
+        [v1] = [p for p in self._timer_paths() if p.endswith("%020d.json" % 1)]
+        files = _head_files(self.home.state)
+        obj = json.loads(_blob(self.home.state, files[v1]))
+        obj["id"] = "tm-other"  # 内容 id 与路径 id 不符
+        _mutate_head(self.home.state, {v1: json.dumps(obj).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_duplicate_id_version_wrong_bucket_fails_closed(self):
+        self._seed()
+        files = _head_files(self.home.state)
+        [v1] = [p for p in self._timer_paths() if p.endswith("%020d.json" % 1)]
+        blob = _blob(self.home.state, files[v1])
+        _mutate_head(self.home.state, {
+            "objects/timers/de/ad/tm-x/%020d.json" % 1: blob})  # 冒位重版
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+    def test_scalar_type_mismatch_fails_closed(self):
+        self._seed()
+        files = _head_files(self.home.state)
+        v1 = next(p for p in self._timer_paths()
+                  if p.endswith("%020d.json" % 1))
+        v2 = next(p for p in self._timer_paths()
+                  if p.endswith("%020d.json" % 2))
+        o1 = json.loads(_blob(self.home.state, files[v1]))
+        o1["data"]["due_ms"] = "100"  # 错型标量（字符串）
+        o2 = json.loads(_blob(self.home.state, files[v2]))
+        o2["data"]["due_ms"] = None  # 错型标量（null）
+        _mutate_head(self.home.state, {
+            v1: json.dumps(o1).encode(), v2: json.dumps(o2).encode()})
+        with self.assertRaises(JournalCorruptionError):
+            self.store()  # 构造期即拒——不延迟到扫描面 TypeError
+
+    def test_missing_referenced_timer_object_fails_closed(self):
+        self._seed()
+        [v2] = [p for p in self._timer_paths() if p.endswith("%020d.json" % 2)]
+        _mutate_head(self.home.state, {v2: None})  # tx 引用对象缺席
+        with self.assertRaises(JournalCorruptionError):
+            self.store()
+
+
+class TestTimerServiceOnGitPort(unittest.TestCase):
+    """Req: F150——TimerService 契约移植 Git 后端（服务零改动；不复制
+    SQLite 套件——择 create/cancel/fire/catch-up 代表性路径＋崩窗对账）。"""
+
+    def setUp(self):
+        self.home = harness.TempAgoraHome()
+        self.addCleanup(self.home.cleanup)
+        self.injector = harness.FaultInjector()
+        for fp in GIT_FAILPOINTS + ("dispatch", "timer_fire",
+                                    "timer_firing"):
+            self.injector.register(fp)
+        self.clock = FakeClock()
+        self.oc = OcStub()
+        self.store = GitStore(self.home.state, injector=self.injector)
+        with self.store.uow():
+            self.store.upsert_task(Task(
+                id=TID, state="running", dispatcher_sid="ses-d1",
+                worker_sid="ses-w1", created_ms=1, updated_ms=2))
+        self.msg = MessagingService(
+            self.store, self.oc, home=str(self.home.path),
+            clock=self.clock, injector=self.injector)
+        self.svc = TimerService(self.store, self.msg, clock=self.clock,
+                                injector=self.injector)
+
+    def _create(self, after=60, key=None, target="worker"):
+        params = {"task": TID, "target": target, "after_seconds": after}
+        if key is not None:
+            params["client_key"] = key
+        return self.svc.create("ses-d1", "dispatcher", params)
+
+    def test_create_cancel_fire_catchup_and_restart_replay(self):
+        a = self._create(after=60, key="k1")
+        again = self._create(after=60, key="k1")  # 同键同载荷幂等
+        self.assertEqual(a["timer"], again["timer"])
+        self.assertEqual(len(self.store.timers_all()), 1)
+        out = self.svc.cancel("ses-d1", "dispatcher", a["timer"])
+        self.assertEqual(out["status"], "cancelled")
+        self.assertEqual(self.store.get_timer(a["timer"]).state,
+                         TimerState.CANCELLED)  # 取消是状态非删除
+        live = [self._create(after=i)["timer"] for i in (1, 2, 3)]
+        live.append(self._create(after=1, target="dispatcher")["timer"])
+        self.clock.advance(120_000)
+        self.assertEqual(self.svc.catch_up(), 4)  # overdue 启动补发
+        self.assertEqual(self.svc.catch_up(), 0)  # 收敛即止
+        states = {t.id: t.state for t in self.store.timers_all()}
+        self.assertTrue(all(states[i] is TimerState.FIRED for i in live))
+        self.assertEqual(states[a["timer"]], TimerState.CANCELLED)
+        msgs = self.store.messages_all()
+        self.assertEqual(len(msgs), 4)
+        for m in msgs:  # dedup_key＝timer id：索引回查恰回本消息
+            self.assertEqual(self.store.message_for_timer(m.dedup_key).id,
+                             m.id)
+        self.assertEqual(self.svc.next_wait_seconds(), 30.0)  # 无 pending
+        self.svc.scan()  # fired 幂等：不重发
+        self.assertEqual(len(self.store.messages_all()), 4)
+        fresh = GitStore(self.home.state)  # 重启重放：最新状态等价
+        self.assertEqual({t.id: t.state for t in fresh.timers_all()}, states)
+        self.assertEqual(fresh.message_for_timer(
+            msgs[0].dedup_key).id, msgs[0].id)
+        self.assertIsNone(fresh.next_due_ms())
+
+    def test_fire_single_tx_transition_message_receipt_event(self):
+        self._create(after=10)
+        obs = harness.GitJournalObserver(self.home.state)
+        before = len(obs.txs())
+        self.clock.advance(20_000)
+        self.svc.scan()
+        txs = obs.txs()
+        self.assertGreater(len(txs), before)
+        fire_tx = next(t for t in txs.values()  # 恰一 tx 含四类对象变更
+                       if any(op["op"] == "insert_message"
+                              for op in t["operations"]))
+        self.assertEqual({op["op"] for op in fire_tx["operations"]},
+                         {"upsert_timer", "insert_message", "upsert_receipt",
+                          "append_event"})
+        [top] = [op for op in fire_tx["operations"]
+                 if op["op"] == "upsert_timer"]
+        self.assertEqual((top["from_version"], top["to_version"]), (1, 2))
+        self.assertIn(top["path"], obs.paths())
+
+    def test_crash_window_reconcile_no_second_message(self):
+        r = self._create(after=10)
+        self.clock.advance(20_000)
+        self.injector.arm("timer_firing", "after")  # 崩窗2：消息已提交
+        with self.assertRaises(harness.FaultInjected):
+            self.svc.scan()
+        self.assertEqual(self.store.get_timer(r["timer"]).state,
+                         TimerState.FIRING)
+        self.assertEqual(len(self.store.messages_all()), 1)
+        fresh = GitStore(self.home.state)  # 重启重放：firing＋消息俱在
+        self.assertEqual(fresh.get_timer(r["timer"]).state,
+                         TimerState.FIRING)
+        self.assertEqual(len(fresh.messages_all()), 1)
+        self.injector.disarm("timer_firing")
+        svc2 = TimerService(fresh, MessagingService(
+            fresh, OcStub(), home=str(self.home.path), clock=self.clock),
+            clock=self.clock)
+        self.assertEqual(svc2.scan(), 0)  # 对账轮零新触发
+        self.assertEqual(fresh.get_timer(r["timer"]).state,
+                         TimerState.FIRED)  # 按 timer_id 补记 fired
+        self.assertEqual(len(fresh.messages_all()), 1)  # 不产第二消息
+        self.assertIn("timer_reconciled",
+                      [e.event for e in fresh.events_all()])
 
 
 if __name__ == "__main__":
