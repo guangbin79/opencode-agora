@@ -69,7 +69,9 @@ class TestLayering(unittest.TestCase):
         assert_pkg_imports("agorad/core", allowed_local=[])            # 仅 stdlib（依赖注入）
         assert_pkg_imports("agorad/transport", allowed_local=["agorad.core"])
         assert_only("agorad/main.py",
-                    may_import=["agorad.access", "agorad.core", "agorad.transport"])
+                    may_import=["agorad.access", "agorad.core",
+                                "agorad.transport", "agorad.compose",
+                                "agorad.serverv3"])  # Req: F158——main 唯一装配文件兼 v3 部署入口（compose/serverv3＝v3 装配/传输对应件）
 
     def test_contracts_stdlib_only(self):  # Req: F130——v3 Contract Catalog 仅 stdlib
         assert_only("agorad/contracts.py", may_import=[])

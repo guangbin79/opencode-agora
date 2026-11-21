@@ -614,7 +614,9 @@ def _write_service_json(stack, port):
         "pid": os.getpid(), "port": port, "started": time.time(),
         "version": _VERSION, "oc_version": stack.oc_version(),
         "api_version": API_VERSION,  # 断言5：旧字段保留＋双版本
-        "storage_version": 3}, ensure_ascii=False)
+        "storage_version": 3,
+        "backend": stack.backend},  # Req: F158 部署面后端投影（sqlite|git）
+        ensure_ascii=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(data + "\n", encoding="utf-8")

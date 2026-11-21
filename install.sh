@@ -181,6 +181,9 @@ else
   (
     export AGORA_HOME="$AGORA_HOME" AGORA_OC_URL="$OC_URL"
     if [ -n "$OC_PASSWORD" ]; then export AGORA_OC_PASSWORD="$OC_PASSWORD"; fi
+    # Req: F158 v3/GitStore 显式选择透传（仅显式设置时；不添缺省——缺省 v2/SQLite 不可配置）
+    if [ -n "${AGORA_API_VERSION:-}" ]; then export AGORA_API_VERSION="$AGORA_API_VERSION"; fi
+    if [ -n "${AGORA_BACKEND:-}" ]; then export AGORA_BACKEND="$AGORA_BACKEND"; fi
     if [ -n "$PKG" ]; then  # F31 pkg 模式：agorad 走 PATH console script
       if command -v setsid >/dev/null 2>&1; then exec setsid nohup agorad; fi
       exec nohup agorad
@@ -193,7 +196,7 @@ else
   AD_PID=$!
   ready=""
   for _ in {1..100}; do  # 10s 上限：等就绪行（root 牌行在其前 flush）
-    if grep -q "^agorad ready" "$LOG" 2>/dev/null; then ready=1; break; fi
+    if grep -Eq "^agorad(-v3)? ready" "$LOG" 2>/dev/null; then ready=1; break; fi  # Req: F158 双 ready 行（v2/v3）
     kill -0 "$AD_PID" 2>/dev/null || break
     sleep 0.1
   done
@@ -202,10 +205,13 @@ else
   [ -n "$ready" ] || { sed '/^AGORA_ROOT_TOKEN: /d' "$LOG" >&2; fail "agorad 启动失败（10s 未就绪，见上方输出）"; }
   tok="$(awk '/^AGORA_ROOT_TOKEN: /{print $2; exit}' "$LOG")"
   if [ -n "$tok" ]; then
-    (umask 077; printf '%s\n' "$tok" > "$ROOT_TOKEN")  # 0600（F1 root 牌唯一落盘点）
+    if [ "${AGORA_API_VERSION:-}" != "3" ]; then
+      (umask 077; printf '%s\n' "$tok" > "$ROOT_TOKEN")  # 0600（F1 root 牌唯一落盘点）
+    fi  # Req: F158 v3：authsvc 已在 start 落 JSON 形 root.token（0600）——
+    # 纯文本覆写会与 authsvc sweep 对账（JSON 权威）打架，不覆写
   elif [ ! -s "$ROOT_TOKEN" ]; then
     fail "未捕获 root 牌且无既有 root.token——异常态，请清 $AGORA_HOME/tokens 后重装"
-  fi  # else: 复装复用既有 root.token（牌持久化，重启不换）
+  fi  # else: 复装复用既有 root.token（牌持久化，重启不换；v3 无牌行＝DB 已有 root，daemon 落盘在位）
 fi
 [ -s "$ROOT_TOKEN" ] || fail "root.token 缺失（运行中实例无牌可接管）"
 
@@ -215,6 +221,8 @@ python3 - "$SERVICE_JSON" "$ROOT_TOKEN" <<'PY'
 import json, sys, urllib.request
 port = json.load(open(sys.argv[1]))["port"]
 token = open(sys.argv[2]).read().strip()
+if token.startswith("{"):  # Req: F158 v3 authsvc JSON 形（v2 install 纯文本）——两形同读
+    token = json.loads(token)["token"]
 req = urllib.request.Request(
     f"http://127.0.0.1:{port}/health",
     headers={"X-Agora-Token": token})

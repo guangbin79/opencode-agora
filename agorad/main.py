@@ -38,10 +38,38 @@ from agorad.core.state import State
 from agorad.core.task import TaskService, _bad_timeout
 from agorad.core.verify_hygiene import find_verify_hygiene_issues
 from agorad.transport.httpd import make_server
+from agorad.compose import V3Stack  # Req: F158 v3 部署装配（main＝唯一装配文件）
+from agorad.serverv3 import serve_forever_v3  # Req: F158
 
 _VERSION = "0.1.0"
 _MAIN_SID = "main"
 _SERVICE_JSON = ".agora/service.json"  # 设计 §4.8：lift/T4 消费面固定路径
+_API_VERSIONS = ("2", "3")  # Req: F158——显式版本域（缺省 2＝现行 v2 daemon）
+_BACKENDS = ("sqlite", "git")  # Req: F158——显式后端域（缺省 sqlite）
+
+
+def api_version_from_env():
+    """Req: F158 部署入口版本选择：AGORA_API_VERSION 缺省 2（现行 v2 daemon
+    零变化）；未知值 fail-fast——先于绑端口/建存储（main 首位解析）。"""
+    raw = os.environ.get("AGORA_API_VERSION", "2")
+    if raw not in _API_VERSIONS:
+        raise ValueError(f"AGORA_API_VERSION 须为 {' 或 '.join(_API_VERSIONS)}"
+                         f"（收到 {raw!r}）")
+    return int(raw)
+
+
+def backend_from_env(api_version):
+    """Req: F158 后端选择（V3Stack 显式面）：AGORA_BACKEND 缺省 sqlite；
+    未知值拒；显式设置要求 AGORA_API_VERSION=3——v2 面无后端概念，静默
+    忽略会伪装成功（AGORA_BACKEND=git＋v2 实跑 sqlite 是危险默认）。"""
+    raw = os.environ.get("AGORA_BACKEND", "sqlite")
+    if raw not in _BACKENDS:
+        raise ValueError(f"AGORA_BACKEND 须为 {' 或 '.join(_BACKENDS)}"
+                         f"（收到 {raw!r}）")
+    if api_version != 3 and "AGORA_BACKEND" in os.environ:
+        raise ValueError("AGORA_BACKEND 显式后端选择仅随 AGORA_API_VERSION=3 "
+                         "生效（v2 缺省行为不可配置）")
+    return raw
 
 
 def pointer_home():
@@ -417,10 +445,60 @@ def payload_drift_note(payload_dir=None):
     return None
 
 
+def main_v3(backend):
+    """Req: F158 v3 部署入口：真 Oc/Gitx 装配生产 V3Stack（backend 显式；
+    runner/anchor/exporter 用 compose 生产缺省）→flock 单实例（与 v2 同锁
+    文件，跨版本互斥）→root bootstrap（root.token 由 authsvc 落 JSON 0600）
+    →牌行先于 ready 行→serve_forever_v3。env 旋钮/占位 OC 语义与 v2 同款。"""
+    home, oc_url, oc_password = env_config()
+    if not oc_url:
+        print("需要 AGORA_OC_URL（或 $XDG_STATE_HOME/opencode/service.json 服务发现）",
+              file=sys.stderr)
+        return 2
+    try:
+        verify_timeout = verify_timeout_from_env()
+        verify_ceiling = verify_ceiling_from_env()
+        quick_files, quick_lines = quick_limits_from_env()
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    store = Store(Path(home))  # 仅 flock 面（锁文件＝$home/agorad.lock，不触存储）
+    if not store.flock_singleton():
+        print("agorad 已在运行", file=sys.stderr)
+        return 1
+    note = payload_drift_note()  # P2-13：版本漂移自检（v2 同款）
+    if note:
+        print(f"WARNING: {note}", flush=True)
+    try:
+        stack = V3Stack(home, oc=Oc(oc_url, oc_password),
+                        gitx=Gitx(instance_id=instance_identity(home)),
+                        verify_timeout=verify_timeout,
+                        verify_ceiling=verify_ceiling,
+                        quick_max_files=quick_files,
+                        quick_max_lines=quick_lines, backend=backend)
+    except ValueError as e:  # verify 画像/外来账本拒开（GitStore split-brain 等）
+        print(str(e), file=sys.stderr)
+        return 2
+    stack.start()  # 幂等；root bootstrap＋root.token 落盘先于牌行
+    if stack.root_token:
+        print(f"AGORA_ROOT_TOKEN: {stack.root_token}", flush=True)  # T4 捕获位
+    return serve_forever_v3(
+        stack, port=int(os.environ.get("AGORA_PORT", "0")),
+        health_interval=float(os.environ.get("AGORA_HEALTH_INTERVAL", "300")))
+
+
 def main():
     for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(_sig, _log_signal_exit)
     load_env_file()  # agorad.env 旋钮缺省层先行（env > 文件 > 代码默认，ag-fc67bc）
+    try:  # Req: F158 显式选择先于一切动土（flock/存储/绑端口）
+        api_version = api_version_from_env()
+        backend = backend_from_env(api_version)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    if api_version == 3:
+        return main_v3(backend)
     home, oc_url, oc_password = env_config()
     if not oc_url:
         print("需要 AGORA_OC_URL（或 $XDG_STATE_HOME/opencode/service.json 服务发现）",
