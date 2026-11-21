@@ -140,6 +140,31 @@ class TestLayering(unittest.TestCase):
     def test_entry_script_layer(self):  # Req: F140——无扩展名入口 ./agora 显式入册（勿按扩展名漏盘）：仅 stdlib＋agorad.cutover（延迟导入，HTTP 谓词零 agorad 依赖）
         assert_only("agora", may_import=["agorad.cutover"])
 
+    def test_v3_gitstore_layer(self):  # Req: F147——GitStore 仅 stdlib＋domain＋storage（错误基类复用 storage；SQL/sqlite 字样圈禁由 test_sql_confined_to_storage 自动覆盖）
+        assert_only("agorad/gitstore.py",
+                    may_import=["agorad.domain", "agorad.storage"])
+
+    def test_git_subprocess_confined_to_gitstore(self):  # Req: F147——journal git 子进程圈禁 gitstore：journal.git 字样全 agorad 唯一落点；v3 应用层（含 storage/服务/装配/传输）零 git 子进程自起（业务 git 归 access/gitx 注入与 v2 main.py/access，不在本守卫面）
+        v3_modules = {
+            "contracts.py", "domain.py", "storage.py", "messaging.py",
+            "tasksvc.py", "timersvc.py", "gateverify.py", "gatedelivery.py",
+            "authsvc.py", "healthsvc.py", "migrator.py", "cutover.py",
+            "adapter.py", "compose.py", "serverv3.py"}
+        for py in sorted((ROOT / "agorad").rglob("*.py")):
+            text = py.read_text(encoding="utf-8")
+            rel = str(py.relative_to(ROOT))
+            if py.name == "gitstore.py":
+                self.assertIn('"git", ', text)  # 唯一 git 起点在案
+                continue
+            self.assertNotIn(
+                "journal.git", text,
+                f"{rel}: journal.git 只许出现在 agorad/gitstore.py（设计 §4）")
+            if py.name in v3_modules:
+                for marker in ('"git"', "'git'"):
+                    self.assertNotIn(
+                        marker, text,
+                        f"{rel}: v3 应用层禁自起 git 子进程（归 gitstore/access 注入）")
+
     def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）；F140：./agora 无扩展名入口同面入册
         for py in sorted((ROOT / "agorad").rglob("*.py")) + [ROOT / "agora"]:
             if py.name == "storage.py":
