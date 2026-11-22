@@ -159,10 +159,13 @@ class Health:
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
-        # Req: F160 僵死梯子布防账（内存态）：tid->(nudge 时刻, last_seen 基线,
-        # worker 末条消息 ts 基线, 退避窗秒, nudge 时 worker_sid)——nudge 成功
-        # 才布防，窗尽零产出即机械兜底；离开候选集/产出/换 worker（reinject
-        # 或改绑车道已接管）/动作即销账（崩溃回退＝梯子从头爬）
+        # Req: F160 僵死梯子布防账（内存态）：tid->(nudge 时刻, updated 基线,
+        # 任务链末条消息 ts 基线, 退避窗秒, nudge 时 worker_sid, nudge 时
+        # state)——nudge 成功才布防，窗尽零产出即机械兜底；产出判据＝新消息
+        # 或业务行更新（ag-d17587 修正：last_seen 前移系插件轮询噪音，不单独
+        # 作判据）；状态迁移离集/产出/换 worker（reinject 或改绑车道已接管）/
+        # 动作即销账（仅 touch/busy 新鲜化离集不销——窗尽照判；崩溃回退＝
+        # 梯子从头爬）
         self._nudged = {}
 
     def tick(self):
@@ -268,6 +271,7 @@ class Health:
                 if now - last > self._gate_stale_after:
                     gate_phase[tid] = phase or "unknown"
                     cand.append([tid, last])
+        renudged = set()  # 本轮补 nudge（布防中再入僵）：同 tick 免窗尽判定
         for tid, _ in cand:
             env_dir = tasks[tid].get("env_dir")
             if env_dir and not Path(env_dir).is_dir():  # F72 在盘判定（勿用 env_activity：0.0 分不清缺失与不活跃）
@@ -286,14 +290,20 @@ class Health:
                 wsid = tasks[tid].get("worker_sid")
                 # 门内僵＝门侧楔死，worker 无从自纠：免 F70 自检注入
                 if wsid and tid not in gate_phase:
-                    if self.nudge_worker(tid):
+                    # 布防中再入僵只补 nudge 不覆写布防（ag-d17587：微光
+                    # 反复离集/入集若每次重开窗＝窗尽永不可达；F70 再提示保留）
+                    if self.nudge_worker(tid) and tid not in self._nudged:
                         # Req: F160 产出锚布防：nudge 已达 worker，退避窗内
-                        # 零产出（last_seen 未前移且无 worker 新消息）→机械兜底
+                        # 零产出（无该任务新消息且无业务行更新——last_seen
+                        # 前移不算，ag-d17587 修正）→机械兜底
                         self._nudged[tid] = (
-                            time.time(), tasks[tid].get("last_seen") or 0.0,
-                            self._worker_msg_ts(tid, wsid) or 0.0,  # 读故障基线 0.0＝宽松
-                            self._stale_gap(self._stale_esc[tid][0]), wsid)
-        self._zombie_scan(tasks, {tid for tid, _ in cand})
+                            time.time(), float(tasks[tid].get("updated") or 0.0),
+                            self._task_msg_ts(tid) or 0.0,  # 读故障基线 0.0＝宽松
+                            self._stale_gap(self._stale_esc[tid][0]), wsid,
+                            tasks[tid].get("state"))
+                    elif tid in self._nudged:
+                        renudged.add(tid)  # nudge 达布防中任务：给生效窗（B 册 suggestion）
+        self._zombie_scan(tasks, {tid for tid, _ in cand}, busy, renudged)
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
         self._stale_esc = {tid: v for tid, v in self._stale_esc.items()
@@ -307,37 +317,55 @@ class Health:
 
     # ---- Req: F160 僵死梯子机械兜底 ----
 
-    def _zombie_scan(self, tasks, cand_ids):
-        """nudge 后一个退避窗内零产出（last_seen 未前移且无 worker 新消息）
-        ＝worker 对自检产出锚无响应：自动重派（running 走 ag-d1d8c1 stalled
+    def _zombie_scan(self, tasks, cand_ids, busy_ids=(), renudged=()):
+        """nudge 后一个退避窗内零产出（无该任务新消息且无业务行更新——
+        last_seen 前移不单独构成判据，ag-d17587 修正：插件后台轮询刷
+        touch 噪音实证）＝worker 对自检产出锚无响应：自动重派（running 走 ag-d1d8c1 stalled
         重派边＝废旧牌＋新会话接管、env 不回收零数据损失；fail_streak 记梯子
         爬升）；连败达限/无重派边/重派被拒只 escalate(kind=zombie) 不再自动
-        重开。动作全程审计＋邮件告知；离开候选集（busy/touch/状态迁移）或
-        已产出＝销账，再僵从边沿重爬梯；动作面半失败回填布防下轮重试
+        重开。动作全程审计＋邮件告知；状态迁移离集或已产出＝销账（仅 touch/
+        busy 新鲜化离集不销——last_seen 非判据，窗尽照判，ag-d17587 修正；
+        busy 回合进行中或同 tick 刚补 nudge 时窗尽顺延不销不拍，终闸 B 册），
+        再僵从边沿重爬梯；动作面半失败回填布防下轮重试
         （拍到才记口径，防候选期内永久静默——评审环 R2 B 册）。"""
         now = time.time()
         for tid in list(self._nudged):
-            ts, ls_base, msg_base, gap, wsid_base = self._nudged[tid]
+            ts, upd_base, msg_base, gap, wsid_base, state_base = self._nudged[tid]
+            t = tasks.get(tid)
             if tid not in cand_ids:
-                del self._nudged[tid]  # 离开候选集＝解除布防（零产出判定失效）
-                continue
+                # 离集两形（ag-d17587 修正）：状态迁移离队（done/blocked 门侧
+                # 接管等）＝静默解除；仅新鲜化离队（touch 微光/busy）不销布防
+                # ——last_seen 前移非有效判据，窗尽照常零产出判定
+                if t is None or t.get("state") != state_base:
+                    del self._nudged[tid]  # 状态离队＝解除布防（零产出判定失效）
+                    continue
             if now - ts < gap:
                 continue  # 退避窗内：等产出锚
+            if tid in busy_ids or tid in renudged:
+                # 窗尽顺延（终闸 B 册）：回合进行中（busy）硬判会撞
+                # redispatch_stalled 的 busy fail-closed→zombie 误报＋梯级
+                # 误消费；本轮刚补 nudge（布防中再入僵）同理给生效窗——
+                # 均不销不拍，下轮再判
+                continue
             entry = self._nudged.pop(tid)  # 本梯级消费：动作与否都销账（防逐 tick 重拍）
-            t = tasks.get(tid)
             if t is None or t.get("state") not in _ACTIVE:
                 continue  # 窗内已终态/除籍（人工 cancel 等）：免动作
             if t.get("worker_sid") != wsid_base:
                 continue  # worker 已易主（reinject 重建/改绑/人工重派）：他车道接管
-            msg_ts = self._worker_msg_ts(tid, t.get("worker_sid"))
+            msg_ts = self._task_msg_ts(tid)
             if msg_ts is None:
                 # 读故障回填（评审环 R3）：持续候选任务边沿不再触发，纯销账
                 # ＝进程生命周期内梯子闩死——回填下轮重读；None 期零动作，
                 # 宁漏杀不误杀方向不变
                 self._nudged[tid] = entry
                 continue
-            if (t.get("last_seen") or 0.0) > ls_base or msg_ts > msg_base:
-                continue  # 已产出（① 的 note 锚或心跳）：梯子收起
+            # 产出判据（ag-d17587 修正）：新消息（任意 from，含 note）或同态
+            # 业务行更新（updated 前移且状态未迁移——迁移走离集/易主/新鲜行
+            # 预检各自收口，不在此静默销账）；last_seen 不参与（仅 stalled 入口）
+            if (msg_ts > msg_base
+                    or (float(t.get("updated") or 0.0) > upd_base
+                        and t.get("state") == state_base)):
+                continue  # 已产出（① 的 note 锚或业务事件）：梯子收起
             age = max(0, int(now - (t.get("last_seen") or t.get("created") or 0.0)))
             try:
                 why = self._auto_redispatch(tid, t, window_s=int(gap), age_s=age)
@@ -414,23 +442,20 @@ class Health:
         send_email(self._store, tid, body, runner=self._runner)
         return None
 
-    def _worker_msg_ts(self, tid, wsid):
-        """worker 在该任务的末条消息 ts（F160 产出基线）：task 归属＋from==worker
-        且 kind!=escalate——worker 上行 question/note/done/verify 皆产出；
-        escalate 行 from 被 router 按 worker 边归属（_resolve "up"）、系服务
-        合成非 worker 产出，不计。store 读回 ts 恒为 str（F92 frontmatter
-        值一律 str）——float 收敛防异型比较炸 tick。返回 None＝消息面读故障
-        （窗尽判定按已产出跳过——宁漏杀不误杀，评审环 R2 B 册）；无匹配
-        消息＝0.0（布防侧作基线＝宽松正确）。"""
-        if not wsid:
-            return 0.0
+    def _task_msg_ts(self, tid):
+        """该任务任务链末条消息 ts（F160 产出基线；ag-d17587 修正放宽：
+        任意 from——worker 上行 question/note/done/verify 与派发方回发
+        皆任务面产出；kind!=escalate 仍排除——escalate 行 from 被 router
+        按 "up" 边归 worker、系服务合成非产出。store 读回 ts 恒为 str
+        （F92 frontmatter 值一律 str）——float 收敛防异型比较炸 tick。
+        返回 None＝消息面读故障（窗尽判定按已产出跳过——宁漏杀不误杀，
+        评审环 R2 B 册）；无匹配消息＝0.0（布防侧作基线＝宽松正确）。"""
         try:
             rows = self._store.read_messages()
         except Exception:
             return None
         m = next((m for m in reversed(rows)
-                  if m.get("task") == tid and m.get("from") == wsid
-                  and m.get("kind") != "escalate"), None)
+                  if m.get("task") == tid and m.get("kind") != "escalate"), None)
         return float(m.get("ts") or 0.0) if m is not None else 0.0
 
     def _delivery_watch(self, tasks):

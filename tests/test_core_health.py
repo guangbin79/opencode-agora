@@ -379,8 +379,9 @@ class TestCoreHealth(unittest.TestCase):
 
     def _arm_and_travel(self, tid, extra=1.0):
         """布防后把 nudge 时刻拨到退避窗外（时间旅行，测试免真实等待）。"""
-        ts, ls, msg, gap, wsid = self.health._nudged[tid]
-        self.health._nudged[tid] = (time.time() - gap - extra, ls, msg, gap, wsid)
+        ts, upd, msg, gap, wsid, st = self.health._nudged[tid]
+        self.health._nudged[tid] = (time.time() - gap - extra, upd, msg,
+                                    gap, wsid, st)
 
     def _zombie(self, tid="t1", state="running", **extra_fields):
         """播种僵尸：超阈候选＋活 worker（非 busy）＋一次性 tick 完成边沿拍僵
@@ -449,15 +450,79 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(sum("失控[zombie]" in m["body"]
                              for m in self.main_msgs()), 0)
 
-    def test_zombie_last_seen_advance_disarms(self):  # Req: F160②
-        """last_seen 前移＝有产出：离开候选集解除布防（心跳即产出）。"""
+    def test_zombie_last_seen_advance_alone_still_zero_output(self):  # Req: F160②（ag-d17587 契约修正）
+        """仅 last_seen 前移不构成产出（插件后台轮询刷 touch 微光实证）：
+        无新消息/业务行更新＝仍零产出，照常机械重派接管。"""
         stub = self._zombie()
-        self.health.touch("s-w1")  # worker 服务调用刷心跳
+        self.health.touch("s-w1")  # 心跳前移：updated 不动（touch_seen 只进内存）
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, ["t1"])  # 仍零产出：兜底照走
+        self.assertEqual(self.state.get("t1")["fail_streak"], 1)  # 梯子爬升
+
+    def test_zombie_business_row_update_disarms(self):  # Req: F160②（ag-d17587 契约修正）
+        """业务行更新（verify 登记等 set_fields 面，状态未迁移）＝有效产出：
+        解除布防不动作——唤醒判据收窄的另一半（真业务活动不误杀）。"""
+        stub = self._zombie()
+        self.state.set_fields("t1", verify="registered - true")  # 业务行更新
         self._arm_and_travel("t1")
         self.health.tick()
         self.assertEqual(stub.calls, [])
+        self.assertNotIn("t1", self.health._nudged)
         self.assertEqual(sum("失控[zombie]" in m["body"]
                              for m in self.main_msgs()), 0)
+
+    def test_zombie_any_sender_message_disarms(self):  # Req: F160②（ag-d17587 契约修正）
+        """产出判据放宽任意 from：任务链出现新消息（任意 kind 含 note，
+        派发方回发同计）＝任务面有活动，解除布防。"""
+        stub = self._zombie()
+        self.store.write_message({"ts": time.time(), "task": "t1",
+                                  "kind": "note", "from": "main",
+                                  "to": "s-w1"}, "派发方附言")
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])
+        self.assertNotIn("t1", self.health._nudged)
+
+    def test_zombie_busy_at_window_end_defers_not_consumes(self):  # Req: F160②（终闸 B 册）
+        """窗尽时 worker 回合进行中（busy）：顺延不销不拍——硬判会撞
+        redispatch_stalled 的 busy fail-closed＝zombie 误报＋梯级误消费；
+        回合结束下轮照判零产出走兜底。"""
+        stub = self._zombie()
+        now_ms = int(time.time() * 1000)
+        self.oc.time_of["s-w1"] = {"updated": now_ms,
+                                   "idle": now_ms - 60000}  # updated>idle＝busy
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])  # 不动作
+        self.assertIn("t1", self.health._nudged)  # 顺延非销账
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)  # 不误拍
+        self.oc.time_of["s-w1"] = {"updated": now_ms - 60000,
+                                   "idle": now_ms}  # 回合结束
+        self.health.tick()
+        self.assertEqual(stub.calls, ["t1"])  # 下轮照判：零产出兜底
+
+    def test_zombie_renudge_same_tick_defers_window_action(self):  # Req: F160②（终闸 B 册）
+        """补 nudge 与窗尽同 tick 对齐（busy 回落恰逢再拍退避到期）：先拍僵
+        补 nudge、后窗尽判定——同 tick 顺延一轮给 nudge 生效窗，下轮照判。"""
+        stub = self._zombie()
+        now_ms = int(time.time() * 1000)
+        self.oc.time_of["s-w1"] = {"updated": now_ms,
+                                   "idle": now_ms - 60000}
+        self.health.tick()  # busy 离集：_stale_seen 剪枝（再入集可再拍）
+        self.health._stale_esc["t1"] = (1, time.time()
+                                        - self.health._stale_gap(1) - 1)
+        self.oc.time_of["s-w1"] = {"updated": now_ms - 60000,
+                                   "idle": now_ms}  # 回合结束再入集
+        self._arm_and_travel("t1")  # 布防窗与再拍退避同刻到期
+        self.health.tick()  # 同 tick：stalled#2＋补 nudge＋窗尽顺延
+        nudges = [t for _, t in self.oc.injected if "僵态自检" in t]
+        self.assertEqual(len(nudges), 2)  # 补 nudge 达 worker
+        self.assertIn("t1", self.health._nudged)  # 顺延非销账
+        self.assertEqual(stub.calls, [])  # 本轮不动作
+        self.health.tick()  # 下轮（无边沿重拍）：照判零产出
+        self.assertEqual(stub.calls, ["t1"])
 
     def test_zombie_fail_streak_cap_escalates_only(self):  # Req: F160②③
         """连败达限：不再自动重开，只 escalate(kind=zombie)＋审计＋邮件。"""
@@ -609,6 +674,26 @@ class TestCoreHealth(unittest.TestCase):
         body = [m["body"] for m in self.main_msgs()
                 if "失控[zombie]" in m["body"]][0]
         self.assertIn("no redispatch face", body)
+
+    def test_zombie_action_face_failure_rearms_audits_survives_tick(self):  # Req: F160②③（R3 失败留痕）
+        """窗尽动作面炸（升级 router 落库 IO 故障）：不抛穿 tick，回填布防
+        下轮重试＋auto_redispatch_error 审计留痕（防静默重试环不可观测）。"""
+        stub = self._zombie(fail_streak=3)  # 达限只升级：动作面＝escalate 落库
+        orig = self.store.write_message
+
+        def boom(*a, **k):
+            raise OSError("ledger EIO")
+
+        self.store.write_message = boom
+        try:
+            self._arm_and_travel("t1")
+            self.health.tick()  # 不抛穿
+        finally:
+            self.store.write_message = orig
+        self.assertIn("t1", self.health._nudged)  # 回填布防＝下轮重试
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"] == "auto_redispatch_error"],
+                         ["auto_redispatch_error"])  # 失败留痕
 
     # ---- env 丢失一次性 env-gone（F72：ag-724152 /tmp 清理事故）----
 
