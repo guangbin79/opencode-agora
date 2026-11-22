@@ -292,7 +292,8 @@ class Health:
                 if wsid and tid not in gate_phase:
                     # 布防中再入僵只补 nudge 不覆写布防（ag-d17587：微光
                     # 反复离集/入集若每次重开窗＝窗尽永不可达；F70 再提示保留）
-                    if self.nudge_worker(tid) and tid not in self._nudged:
+                    nudged_ok = self.nudge_worker(tid)
+                    if nudged_ok and tid not in self._nudged:
                         # Req: F160 产出锚布防：nudge 已达 worker，退避窗内
                         # 零产出（无该任务新消息且无业务行更新——last_seen
                         # 前移不算，ag-d17587 修正）→机械兜底
@@ -301,8 +302,8 @@ class Health:
                             self._task_msg_ts(tid) or 0.0,  # 读故障基线 0.0＝宽松
                             self._stale_gap(self._stale_esc[tid][0]), wsid,
                             tasks[tid].get("state"))
-                    elif tid in self._nudged:
-                        renudged.add(tid)  # nudge 达布防中任务：给生效窗（B 册 suggestion）
+                    elif nudged_ok and tid in self._nudged:
+                        renudged.add(tid)  # nudge 达布防中任务：给生效窗（B 册 suggestion；R4：仅送达才顺延）
         self._zombie_scan(tasks, {tid for tid, _ in cand}, busy, renudged)
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
@@ -419,7 +420,10 @@ class Health:
             # blocked——重派后立即 blocked 会废掉整条自愈车道）。写前重读新鲜行值
             # （C 册：快照 n 到写点隔整轮 tick，门侧并发 bump 可被旧值覆盖）
             fresh = self._state.get(tid) or t  # 行缺席回落预检行（R3：None 炸记账）
-            n = fresh.get("fail_streak", 0)
+            # transition(dispatched) 已把 fresh 清零（再 dispatch 清连败）：
+            # 保留预检累计值爬梯（R4：纯回读恒 0＝梯子恒 1 震荡，达限 zombie
+            # 永不可达）；max 仅让位复位后到达的门侧并发 bump
+            n = max(n, fresh.get("fail_streak", 0))
             self._state.set_fields(tid, fail_streak=n + 1)
         except Exception:
             pass  # 记账败不回滚重派（下轮爬升重新计，崩溃回退口径同内存态）
@@ -439,7 +443,11 @@ class Health:
             self._router.notify_dispatcher(tid, "process", body)
         except Exception:
             pass  # 通知面尽力而为（F54 口径）：审计已落不回滚
-        send_email(self._store, tid, body, runner=self._runner)
+        try:
+            send_email(self._store, tid, body, runner=self._runner)
+        except Exception:
+            pass  # 邮件面尽力而为（R4）：send_email 末尾审计落库异常不得把
+                 # 已完成接管回填成半失败重试（下轮易主静默销账＝邮件永失）
         return None
 
     def _task_msg_ts(self, tid):

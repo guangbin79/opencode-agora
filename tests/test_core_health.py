@@ -603,6 +603,30 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(stub.calls, ["t1", "t1"])
         self.assertEqual(self.state.get("t1")["fail_streak"], 2)
 
+    def test_zombie_ladder_survives_real_dispatch_reset(self):  # Req: F160②（评审环 R4）
+        """生产面记账：真 redispatch_stalled 走 transition(dispatched) 清零
+        fail_streak（再 dispatch 清连败）——爬升回填须保预检累计值（max），
+        纯回读恒 0+1＝梯子恒 1 震荡、达限 zombie 永不可达（stub 桩测不出的
+        真实形态）。"""
+        outer = self
+
+        class ResettingStub(self._RedispatchStub):
+            def redispatch_stalled(self, tid):
+                super().redispatch_stalled(tid)
+                outer.state.transition(tid, "dispatched")  # 真面同款清零边
+
+        stub = ResettingStub()
+        self.app.task = stub
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0, fail_streak=2)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()  # 边沿拍僵＋nudge＋布防
+        self.assertIn("t1", self.health._nudged)
+        self._arm_and_travel("t1")
+        self.health.tick()  # 窗尽零产出：重派（真清零边）＋记账
+        self.assertEqual(stub.calls, ["t1"])
+        self.assertEqual(self.state.get("t1")["fail_streak"], 3)  # 2→3 爬升穿透清零（非 0+1）
+
     def test_zombie_escalate_rows_not_counted_as_output(self):  # Req: F160②
         """router 把 escalate 行 from 归 worker 边（_resolve "up"）——服务合成
         非 worker 产出：窗内新 escalate 行不算产出锚，零产出照样兜底。"""
