@@ -513,6 +513,42 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(sum("失控[zombie]" in m["body"]
                              for m in self.main_msgs()), 0)
 
+    def test_zombie_ladder_climbs_after_redispatch(self):  # Req: F160②（评审环 R1）
+        """重派后边沿复位：替换 worker 持续零产出时下轮重新拍僵＋nudge 新
+        worker 再布防——梯子逐级爬升（否则单梯级后静默孤儿化、达限不可达）。"""
+        stub = self._zombie()  # 梯级 1：escalate#1＋nudge#1＋布防
+        self._arm_and_travel("t1")
+        self.health.tick()  # 窗尽零产出：自动重派（fail_streak 0->1）＋边沿复位
+        self.assertEqual(stub.calls, ["t1"])
+        self.assertNotIn("t1", self.health._stale_seen)  # 边沿已弃＝可再触发
+        # 生产节奏下退避恰在窗尽到期（arm gap＝_stale_gap(同计数)）；测试时间
+        # 旅行同步拨退避账（同既有 _stale_esc 拨钟手法）
+        self.health._stale_esc["t1"] = (1, time.time()
+                                         - self.health._stale_gap(1) - 1)
+        self.health.tick()  # 重新拍僵＋nudge 新 worker＋再布防
+        nudges = [t for _, t in self.oc.injected if "僵态自检" in t]
+        self.assertEqual(len(nudges), 2)  # nudge#2 达新 worker
+        self.assertIn("t1", self.health._nudged)  # 梯级 2 布防
+        esc_bodies = [m["body"] for m in self.main_msgs()
+                      if m["kind"] == "escalate"]
+        self.assertIn("第 2 次升级", esc_bodies[-1])  # 拍人续档
+        # 梯级 2 窗尽再零产出：重派第二次（fail_streak 1->2）
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, ["t1", "t1"])
+        self.assertEqual(self.state.get("t1")["fail_streak"], 2)
+
+    def test_zombie_escalate_rows_not_counted_as_output(self):  # Req: F160②
+        """router 把 escalate 行 from 归 worker 边（_resolve "up"）——服务合成
+        非 worker 产出：窗内新 escalate 行不算产出锚，零产出照样兜底。"""
+        stub = self._zombie()
+        self.store.write_message({"ts": time.time(), "task": "t1",
+                                  "kind": "escalate", "from": "s-w1",
+                                  "to": "main"}, "失控[ext-stale] …")
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, ["t1"])  # escalate 行≠产出：仍零产出
+
     def test_zombie_no_redispatch_face_degrades_to_escalate(self):  # Req: F160②
         """未接重派面（app.task 缺席）：梯子到顶只升级（安全降级不空转）。"""
         self._zombie()  # app.task 已接桩

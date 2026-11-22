@@ -367,6 +367,11 @@ class Health:
             self._state.set_fields(tid, fail_streak=n + 1)
         except Exception:
             pass  # 记账败不回滚重派（下轮爬升重新计，崩溃回退口径同内存态）
+        # 重派不刷基线（F15）→任务留在候选集且 _stale_seen 未复位，边沿
+        # 永不再触发＝梯子爬不上去（评审环 R1）：丢弃边沿记忆，_stale_esc
+        # 退避在本梯级窗尽时恰好到期，下轮重新拍僵＋nudge 新 worker——梯子
+        # 才能逐级爬到 _FAIL_STREAK_LIMIT（替换 worker 持续零产出场景）。
+        self._stale_seen.discard(tid)
         self._store.append_event(
             {"ts": time.time(), "actor": "health",
              "event": "auto_redispatch", "task": tid,
@@ -383,14 +388,18 @@ class Health:
 
     def _worker_msg_ts(self, tid, wsid):
         """worker 在该任务的末条消息 ts（F160 产出基线）：task 归属＋from==worker
-        （question/note/done 皆产出；escalate 消息 from=health 天然不计）。
-        消息面读故障/无消息→0.0（不阻塞布防，降级纪律同 F59 证据包）。"""
+        且 kind!=escalate——worker 上行 question/note/done/verify 皆产出；
+        escalate 行 from 被 router 按 worker 边归属（_resolve "up"）、系服务
+        合成非 worker 产出，不计。store 读回 ts 恒为 str（F92 frontmatter
+        值一律 str）——float 收敛防异型比较炸 tick。消息面读故障/无消息
+        →0.0（不阻塞布防，降级纪律同 F59 证据包）。"""
         if not wsid:
             return 0.0
         try:
             m = next(m for m in reversed(self._store.read_messages())
-                     if m.get("task") == tid and m.get("from") == wsid)
-            return m.get("ts", 0.0)
+                     if m.get("task") == tid and m.get("from") == wsid
+                     and m.get("kind") != "escalate")
+            return float(m.get("ts") or 0.0)
         except Exception:
             return 0.0
 
