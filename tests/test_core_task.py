@@ -1588,6 +1588,26 @@ class TestStalledRedispatch(TestCoreTask):
         self.assertIn("stalled_redispatch", note)  # 审计事件
         self.assertIn("last_seen_age_s", note)  # 证据字段
 
+    def test_redispatch_stalled_daemon_face_preserves_owner(self):  # Req: F160
+        """health 机械兜底经 redispatch_stalled（无 token daemon 面）：走同一
+        重派体（废旧牌/新会话/stalled_redispatch 审计）；归属与审计 actor 均
+        保持行内 dispatcher——不改 ownership、不伪称 worker。"""
+        tid, disp, old = self.running_pair(last_seen_ago=1300)
+        self.svc.redispatch_stalled(tid)
+        self.assertEqual(self.state.get(tid)["state"], "dispatched")
+        self.assertIsNone(self.auth.identify(old))  # 旧 worker 牌即废（取消旧 worker）
+        self.assertEqual(self.state.get(tid)["dispatcher_sid"], "disp1")
+        ev = [e for e in self.events() if e["event"] == "dispatched"][-1]
+        self.assertEqual(ev["actor"], "disp1")  # 行内 dispatcher 归属记账
+        self.assertIn("stalled_redispatch", ev.get("note", ""))
+
+    def test_redispatch_stalled_fresh_propagates_rejected(self):  # Req: F160
+        """非僵态拒绝向上抛：调用方（health）据此收口升级拍人，不静默空转。"""
+        tid, _, _ = self.running_pair(last_seen_ago=0)
+        with self.assertRaises(Rejected):
+            self.svc.redispatch_stalled(tid)
+        self.assertEqual(self.state.get(tid)["state"], "running")  # 拒绝零副作用
+
     def test_full_pool_redispatch_stalled_running_excludes_self(self):  # Req: F88
         """stalled running 是既有任务重派：满池不得把自身算作新增负载。"""
         for i in range(6):

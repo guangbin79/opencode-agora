@@ -363,6 +363,166 @@ class TestCoreHealth(unittest.TestCase):
         self.assertEqual(len(self.oc.inject_calls), 1)
         self.assertEqual(len(self.main_msgs()), 1)
 
+    # ---- Req: F160 僵死梯子：产出锚＋nudge 后零产出机械兜底 ----
+
+    class _RedispatchStub:
+        """daemon 重派面桩：calls 记调用；outcome 异常实例即抛（health 收口升级）。"""
+
+        def __init__(self, outcome=None):
+            self.calls, self.outcome = [], outcome
+
+        def redispatch_stalled(self, tid):
+            self.calls.append(tid)
+            if self.outcome is not None:
+                raise self.outcome
+            return True
+
+    def _arm_and_travel(self, tid, extra=1.0):
+        """布防后把 nudge 时刻拨到退避窗外（时间旅行，测试免真实等待）。"""
+        ts, ls, msg, gap, wsid = self.health._nudged[tid]
+        self.health._nudged[tid] = (time.time() - gap - extra, ls, msg, gap, wsid)
+
+    def _zombie(self, tid="t1", state="running", **extra_fields):
+        """播种僵尸：超阈候选＋活 worker（非 busy）＋一次性 tick 完成边沿拍僵
+        ＋nudge 布防。返回桩。"""
+        stub = self._RedispatchStub()
+        self.app.task = stub
+        self.seed(tid, state=state)
+        self.state.set_fields(tid, created=0.0, **extra_fields)
+        self.oc.liveness["s-w1"] = True
+        self.health.tick()
+        self.assertIn(tid, self.health._nudged)  # nudge 成功即布防
+        return stub
+
+    def test_nudge_prompt_demands_note_anchor(self):  # Req: F160①
+        """自检词强制产出锚：结论必须 post(kind=note) 一条（零产出可机械判定）。"""
+        self._zombie()
+        text = self.oc.injected[0][1]
+        self.assertIn("post(kind=note)", text)
+        self.assertIn("产出锚", text)
+        self.assertIn("零产出", text)
+
+    def test_nudge_failure_never_arms_window(self):  # Req: F160②
+        """nudge 未达 worker（注入面故障）：不布防——无从要求产出锚。"""
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.oc.inject_down = True
+        self.health.tick()
+        self.assertEqual(self.health._nudged, {})
+        self.assertIn("失控[stalled]", self.main_msgs()[0]["body"])  # 拍人照常
+
+    def test_zombie_zero_output_auto_redispatches_with_audit_and_mail(self):  # Req: F160②③
+        """窗内不动、窗尽零产出→自动重派＋fail_streak 爬升＋审计＋通知＋邮件。"""
+        calls = []
+        self.wire_email(lambda cmd, inp: calls.append((cmd, inp)))
+        stub = self._zombie()
+        self.health.tick()  # 窗内：等待产出锚
+        self.assertEqual(stub.calls, [])
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, ["t1"])  # 机械重派恰一次
+        self.assertEqual(self.state.get("t1")["fail_streak"], 1)  # 梯子爬升记账
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "auto_redispatch"]
+        self.assertEqual(len(ev), 1)
+        self.assertIn("fail_streak=0->1", ev[0]["note"])  # 零产出证据随审计
+        self.assertIn("window_s=", ev[0]["note"])
+        self.assertTrue(any("自动重派" in m["body"] for m in self.main_msgs()))
+        evs = [e["event"] for e in self.store.read_events("t1")
+               if e["event"].startswith("email")]
+        self.assertEqual(evs, ["email_sent", "email_sent"])  # stalled 拍＋自动重派
+        self.assertNotIn("t1", self.health._nudged)  # 梯级消费即销账
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)  # 成功不升级
+
+    def test_zombie_anchor_note_disarms(self):  # Req: F160①②
+        """窗内回发 note（产出锚）＝有产出：销账不动作。"""
+        stub = self._zombie()
+        self.store.write_message({"ts": time.time(), "task": "t1",
+                                  "kind": "note", "from": "s-w1",
+                                  "to": "main"}, "自检结论：正常推进")
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])
+        self.assertNotIn("t1", self.health._nudged)
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)
+
+    def test_zombie_last_seen_advance_disarms(self):  # Req: F160②
+        """last_seen 前移＝有产出：离开候选集解除布防（心跳即产出）。"""
+        stub = self._zombie()
+        self.health.touch("s-w1")  # worker 服务调用刷心跳
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)
+
+    def test_zombie_fail_streak_cap_escalates_only(self):  # Req: F160②③
+        """连败达限：不再自动重开，只 escalate(kind=zombie)＋审计＋邮件。"""
+        self.wire_email(lambda cmd, inp: [])
+        stub = self._zombie(fail_streak=3)
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])  # 零重派
+        self.assertEqual(self.state.get("t1")["fail_streak"], 3)  # 不改账
+        bodies = [m["body"] for m in self.main_msgs()]
+        self.assertEqual(sum("失控[zombie]" in b for b in bodies), 1)
+        self.assertIn("达限", bodies[-1])  # 拒因随不可信原文上行
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "escalate"]
+        self.assertEqual(ev[-1]["kind"], "zombie")  # 审计行
+        self.assertTrue(any("失控[zombie]" in t
+                            for _, t in self.oc.notify_injected))  # 通知通道唤醒
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"].startswith("email")][-1],
+                         "email_sent")
+
+    def test_zombie_non_running_state_escalates_only(self):  # Req: F160②
+        """无自动重派边（dispatched 僵尸）：只升级不动作，报因带状态。"""
+        stub = self._zombie(state="dispatched")
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])
+        body = [m["body"] for m in self.main_msgs()
+                if "失控[zombie]" in m["body"]][0]
+        self.assertIn("state=dispatched", body)
+        self.assertIn("无自动重派边", body)
+
+    def test_zombie_redispatch_rejected_escalates_with_reason(self):  # Req: F160②③
+        """重派被拒（fail-closed 守卫，如 open_children）：拒因上行＋审计留痕。"""
+        stub = self._zombie()
+        stub.outcome = RuntimeError("open_children: 名下未结案子任务")
+        self._arm_and_travel("t1")
+        self.health.tick()
+        body = [m["body"] for m in self.main_msgs()
+                if "失控[zombie]" in m["body"]][0]
+        self.assertIn("open_children", body)
+        self.assertEqual([e["event"] for e in self.store.read_events("t1")
+                          if e["event"] == "auto_redispatch_rejected"],
+                         ["auto_redispatch_rejected"])
+
+    def test_zombie_worker_replaced_disarms(self):  # Req: F160②
+        """窗内 worker 已易主（reinject 重建/人工改绑）：他车道接管，免动作。"""
+        stub = self._zombie()
+        self.state.set_fields("t1", worker_sid="s-w2")  # reinject 同款覆写
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)
+
+    def test_zombie_no_redispatch_face_degrades_to_escalate(self):  # Req: F160②
+        """未接重派面（app.task 缺席）：梯子到顶只升级（安全降级不空转）。"""
+        self._zombie()  # app.task 已接桩
+        self.app.task = None  # 拆面
+        self._arm_and_travel("t1")
+        self.health.tick()
+        body = [m["body"] for m in self.main_msgs()
+                if "失控[zombie]" in m["body"]][0]
+        self.assertIn("no redispatch face", body)
+
     # ---- env 丢失一次性 env-gone（F72：ag-724152 /tmp 清理事故）----
 
     def _lose_env(self, tid):  # 真实目录表达消失（在盘判定勿用 env_activity）

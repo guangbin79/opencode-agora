@@ -5,10 +5,14 @@ tick 只探活动任务的直接下级会话（无全局巡检）；死下级→
 子任务；只有无法重注入的失管 dispatcher 才直接拍人。
 worker 凭据自愈已推改拉（F25 修正）：inject_silent 推送通道证伪（v2.2.0
 synthetic 不触发 prompt 钩子），改由插件 hook 缓存未命中经 /cred_for_sid 拉取。
-边沿判僵（F5 决策记录 2026-10-28；F70 自检提示，不处置）：tick 顺带按 doctor
+边沿判僵（F5 决策记录 2026-10-28；F70 自检提示＋F160 僵死梯子）：tick 顺带按 doctor
 同口径（20min 无活动，report.stale_candidates 构造注入）算僵态候选，新进候选集→
 stalled 升级＋worker prompt 自检一次（不强制打断，失败不重试）＋可选邮件
-（email.json opt-in）；离开候选集复位，oc 不可达轮次
+（email.json opt-in）。F160 机械兜底：自检词强制产出锚（结论必须
+post(kind=note) 一条）；nudge 后一个退避窗内零产出（last_seen 未前移且无
+worker 新消息）→自动重派（ag-d1d8c1 stalled 重派边：废旧牌＋新会话接管，
+fail_streak 记梯子爬升）；连败达限/无重派边/重派被拒只 escalate(kind=zombie)
+不再自动重开；自动动作全程审计＋邮件告知。离开候选集复位，oc 不可达轮次
 免判；同任务重复升级（复位后再僵再拍）间隔×4 指数退避、封顶 24h，正文带
 连续升级计数（ag-0f537d 降噪，ag-4628f9 宿主排队忙/闲抖动误报实证）；
 "僵"的处置仍归人工。env 已物理消失的候选改拍一次性 env-gone（F72，
@@ -35,6 +39,7 @@ KIND_REINJECT = "reinject-fail"
 KIND_DISPATCHER_DEAD = "dispatcher-dead"
 KIND_STALLED = "stalled"
 KIND_ENV_GONE = "env-gone"
+KIND_ZOMBIE = "zombie"  # Req: F160 僵死梯子到顶（nudge 后零产出且不可再自动重开）
 KIND_VERIFY_DEAD = "verify-dead"
 KIND_VERIFY_INFRA = "verify-infra"  # Req: F122 signal 类机械失败（非质量败）
 KIND_EXT_STALE = "external-stale"  # Req: F110 external handoff 驻留超龄
@@ -46,6 +51,9 @@ _RAW_MAX = 500
 # 逐档再×4，封顶 24h
 _STALE_GAP0 = 1200.0
 _STALE_CAP = 86400.0
+# Req: F160 连败达限口径（对齐 state.fail_streak_bump 硬编码 3；core 禁兄弟
+# import 故本地字面量）：僵死梯子重派爬升到限只升级不再自动重开
+_FAIL_STREAK_LIMIT = 3
 # 活动面＝探活与 last_seen 的任务集（verify_failed/reopened 归在飞，同 task 口径）
 _ACTIVE = {"dispatched", "running", "done", "verify_failed", "reopened", "blocked"}
 _IN_FLIGHT = {"dispatched", "running"}  # 自愈重注入仅限 worker 在跑的两态
@@ -67,12 +75,18 @@ _KIND_NOTE = {
                     "——外部派发方未确认交付，可能派发链路断裂，请人工核对",
     KIND_UNPUBLISHED: "managed 交付已 merged 但 origin 未同步（本地支领先未推）"
                       "——请派发方尽快自推，防 origin 长期缺交付",
+    KIND_ZOMBIE: "nudge 自检后一个退避窗零产出——僵死梯子已到顶（连败达限或"
+                 "该状态无自动重派边），不再自动重开；请人工处置（取消归档"
+                 "或修复后重派）",
 }
 
 # F70/F73 共用提示：单源防 board 手动面与 health 自动面漂移
+# Req: F160 产出锚——结论必须 post(kind=note) 一条：零产出可机械判定
 SELF_CHECK_PROMPT = ("核对任务目标、当前动作与程序状态。若正常，简述当前进展后"
                      "继续；若异常或偏离目标，先安全停止当前动作，说明原因，"
-                     "再选择安全的恢复方式；不要机械重启。")
+                     "再选择安全的恢复方式；不要机械重启。无论结论如何，必须先"
+                     " post(kind=note) 回发一条自检结论（产出锚）——退避窗内"
+                     "零产出将被自动重派接管。")
 
 
 def _subprocess_runner(cmd, input_text):
@@ -145,6 +159,11 @@ class Health:
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
+        # Req: F160 僵死梯子布防账（内存态）：tid->(nudge 时刻, last_seen 基线,
+        # worker 末条消息 ts 基线, 退避窗秒, nudge 时 worker_sid)——nudge 成功
+        # 才布防，窗尽零产出即机械兜底；离开候选集/产出/换 worker（reinject
+        # 或改绑车道已接管）/动作即销账（崩溃回退＝梯子从头爬）
+        self._nudged = {}
 
     def tick(self):
         """F75 错址修复扫描先行（启动＋每轮双触发），再探每个活动任务的直接
@@ -221,7 +240,8 @@ class Health:
         首拍不变，宿主排队忙/闲抖动反复再僵时降噪（ag-4628f9 实证）；
         退避窗内边沿不拍不记（下轮到期重试，拍到才记不丢报）。
         拍人后向 worker 注入一次 prompt 自检提示（F70）：模型自行纠偏，不强制
-        打断/取消/重派；注入失败同轮不重试、不阻断拍人。
+        打断；注入失败同轮不重试、不阻断拍人。nudge 成功即布防 F160 僵死梯子
+        （_zombie_scan：退避窗内零产出→自动重派/到顶升级）。
         env 在册不在盘的候选改拍一次性 env-gone（F72，ag-724152）：每丢失周期
         只拍一次；持续丢失不拍 stalled、不注入自检（env 已失无从自纠）；
         恢复在盘回常规 stalled 边沿；终态出账。
@@ -266,7 +286,14 @@ class Health:
                 wsid = tasks[tid].get("worker_sid")
                 # 门内僵＝门侧楔死，worker 无从自纠：免 F70 自检注入
                 if wsid and tid not in gate_phase:
-                    self.nudge_worker(tid)
+                    if self.nudge_worker(tid):
+                        # Req: F160 产出锚布防：nudge 已达 worker，退避窗内
+                        # 零产出（last_seen 未前移且无 worker 新消息）→机械兜底
+                        self._nudged[tid] = (
+                            time.time(), tasks[tid].get("last_seen") or 0.0,
+                            self._worker_msg_ts(tid, wsid),
+                            self._stale_gap(self._stale_esc[tid][0]), wsid)
+        self._zombie_scan(tasks, {tid for tid, _ in cand})
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
         # 终态任务出账：防长驻 daemon 无界增长（终闸 B1；在飞任务退避记忆保留）
         self._stale_esc = {tid: v for tid, v in self._stale_esc.items()
@@ -277,6 +304,95 @@ class Health:
                                if tasks.get(tid, {}).get("state") in _ACTIVE
                                and tasks[tid].get("env_dir")
                                and not Path(tasks[tid]["env_dir"]).is_dir()}
+
+    # ---- Req: F160 僵死梯子机械兜底 ----
+
+    def _zombie_scan(self, tasks, cand_ids):
+        """nudge 后一个退避窗内零产出（last_seen 未前移且无 worker 新消息）
+        ＝worker 对自检产出锚无响应：自动重派（running 走 ag-d1d8c1 stalled
+        重派边＝废旧牌＋新会话接管、env 不回收零数据损失；fail_streak 记梯子
+        爬升）；连败达限/无重派边/重派被拒只 escalate(kind=zombie) 不再自动
+        重开。动作全程审计＋邮件告知；离开候选集（busy/touch/状态迁移）或
+        已产出＝销账，再僵从边沿重爬梯。"""
+        now = time.time()
+        for tid in list(self._nudged):
+            ts, ls_base, msg_base, gap, wsid_base = self._nudged[tid]
+            if tid not in cand_ids:
+                del self._nudged[tid]  # 离开候选集＝解除布防（零产出判定失效）
+                continue
+            if now - ts < gap:
+                continue  # 退避窗内：等产出锚
+            del self._nudged[tid]  # 本梯级消费：动作与否都销账（防逐 tick 重拍）
+            t = tasks.get(tid)
+            if t is None or t.get("state") not in _ACTIVE:
+                continue  # 窗内已终态（人工 cancel/done 收尾）：免动作
+            if t.get("worker_sid") != wsid_base:
+                continue  # worker 已易主（reinject 重建/改绑/人工重派）：他车道接管
+            if ((t.get("last_seen") or 0.0) > ls_base
+                    or self._worker_msg_ts(tid, t.get("worker_sid")) > msg_base):
+                continue  # 已产出（① 的 note 锚或心跳）：梯子收起
+            age = max(0, int(now - (t.get("last_seen") or t.get("created") or 0.0)))
+            why = self._auto_redispatch(tid, t, window_s=int(gap), age_s=age)
+            if why is not None:
+                self.escalate(KIND_ZOMBIE, tid, raw=why)
+
+    def _auto_redispatch(self, tid, t, window_s, age_s):
+        """机械重派单点：连败达限/状态无重派边先判（只升级），重派经
+        TaskService.redispatch_stalled daemon 权威面（token 闸旁路同
+        recover.reinject 口径）。成功即 fail_streak＋1（梯子爬升记账）＋
+        auto_redispatch 审计＋dispatcher 通知＋邮件；失败拒因随 zombie 升级
+        raw 上行（auto_redispatch_rejected 审计留痕）。返回 None＝已重派/
+        无需升级，否则＝升级 raw。"""
+        note = f"zero_output window_s={window_s} last_seen_age_s={age_s}"
+        n = t.get("fail_streak", 0)
+        if n >= _FAIL_STREAK_LIMIT:
+            return f"{note} fail_streak={n} 达限——停止自动重开"
+        if t.get("state") != "running":
+            return f"{note} state={t.get('state')} 无自动重派边（仅 running stalled）"
+        ts = getattr(self._app, "task", None) if self._app is not None else None
+        if ts is None or not hasattr(ts, "redispatch_stalled"):
+            return f"{note} no redispatch face wired"
+        try:
+            ts.redispatch_stalled(tid)
+        except Exception as e:
+            self._store.append_event(
+                {"ts": time.time(), "actor": "health",
+                 "event": "auto_redispatch_rejected", "task": tid,
+                 "note": f"{note} {e}"[:200]})
+            return f"{note} redispatch rejected: {e}"
+        try:
+            # transition(dispatched) 清零后回填：梯子爬升与质量连败共用计数
+            # （达限即停自动重开；set_fields 不触发 fail_streak_bump 的自动
+            # blocked——重派后立即 blocked 会废掉整条自愈车道）
+            self._state.set_fields(tid, fail_streak=n + 1)
+        except Exception:
+            pass  # 记账败不回滚重派（下轮爬升重新计，崩溃回退口径同内存态）
+        self._store.append_event(
+            {"ts": time.time(), "actor": "health",
+             "event": "auto_redispatch", "task": tid,
+             "note": f"{note} fail_streak={n}->{n + 1}"})
+        body = (f"僵死梯子（F160）：任务 {tid} nudge 后退避窗 {window_s}s 零产出，"
+                f"已自动重派新 worker 接管（连败 {n + 1}/{_FAIL_STREAK_LIMIT}，"
+                f"达限即停自动重开）")
+        try:
+            self._router.notify_dispatcher(tid, "process", body)
+        except Exception:
+            pass  # 通知面尽力而为（F54 口径）：审计已落不回滚
+        send_email(self._store, tid, body, runner=self._runner)
+        return None
+
+    def _worker_msg_ts(self, tid, wsid):
+        """worker 在该任务的末条消息 ts（F160 产出基线）：task 归属＋from==worker
+        （question/note/done 皆产出；escalate 消息 from=health 天然不计）。
+        消息面读故障/无消息→0.0（不阻塞布防，降级纪律同 F59 证据包）。"""
+        if not wsid:
+            return 0.0
+        try:
+            m = next(m for m in reversed(self._store.read_messages())
+                     if m.get("task") == tid and m.get("from") == wsid)
+            return m.get("ts", 0.0)
+        except Exception:
+            return 0.0
 
     def _delivery_watch(self, tasks):
         """Req: F110 交付终局观测：external handoff 超龄未确认＋managed 未出版。
@@ -581,7 +697,8 @@ class Health:
                                   "event": "escalate", "task": tid, "kind": kind})
         quiet = kind in (KIND_STALLED, KIND_ENV_GONE, KIND_VERIFY_DEAD,
                          KIND_VERIFY_INFRA,  # Req: F122 signal 类同走通知通道
-                         KIND_EXT_STALE, KIND_UNPUBLISHED)  # Req: F110 同走通知通道＋邮件
+                         KIND_EXT_STALE, KIND_UNPUBLISHED,  # Req: F110 同走通知通道＋邮件
+                         KIND_ZOMBIE)  # Req: F160 梯子到顶：通知通道唤醒＋邮件
         self._router.post(rt.get("worker_sid"), ("up", root), "escalate", body,
                           notify=quiet)  # stalled/env-gone/verify-dead/verify-infra 通知通道：synthetic resume:true 唤醒 dispatcher（无选择框；gt-5bc312 勘误 ag-3016f1；F72/F80/F122 同款）
         if quiet:  # 邮件例外（§6 决策记录）：stalled/env-gone（F72）＋verify-dead（F80：命令死需人工处置）＋verify-infra（F122 同款）

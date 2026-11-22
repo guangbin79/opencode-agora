@@ -53,8 +53,9 @@ class Rejected(Exception):
 
 class TaskService:
     """工具面（create/dispatch/update_verify/cancel）httpd 单线程串行独占；
-    stop_after_failed 经 on_blocked 回调由 gate 线程调用（与 httpd 二写者并发，
-    口径同 Health 消息写面）；无锁无线程。"""
+    stop_after_failed 经 on_blocked 回调由 gate 线程调用，redispatch_stalled
+    由 health 定时线程调用（均与 httpd 二写者并发，口径同 Health 消息写面）；
+    无锁无线程。"""
 
     def __init__(self, state, auth, gitx, oc, store, router, pages,
                  stale_candidates=None, verify_hygiene=None,
@@ -313,7 +314,20 @@ class TaskService:
         t = self._state.get(tid)
         sid, _ = self._gate(dispatcher_token, "task_dispatch", tid, t,
                             owner=t.get("dispatcher_sid"))
-        sid = actor_sid or sid  # ag-f80309：派发归属同建单按对齐调用 sid 记
+        return self._dispatch_as(tid, actor_sid or sid)  # ag-f80309：派发归属按对齐 sid 记
+
+    def redispatch_stalled(self, tid):
+        """Req: F160 僵死梯子机械兜底的 daemon 权威面：health 在 nudge 后退避
+        窗零产出时调用的自动重派。不走 token 闸（同 recover.reinject 的
+        daemon 权威口径，stop_after_failed 同款线程面）；归属 sid 取行内
+        dispatcher_sid——重派不改变 ownership、审计 actor 不伪称 worker。
+        沿用 dispatch 全部守卫（_stalled_running fail-closed/身份卫兵/env
+        自愈/配额）；Rejected 向上抛，由调用方收口升级拍人。"""
+        return self._dispatch_as(tid, self._state.get(tid).get("dispatcher_sid")
+                                 or "root")
+
+    def _dispatch_as(self, tid, sid):
+        t = self._state.get(tid)
         owner = self._route_owner(t, sid)  # F75：CLI 无 sid 派发防归属错址
         stale_note = None
         if t["state"] not in ("todo", "blocked"):
