@@ -67,7 +67,10 @@ def discover(home=None):
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
     if token.startswith("{"):  # Req: F158 v3 authsvc 落 JSON 形（v2 install 纯文本）——两形同读
         try:
-            token = str(json.loads(token)["token"])
+            tok = json.loads(token)["token"]
+            if not isinstance(tok, str) or not tok:  # Req: F161 对齐 F159 ②：非串/空值＝坏形，勿 str 强转
+                raise ValueError("token 键须为非空字符串值")  # 不回显值——牌面防漏 stderr
+            token = tok
         except (ValueError, KeyError, TypeError) as e:  # 非对象 JSON＝TypeError（坏形归口 ValueError）
             raise ValueError(f"root.token JSON 坏形或缺 token 键: {e}") from None
     if "\n" in token or "\r" in token:  # 控制符会让 putheader 带牌面炸进 stderr／折叠改头

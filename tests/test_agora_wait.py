@@ -389,6 +389,18 @@ class TestWait(unittest.TestCase):
                 with self.assertRaises((ValueError, TypeError)):
                     agora.discover(home)
 
+    def test_discover_json_form_rejects_non_string_token(self):  # Req: F161  F159 ②口径
+        for tok in ['{"token": null}', '{"token": 123}', '{"token": ""}',
+                    '{"token": {"a": 1}}', '{"token": [1]}']:
+            with self.subTest(token=tok):
+                home = mkhome(8080, tok)
+                self.addCleanup(shutil.rmtree, home, True)
+                with self.assertRaises(ValueError):
+                    agora.discover(home)
+        home = mkhome(8080, '{"token": "tok-v3"}')  # 收紧不过度：串值形态照取
+        self.addCleanup(shutil.rmtree, home, True)
+        self.assertEqual(agora.discover(home)[1], "tok-v3")
+
     def test_reread_type_error_keeps_old_endpoint(self):  # Req: F14  非 dict JSON
         srv = _Srv(["merged"], commit="c" * 40)
         try:
