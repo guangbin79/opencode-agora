@@ -331,7 +331,11 @@ class Health:
                 continue  # worker 已易主（reinject 重建/改绑/人工重派）：他车道接管
             msg_ts = self._worker_msg_ts(tid, t.get("worker_sid"))
             if msg_ts is None:
-                continue  # 消息面读故障：宁漏杀不误杀，本轮跳过（账已销、边沿重爬）
+                # 读故障回填（评审环 R3）：持续候选任务边沿不再触发，纯销账
+                # ＝进程生命周期内梯子闩死——回填下轮重读；None 期零动作，
+                # 宁漏杀不误杀方向不变
+                self._nudged[tid] = entry
+                continue
             if (t.get("last_seen") or 0.0) > ls_base or msg_ts > msg_base:
                 continue  # 已产出（① 的 note 锚或心跳）：梯子收起
             age = max(0, int(now - (t.get("last_seen") or t.get("created") or 0.0)))
@@ -339,8 +343,15 @@ class Health:
                 why = self._auto_redispatch(tid, t, window_s=int(gap), age_s=age)
                 if why is not None:
                     self.escalate(KIND_ZOMBIE, tid, raw=why)
-            except Exception:
+            except Exception as e:
                 self._nudged[tid] = entry  # 半失败回填：动作下轮重试不丢报
+                try:  # 失败留痕（评审环 R3）：静默重试环不可观测，同 rejected 口径
+                    self._store.append_event(
+                        {"ts": time.time(), "actor": "health",
+                         "event": "auto_redispatch_error", "task": tid,
+                         "note": f"zero_output retry: {e}"[:200]})
+                except Exception:
+                    pass
                 continue
 
     def _auto_redispatch(self, tid, t, window_s, age_s):
@@ -379,7 +390,7 @@ class Health:
             # （达限即停自动重开；set_fields 不触发 fail_streak_bump 的自动
             # blocked——重派后立即 blocked 会废掉整条自愈车道）。写前重读新鲜行值
             # （C 册：快照 n 到写点隔整轮 tick，门侧并发 bump 可被旧值覆盖）
-            fresh = self._state.get(tid)
+            fresh = self._state.get(tid) or t  # 行缺席回落预检行（R3：None 炸记账）
             n = fresh.get("fail_streak", 0)
             self._state.set_fields(tid, fail_streak=n + 1)
         except Exception:

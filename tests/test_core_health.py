@@ -573,9 +573,10 @@ class TestCoreHealth(unittest.TestCase):
                 if "失控[zombie]" in m["body"]][0]
         self.assertIn("state=verify_failed", body)
 
-    def test_zombie_msg_face_read_failure_skips_action(self):  # Req: F160②（评审环 R2）
-        """窗尽时消息面读故障＝产出不可判：宁漏杀不误杀——跳过动作不误重派
-        已回发锚的活 worker（账已销、边沿重爬，非永久静默）。"""
+    def test_zombie_msg_face_read_failure_skips_action(self):  # Req: F160②（评审环 R2/R3）
+        """窗尽时消息面读故障＝产出不可判：宁漏杀不误杀——本轮零动作且回填
+        布防（持续候选任务边沿不再触发，纯销账＝进程内闰死）；读面恢复后
+        下轮照常判定（锚在＝解除布防，非永久静默）。"""
         stub = self._zombie()
         self.store.write_message({"ts": time.time(), "task": "t1",
                                   "kind": "note", "from": "s-w1",
@@ -589,11 +590,15 @@ class TestCoreHealth(unittest.TestCase):
         try:
             self._arm_and_travel("t1")
             self.health.tick()  # 不抛、不动作
+            self.assertIn("t1", self.health._nudged)  # 回填布防＝下轮重读
         finally:
             self.store.read_messages = orig
         self.assertEqual(stub.calls, [])
+        self.health.tick()  # 读面恢复：锚已在→解除布防
+        self.assertEqual(stub.calls, [])
         self.assertEqual(sum("失控[zombie]" in m["body"]
                              for m in self.main_msgs()), 0)
+        self.assertNotIn("t1", self.health._nudged)
 
     def test_zombie_no_redispatch_face_degrades_to_escalate(self):  # Req: F160②
         """未接重派面（app.task 缺席）：梯子到顶只升级（安全降级不空转）。"""

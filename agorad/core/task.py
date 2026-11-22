@@ -56,7 +56,7 @@ class TaskService:
     """工具面（create/dispatch/update_verify/cancel）httpd 单线程串行独占；
     stop_after_failed 经 on_blocked 回调由 gate 线程调用，redispatch_stalled
     由 health 定时线程调用（均与 httpd 二写者并发，口径同 Health 消息写面）；
-    无锁无线程。"""
+    派发体经 _dispatch_lock 跨线程串行（Req: F160），余无锁无线程。"""
 
     def __init__(self, state, auth, gitx, oc, store, router, pages,
                  stale_candidates=None, verify_hygiene=None,
