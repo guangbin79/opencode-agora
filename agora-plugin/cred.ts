@@ -44,10 +44,17 @@ export function resetCredPull(): void {
 export type PullReason = "ok" | "not_worker" | "unreachable" | "throttled";
 export type PullResult = { reason: PullReason; cred: Cred | null };
 
-/** root 牌接管文件（F1 唯一落盘点，0600）；缺失/损坏返回 null（调用方按无牌走安全向）。 */
+/** root 牌接管文件（F1 唯一落盘点，0600）；缺失/损坏返回 null（调用方按无牌走安全向）。
+ * F159 两形读牌：v2 install 纯文本 / v3 authsvc JSON {token}（agora CLI/board_tui
+ * 同形）；JSON 坏形/缺 token 键＝null（安全向，与 Python 面报错口径的差异＝本函数
+ * 契约本就缺文件回落 null 而非抛错）。 */
 export function readRootToken(): string | null {
   try {
-    return readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim() || null;
+    const raw = readFileSync(join(agoraHome(), ".agora", "root.token"), "utf8").trim();
+    if (!raw) return null;
+    if (!raw.startsWith("{")) return raw;
+    const t = (JSON.parse(raw) as { token?: unknown }).token;
+    return typeof t === "string" && t ? t : null;
   } catch {
     return null;
   }

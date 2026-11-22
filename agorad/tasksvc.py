@@ -224,7 +224,12 @@ class TaskService:
                                 timeout_source="task" if timeout is not None
                                 else "default")
         fallback_note = None
-        if role != "worker" and target_branch is not None:
+        if project_dir is None:
+            # Req: F159 缺 project_dir（无仓上下文建单）＝跳过钉支/验支：真实
+            # gitx 对 None 路径报 ENOENT 天书；v2/OCR 幂等语义＝照建 todo、支空
+            # （显式支照存不验；external_branch 支空拒派由 dispatch local_base 兜底）。
+            pass
+        elif role != "worker" and target_branch is not None:
             try:
                 self._gitx.check_branch(project_dir, target_branch)
             except Exception as e:

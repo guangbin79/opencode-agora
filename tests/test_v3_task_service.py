@@ -271,6 +271,25 @@ class TestCreateForms(_Base):  # 断言1
         self.assertEqual(t.target_branch, "main")
         self.assertIn("target_branch_fallback", self.events(tid))
 
+    def test_absent_project_dir_skips_branch_pinning(self):
+        # Req: F159 缺 project_dir＝跳过钉支/验支（真实 gitx 对 None 路径报
+        # ENOENT 天书）：照建 todo、支空、零 gitx 调用
+        tid = self.mk(execution={"project_dir": None})
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.project_dir, t.target_branch, t.state),
+                         (None, None, "todo"))
+        self.assertEqual(self.gitx.calls, [])  # 钉支面零调用
+
+    def test_absent_project_dir_explicit_branch_unvalidated(self):
+        # Req: F159 缺 project_dir 显式支照存不验（"nope" 不在 branches，
+        # 若误发 check_branch 即拒建——本测证明零验证零钉支）
+        tid = self.mk(execution={"project_dir": None},
+                      delivery={"target_branch": "nope"})
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.target_branch, t.delivery.target_branch),
+                         ("nope", "nope"))
+        self.assertEqual(self.gitx.calls, [])
+
 
 class TestWorkerMatrix(_Base):  # 断言2
     def setUp(self):
