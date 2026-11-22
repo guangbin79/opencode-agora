@@ -291,7 +291,7 @@ class Health:
                         # 零产出（last_seen 未前移且无 worker 新消息）→机械兜底
                         self._nudged[tid] = (
                             time.time(), tasks[tid].get("last_seen") or 0.0,
-                            self._worker_msg_ts(tid, wsid),
+                            self._worker_msg_ts(tid, wsid) or 0.0,  # 读故障基线 0.0＝宽松
                             self._stale_gap(self._stale_esc[tid][0]), wsid)
         self._zombie_scan(tasks, {tid for tid, _ in cand})
         self._stale_seen &= {tid for tid, _ in cand}  # 离开候选集即移除（复位再拍）
@@ -313,7 +313,8 @@ class Health:
         重派边＝废旧牌＋新会话接管、env 不回收零数据损失；fail_streak 记梯子
         爬升）；连败达限/无重派边/重派被拒只 escalate(kind=zombie) 不再自动
         重开。动作全程审计＋邮件告知；离开候选集（busy/touch/状态迁移）或
-        已产出＝销账，再僵从边沿重爬梯。"""
+        已产出＝销账，再僵从边沿重爬梯；动作面半失败回填布防下轮重试
+        （拍到才记口径，防候选期内永久静默——评审环 R2 B 册）。"""
         now = time.time()
         for tid in list(self._nudged):
             ts, ls_base, msg_base, gap, wsid_base = self._nudged[tid]
@@ -322,19 +323,25 @@ class Health:
                 continue
             if now - ts < gap:
                 continue  # 退避窗内：等产出锚
-            del self._nudged[tid]  # 本梯级消费：动作与否都销账（防逐 tick 重拍）
+            entry = self._nudged.pop(tid)  # 本梯级消费：动作与否都销账（防逐 tick 重拍）
             t = tasks.get(tid)
             if t is None or t.get("state") not in _ACTIVE:
-                continue  # 窗内已终态（人工 cancel/done 收尾）：免动作
+                continue  # 窗内已终态/除籍（人工 cancel 等）：免动作
             if t.get("worker_sid") != wsid_base:
                 continue  # worker 已易主（reinject 重建/改绑/人工重派）：他车道接管
-            if ((t.get("last_seen") or 0.0) > ls_base
-                    or self._worker_msg_ts(tid, t.get("worker_sid")) > msg_base):
+            msg_ts = self._worker_msg_ts(tid, t.get("worker_sid"))
+            if msg_ts is None:
+                continue  # 消息面读故障：宁漏杀不误杀，本轮跳过（账已销、边沿重爬）
+            if (t.get("last_seen") or 0.0) > ls_base or msg_ts > msg_base:
                 continue  # 已产出（① 的 note 锚或心跳）：梯子收起
             age = max(0, int(now - (t.get("last_seen") or t.get("created") or 0.0)))
-            why = self._auto_redispatch(tid, t, window_s=int(gap), age_s=age)
-            if why is not None:
-                self.escalate(KIND_ZOMBIE, tid, raw=why)
+            try:
+                why = self._auto_redispatch(tid, t, window_s=int(gap), age_s=age)
+                if why is not None:
+                    self.escalate(KIND_ZOMBIE, tid, raw=why)
+            except Exception:
+                self._nudged[tid] = entry  # 半失败回填：动作下轮重试不丢报
+                continue
 
     def _auto_redispatch(self, tid, t, window_s, age_s):
         """机械重派单点：连败达限/状态无重派边先判（只升级），重派经
@@ -344,6 +351,13 @@ class Health:
         raw 上行（auto_redispatch_rejected 审计留痕）。返回 None＝已重派/
         无需升级，否则＝升级 raw。"""
         note = f"zero_output window_s={window_s} last_seen_age_s={age_s}"
+        # 预检用新鲜行（评审环 R2 B 册）：布防窗可达数小时，快照行可被门侧
+        # 走完 running→done→verify×3→blocked——机械重开质量封锁任务＝击穿
+        # 「达限只 escalate」语义；行读失败回落快照行（报因上行，不空转）
+        try:
+            t = self._state.get(tid) or t
+        except Exception:
+            pass
         n = t.get("fail_streak", 0)
         if n >= _FAIL_STREAK_LIMIT:
             return f"{note} fail_streak={n} 达限——停止自动重开"
@@ -363,7 +377,10 @@ class Health:
         try:
             # transition(dispatched) 清零后回填：梯子爬升与质量连败共用计数
             # （达限即停自动重开；set_fields 不触发 fail_streak_bump 的自动
-            # blocked——重派后立即 blocked 会废掉整条自愈车道）
+            # blocked——重派后立即 blocked 会废掉整条自愈车道）。写前重读新鲜行值
+            # （C 册：快照 n 到写点隔整轮 tick，门侧并发 bump 可被旧值覆盖）
+            fresh = self._state.get(tid)
+            n = fresh.get("fail_streak", 0)
             self._state.set_fields(tid, fail_streak=n + 1)
         except Exception:
             pass  # 记账败不回滚重派（下轮爬升重新计，崩溃回退口径同内存态）
@@ -391,17 +408,19 @@ class Health:
         且 kind!=escalate——worker 上行 question/note/done/verify 皆产出；
         escalate 行 from 被 router 按 worker 边归属（_resolve "up"）、系服务
         合成非 worker 产出，不计。store 读回 ts 恒为 str（F92 frontmatter
-        值一律 str）——float 收敛防异型比较炸 tick。消息面读故障/无消息
-        →0.0（不阻塞布防，降级纪律同 F59 证据包）。"""
+        值一律 str）——float 收敛防异型比较炸 tick。返回 None＝消息面读故障
+        （窗尽判定按已产出跳过——宁漏杀不误杀，评审环 R2 B 册）；无匹配
+        消息＝0.0（布防侧作基线＝宽松正确）。"""
         if not wsid:
             return 0.0
         try:
-            m = next(m for m in reversed(self._store.read_messages())
-                     if m.get("task") == tid and m.get("from") == wsid
-                     and m.get("kind") != "escalate")
-            return float(m.get("ts") or 0.0)
+            rows = self._store.read_messages()
         except Exception:
-            return 0.0
+            return None
+        m = next((m for m in reversed(rows)
+                  if m.get("task") == tid and m.get("from") == wsid
+                  and m.get("kind") != "escalate"), None)
+        return float(m.get("ts") or 0.0) if m is not None else 0.0
 
     def _delivery_watch(self, tasks):
         """Req: F110 交付终局观测：external handoff 超龄未确认＋managed 未出版。

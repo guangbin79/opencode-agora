@@ -12,6 +12,7 @@ import pathlib
 import re
 import secrets
 import sys
+import threading
 import time
 
 _MAX_DEPTH = 3
@@ -65,6 +66,11 @@ class TaskService:
         self._stale_candidates = stale_candidates  # ag-d1d8c1：僵态口径单一事实源
         self._verify_hygiene = verify_hygiene  # F99：纯函数检查器构造注入（core 禁兄弟 import）
         self._verify_profiles = verify_profiles or {}  # Req: F126 项目级预算画像（服务侧配置）
+        # Req: F160 派发体串行锁：redispatch_stalled 使 health 线程与 httpd
+        # 并发进入 _dispatch_as（评审环 R2 B 册：双卫兵比对各自快照恒过、
+        # 输家 InvalidTransition 时已 oc.create 孤儿会话＋凭据文件互相覆写错位）
+        # ——恢复 httpd 单线程时代的派发串行语义；cancel/stop_after_failed 不经此体
+        self._dispatch_lock = threading.Lock()
 
     def _budget(self, project_dir, verify, timeout):
         """Req: F126 effective timeout/source 解析：task > profile > global。
@@ -327,6 +333,10 @@ class TaskService:
                                  or "root")
 
     def _dispatch_as(self, tid, sid):
+        with self._dispatch_lock:  # Req: F160 派发体跨线程串行（见 __init__ 注）
+            return self._dispatch_as_locked(tid, sid)
+
+    def _dispatch_as_locked(self, tid, sid):
         t = self._state.get(tid)
         owner = self._route_owner(t, sid)  # F75：CLI 无 sid 派发防归属错址
         stale_note = None

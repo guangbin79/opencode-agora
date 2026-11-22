@@ -8,6 +8,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1607,6 +1608,29 @@ class TestStalledRedispatch(TestCoreTask):
         with self.assertRaises(Rejected):
             self.svc.redispatch_stalled(tid)
         self.assertEqual(self.state.get(tid)["state"], "running")  # 拒绝零副作用
+
+    def test_concurrent_dispatch_serialized_no_orphan(self):  # Req: F160（评审环 R2 B 册）
+        """health×httpd 并发派发同一任务：串行锁收口——恰一胜一拒，输家零
+        副作用（无孤儿 oc.create 会话、无凭据文件互相覆写）。"""
+        tid, disp, old = self.running_pair(last_seen_ago=1300)
+        results = []
+
+        def call(fn, *a):
+            try:
+                fn(*a)
+                results.append("ok")
+            except Exception as e:
+                results.append(type(e).__name__)
+
+        th = threading.Thread(target=call, args=(self.svc.redispatch_stalled, tid))
+        th.start()
+        call(self.svc.dispatch, tid, disp)  # 与 health 线程并发同任务派发
+        th.join(5)
+        self.assertFalse(th.is_alive())  # 锁保证不悬挂
+        self.assertEqual(sorted(results), ["Rejected", "ok"])  # 恰一胜一拒
+        self.assertEqual(self.state.get(tid)["state"], "dispatched")
+        # 初派 s1＋赢家恰 1 个新会话：输家被锁挡在 oc.create 前（无孤儿）
+        self.assertEqual(len(self.oc.sessions), 2)
 
     def test_full_pool_redispatch_stalled_running_excludes_self(self):  # Req: F88
         """stalled running 是既有任务重派：满池不得把自身算作新增负载。"""

@@ -549,6 +549,52 @@ class TestCoreHealth(unittest.TestCase):
         self.health.tick()
         self.assertEqual(stub.calls, ["t1"])  # escalate 行≠产出：仍零产出
 
+    def test_zombie_state_drift_not_reopened(self):  # Req: F160②（评审环 R2）
+        """布防窗内状态漂移不机械重开：blocked 离开候选集＝解除布防静默；
+        verify_failed 留在候选集＝新鲜行预检拦下，只升级报因带 state。"""
+        stub = self._zombie()  # 布防时快照行 state=running
+        self.state.transition("t1", "done")
+        self.state.transition("t1", "blocked")  # 门侧质量封锁：离候选集
+        self._arm_and_travel("t1")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)  # 解除布防非升级
+        self.seed("t2", worker="s-w2")  # 留候选集的漂移形态
+        self.state.set_fields("t2", created=0.0)
+        self.oc.liveness["s-w2"] = True
+        self.health.tick()  # t2 边沿拍僵＋nudge＋布防（快照行 state=running）
+        self.state.transition("t2", "done")
+        self.state.transition("t2", "verify_failed")  # 窗内漂移
+        self._arm_and_travel("t2")
+        self.health.tick()
+        self.assertEqual(stub.calls, [])  # 零重派：新鲜行预检拦下
+        body = [m["body"] for m in self.main_msgs()
+                if "失控[zombie]" in m["body"]][0]
+        self.assertIn("state=verify_failed", body)
+
+    def test_zombie_msg_face_read_failure_skips_action(self):  # Req: F160②（评审环 R2）
+        """窗尽时消息面读故障＝产出不可判：宁漏杀不误杀——跳过动作不误重派
+        已回发锚的活 worker（账已销、边沿重爬，非永久静默）。"""
+        stub = self._zombie()
+        self.store.write_message({"ts": time.time(), "task": "t1",
+                                  "kind": "note", "from": "s-w1",
+                                  "to": "main"}, "自检结论：正常")  # 锚已在（读不到）
+
+        def boom():
+            raise OSError("scandir EIO")
+
+        orig = self.store.read_messages
+        self.store.read_messages = boom
+        try:
+            self._arm_and_travel("t1")
+            self.health.tick()  # 不抛、不动作
+        finally:
+            self.store.read_messages = orig
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(sum("失控[zombie]" in m["body"]
+                             for m in self.main_msgs()), 0)
+
     def test_zombie_no_redispatch_face_degrades_to_escalate(self):  # Req: F160②
         """未接重派面（app.task 缺席）：梯子到顶只升级（安全降级不空转）。"""
         self._zombie()  # app.task 已接桩
