@@ -180,6 +180,7 @@ class Health:
         if not oc_down:
             self._stale_scan(tasks, busy)
         self._delivery_watch(tasks)  # Req: F110 交付终局观测（与 oc 活性无关）
+        self._infra_backstop_scan(tasks)  # Req: F130 verify_infra 宽限兜底
 
     def _wait_scan(self):
         """Req: F124 受控等待解析：幂等扫描 waiting_on 任务（账本侧事实，
@@ -339,6 +340,44 @@ class Health:
             for tid in list(book):
                 if tid not in tasks:  # 除籍出账：防长驻 daemon 无界增长
                     del book[tid]
+
+    def _infra_backstop_scan(self, tasks):  # Req: F130
+        """verify_infra 驻留宽限兜底：到点仍 done∧非门内∧非 awaiting_external
+        ＝派发方失效零动作（ag-aa8798 判例 13h 死锁）——服务自动重排恰一次
+        （reverify 同款投 gate_q，审计 verify_infra_backstop/actor=health）；
+        重排后再败由门体转 blocked（exhausted）。owner 活着且动作即撤销计时
+        （用户裁定：服务端兜底仅在派发方失效时出手）：reverify（task 面）、
+        dispatch/cancel/终态（State.transition）、转 in_gate（gate.run 入门）、
+        worker 心跳（last_seen>since）五面各自撤销。"""
+        now = time.time()
+        q = getattr(self._app, "gate_q", None)
+        for tid, t in tasks.items():
+            g = t.get("verify_infra_grace")
+            if not g:
+                continue
+            if t["state"] != "done" or t.get("in_gate"):
+                continue  # 非驻留态：计时由迁移/入门面撤销，此为竞态兜底
+            d = t.get("delivery") or {}
+            if d.get("status") == "awaiting_external":
+                continue  # 外部交付驻留＝设计内稳态（F101），永不触发
+            if (t.get("last_seen") or 0.0) > (g.get("since") or 0.0):
+                # 锁内复核再清（R3）：窗内可能已装新宽限/任务已除籍——陈旧
+                # 清除不得误伤新周期（clear_infra_grace_if 自吞 KeyError 面）
+                self._state.clear_infra_grace_if(tid, g.get("since"))
+                continue  # 宽限窗内 worker 动作：撤销计时
+            if now < (g.get("deadline") or 0.0) or q is None:
+                continue  # 未到点／队列缺席（无 httpd 装配）：下轮再判
+            # 落账走锁内复核（R2：陈旧快照 TOCTOU——窗内 reverify/入门/心跳
+            # 已动作即 False 免投队）；True 才审计＋投队＝恰一次且不抹 owner 动作
+            if not self._state.mark_infra_backstop(tid, ts=now):
+                continue
+            try:
+                self._store.append_event({"ts": now, "actor": "health",
+                                          "event": "verify_infra_backstop",
+                                          "task": tid})
+            except Exception:  # R3 审计尽力而为（F54 口径）：败不吞唯一投队
+                pass
+            q.put(tid)
 
     def repair_dispatcher_routes(self):
         """F75 存量错址修复：active 顶层任务 dispatcher_sid=='root' 且 root_sid

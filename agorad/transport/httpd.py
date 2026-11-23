@@ -496,6 +496,7 @@ def make_server(app, port: int = 0, gate_deadline=None):
     max(4×生效 verify 预算, 600s)）——测试秒级跑。
     """
     q = queue.Queue()
+    app.gate_q = q  # Req: F130 health 宽限兜底重排投门面（晚绑同 Handler.gate_q）
     for tid, t in app.state.snapshot()["tasks"].items():
         if t["state"] == "done":
             q.put(tid)

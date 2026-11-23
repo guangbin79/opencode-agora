@@ -325,7 +325,8 @@ class Gate:
                  on_blocked=None, roster_path=None, quick_max_files=3,
                  quick_max_lines=30, clean_ignore_env="",
                  page_writer=None, spawn_tracker=None,
-                 resources=None, artifact_store=None):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新；F116 跨进程资源闸；F122 执行产物存储
+                 resources=None, artifact_store=None,
+                 infra_grace=1800.0):  # F35 名册；F65 quick；ag-f5aa4d 豁免 env；ag-0f60fd 页面刷新；F116 跨进程资源闸；F122 执行产物存储；Req: F130 infra 宽限
         self._state, self._gitx, self._router, self._oc = state, gitx, router, oc
         self._read_anchor, self._health, self._auth = read_anchor, health, auth
         self._store, self._on_blocked = store, on_blocked
@@ -337,6 +338,7 @@ class Gate:
         self._runner = runner  # None＝run() 按 tid 构造默认 runner（F36 软顶提醒绑任务）
         self._resources = resources  # F116：None＝无跨进程闸（单测直构），assemble 恒注入
         self._artifacts = artifact_store  # Req: F122：None＝单测直构直通零落盘，main 生产注入
+        self._infra_grace = infra_grace  # Req: F130：verify_infra 驻留宽限（秒）
         # P0-1（ag-9c4cbb）：门运行期 spawn 登记簿（与 Gitx 同实例注入＝门线程
         # 内全部子进程组可被看门狗整组收杀）；killed 标记即 run() 异常路径的
         # 让位判据（activate() 每轮复位——重派重跑的门内崩不被旧轮标记误吞）
@@ -687,7 +689,8 @@ class Gate:
             runner = lambda env, cmd: self._runner(env, cmd, timeout=budget,
                                                    ceiling=ceiling)
         auto_ignored = []  # Req: F97 本轮自动豁免清单（merged 通知外带）
-        self._state.set_fields(tid, in_gate=True, gate_env=integration)
+        self._state.set_fields(tid, in_gate=True, gate_env=integration,
+                               verify_infra_grace=None)  # Req: F130 转 in_gate 撤销宽限计时
         try:  # F54 门启动拍：两通道各自尽力而为（同 notify_transition 口径），一侧败不压另一侧
             self._post(tid, "已入验证门：verify 运行中——绿/败另有消息")
         except Exception:
@@ -1469,14 +1472,41 @@ class Gate:
             f"生效预算 {budget:g}s（硬顶 {ceiling:g}s）；"
             f"输出尾部:\n{out[-_TAIL:]}{self._artifact_line(tid)}")
 
-    def _verify_infra(self, tid, rc, out):  # Req: F122
+    def _verify_infra(self, tid, rc, out):  # Req: F122；宽限兜底 Req: F130
         """signal 类机械失败分类（137 SIGKILL/139 SIGSEGV/134 SIGABRT 等）：
         与活不达标分开——任务驻留 done、不计连败、不弹回 worker（基础设施疑点
         worker 无从修）；审计 verify_infra_failed＋KIND_VERIFY_INFRA 升级
         （通知通道唤醒派发方，8122a2e 同 verify-dead 渠道）；worker 只收最小
         等待说明；通知明确「机械失败/基础设施疑点，非质量败」。通知面尽力而为
-        （F54 口径）——败不改变驻留语义。"""
+        （F54 口径）——败不改变驻留语义。
+        Req: F130 宽限兜底：首败登记宽限计时（health tick 到点 dispatcher 仍
+        失效零动作→自动重排恰一次）；兜底标记在身再败＝终局 blocked
+        （verify_infra_backstop_exhausted，gate_overrun→blocked 同构）——
+        防 dispatcher 失效下的无限驻留（ag-aa8798 判例 13h 死锁）。"""
         self._audit(tid, "verify_infra_failed", rc=rc)
+        if self._state.get(tid).get("verify_infra_backstop"):
+            self._state.transition(
+                tid, "blocked", blocked_reason="verify_infra_backstop_exhausted")
+            try:
+                self._health.escalate(
+                    KIND_VERIFY_INFRA, tid,
+                    raw=f"exit={rc} backstop exhausted"
+                        f"{self._artifact_line(tid)}")
+            except Exception:
+                pass
+            try:
+                self._router.notify_transition(
+                    tid, "blocked",
+                    body=f"任务 {tid} verify 机械失败再发（宽限兜底重排后仍 "
+                         f"signal，exit={rc}）——已 blocked"
+                         f"（verify_infra_backstop_exhausted，非质量败）；"
+                         f"处置后重派或取消{self._artifact_line(tid)}")
+            except Exception:  # 通知面尽力而为（F54 口径）——不逆转终局
+                pass
+            return
+        self._state.set_fields(tid, verify_infra_grace={  # 驻留后登记宽限
+            "deadline": time.time() + self._infra_grace,
+            "since": time.time()})
         try:
             self._health.escalate(
                 KIND_VERIFY_INFRA, tid,

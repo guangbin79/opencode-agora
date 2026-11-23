@@ -740,6 +740,10 @@ class TaskService:
                                    "失败走 task_deliver")
         self._store.append_event({"ts": time.time(), "actor": sid,
                                   "event": "reverify", "task": tid})
+        # Req: F130 宽限兜底撤销：dispatcher 亲自动作＝owner 活着，计时与兜底
+        # 标记一并清零（后续 infra 驻留重新走完整宽限周期，服务不干预）
+        self._state.set_fields(tid, verify_infra_grace=None,
+                               verify_infra_backstop=None)
         return {"ok": True, "requeued": True}
 
     # ---- Req: F124 受控等待登记（task_wait） ----

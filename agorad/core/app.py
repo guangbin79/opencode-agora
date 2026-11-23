@@ -29,6 +29,7 @@ class App:
     main_sid: str
     page_writer: object = None  # ag-0f60fd 任务页刷新面（httpd running 转换补刷）
     verify_profiles: dict = None  # Req: F126 doctor 画像摘要注入面（None＝缺席；{}＝count 0 亦注入）
+    gate_q: object = None  # Req: F130 make_server 晚绑门队列（health 宽限兜底重排投门面）
 
     def bind_main(self, sid, caller):
         """root 牌身份钉死 daemon 身份（ag-f80309 B 案，替代 R25-A 活绑定 rebind）：

@@ -131,6 +131,18 @@ def verify_ceiling_from_env():
     return ceiling
 
 
+def verify_infra_grace_from_env():
+    """Req: F130 verify_infra 驻留宽限（秒）；坏值/非有限值/非正数 fail-fast。"""
+    raw = os.environ.get("AGORA_VERIFY_INFRA_GRACE", "1800")
+    try:
+        grace = float(raw)
+    except ValueError:
+        raise ValueError(f"AGORA_VERIFY_INFRA_GRACE 须为正数秒（收到 {raw!r}）") from None
+    if not math.isfinite(grace) or grace <= 0:
+        raise ValueError(f"AGORA_VERIFY_INFRA_GRACE 须为正数秒（收到 {raw!r}）")
+    return grace
+
+
 def quick_limits_from_env():
     """F65 quick 包络旋钮（文件数/行数，正整数）；坏值 fail-fast 同款文案风格。"""
     limits = []
@@ -256,6 +268,7 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
              verify_timeout=300, verify_ceiling=None, roster_path=None,
              quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
              gate_max_concurrent=1, gate_artifact_keep=50,
+             verify_infra_grace=1800.0,  # Req: F130
              verify_profiles=None):
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
@@ -301,6 +314,7 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
                 page_writer=page_writer,  # ag-0f60fd：门段事件刷新任务页
                 spawn_tracker=spawns,  # P0-1：真 Gitx 同一登记簿（注入假 gitx 不登记）
                 resources=GateResources(home, gate_max_concurrent),  # F116 跨进程闸
+                infra_grace=verify_infra_grace,  # Req: F130 宽限兜底
                 artifact_store=ArtifactStore(  # Req: F122 执行产物存储
                     Path(home) / "state" / "gate-artifacts",
                     keep=gate_artifact_keep))
@@ -418,6 +432,7 @@ def main():
         quick_files, quick_lines = quick_limits_from_env()  # F65
         gate_max = gate_max_concurrent_from_env()  # F116
         ga_keep = gate_artifact_keep_from_env()  # F122
+        infra_grace = verify_infra_grace_from_env()  # Req: F130
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -439,6 +454,7 @@ def main():
                    clean_ignore_env=os.environ.get("AGORA_CLEAN_IGNORE", ""),
                    gate_max_concurrent=gate_max,
                    gate_artifact_keep=ga_keep,  # Req: F122
+                   verify_infra_grace=infra_grace,  # Req: F130
                    verify_profiles=verify_profiles)  # Req: F126
     tok = issue_root(app)
     if tok:

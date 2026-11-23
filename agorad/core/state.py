@@ -173,6 +173,40 @@ class State:
             if t is not None:
                 t["last_seen"] = time.time()
 
+    def mark_infra_backstop(self, tid, ts=None):  # Req: F130
+        """宽限兜底标记锁内复核落账（clear_waiting_on_if 同型竞态修法，
+        评审环 R2/B 册＋OCR 同发现）：tick 按起点快照判定，落账窗内 reverify/
+        dispatch/cancel/入门/worker 心跳可能已撤销计时——仅 grace 仍在∧
+        state==done∧非 in_gate∧窗内无新心跳才撤计时＋落标记并返回 True；
+        否则 False＝判定窗已被动作，health 免审计免投队（owner 活着且动作时
+        服务不得干预）。"""
+        with self._lock:
+            t = self._tasks.get(tid)
+            g = (t or {}).get("verify_infra_grace") or {}
+            if (t is None or not g
+                    or t["state"] != EV_DONE or t.get("in_gate")
+                    or (t.get("last_seen") or 0.0) > (g.get("since") or 0.0)):
+                return False  # 含心跳面（R3）：窗内 worker 已动作＝owner 活着
+            t.pop("verify_infra_grace", None)
+            t["verify_infra_backstop"] = time.time() if ts is None else ts
+            t["updated"] = time.time()
+            self._persist()
+            return True
+
+    def clear_infra_grace_if(self, tid, since):  # Req: F130
+        """心跳撤销面锁内复核（R3，mark_infra_backstop 同型）：grace.since
+        仍是判定那份才清——窗内门体可能已装新宽限（reverify 重验再败）或
+        任务已除籍，陈旧清除不得误伤新周期/抛 KeyError 中断本轮扫描。"""
+        with self._lock:
+            t = self._tasks.get(tid)
+            g = (t or {}).get("verify_infra_grace") or {}
+            if t is None or not g or g.get("since") != since:
+                return False
+            t.pop("verify_infra_grace", None)
+            t["updated"] = time.time()
+            self._persist()
+            return True
+
     def clear_waiting_on_if(self, tid, dep):
         """Req: F124 条件清除（锁内复核）：waiting_on==dep 才清——防 health
         tick 判定窗内 httpd task_wait 并发换登记被旧清除抹掉（活等待丢失，
@@ -201,6 +235,11 @@ class State:
             legal = LEGAL.get(t["state"], set())
             if to not in legal:
                 raise InvalidTransition(tid, t["state"], to, legal)
+            # Req: F130 宽限兜底随状态迁移整体撤销：dispatch/cancel/merged/
+            # verify_failed/reopened/blocked 都不是「dispatcher 失效零动作」
+            # 驻留态——计时与兜底标记不再有效
+            t.pop("verify_infra_grace", None)
+            t.pop("verify_infra_backstop", None)
             t["state"] = to
             t["updated"] = time.time()
             t.update(fields)
