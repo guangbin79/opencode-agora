@@ -42,6 +42,7 @@ core 只 import stdlib，依赖全构造注入。
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -74,6 +75,12 @@ _PHANTOM_BOUNCE = ("合并前置失败：env 分支相对目标无新增提交�
 # 类自测拉起的 daemon 经 main.py os.environ.get("AGORA_PORT","0") 硬绑服务在用端口即崩。
 # AGORA_HOME 明示不剥：无事故面，夹具本就自设各自值。
 _GATE_ENV_STRIP = ("AGORA_PORT", "AGORA_OC_URL", "AGORA_OC_PASSWORD")
+
+# ag-67650e 门构建 cgroup 隔离：verify 子进程落独立 slice，oomd 连坐不再击杀
+# daemon 单元（11-23 事故：验收构建与 daemon 同 cgroup，5.8G 构建触发 oomd 杀
+# 整单元）。unit 模板（MemoryMax/ManagedOOMMemoryPressure）见
+# docs/agorad-oomd-isolation.md——宿主 unit 更新由派发方合并后处理。
+_GATE_SLICE = "agora-gate.slice"
 
 # Req: F98 交付锁有界等待：等锁超时＝一次失败尝试，绝不无限阻塞串行门
 # （数值沿用原 push 网络上界口径——F109 网络面已删，常量仅作交付锁等待上界）
@@ -253,6 +260,25 @@ def _with_shell_exports(cmd, env):
     return f"export {' '.join(parts)}; {cmd}"
 
 
+def _scoped_cmd(cmd):
+    """ag-67650e 门构建 cgroup 隔离：verify 命令包进 systemd-run --user --scope
+    落 agora-gate.slice（与 daemon 不同 cgroup，oomd 连坐不再杀服务单元）。
+
+    systemd-run 缺失直接回退现状直跑；user bus 不可达（cron/CI 态拉起 daemon）
+    由命令内探针运行时回退——两分支都不改 verify 语义/超时/输出捕获/退出码分类：
+    --scope 透传 stdio/env/cwd 且命令树留在原进程组（killpg proc.pid 杀伤口径
+    不变，探针实证）。两分支同走 sh -c 引号体：cmd 内保留字（fi/else）不破壳。
+    """
+    if not shutil.which("systemd-run"):
+        return cmd
+    body = shlex.quote(cmd)
+    probe = ("systemd-run --user --scope --quiet "
+             f"--slice={_GATE_SLICE} sh -c true 2>/dev/null")
+    scope = (f"systemd-run --user --scope --quiet --slice={_GATE_SLICE} "
+             f"sh -c {body}")
+    return f"if {probe}; then {scope}; else sh -c {body}; fi"
+
+
 def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None,
                        tracker=None):
     """真 runner：独立进程组跑 verify，F36 软硬双顶。
@@ -268,7 +294,8 @@ def _subprocess_runner(env_dir, cmd, timeout=300, ceiling=None, on_soft=None,
     """
     ceiling = 4 * timeout if ceiling is None else ceiling
     child_env = {k: v for k, v in os.environ.items() if k not in _GATE_ENV_STRIP}
-    proc = subprocess.Popen(cmd, shell=True, cwd=env_dir, env=child_env,
+    proc = subprocess.Popen(_scoped_cmd(cmd), shell=True, cwd=env_dir,
+                            env=child_env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace",
                             start_new_session=True)

@@ -28,11 +28,12 @@ _loader.exec_module(agora)
 
 
 def _stub(states, code=200, commit=None, dispatch_code=200, dispatch_error=None,
-          dispatch_reset=False):
+          dispatch_reset=False, dispatch_codes=None):
     """按请求数走 states 序列的 /board 单任务视图；耗尽后停在末态。
 
     F64：/task_dispatch 代理目标（回 {"task","token"}），dispatch_code 模拟
-    派发被拒（dispatch_error＝服务拒因体）；dispatch_reset＝断连模拟瞬断。
+    派发被拒（dispatch_error＝服务拒因体）；dispatch_reset＝断连模拟瞬断；
+    dispatch_codes（ag-67650e）＝逐跳派发码序列（首跳受理、重发被拒等形态）。
     """
     count = {"n": 0, "paths": [], "bodies": []}
 
@@ -48,11 +49,15 @@ def _stub(states, code=200, commit=None, dispatch_code=200, dispatch_error=None,
                 if dispatch_reset:  # 断连（RemoteDisconnected＝OSError 族瞬态）
                     self.connection.shutdown(socket.SHUT_RDWR)
                     return
-                if dispatch_code != 200:
+                dc = dispatch_code
+                if dispatch_codes:  # 逐跳码序列：越界粘末位（与 states 同口径）
+                    dc = dispatch_codes[min(len(count["bodies"]) - 1,
+                                            len(dispatch_codes) - 1)]
+                if dc != 200:
                     data = json.dumps({"error": dispatch_error or "拒"}).encode()
                 else:
                     data = json.dumps({"task": "t1", "token": "w-tok"}).encode()
-                self.send_response(dispatch_code)
+                self.send_response(dc)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -78,9 +83,9 @@ def _stub(states, code=200, commit=None, dispatch_code=200, dispatch_error=None,
 
 class _Srv:
     def __init__(self, states, code=200, commit=None, dispatch_code=200,
-                 dispatch_error=None, dispatch_reset=False):
+                 dispatch_error=None, dispatch_reset=False, dispatch_codes=None):
         h, count = _stub(states, code, commit, dispatch_code, dispatch_error,
-                         dispatch_reset)
+                         dispatch_reset, dispatch_codes)
         self.count = count
         self.srv = http.server.HTTPServer(("127.0.0.1", 0), h)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -671,6 +676,87 @@ class TestDispatch(unittest.TestCase):
             srv.stop()
         self.assertEqual(p.returncode, 2)
         self.assertIn("404", p.stderr)
+
+
+class TestDispatchRedispatch(unittest.TestCase):
+    """ag-67650e 派发自愈：等待期连续 ≥2 次成功取数仍 todo → 重发 /task_dispatch
+    恰一次（11-23 事故：首跳瞬断后恒 todo，CLI 静默轮询 1h41m）；watch 零重发、
+    至多一次不循环、deadline 到期不重发、重发跳瞬态续等、认牌/闸拒终局。"""
+
+    def setUp(self):
+        self.homes = []
+
+    def tearDown(self):
+        for h in self.homes:
+            shutil.rmtree(h, ignore_errors=True)
+
+    def home(self, srv, token="tok"):
+        port = srv.srv.server_address[1] if srv else _dead_port()
+        h = mkhome(port, token)
+        self.homes.append(h)
+        return h
+
+    def _clock(self):  # 假时钟：pause 只推进不真睡
+        t = [0.0]
+        return (lambda: t[0]), (lambda dt: t.__setitem__(0, t[0] + dt))
+
+    def test_transient_double_todo_resends_once_to_terminal(self):  # a) 自愈主线
+        # 首跳瞬断（假失败真未落）＋连续两次 todo → 重发恰一次 → dispatched 续等终态
+        srv = _Srv(["todo", "todo", "dispatched", "merged"], commit="r" * 40,
+                   dispatch_reset=True)
+        try:
+            p = run_cli(["dispatch", "t1"], self.home(srv))
+            self.assertEqual((p.returncode, p.stdout.strip()),
+                             (0, "merged @" + "r" * 12))
+            self.assertEqual(len(srv.count["bodies"]), 2)  # 首跳瞬断＋重发一次
+        finally:
+            srv.stop()
+
+    def test_redispatch_bounded_by_once_and_deadline(self):  # b) d) 不循环/到期不重发
+        for timeout, want in ((60, 1), (15, 0)):
+            with self.subTest(timeout=timeout):
+                calls, srv = [], _Srv(["todo"])
+                try:
+                    clock, pause = self._clock()
+                    self.assertEqual(
+                        agora.wait("t1", srv.base, "tok", timeout=timeout,
+                                   clock=clock, pause=pause,
+                                   redispatch=lambda b, t: calls.append(b)),
+                        (1, "in-flight: todo"))
+                    self.assertEqual(len(calls), want)
+                finally:
+                    srv.stop()
+
+    def test_watch_mode_zero_redispatch(self):  # c) watch 盯他人任务零重发
+        srv = _Srv(["todo", "todo", "merged"], commit="w" * 40)
+        try:
+            p = run_cli(["watch", "t1"], self.home(srv))
+            self.assertEqual((p.returncode, p.stdout.strip()),
+                             (0, "merged @" + "w" * 12))
+            self.assertNotIn("task_dispatch", srv.count["paths"])
+        finally:
+            srv.stop()
+
+    def test_redispatch_rejected_is_fatal(self):  # 重发被闸拒＝终局 exit 2
+        srv = _Srv(["todo"], dispatch_codes=[200, 403])
+        try:
+            p = run_cli(["dispatch", "t1", "--timeout", "60"], self.home(srv))
+            self.assertEqual(p.returncode, 2)
+            self.assertIn("403", p.stderr)
+            self.assertEqual(len(srv.count["bodies"]), 2)  # 首跳＋重发无第三跳
+        finally:
+            srv.stop()
+
+    def test_redispatch_hop_transient_absorbed(self):  # 重发跳瞬态自消化续等
+        srv = _Srv(["todo"], dispatch_reset=True)
+        rej = _Srv(["todo"], dispatch_code=403)
+        try:
+            agora._redispatch("t1")(srv.base, "tok")  # 瞬断不外溢
+            with self.assertRaises(agora.Fail):  # 认牌/闸拒按终局
+                agora._redispatch("t1")(rej.base, "tok")
+        finally:
+            srv.stop()
+            rej.stop()
 
 
 class TestCancel(unittest.TestCase):

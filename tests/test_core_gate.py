@@ -330,6 +330,33 @@ class TestSubprocessRunner(unittest.TestCase):
         self.assertIn("\ufffd", out)  # 非法字节降级替换符（自带定位线索）
 
 
+class TestGateScopeCmd(unittest.TestCase):
+    """ag-67650e 门构建 cgroup 隔离：verify 包进独立 scope（agora-gate.slice），
+    oomd 连坐不再击杀 daemon 单元（11-23 事故）；systemd-run 缺失/user bus 不可达
+    回退现状直跑（构造命令断言）；verify 语义/rc 分类不变。"""
+
+    CMD = "export FOO=bar; pytest -q"
+
+    def test_scope_wrap_and_missing_fallback(self):  # 构造命令断言
+        with mock.patch("agorad.core.gate.shutil.which",
+                        return_value="/usr/bin/systemd-run"):
+            wrapped = gate_mod._scoped_cmd(self.CMD)
+        self.assertIn(
+            f"systemd-run --user --scope --quiet --slice={gate_mod._GATE_SLICE} "
+            f"sh -c {shlex.quote(self.CMD)}", wrapped)
+        self.assertIn("else sh -c " + shlex.quote(self.CMD),
+                      wrapped)  # user bus 缺失（cron/CI 态）运行时回退直跑
+        with mock.patch("agorad.core.gate.shutil.which", return_value=None):
+            self.assertEqual(gate_mod._scoped_cmd(self.CMD), self.CMD)
+
+    def test_runner_keeps_rc_and_capture_under_scope(self):  # 真跑一跳
+        # bus 在位走 scope、缺失走 if-else 回退——rc/输出捕获口径均不变
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = _subprocess_runner(tmp, "printf captured; exit 3")
+        self.assertEqual(rc, 3)
+        self.assertEqual(out, "captured")
+
+
 class TestCoreGate(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

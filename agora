@@ -113,14 +113,19 @@ def classify(state):
 
 def wait(tid, base, token, timeout=_DEFAULT_TIMEOUT, once=False,
          interval=_INTERVAL, clock=time.monotonic, pause=time.sleep,
-         reread=None):
+         reread=None, redispatch=None):
     """轮询至终态：返回 (exit, stdout 行)；重试至超时仍不可达 raise Fail。
 
     reread（run_wait 注入 discover）每轮轮询前重读指针——服务换模
     （杀旧拉新、端口/牌换代）即跟随新端点续等，不对死端口空转到超时；
     跟随时认牌失败（401/403，撕裂对/换代窗口）按瞬态重试。
+    redispatch（ag-67650e，run_dispatch 专属注入）：等待期 ≥2 次成功取数仍
+    todo（瞬态取数失败无反证信息、计数不重置）时回调 (base, token) 重发派发
+    恰一次——重发跳瞬态由回调自消化、终局异常外抛；到期观察点不重发
+    （deadline 语义不变）。watch 不传＝零重发。
     """
     deadline = clock() + timeout
+    todo_run = redone = 0
     while True:
         if reread:
             try:
@@ -139,10 +144,14 @@ def wait(tid, base, token, timeout=_DEFAULT_TIMEOUT, once=False,
                         else "服务不可达" if once else "服务不可达（重试至超时）")
                 raise Fail(f"{head}: {e}") from None
         else:
+            todo_run = todo_run + 1 if state == "todo" else 0
             if classify(state) == 0:
                 return 0, (f"{state} @{commit[:12]}" if commit else state)
             if once or clock() >= deadline:
                 return 1, f"in-flight: {state}"
+            if redispatch is not None and not redone and todo_run >= 2:
+                redone = 1  # 恰一次：重发结果好坏都不进循环
+                redispatch(base, token)
         pause(min(interval, max(0.0, deadline - clock())))
 
 
@@ -155,6 +164,23 @@ def run_wait(a):
                       reread=discover)
     print(line)
     return code
+
+
+def _redispatch(tid):
+    """ag-67650e 派发自愈回调（dispatch 专属，wait() 恰回调一次）：等待期 ≥2
+    次仍 todo ＝首跳瞬断假失败真未落，重发 /task_dispatch（_DISPATCH_TIMEOUT
+    预算）——服务端 todo/blocked 闸下重发幂等安全。重发跳瞬态自消化继续等；
+    认牌/闸拒（401/403）按终局 Fail 对齐首跳口径；其余 HTTP 错照常 Fail 外抛。
+    """
+    def go(base, token):
+        try:
+            _call(base, token, "/task_dispatch", {"task": tid},
+                  timeout=_DISPATCH_TIMEOUT)
+        except Transient as e:
+            if isinstance(e, Rejected):
+                raise Fail(str(e)) from None
+            # 瞬态＝重发未落：续等对账（不进重发循环——wait 只回调一次）
+    return go
 
 
 def run_dispatch(a):
@@ -173,11 +199,12 @@ def run_dispatch(a):
             raise
         # 派发跳瞬时（30s 超时/连接抖动）≠未受理：服务端串行重活可能已落地
         # （worker 已拉起）——不终局 exit 2，落 wait() 对账：已派发即续等终态；
-        # 仍 todo 则轮询至到期（exit 1，todo 态自证派发未落，重派安全）。
+        # 仍 todo 则连续两次确认后重发一次（ag-67650e 自愈，_redispatch）。
         # shortcut: 非 401/403 HTTP 错（Fail）仍终局 exit 2——4xx 拒因须直达；
         # 5xx 窄窗（flip 后 append_event/_pages 抛）＝有意取舍不对账，后果有界
         # （重派被服务端 todo/blocked 闸守），when: 出现误报实例再议 5xx 对账
-    code, line = wait(a.task_id, base, token, timeout=timeout, reread=discover)
+    code, line = wait(a.task_id, base, token, timeout=timeout, reread=discover,
+                      redispatch=_redispatch(a.task_id))
     print(line)
     return code
 
