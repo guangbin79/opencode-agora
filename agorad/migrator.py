@@ -73,10 +73,14 @@ _GATE_HEALTH_KEYS = (
     "commit", "rebased_from", "env_base", "usage", "in_gate", "gate_env",
     "gate_origin_branch", "gate_artifact", "review_cache", "probe",
     "review_fail_streak", "pending_cancel", "pending_cancel_reason",
+    # main F130 verify_infra 宽限兜底写键（ag-60f870 并 main 集成补齐）
+    "verify_infra_grace", "verify_infra_backstop", "blocked_reason",
     "cancel_reason")
 KNOWN_TASK_FIELDS = frozenset(_CREATE_KEYS) | frozenset(_GATE_HEALTH_KEYS)
 DROP_FIELDS = frozenset({"gate_resource"})  # 瞬态清单：只进内存、不落账本
-_KNOWN_NO_PROJECTION = ("usage", "gate_origin_branch")  # 已知无 v3 列→审计位
+# 已知无 v3 列→审计位（含 main F130 三写键，ag-60f870 并 main 集成补齐）
+_KNOWN_NO_PROJECTION = ("usage", "gate_origin_branch", "verify_infra_grace",
+                        "verify_infra_backstop", "blocked_reason")
 
 _MSG_FM_KEYS = frozenset({"id", "ts", "task", "kind", "from", "to",
                           "replay_of"})

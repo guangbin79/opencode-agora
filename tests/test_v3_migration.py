@@ -171,9 +171,12 @@ class TestFieldMapping(_Src):  # 断言2
             ran_at_ms=domain.epoch_ms(p["ran_at"])))
         # 已知无 v3 投影字段→legacy_extra_json 逐字段保真
         # （full-field 语料含 gate_origin_branch=None——值亦保真）
+        # 未建模字段无损收 legacy_extra（含 main F130 三写键，ag-60f870 并 main 集成）
         self.assertEqual(json.loads(t.legacy_extra_json),
-                         {"usage": row["usage"],
-                          "gate_origin_branch": row["gate_origin_branch"]})
+                         {k: row[k] for k in ("usage", "gate_origin_branch",
+                                              "verify_infra_grace",
+                                              "verify_infra_backstop",
+                                              "blocked_reason")})
 
     def test_known_no_projection_fields(self):
         row = harness.full_field_row(gate_origin_branch="feature-x")
@@ -181,7 +184,10 @@ class TestFieldMapping(_Src):  # 断言2
         self.run_migrate()
         t = self.storage().get_task("gt-o")
         self.assertEqual(json.loads(t.legacy_extra_json),
-                         {"usage": row["usage"],
+                         {**{k: row[k] for k in ("usage",
+                                                 "verify_infra_grace",
+                                                 "verify_infra_backstop",
+                                                 "blocked_reason")},
                           "gate_origin_branch": "feature-x"})
 
     def test_unknown_fields_preserved_transient_dropped(self):
@@ -554,7 +560,9 @@ class TestReport(_Src):  # 断言11
                           gate["gate_artifacts"], gate["probes"],
                           gate["review_cache"]), (0, 0, 1, 1, 1))
         self.assertEqual(report["unknown_fields"],
-                         {"gt-full": ["gate_origin_branch", "usage"]})
+                         {"gt-full": ["blocked_reason", "gate_origin_branch",
+                                      "usage", "verify_infra_backstop",
+                                      "verify_infra_grace"]})
         self.assertEqual(report["messages"]["count"], 2)
         self.assertEqual(report["messages"]["frontmatter_extra"], {"repo": 1})
         self.assertEqual(report["events"]["count"], 1)
