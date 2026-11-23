@@ -94,7 +94,7 @@ def rel_time(ts, now=None):
 
 
 def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
-               group=None, gexpanded=None, titles=None):
+               group=None, gexpanded=None, titles=None, scollapsed=None):
     """渲染模型：五桶计数行＋链树任务行（缩进/着色域/相对时间）＋升级事件行。
 
     snap＝HTTP /board 汇合（tasks 全集＋chain 根链 BFS 序）；events 全量审计
@@ -114,10 +114,13 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
     titles（F115）＝sid→会话标题映射：forest 根层 ≥2 派发会话时按派发会话
     分组出头（会话名＋可见根任务数，根任务 depth+1 挂头下、嵌套不重挂），
     单会话不激活板面不变。
+    scollapsed（F131）＝折叠会话头集：缺省空＝全展开（保 F115 既有板面）；过滤/
+    桶视图穿透会话折叠、会话头恒在（同组折叠语义）。
     """
     now = time.time() if now is None else now
     expanded = expanded if expanded is not None else set()
     gexp = gexpanded if gexpanded is not None else set()
+    scol = scollapsed if scollapsed is not None else set()
     tasks = snap.get("tasks", {})
     chain = [tid for tid in snap.get("chain", []) if tid in tasks]
     esc = {}
@@ -251,6 +254,8 @@ def build_rows(snap, events, filt="", now=None, expanded=None, bucket=None,
             if nroot:               # 无可见根任务（桶/过滤）的会话整组不出头
                 rows.append(Row("session", sid, domain="bucket",
                                 title=f"{_pad(_sname(sid, titles), 28)} {nroot}"))
+            if sid in scol and not f and bucket is None:
+                continue            # F131 会话折叠：过滤/桶穿透（同组折叠语义）
             for tid in block:
                 if _vis(tid):
                     _emit(rows, tid)    # 子行照三闸显隐，与出头与否无关
@@ -298,7 +303,7 @@ def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
     键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter/l 明细 h 返回 L 会话 tail d doctor
-    p 自检 P 自定义提示（任务锁定） ! 手动拍僵（root，F77） x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员）
+    p 自检 P 自定义提示（任务锁定） ! 手动拍僵（root，F77） x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员/会话块）
     Z 全折全展 / 过滤（单行输入态） 1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
     """
     if m.get("input") is not None:            # 过滤/提示单行输入态
@@ -390,15 +395,21 @@ def handle_key(m, key):
             m.setdefault("gexpanded", set()).symmetric_difference_update(
                 {r.tid})                       # 组展开态就地 toggle（缺省空＝全折叠）
             return Action("fold", task=r.tid)
+        if m.get("view") == "board" and r and r.kind == "session":
+            m.setdefault("scollapsed", set()).symmetric_difference_update(
+                {r.tid})                       # F131 会话折叠就地 toggle（缺省空＝全展开）
+            return Action("fold", task=r.tid)
         return Action("noop")
     if key == "Z":
         if m.get("view") == "board":
             if m.get("gexpanded") or m.get("expanded"):    # 任一展开→全折
                 m.setdefault("gexpanded", set()).clear()
                 m.setdefault("expanded", set()).clear()
-            else:                          # 全折→全展（分组＋子树两层面）
+                m["scollapsed"] = set(m.get("sids") or ())  # F131 会话面同折
+            else:                          # 全折→全展（分组＋子树＋会话三层面）
                 m["gexpanded"] = set(m.get("groups") or ())
                 m["expanded"] = set(m.get("tids") or ())
+                m["scollapsed"] = set()
             return Action("fold")
         return Action("noop")
     if key == "r":
@@ -643,12 +654,15 @@ def draw_board(stdscr, m, status="", err=None):
     stdscr.refresh()
 
 
-def draw_page(stdscr, title, lines):
-    """全屏页（明细/doctor/会话 tail）：文本流＋底行 h 返回。"""
+def draw_page(stdscr, title, lines, follow=False):
+    """全屏页（明细/doctor/会话 tail）：文本流＋底行 h 返回。
+    follow＝尾随渲染（tail -f）：显末尾 h-2 行，新进展恒可见。"""
     h, w = stdscr.getmaxyx()
     stdscr.erase()
     stdscr.addnstr(0, 0, f" {title}", w - 1, curses.A_REVERSE)
-    for i, ln in enumerate(lines[:h - 2]):
+    n = max(0, h - 2)
+    shown = lines[max(0, len(lines) - n):] if follow else lines[:n]
+    for i, ln in enumerate(shown):
         stdscr.addnstr(i + 1, 0, str(ln), w - 1, 0)
     stdscr.addnstr(h - 1, 0, " h back | q quit", w - 1, curses.A_DIM)
     stdscr.refresh()
@@ -664,8 +678,9 @@ def run(stdscr, base, token):
     m = {"rows": [], "sel": 0, "top": 0, "view": "board", "confirm": None,
          "input": None, "buf": "", "filter": "", "expanded": set(),
          "bucket": None, "proj": False, "gexpanded": set(), "prompt": False,
-         "prompt_task": None, "tids": set(), "groups": set(), "titles": {}}
-    snap, events, page_tid = None, None, None
+         "prompt_task": None, "tids": set(), "groups": set(), "titles": {},
+         "scollapsed": set(), "sids": set()}
+    snap, events, page_tid, page_sid = None, None, None, None
     status, err, page = "loading…", None, []
 
     def poll():
@@ -686,9 +701,12 @@ def run(stdscr, base, token):
         nonlocal status
         m["rows"] = build_rows(snap, events, m["filter"], expanded=m["expanded"],
                                bucket=m["bucket"], group=m["proj"],
-                               gexpanded=m["gexpanded"], titles=m.get("titles"))
+                               gexpanded=m["gexpanded"], titles=m.get("titles"),
+                               scollapsed=m.get("scollapsed"))
         m["tids"] = set(snap.get("tasks", {}))     # Z 全展宇宙：tid 与分组键全集
         m["groups"] = {_gkey(t) for t in snap.get("tasks", {}).values()}
+        m["sids"] = {t.get("dispatcher_sid")       # F131 Z 全折宇宙（嵌套派发
+                     for t in snap.get("tasks", {}).values()}  # 超集，折空块无副作用）
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
         status = f"{len(m['rows'])} rows  poll {interval:g}s"
@@ -702,17 +720,28 @@ def run(stdscr, base, token):
             if not page:
                 page = [f"detail unavailable: {e}"]
 
+    def _pull_tail():
+        """F131 tail 取新帧：失败保旧页，空页降级提示（同 _pull_detail）。"""
+        nonlocal page
+        try:
+            page = tail_session(page_sid)
+        except Exception as e:
+            if not page:
+                page = [f"session tail unavailable: {e}"]
+
     poll()                                         # 首帧先拉，免空板白等一个周期
     while True:
         if m["view"] == "board":
             draw_board(stdscr, m, status, err)
         else:
-            draw_page(stdscr, m["view"], page)
+            draw_page(stdscr, m["view"], page, follow=m["view"] == "tail")
         key = stdscr.getch()
         if key == -1:
             poll()                                 # 到点轮询刷一帧
             if m["view"] == "detail":
                 _pull_detail()                     # F127：明细页与看板同帧率活刷
+            elif m["view"] == "tail":
+                _pull_tail()                       # F131：tail 页同帧率活刷
             continue
         k = curses.keyname(key).decode() if key >= 256 else chr(key)
         a = handle_key(m, k)
@@ -734,6 +763,8 @@ def run(stdscr, base, token):
             poll()                                 # r 手动刷：立即拉一帧
             if m["view"] == "detail":
                 _pull_detail()                     # F127：明细页同刷
+            elif m["view"] == "tail":
+                _pull_tail()                       # F131：tail 页同刷
         elif a.op in ("apply", "fold"):        # 过滤回车/z 折叠：用缓存帧即时重建，零 HTTP
             if snap is not None:
                 try:
@@ -750,10 +781,9 @@ def run(stdscr, base, token):
             except Exception as e:
                 page = [f"doctor unavailable: {e}"]
         elif a.op == "tail":
-            try:
-                page = tail_session(a.arg)
-            except Exception as e:                 # 只读降级为提示行
-                page = [f"session tail unavailable: {e}"]
+            page = []                          # F131：换页先清（同 detail），首取失败必落降级提示
+            page_sid = a.arg
+            _pull_tail()
         elif a.op == "back":
             page = []
 

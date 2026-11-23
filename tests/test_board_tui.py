@@ -735,6 +735,51 @@ class TestSessionLayer(unittest.TestCase):
         self.assertEqual(board_tui._sname("ses_abcdefgh", {}), "abcdefgh")
         self.assertEqual(board_tui._sname("ses-abcdefgh", {}), "abcdefgh")
 
+    def test_z_on_session_header_folds_members(self):  # Req: F131
+        s = {"tasks": {"A": trow(disp="main", worker="wa"),
+                       "A1": trow(disp="wa", worker="wa1"),
+                       "B": trow(disp="other", worker="wb")},
+             "chain": ["A", "A1", "B"]}
+        rows = build_rows(s, [], now=NOW, expanded={"A"},
+                          titles={"main": "主会话", "other": "外部池"})
+        m = model(rows, sel=[r.tid for r in rows].index("main"))
+        a = handle_key(m, "z")
+        self.assertEqual((a.op, a.task), ("fold", "main"))
+        self.assertEqual(m["scollapsed"], {"main"})
+        rows2 = build_rows(s, [], now=NOW, expanded={"A"},
+                           scollapsed=m["scollapsed"],
+                           titles={"main": "主会话", "other": "外部池"})
+        self.assertEqual([r.tid for r in task_rows(rows2)], ["B"])  # 折叠藏组员
+        self.assertEqual([r.tid for r in rows2 if r.kind == "session"],
+                         ["main", "other"])                         # 头恒在
+        handle_key(m, "z")
+        self.assertEqual(m["scollapsed"], set())                    # 再按展开
+        self.assertEqual(handle_key(model(rows, sel=0), "z").op,
+                         "noop")            # 桶头行不折叠（会话面同口径）
+
+    def test_session_fold_penetrated_by_filter_and_bucket(self):  # Req: F131
+        s = {"tasks": {"A": trow("running", disp="main", worker="wa"),
+                       "A1": trow("merged", disp="wa", worker="wa1"),
+                       "B": trow("running", disp="other", worker="wb")},
+             "chain": ["A", "A1", "B"]}
+        rows = build_rows(s, [], filt="a1", now=NOW,
+                          scollapsed={"main", "other"})
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A1"])  # 文本穿透
+        rows = build_rows(s, [], now=NOW, bucket="已合并",
+                          scollapsed={"main", "other"})
+        self.assertEqual([r.tid for r in task_rows(rows)], ["A1"])  # 桶穿透
+
+    def test_Z_folds_and_expands_sessions(self):  # Req: F131
+        rows = [Row("session", "main", title="主会话 1", domain="bucket"),
+                Row("task", "t1", 1, "running", "目标", "ses-9", "1m", "", "fly")]
+        m = model(rows, sel=0, expanded={"t1"}, sids={"main", "other"})
+        handle_key(m, "Z")                       # 有展开→全折（会话面同折）
+        self.assertEqual(m["scollapsed"], {"main", "other"})
+        m = model(rows, sel=0, gexpanded=set(), sids={"main", "other"},
+                  scollapsed={"main", "other"})
+        handle_key(m, "Z")                       # 全折→全展（会话面同展）
+        self.assertEqual(m["scollapsed"], set())
+
     def test_synth_title_hit_unchanged(self):  # Req: F115
         self.assertEqual(board_tui._sname("issue-agent",
                                          {"issue-agent": "标题"}), "标题")
@@ -1157,6 +1202,63 @@ class TestFullViewLazyDetail(unittest.TestCase):
         scr = _FakeStdscr([ord("\r"), ord("q")])
         run(scr, self._serve(_DetailFailBoard), "tok")
         self.assertTrue(any("detail unavailable" in s for _, s in scr.lines))
+
+
+class TestTailFollow(unittest.TestCase):
+    """F131 L tail 持续跟随：进页后轮询到点/r 同帧率取新＋尾端渲染（tail -f）。"""
+
+    def setUp(self):
+        # 无头环境跑 run()：桩掉 curses 面（同 TestFullViewLazyDetail）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def _serve(self, handler):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.server_close)
+        return f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def _tail_stub(self, frames):
+        calls = []
+
+        def _fake(sid, limit=40):
+            calls.append(sid)
+            return frames[min(len(calls) - 1, len(frames) - 1)]
+        return calls, _fake
+
+    def test_tail_refollows_on_poll(self):  # Req: F131
+        calls, fake = self._tail_stub(
+            [["[a] 旧进展"], ["[a] 旧进展", "[b] 新进展"]])
+        with unittest.mock.patch("board_tui.tail_session", fake):
+            scr = _FakeStdscr([ord("L"), -1, ord("q")])  # 进 tail→到点轮询→退
+            run(scr, self._serve(_CountingBoard), "tok")
+        self.assertEqual(calls, ["w1", "w1"])            # 轮询同帧率取新
+        self.assertTrue(any("新进展" in s for _, s in scr.lines))
+
+    def test_tail_r_refetches(self):  # Req: F131
+        calls, fake = self._tail_stub(
+            [["[a] 旧进展"], ["[a] 旧进展", "[b] 新进展"]])
+        with unittest.mock.patch("board_tui.tail_session", fake):
+            scr = _FakeStdscr([ord("L"), ord("r"), ord("q")])  # 进 tail→r 刷→退
+            run(scr, self._serve(_CountingBoard), "tok")
+        self.assertEqual(calls, ["w1", "w1"])            # r 亦取新帧
+        self.assertTrue(any("新进展" in s for _, s in scr.lines))
+
+    def test_tail_page_shows_tail_end(self):  # Req: F131
+        _, fake = self._tail_stub([[f"ln{i}" for i in range(40)]])
+        with unittest.mock.patch("board_tui.tail_session", fake):
+            scr = _FakeStdscr([ord("L"), ord("q")])
+            run(scr, self._serve(_CountingBoard), "tok")
+        shown = [s for _, s in scr.lines]
+        self.assertIn("ln39", shown)          # 尾端恒可见（最新进展）
+        self.assertNotIn("ln17", shown)       # 24 行屏 22 行窗：显 ln18..ln39
 
 
 class _AlarmBoard(http.server.BaseHTTPRequestHandler):
