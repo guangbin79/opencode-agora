@@ -277,16 +277,21 @@ class TestHandleKey(unittest.TestCase):
         handle_key(m, "k")
         self.assertEqual(m["sel"], 5)
 
-    def test_enter_l_detail_h_back(self):  # Req: F10
+    def test_enter_detail_h_back(self):  # Req: F10
         m = model(self.ROWS, sel=1)
         a = handle_key(m, "\n")
         self.assertEqual((a.op, a.task), ("detail", "t1"))
         self.assertEqual(m["view"], "detail")
         a = handle_key(m, "h")
         self.assertEqual((a.op, m["view"]), ("back", "board"))
-        m = model(self.ROWS, sel=1)
-        self.assertEqual(handle_key(m, "l").op, "detail")
         self.assertEqual(handle_key(model(self.ROWS, sel=0), "\n").op, "noop")
+
+    def test_l_tail_lowercase(self):  # Req: F132
+        m = model(self.ROWS, sel=1)
+        a = handle_key(m, "l")
+        self.assertEqual((a.op, a.arg), ("tail", "ses-9"))
+        self.assertEqual(m["view"], "tail")
+        self.assertEqual(handle_key(model(self.ROWS, sel=0), "l").op, "noop")
 
     def test_L_tail_by_worker_sid(self):  # Req: F10
         m = model(self.ROWS, sel=1)

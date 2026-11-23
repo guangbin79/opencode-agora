@@ -740,3 +740,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：①tail 页与 F127 明细页同款活刷：run() 记 page_sid，轮询到点（key==-1）与 r 手动刷均 `_pull_tail()` 取新帧（失败保旧页、空页降级提示，同 _pull_detail 口径）；进页先清页再取（防跨会话串显旧数据）。②draw_page 增 follow 参数＝尾随渲染（显末尾 h-2 行，n=0 空切片防负索引整列），仅 tail 视图启用——明细/doctor 保持头部切片。③build_rows 增 scollapsed（折叠会话头集，缺省空＝全展开——保 F115 既有板面形态，与 gexpanded 缺省全折叠相反）；折叠藏组员、会话头恒在；过滤/桶视图穿透会话折叠（同组折叠语义）。④z 在会话头就地 toggle scollapsed；Z 沿用「任一展开→全折，全折→全展」判定（不扩判定面），全折时 scollapsed=m['sids']（全部 dispatcher_sid 超集——嵌套派发空块折叠无副作用）、全展时清空；sids 宇宙由 _rebuild 刷新。
 **落点**：board_tui.py（build_rows scollapsed＋handle_key z/Z 两分支＋draw_page follow＋run() page_sid/_pull_tail/轮询·r·tail 三路接线）、tests/test_board_tui.py（Req: F131——TestSessionLayer 三锚＋TestTailFollow 三锚，先红后绿）、docs/reqs/opencode-agora.md（本条）。服务端零改动。
 **验收**：`python3 -m pytest tests/test_board_tui.py -q` 绿（81 passed）；全量 `python3 -m pytest tests/ -q` 不回归；`req-check` 退出码 0。
+
+### F132 board TUI 键位调整——l 改 tail、Enter 专明细（2026-11-23，用户裁定）
+**现状**：F10 键位 Enter 与 l 同为明细、L 为 tail——高频动作「看会话进展」挂在需 Shift 的 L 上，home row 的 l 反而与 Enter 重复。
+**裁定**：①Enter 专明细（\n/\r/KEY_ENTER）；②l 改为会话 tail（主键），L 保留同义不删（用户未点名移除，存量化石键零回归）；③底行提示同步「Enter detail | l/L tail」。历史文档与 F10/F48 台账原文不改写（需求只替代不改写）。
+**落点**：board_tui.py（handle_key Enter 分支去 l＋tail 分支收 l/L＋键位表 docstring＋底行提示）、tests/test_board_tui.py（Req: F132——test_l_tail_lowercase 新锚＋test_enter_detail_h_back 更名去 l 断言；L 锚 test_L_tail_by_worker_sid 原样保真）、docs/reqs/opencode-agora.md（本条）。服务端零改动。
+**验收**：`python3 -m pytest tests/test_board_tui.py -q` 绿（82 passed）；全量 `python3 -m pytest tests/ -q` 不回归；`req-check` 退出码 0。
