@@ -62,6 +62,37 @@ class TestAccessAnchors(unittest.TestCase):
         self._write_base((self.sha + "\n").encode())
         self.assertIsNone(read_anchor(str(self.tmp)))
 
+    def test_short_sha_base_and_marker_equivalent_to_full(self):  # Req: ag-71dd8b
+        """ag-4d17ea：评审环工具写短 sha——rev-parse 归一后与全 sha 等价。"""
+        short = self.sha[:8]
+        self._write_marker((short + "\n").encode())
+        self._write_base(short.encode())  # 无换行变体同收
+        self.assertEqual(read_anchor(str(self.tmp)),
+                         {"head": self.sha, "base": self.sha, "clean": True})
+
+    def test_ambiguous_or_unknown_short_sha_is_none(self):  # Req: ag-71dd8b
+        """歧义/未知短 sha：rev-parse 失败＝不可证 → None。"""
+        self._write_marker((self.sha + "\n").encode())
+        self._write_base(b"1234abcd\n")  # 不在库内的 8 位前缀
+        self.assertIsNone(read_anchor(str(self.tmp)))
+
+    def test_garbage_base_is_none(self):  # Req: ag-71dd8b
+        """垃圾内容（非 sha 文本）：rev-parse 失败 → None。"""
+        self._write_marker((self.sha + "\n").encode())
+        self._write_base(b"not-a-sha!!\n")
+        self.assertIsNone(read_anchor(str(self.tmp)))
+
+    def test_symbolic_ref_in_anchor_is_none(self):  # Req: ag-71dd8b
+        """HEAD/分支名解析到当前 tip——若放行，"锚落后"检测恒真（评审环洞）。"""
+        self._write_marker(b"HEAD\n")
+        self._write_base((self.sha + "\n").encode())
+        self.assertIsNone(read_anchor(str(self.tmp)))  # 标记为符号引用
+        self._write_marker(b"main\n")
+        self.assertIsNone(read_anchor(str(self.tmp)))  # 标记为分支名
+        self._write_marker((self.sha + "\n").encode())
+        self._write_base(b"main\n")
+        self.assertIsNone(read_anchor(str(self.tmp)))  # 链根为分支名
+
 
 if __name__ == "__main__":
     unittest.main()

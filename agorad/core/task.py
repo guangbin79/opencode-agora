@@ -1121,6 +1121,8 @@ class TaskService:
                 + "shell: mcp_shell（shell_execute）按 argv 数组执行、非 shell——命令须在 ALLOW_COMMANDS 白名单（否则报 Command not allowed）；分号/&&/|| 一律拒（无「|| true」吞退码惯用法，退码调用方自理）；多行内联/heredoc 报 Unexpected shell operator，多行脚本走原生 shell 或先落文件再执行\n"
                 "git: 任务 env 无 git identity，且 git config / git -c 被 mcp-shell 加固拒——造提交用 plumbing（write-tree / hash-object -t commit -w / update-ref）\n"
                 "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记\n"
+                # ag-4d17ea：worker 全链正确仍被锚拒三次并 blocked——拒收后缺"弹回＝工作项"指引
+                "done 拒收＝工作项: done 被门拒收（任何 note：anchor/vacuous-done/children 等）＝工作项不是终态——逐字执行拒因文案中的“重新 post(done)”指引；同因第二次拒 → post(kind=question) 附门拒因原文，禁第三次盲试\n"
                 # ag-aa8798：done 时自测构建未退场→gate verify 同 env 并发构建互杀死锁
                 "构建退净: post(done) 前必须确认 env 内全部构建/测试/容器进程已退出，用命令亲自核实"
                 "（pgrep/docker 不在 mcp-shell 白名单，走原生 shell）："
