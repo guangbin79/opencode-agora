@@ -302,7 +302,7 @@ def clamp_view(m, visible, nb=0):
 def handle_key(m, key):
     """vi 键位→Action，model 就地演进（less 形态，无模式切换）。
 
-    键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter 明细 h 返回 l 会话 tail（L 同义，F132） d doctor
+    键位：j/k 移动（桶头只作分隔不停驻） g/G 跳顶底 Enter 明细 h 返回 l 会话 tail d doctor
     p 自检 P 自定义提示（任务锁定） ! 手动拍僵（root，F77） x cancel（y/n 确认行） z 折叠/展开（任务子树/组头成员/会话块）
     Z 全折全展 / 过滤（单行输入态） 1-5 桶视图（同键复原） 0 项目分组模式 r 即刷 q 退出。
     """
@@ -360,7 +360,7 @@ def handle_key(m, key):
             m["view"] = "board"
             return Action("back")
         return Action("noop")
-    if key in ("l", "L"):                      # F132：l 主键 tail，L 保留同义
+    if key == "l":                              # F133：l 专 tail，L 退役
         if r and r.kind == "task" and r.worker:
             m["view"] = "tail"
             return Action("tail", arg=r.worker)
@@ -639,7 +639,7 @@ def draw_board(stdscr, m, status="", err=None):
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
     stdscr.addnstr(h - 3, 0,
-                   " j/k move | g/G jump | Enter detail | l/L tail | d doctor"
+                   " j/k move | g/G jump | Enter detail | l tail | d doctor"
                    " | p/P prompt | ! alarm | x cancel | r refresh | z/Z fold"
                    " | q quit",
                    w - 1, curses.A_DIM)

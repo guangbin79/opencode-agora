@@ -293,10 +293,8 @@ class TestHandleKey(unittest.TestCase):
         self.assertEqual(m["view"], "tail")
         self.assertEqual(handle_key(model(self.ROWS, sel=0), "l").op, "noop")
 
-    def test_L_tail_by_worker_sid(self):  # Req: F10
-        m = model(self.ROWS, sel=1)
-        a = handle_key(m, "L")
-        self.assertEqual((a.op, a.arg), ("tail", "ses-9"))
+    def test_L_retired_noop(self):  # Req: F133
+        self.assertEqual(handle_key(model(self.ROWS, sel=1), "L").op, "noop")
         self.assertEqual(handle_key(model(self.ROWS, sel=0), "L").op, "noop")
 
     def test_d_doctor_r_refresh_q_quit(self):  # Req: F10
@@ -1210,7 +1208,7 @@ class TestFullViewLazyDetail(unittest.TestCase):
 
 
 class TestTailFollow(unittest.TestCase):
-    """F131 L tail 持续跟随：进页后轮询到点/r 同帧率取新＋尾端渲染（tail -f）。"""
+    """F131 l tail 持续跟随：进页后轮询到点/r 同帧率取新＋尾端渲染（tail -f）。"""
 
     def setUp(self):
         # 无头环境跑 run()：桩掉 curses 面（同 TestFullViewLazyDetail）
@@ -1242,7 +1240,7 @@ class TestTailFollow(unittest.TestCase):
         calls, fake = self._tail_stub(
             [["[a] 旧进展"], ["[a] 旧进展", "[b] 新进展"]])
         with unittest.mock.patch("board_tui.tail_session", fake):
-            scr = _FakeStdscr([ord("L"), -1, ord("q")])  # 进 tail→到点轮询→退
+            scr = _FakeStdscr([ord("l"), -1, ord("q")])  # 进 tail→到点轮询→退
             run(scr, self._serve(_CountingBoard), "tok")
         self.assertEqual(calls, ["w1", "w1"])            # 轮询同帧率取新
         self.assertTrue(any("新进展" in s for _, s in scr.lines))
@@ -1251,7 +1249,7 @@ class TestTailFollow(unittest.TestCase):
         calls, fake = self._tail_stub(
             [["[a] 旧进展"], ["[a] 旧进展", "[b] 新进展"]])
         with unittest.mock.patch("board_tui.tail_session", fake):
-            scr = _FakeStdscr([ord("L"), ord("r"), ord("q")])  # 进 tail→r 刷→退
+            scr = _FakeStdscr([ord("l"), ord("r"), ord("q")])  # 进 tail→r 刷→退
             run(scr, self._serve(_CountingBoard), "tok")
         self.assertEqual(calls, ["w1", "w1"])            # r 亦取新帧
         self.assertTrue(any("新进展" in s for _, s in scr.lines))
@@ -1259,7 +1257,7 @@ class TestTailFollow(unittest.TestCase):
     def test_tail_page_shows_tail_end(self):  # Req: F131
         _, fake = self._tail_stub([[f"ln{i}" for i in range(40)]])
         with unittest.mock.patch("board_tui.tail_session", fake):
-            scr = _FakeStdscr([ord("L"), ord("q")])
+            scr = _FakeStdscr([ord("l"), ord("q")])
             run(scr, self._serve(_CountingBoard), "tok")
         shown = [s for _, s in scr.lines]
         self.assertIn("ln39", shown)          # 尾端恒可见（最新进展）

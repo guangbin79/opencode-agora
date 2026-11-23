@@ -746,3 +746,9 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **裁定**：①Enter 专明细（\n/\r/KEY_ENTER）；②l 改为会话 tail（主键），L 保留同义不删（用户未点名移除，存量化石键零回归）；③底行提示同步「Enter detail | l/L tail」。历史文档与 F10/F48 台账原文不改写（需求只替代不改写）。
 **落点**：board_tui.py（handle_key Enter 分支去 l＋tail 分支收 l/L＋键位表 docstring＋底行提示）、tests/test_board_tui.py（Req: F132——test_l_tail_lowercase 新锚＋test_enter_detail_h_back 更名去 l 断言；L 锚 test_L_tail_by_worker_sid 原样保真）、docs/reqs/opencode-agora.md（本条）。服务端零改动。
 **验收**：`python3 -m pytest tests/test_board_tui.py -q` 绿（82 passed）；全量 `python3 -m pytest tests/ -q` 不回归；`req-check` 退出码 0。
+
+### F133 board TUI L 键退役——l 专 tail（2026-11-23，用户裁定；取代 F132② 的「L 保留同义」）
+**现状**：F132 保留 L 作 tail 同义键（提示「l/L tail」）；用户随后裁定撤除——单一键位单一语义，提示与实际键位一致。
+**裁定**：①tail 分支收窄为 `key == "l"`，L 落入非引导键 noop；②底行提示与键位表同步「l tail」；③F131 tail 跟随测试键序 ord("L")→ord("l")（测视图行为非测键位，随主键走）。F132①③（Enter 专明细、提示同步）不变。
+**落点**：board_tui.py（tail 分支收窄＋docstring＋底行提示）、tests/test_board_tui.py（Req: F133——test_L_retired_noop 新锚，test_L_tail_by_worker_sid 退役；TestTailFollow 键序改 ord("l")）、docs/reqs/opencode-agora.md（本条）。服务端零改动。
+**验收**：`python3 -m pytest tests/test_board_tui.py -q` 绿（82 passed）；全量 `python3 -m pytest tests/ -q` 不回归；`req-check` 退出码 0。
