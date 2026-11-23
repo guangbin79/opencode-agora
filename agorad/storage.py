@@ -1,4 +1,4 @@
-"""Req: F133 — v3 SQLite 存储 core：schema／UoW／仓库（设计 §4/§5）。
+"""Req: F166 — v3 SQLite 存储 core：schema／UoW／仓库（设计 §4/§5）。
 
 stdlib sqlite3 记账权威：14 表基线（表名自设计 §4 枚举名单——任务页断言
 计数「15」系笔误，两处枚举一致，以名单为准）；WAL＋synchronous=FULL＋

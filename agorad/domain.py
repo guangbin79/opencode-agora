@@ -1,4 +1,4 @@
-"""Req: F131 — v3 domain 层：实体、状态机与 DeliveryPolicy（设计 §3/§5-§7）。
+"""Req: F164 — v3 domain 层：实体、状态机与 DeliveryPolicy（设计 §3/§5-§7）。
 
 纯 stdlib 值对象层：不 import 兄弟包、不触存储/transport——持久化归 storage
 （T6）、服务归 application（T8+）、装配归 main。任务状态矩阵自 v2

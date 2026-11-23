@@ -1,10 +1,10 @@
-"""Req: F130 — v3 Contract Catalog（opencode-agora v3 P1-T3）。
+"""Req: F163 — v3 Contract Catalog（opencode-agora v3 P1-T3）。
 
 锚 agorad/contracts.py（仅 stdlib，test_architecture 守卫）单源：CATALOG＝19
 服务端工具＋sleep 的 ToolSpec（§2 清单）；校验器（bool≠int、str≠object、未知
 字段列名、enum 白名单、显式 null 拒）；错误三向映射与 F128 golden 一致；
 task_create nested DTO 缺省派生＋v2 扁平→nested 纯转换；MCP 桥接 schema 与
-golden 逐字段等价。断言清单见 docs/reqs/opencode-agora.md F130（T5 接线外）。
+golden 逐字段等价。断言清单见 docs/reqs/opencode-agora.md F163（T5 接线外）。
 """
 import copy
 import json
@@ -256,10 +256,10 @@ class TestV2ToNested(unittest.TestCase):
             "verify_base_exempt": True, "quick": True,
             "timeout": 300, "deliverable": "external_branch",
             "target_branch": "v3-runtime", "model": "glm-5.3", "after": "ag-1",
-            "req_id": "F130", "project_dir": "/repo", "client_key": "k1"}
+            "req_id": "F163", "project_dir": "/repo", "client_key": "k1"}
     NESTED = {
         "goal": "migrate", "title": "T",
-        "execution": {"model": "glm-5.3", "after": "ag-1", "req_id": "F130",
+        "execution": {"model": "glm-5.3", "after": "ag-1", "req_id": "F163",
                       "project_dir": "/repo", "client_key": "k1",
                       "quick": True},
         "verify": {"cmd": "pytest -q", "review_cmd": "ocr review",

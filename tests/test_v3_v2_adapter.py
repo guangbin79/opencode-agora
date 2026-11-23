@@ -4,7 +4,7 @@
 请求向 15 根路由扁平/旧名→v3 正名/nested 规范形逐一；响应向 board/doctor/
 check_mail 与 F128 golden 逐字段；错误向六档三处映射不丢档；时间向 epoch 毫秒
 ↔v2 浮点秒（None 透传往返）；旧名别名等价；task_create 深缺省三形态（v2 缺席
-deliverable＝None→服务层 managed 保真——F130 边缘缺省 out_of_band 是 v3 原生
+deliverable＝None→服务层 managed 保真——F163 边缘缺省 out_of_band 是 v3 原生
 调用面口径）；worker 写面拒绝矩阵传导（拒绝归服务层同场判定）。断言清单见
 docs/reqs/opencode-agora.md F141。
 """
@@ -153,7 +153,7 @@ class TestTaskCreateDefaults(unittest.TestCase):
                                      "root")[1]
 
     def test_absent_deliverable_stays_none_for_managed(self):
-        # v2「absent＝普通合并任务」保真：适配层不套用 F130 边缘缺省
+        # v2「absent＝普通合并任务」保真：适配层不套用 F163 边缘缺省
         # out_of_band（v3 原生调用面口径）——服务层 None→managed 初始行
         self.assertIsNone(self._spec({"goal": "g"})["delivery"]["deliverable"])
 

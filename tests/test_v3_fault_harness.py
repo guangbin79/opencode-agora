@@ -1,9 +1,9 @@
-"""Req: F129, F132 — 故障注入与差分设施测试（opencode-agora v3 P0-T2＋T2b 修复）。
+"""Req: F162, F165 — 故障注入与差分设施测试（opencode-agora v3 P0-T2＋T2b 修复）。
 
-断言清单与裁定见 docs/reqs/opencode-agora.md F129/F132；设施本体＝
+断言清单与裁定见 docs/reqs/opencode-agora.md F162/F165；设施本体＝
 tests/v3_harness.py。live 交叉锚：full-fields 字段集以真 TaskService.create
 （真 Store/State/Auth/Router＋假 oc/gitx，同 test_core_task 装配套路）对照；
-GATE_HEALTH_KEYS/usage 投影以 agorad 活码 AST 写点锚（F132）——防冻结清单漂移。
+GATE_HEALTH_KEYS/usage 投影以 agorad 活码 AST 写点锚（F165）——防冻结清单漂移。
 """
 import ast
 import json
@@ -31,7 +31,7 @@ _LATCH_CANCEL_KEYS = {"pending_cancel", "pending_cancel_reason", "cancel_reason"
 
 
 def _agorad_write_keys():
-    """agorad 现行 gate/health 持久写入键集（F132 live 锚）：全仓
+    """agorad 现行 gate/health 持久写入键集（F165 live 锚）：全仓
     set_fields/transition 调用 kwargs AST 机械提取＋cancel/门闩体内写点，
     减 CREATE_KEYS（create/dispatch 侧字段归另一清单）。"""
     keys = set(_LATCH_CANCEL_KEYS)
@@ -207,7 +207,7 @@ class TestLegacyTaskFixtures(unittest.TestCase):
 
 
 class TestGateHealthAuthorityAnchors(unittest.TestCase):
-    """断言（Req: F132/T2b）：冻结清单与 agorad 活码写点一致、tid 传导、
+    """断言（Req: F165/T2b）：冻结清单与 agorad 活码写点一致、tid 传导、
     usage 子投影全键——三缺陷各一锚，防清单再漏。"""
 
     def test_gate_health_keys_equal_agorad_write_keys(self):

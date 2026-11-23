@@ -1,4 +1,4 @@
-"""Req: F133 — v3 SQLite 存储 core（opencode-agora v3 P2-T6）。
+"""Req: F166 — v3 SQLite 存储 core（opencode-agora v3 P2-T6）。
 
 断言清单（任务页 ag-1fe3af，逐条机械判定）：1 schema 初始化（14 表全集
 ——任务页计数「15」与两处枚举 14 名不符，以枚举名单为准）＋PRAGMA＋

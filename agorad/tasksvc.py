@@ -257,7 +257,7 @@ class TaskService:
                     f"主检出当前分支解析失败（{why}）——回退仓默认支 "
                     f"{target_branch}")
         delivery = None  # Req: F94：out_of_band 不建投影。服务面缺省（None）
-        # ＝ managed 初始行——v2「absent＝普通合并任务」保真；F130 边缘缺省
+        # ＝ managed 初始行——v2「absent＝普通合并任务」保真；F163 边缘缺省
         # out_of_band 是 T5 适配层口径，服务层 None/out_of_band 语义分立。
         if deliverable == "external_branch":
             delivery = DeliveryState(mode="external_branch",

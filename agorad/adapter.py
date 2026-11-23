@@ -5,7 +5,7 @@ v2 边缘（15 个根路由扁平参数/旧名/响应形状）↔ v3 服务面�
 活性/探测经参数注入（T13a 装配），SQL 圈禁与分层由 test_architecture 锁定。
 保真锚＝tests/fixtures/v3_contract_golden.json＋tests/test_v3_characterization.py。
 
-口径裁定（F130×F135 张力）：validate_task_create 的边缘缺省
+口径裁定（F163×F135 张力）：validate_task_create 的边缘缺省
 out_of_band 供 v3 原生调用面；本适配层不套用——v2 扁平缺席 deliverable 保持
 None 交服务层派生 managed（v2「absent＝普通合并任务」保真、tasksvc None/
 out_of_band 语义分立；同名工具经适配语义零变化）。
@@ -32,7 +32,7 @@ def adapt_request(name, params, role):
     """v2 工具名＋扁平参数（＋调用角色）→ (v3 正名, v3 规范参数)。
 
     - 旧名映射：reverify→task_reverify、post→message_post、check_mail→
-      message_pull；余 12 路同名直过（v2 扁平键面＝v3 ToolSpec，F130 已锚）。
+      message_pull；余 12 路同名直过（v2 扁平键面＝v3 ToolSpec，F163 已锚）。
     - task_create：扁平校验→分组→nested 规范形；v2 缺席 deliverable 保 None
       （模块 docstring 口径）；受信角色（非 worker）project_dir 必填＝v2
       边缘 KeyError→400 同档拒。
@@ -68,7 +68,7 @@ def adapt_request(name, params, role):
 
 
 def _seconds(ms):
-    """epoch 毫秒→v2 浮点秒；None 透传（毫秒粒度内往返无损，F131）。"""
+    """epoch 毫秒→v2 浮点秒；None 透传（毫秒粒度内往返无损，F164）。"""
     return None if ms is None else epoch_seconds(ms)
 
 

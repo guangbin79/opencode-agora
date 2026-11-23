@@ -73,13 +73,13 @@ class TestLayering(unittest.TestCase):
                                 "agorad.transport", "agorad.compose",
                                 "agorad.serverv3", "agorad.storage"])  # Req: F158——main 唯一装配文件兼 v3 部署入口（compose/serverv3＝v3 装配/传输对应件；storage＝StorageError 拒开族收口）
 
-    def test_contracts_stdlib_only(self):  # Req: F130——v3 Contract Catalog 仅 stdlib
+    def test_contracts_stdlib_only(self):  # Req: F163——v3 Contract Catalog 仅 stdlib
         assert_only("agorad/contracts.py", may_import=[])
 
-    def test_v3_domain_stdlib_only(self):  # Req: F131——domain 层仅 stdlib
+    def test_v3_domain_stdlib_only(self):  # Req: F164——domain 层仅 stdlib
         assert_only("agorad/domain.py")
 
-    def test_v3_storage_layer(self):  # Req: F133——storage 仅 stdlib＋domain
+    def test_v3_storage_layer(self):  # Req: F166——storage 仅 stdlib＋domain
         assert_only("agorad/storage.py", may_import=["agorad.domain"])
 
     def test_v3_messaging_layer(self):  # Req: F134——messaging 仅 stdlib＋domain（OC/仓库/导出经 Protocol 注入，不 import access/storage；SQL 圈禁由 test_sql_confined_to_storage 自动覆盖）
@@ -179,7 +179,7 @@ class TestLayering(unittest.TestCase):
                         marker, text,
                         f"{rel}: v3 应用层禁自起 git 子进程（归 gitstore/access 注入）")
 
-    def test_sql_confined_to_storage(self):  # Req: F133——SQL 不得出 storage（设计 §1）；F140：./agora 无扩展名入口同面入册
+    def test_sql_confined_to_storage(self):  # Req: F166——SQL 不得出 storage（设计 §1）；F140：./agora 无扩展名入口同面入册
         for py in sorted((ROOT / "agorad").rglob("*.py")) + [ROOT / "agora"]:
             if py.name == "storage.py":
                 continue

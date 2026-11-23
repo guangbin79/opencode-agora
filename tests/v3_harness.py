@@ -1,4 +1,4 @@
-"""Req: F129, F132 — v3 故障注入与差分测试设施（opencode-agora v3 P0-T2＋T2b 修复）。
+"""Req: F162, F165 — v3 故障注入与差分测试设施（opencode-agora v3 P0-T2＋T2b 修复）。
 
 测试支撑库（零生产码）：v3 迁移/差分/浸泡共用的四件设施——
 ① FaultInjector：命名 failpoint，before/after 两相位，触发抛可控异常并携上下文；

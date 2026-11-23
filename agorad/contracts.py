@@ -1,4 +1,4 @@
-"""agorad.contracts — v3 Contract Catalog（Req: F130，设计页 §1/§2）。
+"""agorad.contracts — v3 Contract Catalog（Req: F163，设计页 §1/§2）。
 
 单源生成 MCP schema、参数校验、角色/ownership 与错误映射；transport 接线归
 T5 适配层，本模块零 import。task_create 双面：ToolSpec 扁平字段＝v2 MCP/HTTP

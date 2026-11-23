@@ -1,4 +1,4 @@
-"""Req: F131 — v3 domain 实体与状态机（opencode-agora v3 P1-T4）。
+"""Req: F164 — v3 domain 实体与状态机（opencode-agora v3 P1-T4）。
 
 断言清单（任务页 ag-ba4a47）：①实体字段集与设计 §3 一致（含 legacy_extra_json
 只读位）；②任务状态机全量移植 v2 LEGAL（合法逐一通过／非法逐一 InvalidTransition
