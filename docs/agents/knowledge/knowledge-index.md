@@ -54,6 +54,7 @@
 - **rebase 冲突态检测须双 backend 目录**（F32/ag-4b300d）：sequencer 目录随 backend 分叉——merge 停 rebase-merge、apply 停 rebase-apply，单查其一即把真冲突误判环境病；定式＝rev-parse --git-path 两目录逐一探测，任一在位→abort→冲突，皆缺才按环境病上抛（分类先于动作）
 - **递归引用图遍历必带 visited＋显式栈**（F38 W-2）：after 环无校验→stop_after_failed 下钻 RecursionError（落假 reclaim_failed 审计）；定式＝起点自身入 seen、已访问不下钻、dispatch 沿 after 链查自引用/成环拒派报因含路径；visited 只消环不消链深，递归版长链仍引爆
 - **网络子进程超时杀按进程组**（F-1）：git push 类派生 ssh 孙进程——start_new_session＋TimeoutExpired 时 os.killpg(SIGKILL)＋宽限收尸（逃逸后代持管道弃读防挂死）；只杀直接子＝孤儿累积（gate runner 同款对齐）
+- **BOOT 钉死命令双判据**（ag-345dcb，ag-aa8798 后续）：往 BOOT/行为指令文本里钉自查命令示例时必须核两面——①通道可用性（示例命令是否在 worker 实际执行通道可跑：pgrep/docker 不在 mcp-shell 白名单，须同步指路原生 shell，否则纪律 100% 摩擦）；②所有权视角一致性（pgrep/docker ps 是宿主全局视角而纪律所有权是 env 局部——同机多 worktree 常态下他任务/gate 构建恒命中，须限定「只认 cmdline 命中本 env 路径的进程行，他人任务的不算」，否则退化为等他任务的永等死锁）；reinject 短 boot（recover.py::_boot）不携本纪律属已知覆盖缺口（任务规格明禁改加载逻辑，待后续任务）
 - **e2e 裸拉 MCP 必沙箱 HOME**（20261112-081929-95c0）：直拉 agora_mcp.py 只覆写 AGORA_HOME 不够——write_pointer 仍写宿主 ~/.agora-home；子进程 env 必同时覆写 HOME，红跑后核对/恢复宿主指针
 
 ## 已知接受面

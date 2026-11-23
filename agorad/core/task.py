@@ -1121,6 +1121,12 @@ class TaskService:
                 + "shell: mcp_shell（shell_execute）按 argv 数组执行、非 shell——命令须在 ALLOW_COMMANDS 白名单（否则报 Command not allowed）；分号/&&/|| 一律拒（无「|| true」吞退码惯用法，退码调用方自理）；多行内联/heredoc 报 Unexpected shell operator，多行脚本走原生 shell 或先落文件再执行\n"
                 "git: 任务 env 无 git identity，且 git config / git -c 被 mcp-shell 加固拒——造提交用 plumbing（write-tree / hash-object -t commit -w / update-ref）\n"
                 "verify: 若任务页 verify.state=registered 则直接 post(done)；否则 post(kind=verify) 提案等派发方登记\n"
+                # ag-aa8798：done 时自测构建未退场→gate verify 同 env 并发构建互杀死锁
+                "构建退净: post(done) 前必须确认 env 内全部构建/测试/容器进程已退出，用命令亲自核实"
+                "（pgrep/docker 不在 mcp-shell 白名单，走原生 shell）："
+                "pgrep -af \"build.sh|docker-compose\" 输出为空、docker ps --filter name=<env 目录名> 无容器行"
+                "——pgrep 只认 cmdline 命中本 env 路径的进程行，他人任务的不算；"
+                "未退净→sleep 等退净再报（残留构建会与 gate 验收构建同 env 互杀，判例 ag-aa8798）\n"
                 + done)
 
     def _revoke_worker(self, wsid):

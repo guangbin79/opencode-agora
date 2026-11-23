@@ -22,3 +22,6 @@
 ## [2026-11-13] ingest | knowledge-index
 - Added F104 CLI cancel root channel: dispatcher-card cross-pool cancel denied by design (ownership invariant); operator channel is agora cancel <tid> [--force] with exit 0/1/2 contract; CLI becomes dispatch/cancel dual write surface.
 - Types: Decision
+## [2026-11-23] ingest | knowledge-index
+- Added BOOT pinned-command dual criteria (ag-345dcb): channel availability (mcp-shell whitelist vs native shell) and ownership-scope consistency (host-global pgrep vs env-local ownership) for self-check command examples in BOOT discipline text; reinject short-boot coverage gap noted.
+- Types: Strategy/Bug

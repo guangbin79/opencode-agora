@@ -917,6 +917,19 @@ class TestVerifyGate(TestCoreTask):
         self.assertIn("申报通道必须是 question", boot)
         self.assertNotIn("post(kind=note) 报 no-op", boot)  # 旧句零残留
 
+    def test_boot_done_requires_builds_exited(self):  # Task: ag-345dcb
+        """ag-aa8798 判例：worker 报 done 时自测构建未退场→gate verify 在
+        同 env 并发构建互杀（rc=137）→verify_infra 死锁 13h。BOOT 钉死
+        可机械自查的退净纪律：pgrep／docker ps 亲自核实后才许 done。"""
+        self.dispatched_pair()
+        boot = self.oc.sessions[-1][2]
+        self.assertIn("构建退净:", boot)
+        self.assertIn('pgrep -af "build.sh|docker-compose"', boot)  # 自查示例可机械执行
+        self.assertIn("docker ps", boot)
+        self.assertIn("走原生 shell", boot)  # W1: 钉死命令须落在实际可用通道（pgrep/docker 不在 mcp-shell 白名单）
+        self.assertIn("他人任务的不算", boot)  # W2: pgrep 宿主全局视角→所有权限定本 env 路径命中行
+        self.assertIn("未退净", boot)  # 处置：等退净再报，非空话
+
     def test_boot_carries_renumber_dual_check(self):  # Req: F83
         """ag-3136b4/ag-a8531f 同根因：撞号让渡改号只查 main 台账，看不见
         服务端在飞同号——BOOT 钉死双查纪律，不确定即问派发方。"""
