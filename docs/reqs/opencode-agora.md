@@ -990,3 +990,16 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **边界**：board_tui.py／install.sh 同形读牌面不动——与 CLI 在病理形态（非串值）上有意分叉，统一口径归后续任务；无服务端/API 变化；agora-plugin/cred.ts（F159）本就严格，经此 CLI 与插件口径一致。
 **落点**：agora（discover 校验，Req: F161）、tests/test_agora_wait.py（TestWait::test_discover_json_form_rejects_non_string_token——非串/空值五形态拒锚＋串值形态不过度锚，Req: F161）、docs/reqs/opencode-agora.md（本条）。
 **验收**：任务页 verify 登记 `python3 -m pytest tests/test_agora_wait.py tests/test_main.py -q` 绿；F158 锚 test_v3_deployed_entrypoint.py::test_cli_discovery_reads_v3_service_json_and_both_token_forms 不回归；全量 `python3 -m pytest tests/ -q` 不回归。
+
+### F167 v3 message_post 链边授权恢复——非 done/peer kind 跨链 400（2026-11-24，ag-1b9ba3）
+
+**现状**：v3 `serverv3._message_post` 对非 done/peer kind（note/question/answer/verify/verify_reject）无链边校验——`to` 直接取任务行对端（dispatcher_sid!=sid 即投 dispatcher），任意已持牌 worker 可向他链任务投递伪造 verify 文本并经 messaging.post 的 WAKE 通道 oc.inject 唤醒注入受害 dispatcher（C 册 finding，有 PoC）。v2 无此洞：Router._resolve up 边＝`from_sid==worker_sid` 严格相等、down 边＝is_dispatcher（相等或 F16 血统），违者 NotChainEdge→400；v3 平移时该判层丢失。
+
+**裁定**：`_message_post` 恢复 v2 同口径链边判——新增 `_is_chain_dispatcher(sid,row)`（sid==dispatcher_sid 或 auth.same_lineage(sid, dispatcher_sid)）；root 保留 bind_dispatcher 愈合前判（触发条件随同改为非链 dispatcher，血统命中免触发）；其后统一链边闸：`row.worker_sid!=sid 且非链 dispatcher` → invalid_argument 400（与 done 分支「仅任务 worker」同码同档），零落库零注入。`to` 计算同改按边取值（down 边＝worker_sid——血统 dispatcher 直投新链，不再落旧死号）。done/peer 维持现状；legacy `post` 路由经 adapt→`_dispatch`→同函数，同面收口。
+
+**边界**：root 对外链活号 dispatcher 由「恒可投」收紧为 v2 同款 400（愈合放行面仍＝登记 dispatcher 已死）；服务侧内部通知（tasksvc/healthsvc/timersvc 直调 messaging.post 传显式 to_sid）不经 `_message_post`，零扰动；worker 牌向嵌套子任务 down 边投递（父 worker＝子任务 dispatcher_sid）合法保留。
+
+**落点**：agorad/serverv3.py（`_is_chain_dispatcher`＋`_message_post` 链边闸，Req: F167）、tests/test_v3_server.py（TestMessagePostChainEdge 8 锚：五 kind 跨链 400 零落库/legacy 面同拒/零注入/dispatcher 跨链拒/root 活号外链拒/正向四边 200/父 worker 子任务 down 边/root 死号愈合保留，Req: F167）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：任务页 verify 登记 `python3 -m pytest tests/test_v3_server.py -q` 绿（53 passed）；v3 族回归（health_auth/contracts/v2_adapter/mcp_shell/architecture/notification_refs，201 passed）绿；全量 `python3 -m pytest tests/ -q` 不回归。
+

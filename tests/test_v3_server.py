@@ -699,6 +699,123 @@ class TestPeerBoardFace(_Base):  # B-4/OCR-3/OCR-5 修复锚：并发留言/多�
         self.assertEqual(len(b["messages"]), 8)  # 最新在前全量在册
 
 
+class TestMessagePostChainEdge(_Base):  # Req: F167 链边授权（C 册）
+    """非 done/peer kind 的链边授权恢复（v2 Router._resolve 同语义）：
+    worker 牌限本任务（up 边 worker_sid==sid）、dispatcher 牌限归属链
+    （down 边 sid==dispatcher_sid 或血统）、root 保留 bind_dispatcher
+    愈合前判后同受链边约束——跨链 400 且零落库零注入。"""
+
+    def setUp(self):
+        super().setUp()
+        # 受害链：独立派发方 ses-dsp 的任务 B
+        s, b = self.call("cred_for_sid", {"sid": "ses-dsp"}, self.root)
+        self.assertEqual((s, b.get("role")), (200, "dispatcher"))
+        self.dtok = b["token"]
+        s, b = self.call("task_create", {"goal": "victim",
+                                         "project_dir": "/repo",
+                                         "verify_cmd": "true"}, self.dtok)
+        self.assertEqual(s, 200, b)
+        self.tid_b = b["task"]
+        _, self.wtok_b = self.dispatch(self.tid_b)
+        # 攻击者：root 名下任务 A 的 worker
+        self.tid_a = self.mk("attacker")
+        _, self.wtok_a = self.dispatch(self.tid_a)
+
+    def _msgs(self, tid, kind):
+        return [m for m in self.stack.storage.messages_all()
+                if m.task_id == tid and m.kind == kind]
+
+    def test_worker_cross_chain_rejected_all_kinds(self):
+        for kind in ("note", "question", "answer", "verify",
+                     "verify_reject"):
+            s, b = self.call("v3/message_post",
+                             {"task": self.tid_b, "kind": kind,
+                              "body": "伪造"}, self.wtok_a)
+            self.assertEqual((s, b["error"]["code"]),
+                             (400, "invalid_argument"), kind)
+            self.assertFalse(self._msgs(self.tid_b, kind), kind)  # 零落库
+
+    def test_worker_cross_chain_rejected_legacy_face(self):
+        s, b = self.call("post", {"task": self.tid_b, "kind": "verify",
+                                  "body": "伪造"}, self.wtok_a)
+        self.assertEqual(s, 400)
+        self.assertIsInstance(b["error"], str)  # legacy 平面错误
+
+    def test_worker_cross_chain_no_inject_to_victim_dispatcher(self):
+        self.call("v3/message_post", {"task": self.tid_b, "kind": "verify",
+                                      "body": "伪造 verify 提案"},
+                  self.wtok_a)
+        self.assertFalse([i for i in self.oc.injects if "伪造" in i[2]])
+
+    def test_dispatcher_cross_chain_rejected(self):
+        s, b = self.call("v3/message_post", {"task": self.tid_a,
+                                             "kind": "note", "body": "x"},
+                         self.dtok)
+        self.assertEqual((s, b["error"]["code"]),
+                         (400, "invalid_argument"))
+        self.assertFalse(self._msgs(self.tid_a, "note"))
+
+    def test_root_cross_chain_live_dispatcher_rejected(self):
+        # root 愈合前判放行面＝登记 dispatcher 已死；活号链边照拒（v2 同口径）
+        s, b = self.call("v3/message_post", {"task": self.tid_b,
+                                             "kind": "note", "body": "x"},
+                         self.root)
+        self.assertEqual((s, b["error"]["code"]),
+                         (400, "invalid_argument"))
+        self.assertFalse(self._msgs(self.tid_b, "note"))
+
+    def test_on_edge_posts_still_allowed(self):
+        s, b = self.call("v3/message_post", {"task": self.tid_a,
+                                             "kind": "question", "body": "q"},
+                         self.wtok_a)  # worker → 本任务 up 边
+        self.assertEqual((s, isinstance(b.get("message"), int)), (200, True))
+        s, b = self.call("v3/message_post", {"task": self.tid_b,
+                                             "kind": "note", "body": "n"},
+                         self.dtok)  # dispatcher → 归属链 down 边
+        self.assertEqual((s, isinstance(b.get("message"), int)), (200, True))
+        s, b = self.call("v3/message_post", {"task": self.tid_a,
+                                             "kind": "note", "body": "n"},
+                         self.root)  # root 名下 daemon 行（dispatcher_sid=root）
+        self.assertEqual((s, isinstance(b.get("message"), int)), (200, True))
+        self.assertTrue(self._msgs(self.tid_a, "note"))
+
+    def test_parent_worker_down_edge_to_nested_subtask(self):
+        s, b = self.call("task_create", {"goal": "sub"}, self.wtok_a)
+        self.assertEqual(s, 200, b)
+        sub = b["task"]
+        s, b = self.call("task_dispatch", {"task": sub}, self.wtok_a)
+        self.assertEqual(s, 200, b)
+        s, b = self.call("v3/message_post", {"task": sub, "kind": "answer",
+                                             "body": "a"}, self.wtok_a)
+        self.assertEqual((s, isinstance(b.get("message"), int)), (200, True))
+        # 子任务 worker 仍是旁链：跨到受害任务照拒
+        srow = self.stack.storage.get_task(sub)
+        _, stok = self._pull_worker_token(srow.worker_sid)
+        s, b = self.call("v3/message_post", {"task": self.tid_b,
+                                             "kind": "note", "body": "x"},
+                         stok)
+        self.assertEqual((s, b["error"]["code"]),
+                         (400, "invalid_argument"))
+
+    def test_root_healing_preserved_on_dead_dispatcher(self):
+        self.oc.dead.add("ses-dsp")
+        s, b = self.call("v3/message_post", {"task": self.tid_b,
+                                             "kind": "note", "body": "heal"},
+                         self.root, sid="ses-real1")
+        self.assertEqual((s, isinstance(b.get("message"), int)), (200, True))
+        self.assertEqual(
+            self.stack.storage.get_task(self.tid_b).dispatcher_sid,
+            "ses-real1")  # F21 愈合改绑后按链边放行
+        self.assertTrue(self._msgs(self.tid_b, "note"))
+
+    def _pull_worker_token(self, sid):
+        s, b = self.call("cred_for_sid", {"sid": sid})
+        if s != 200:  # 无牌直连＝按在飞 worker 行命中（F25 推改拉）
+            s, b = self.call("cred_for_sid", {"sid": sid}, self.root)
+        self.assertEqual(s, 200, b)
+        return None, b["token"]
+
+
 class TestMcpShell(_ChainBase):  # 断言4
     def setUp(self):
         super().setUp()

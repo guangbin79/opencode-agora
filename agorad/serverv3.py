@@ -365,6 +365,14 @@ class _V3Handler(BaseHTTPRequestHandler):
             return {"enforce_on": stack.set_enforce(params["on"])}
         raise ContractError("invalid_argument", f"未知工具: {name}")
 
+    def _is_chain_dispatcher(self, sid, row):
+        """Req: F167 v2 Router.is_dispatcher 同口径：sid==登记
+        dispatcher_sid，或现持牌血统含旧 dispatcher_sid（F16 dispatcher
+        换号链边连续）。"""
+        d = row.dispatcher_sid
+        return (sid == d
+                or (bool(d) and self.stack.auth.same_lineage(sid, d)))
+
     def _message_post(self, sid, role, params, row):
         stack = self.stack
         kind, body = params["kind"], params["body"]
@@ -387,10 +395,16 @@ class _V3Handler(BaseHTTPRequestHandler):
             stack.enqueue(tid)  # 门体后台串行
             return {"result": "accepted"}
         if (role == "root" and row is not None
-                and row.dispatcher_sid != sid):
+                and not self._is_chain_dispatcher(sid, row)):
             stack.auth.bind_dispatcher(role, sid, row)  # F21 换号愈合
             row = stack.storage.get_task(tid)
-        to = (row.dispatcher_sid if row.dispatcher_sid != sid
+        if (row.worker_sid != sid
+                and not self._is_chain_dispatcher(sid, row)):
+            # Req: F167 链边授权（v2 Router._resolve NotChainEdge 恢复）：
+            # 非 done/peer kind 限任务链边——worker 牌限本任务（up 边严格
+            # 相等）、dispatcher 牌限归属链（含血统）；跨链 400 零落库零注入
+            raise ContractError("invalid_argument", f"{sid}->{tid}: 非链边")
+        to = (row.dispatcher_sid if not self._is_chain_dispatcher(sid, row)
               else row.worker_sid)
         if not to:
             raise ContractError("conflict",
