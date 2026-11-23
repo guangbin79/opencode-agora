@@ -1002,4 +1002,3 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/serverv3.py（`_is_chain_dispatcher`＋`_message_post` 链边闸，Req: F167）、tests/test_v3_server.py（TestMessagePostChainEdge 8 锚：五 kind 跨链 400 零落库/legacy 面同拒/零注入/dispatcher 跨链拒/root 活号外链拒/正向四边 200/父 worker 子任务 down 边/root 死号愈合保留，Req: F167）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：任务页 verify 登记 `python3 -m pytest tests/test_v3_server.py -q` 绿（53 passed）；v3 族回归（health_auth/contracts/v2_adapter/mcp_shell/architecture/notification_refs，201 passed）绿；全量 `python3 -m pytest tests/ -q` 不回归。
-
