@@ -45,6 +45,8 @@ GATE_HEALTH_KEYS = (
     "commit", "rebased_from", "env_base", "usage", "in_gate", "gate_env",
     "gate_origin_branch", "gate_artifact", "review_cache", "probe",
     "review_fail_streak", "pending_cancel", "pending_cancel_reason",
+    # main F130 verify_infra 宽限兜底写键（ag-60f870 并 main 集成补齐）
+    "verify_infra_grace", "verify_infra_backstop", "blocked_reason",
     "cancel_reason")
 
 
@@ -230,6 +232,10 @@ def full_field_row(tid="gt-full", **over):
                   "ran_at": 1780000050.0},
         "review_fail_streak": 0, "pending_cancel": False,
         "pending_cancel_reason": None, "cancel_reason": None,
+        # main F130 verify_infra 宽限兜底写键（ag-60f870 并 main 集成补齐）
+        "verify_infra_grace": {"deadline": 1780000300.0, "since": 1780000250.0},
+        "verify_infra_backstop": 1780000350.0,
+        "blocked_reason": None,
     }
     row.update(over)
     return row

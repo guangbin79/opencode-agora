@@ -148,9 +148,12 @@ class TestGitLegacyMigration(_GitCase):
             mode="managed", status="pending", commit=None, base=None,
             target_branch="main", attempt=0, local_status="pending",
             error=None, conflict_files=None))
+        # 未建模字段无损收 legacy_extra（含 main F130 三写键，ag-60f870 并 main 集成）
         self.assertEqual(json.loads(t.legacy_extra_json),
-                         {"usage": row["usage"],
-                          "gate_origin_branch": row["gate_origin_branch"]})
+                         {k: row[k] for k in ("usage", "gate_origin_branch",
+                                              "verify_infra_grace",
+                                              "verify_infra_backstop",
+                                              "blocked_reason")})
         for tid, mrow in matrix.items():
             self.assertEqual(first.get_task(tid).state, mrow["state"])
         self.assertEqual(report["tasks"]["total"], 11)
