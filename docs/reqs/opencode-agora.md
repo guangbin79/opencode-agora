@@ -1016,3 +1016,17 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：board_tui.py（_home_path 抽取＋run(home)＋poll 自愈＋_fetch 抽取＋_rebuild 帧时刻，Req: F168）、tests/test_board_tui.py（TestPollSelfHeal 两锚：端口漂移换 base 重试清横幅＋新帧可见＋帧时刻；真不可达保旧帧＋横幅＋帧时刻，Req: F168）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：任务页 verify 登记 `python3 -m pytest tests/test_board_tui.py -q` 绿（85 passed＝83＋新 2 锚）；全量 `python3 -m pytest tests/ -q` 不回归（2437 passed, 105 subtests）。
+
+### F170 board_tui tail 取数面重做——session_part 主读＋内联兜底＋时间前缀（2026-11-24，用户裁定）
+
+取代两张已取消草稿 ag-ce16de/ag-89ef61（原 F168 号已被 56cbc98 轮询自愈占用，本单换号 F170 落地）。
+
+**背景（实测 opencode.db）**：①现行 tail 只读 session_message.data.content，但 opencode v2 流式消息 content 为空 []，真实正文在 session_part 表（PK message_id+ordinal；type 全集 text/reasoning/tool：text={text}；reasoning={text, native}（text 可为空串）；tool={name, state:{status, input}, executed, id}）。两存储互斥不双驻留（内联有 text 的 message 必无 part 行，全库 0 反例），重 agent 会话（issue#357 worker，244 part 行 vs 7 内联行）tail 几乎空白。②内联形态另有窗口病：取最新 40 行原始消息，无文本行吃预算，最新文本被挤出。③tail 行无时间看不出新旧。
+
+**裁定**：tail_session 主读 session_part（窗口 limit*2，ORDER BY time_created DESC, message_id DESC, ordinal DESC），渲染每 part 一行：text→整段文本；reasoning→'💭 '+首 120 字符（换行压空格，空串跳过）；tool→'⚡'+name+' '+输入摘要（input 有 'command' 键用其值，否则 json.dumps(input, ensure_ascii=False)，合计截 100 字符）。兜底读内联 session_message（窗口 LIMIT limit*5，无文本行不吃文本预算，解析同旧实现）。两路按 time_created（epoch ms）升序归并回尾段 limit 行；行首时间前缀——当日 HH:MM:SS、隔日及以上 MM-DD HH:MM；part 行图标形态（无 [type] 框），内联行保留现有 [type] 形态。降级语义不变（["session tail unavailable: …"] 由壳兜、空降级 ["(no text messages)"]）。
+
+**边界**：不动 run()/handle_key/draw_page/tail follow 轮询语义；sqlite 仍 ro；不动既有测试；不改服务端。
+
+**落点**：board_tui.py（tail_session 重构＋_tail_clock/_part_line/_inline_text，Req: F170）、tests/test_board_tui.py（TestTailSessionParts 三锚＋TestTailSessionFreshText 两锚＋_tail_db 真库同构夹具，Req: F170）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：grep -q session_part board_tui.py（base 56cbc98 红判别锚，实测 base 退出码 1）；python3 -m unittest tests.test_board_tui -q 全绿含新 5 锚（90 passed）；tests/test_board_tui.py 内 'Req: F170' ≥5 处；全量 python3 -m pytest tests/ -q 不回归。

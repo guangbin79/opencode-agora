@@ -521,30 +521,77 @@ def try_alarm(base, token, task):
         return f"alarm failed: {e}"
 
 
-def tail_session(sid, limit=40):
-    """opencode 会话只读 tail：sqlite ro 读 session_message 尾段文本。"""
-    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    p = Path(data_home) / "opencode" / "opencode.db"
-    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=2)
+def _tail_clock(tc):
+    """行首时间前缀（Req: F170）：当日 HH:MM:SS、隔日及以上 MM-DD HH:MM。"""
+    t = time.localtime((tc or 0) / 1000)
+    if time.strftime("%F", t) == time.strftime("%F"):
+        return time.strftime("%H:%M:%S", t)
+    return time.strftime("%m-%d %H:%M", t)
+
+
+def _part_line(typ, data):
+    """session_part 单行渲染（Req: F170）：text 整段；reasoning 首 120 字
+    （换行压空格，空串跳过）；tool→⚡name+输入摘要（command 键优先，合计截 100）。"""
     try:
-        rows = con.execute(
-            "SELECT type, data FROM session_message WHERE session_id=?"
-            " ORDER BY seq DESC LIMIT ?", (sid, limit)).fetchall()
+        d = json.loads(data)
+    except ValueError:
+        return None
+    if typ == "text":
+        return d.get("text") or None
+    if typ == "reasoning":
+        txt = " ".join((d.get("text") or "").split())[:120]
+        return f"💭 {txt}" if txt else None
+    if typ == "tool":
+        inp = (d.get("state") or {}).get("input") or {}
+        summ = (inp["command"] if isinstance(inp, dict) and "command" in inp
+                else json.dumps(inp, ensure_ascii=False))
+        return f"⚡{d.get('name')} {summ}"[:100]
+    return None
+
+
+def _inline_text(data):
+    """内联消息正文（旧实现解析口径）：content 列表拼 text 段，否则整体串。"""
+    try:
+        d = json.loads(data)
+    except ValueError:
+        return ""
+    c = d.get("content")
+    return (" ".join(x.get("text", "") for x in c
+                     if isinstance(x, dict) and x.get("type") == "text").strip()
+            if isinstance(c, list) else str(c or d.get("text") or "").strip())
+
+
+def tail_session(sid, limit=40):
+    """opencode 会话只读 tail（Req: F170）：主读 session_part（v2 流式正文
+    真源——envelope content 为空 []），内联 session_message 兜底（互斥不双驻留）；
+    两路按 time_created 升序归并回尾段 limit 行，无文本行不吃文本预算。"""
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    db = Path(data_home) / "opencode" / "opencode.db"
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+    try:
+        parts = con.execute(
+            "SELECT type, time_created, data FROM session_part"
+            " WHERE session_id=?"
+            " ORDER BY time_created DESC, message_id DESC, ordinal DESC"
+            " LIMIT ?", (sid, limit * 2)).fetchall()
+        msgs = con.execute(
+            "SELECT type, time_created, data FROM session_message"
+            " WHERE session_id=? ORDER BY seq DESC LIMIT ?",
+            (sid, limit * 5)).fetchall()
     finally:
         con.close()
     out = []
-    for typ, data in reversed(rows):
-        try:
-            d = json.loads(data)
-        except ValueError:
-            continue
-        c = d.get("content")
-        txt = (" ".join(p.get("text", "") for p in c
-                        if isinstance(p, dict) and p.get("type") == "text").strip()
-               if isinstance(c, list) else str(c or d.get("text") or "").strip())
+    for typ, tc, data in reversed(parts):  # 反转归升序：同刻行保 ordinal 正序
+        ln = _part_line(typ, data)
+        if ln is not None:
+            out.append((tc, ln))
+    for typ, tc, data in reversed(msgs):
+        txt = _inline_text(data)
         if txt:
-            out.append(f"[{typ}] {txt}")
-    return out or ["(no text messages)"]
+            out.append((tc, f"[{typ}] {txt}"))
+    out.sort(key=lambda e: e[0])
+    return [f"{_tail_clock(tc)} {ln}" for tc, ln in out[-limit:]] or [
+        "(no text messages)"]
 
 
 def session_titles(sids):

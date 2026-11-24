@@ -816,6 +816,123 @@ class TestSessionLayer(unittest.TestCase):
             self.assertEqual(session_titles(set()), {})
 
 
+def _tail_db(rows_msg, rows_part):
+    """F170 夹具：tempdir XDG_DATA_HOME＋真库同构 session_message/session_part。"""
+    home = Path(tempfile.mkdtemp())
+    db = home / "opencode" / "opencode.db"
+    db.parent.mkdir(parents=True)
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE session_message (id TEXT PRIMARY KEY,"
+                " session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER"
+                " NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER"
+                " NOT NULL, data TEXT NOT NULL)")
+    con.execute("CREATE TABLE session_part (message_id TEXT NOT NULL,"
+                " session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT"
+                " NOT NULL, call_id TEXT, time_created INTEGER NOT NULL,"
+                " time_updated INTEGER NOT NULL, data TEXT NOT NULL,"
+                " PRIMARY KEY (message_id, ordinal))")
+    con.executemany("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)",
+                    [(i, "s1", t, s, tc, tc, d) for i, t, s, tc, d in rows_msg])
+    con.executemany("INSERT INTO session_part VALUES (?,?,?,?,?,?,?,?)",
+                    [(m, "s1", o, t, None, tc, tc, d)
+                     for m, o, t, tc, d in rows_part])
+    con.commit()
+    con.close()
+    return home
+
+
+class _TailDbCase(unittest.TestCase):
+    """F170 tail_session 直测基类（tempdir 建库→环境注入→直调，零测试）。"""
+
+    def _tail(self, msgs, parts, limit=40):
+        home = _tail_db(msgs, parts)
+        self.addCleanup(shutil.rmtree, home, True)
+        with unittest.mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(home)}):
+            return board_tui.tail_session("s1", limit)
+
+
+class TestTailSessionParts(_TailDbCase):
+    """F170 session_part 主读：text/⚡tool/💭reasoning 渲染＋内联兜底归并。"""
+
+    def test_part_session_renders_all_kinds(self):  # Req: F170
+        """纯 part 会话（envelope 空 content）：text/⚡tool/💭reasoning 全显，
+        空 reasoning 不出行。"""
+        lines = self._tail(
+            [("m1", "assistant", 1, 1000, json.dumps({"content": []}))],
+            [("m1", 0, "reasoning", 1001, json.dumps({"text": "思考中",
+                                                      "native": False})),
+             ("m1", 1, "text", 1002, json.dumps({"text": "开工了"})),
+             ("m1", 2, "tool", 1003, json.dumps(
+                 {"name": "shell", "state": {"status": "pending",
+                                             "input": {"command": ["ls", "-la"]}},
+                  "executed": False, "id": "c1"})),
+             ("m1", 3, "reasoning", 1004, json.dumps({"text": ""}))])
+        self.assertTrue(lines)                          # 空降级不触发
+        self.assertTrue(any(ln.endswith("开工了") for ln in lines))  # text 整段
+        self.assertTrue(any("⚡shell" in ln and "ls" in ln     # command 摘要
+                            for ln in lines))
+        self.assertEqual([ln for ln in lines if "💭" in ln],
+                         [ln for ln in lines if "思考中" in ln])  # 唯一 reasoning
+        self.assertEqual(len(lines), 3)                 # 空 reasoning 不出行
+
+    def test_inline_and_parts_merge_by_time(self):  # Req: F170
+        """混合会话：内联消息与 part 消息按 time_created 交错，尾段序正确。"""
+        lines = self._tail(
+            [("mi1", "assistant", 1, 2000,
+              json.dumps({"content": [{"type": "text", "text": "内联甲"}]})),
+             ("mp1", "assistant", 2, 3000, json.dumps({"content": []})),
+             ("mi2", "assistant", 3, 4000,
+              json.dumps({"content": [{"type": "text", "text": "内联丙"}]}))],
+            [("mp1", 0, "text", 3001, json.dumps({"text": "part 乙"}))])
+        self.assertTrue(any("[assistant] 内联甲" in ln for ln in lines))  # [type] 形态
+        self.assertTrue(any(ln.endswith("part 乙") and "[" not in ln
+                            for ln in lines))                    # part 图标形态
+        i = [next(i for i, ln in enumerate(lines) if k in ln)
+             for k in ("内联甲", "part 乙", "内联丙")]
+        self.assertEqual(i, sorted(i))                 # time_created 升序归并
+
+    def test_limit_keeps_tail_segment(self):  # Req: F170
+        """limit 截尾：回尾段 limit 行，更早行被截。"""
+        msgs = [(f"m{i}", "assistant", i, 1000 + i,
+                 json.dumps({"content": []})) for i in range(5)]
+        parts = [(f"m{i}", 0, "text", 2000 + i, json.dumps({"text": f"第{i}行"}))
+                 for i in range(5)]
+        lines = self._tail(msgs, parts, limit=3)
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[-1].endswith("第4行"))    # 尾段＝最新 limit 行
+        self.assertFalse(any("第0行" in ln for ln in lines))
+
+
+class TestTailSessionFreshText(_TailDbCase):
+    """F170 窗口病根治：无文本行不吃预算＋行首时间前缀两形态。"""
+
+    def test_buried_latest_text_still_visible_and_last(self):  # Req: F170
+        """45 条无文本行（空 content envelope）埋葬后，最新文本仍可见且殿后。"""
+        msgs = [(f"m{i}", "assistant", i, 1000 + i,
+                 json.dumps({"content": []})) for i in range(45)]
+        parts = [("mz", 0, "text", 99999, json.dumps({"text": "最新文本"}))]
+        lines = self._tail(
+            msgs + [("mz", "assistant", 45, 99998, json.dumps({"content": []}))],
+            parts)
+        self.assertEqual(len(lines), 1)                # 无文本行不吃文本预算
+        self.assertTrue(lines[-1].endswith("最新文本"))  # 最新文本殿后
+
+    def test_time_prefix_same_day_and_older(self):  # Req: F170
+        """行首时间前缀两形态：当日 HH:MM:SS、隔日及以上 MM-DD HH:MM。"""
+        now_ms = int(time.time() * 1000)
+        msgs = [("m1", "assistant", 1, now_ms - 3 * 86400_000,
+                 json.dumps({"content": []})),
+                ("m2", "assistant", 2, now_ms, json.dumps({"content": []}))]
+        parts = [("m1", 0, "text", now_ms - 3 * 86400_000,
+                  json.dumps({"text": "三天前"})),
+                 ("m2", 0, "text", now_ms, json.dumps({"text": "刚才"}))]
+        lines = self._tail(msgs, parts)
+        self.assertRegex(lines[0], r"^\d{2}-\d{2} \d{2}:\d{2} ")   # 隔日带日期
+        self.assertTrue(lines[0].endswith("三天前"))
+        self.assertRegex(lines[1], r"^\d{2}:\d{2}:\d{2} ")          # 当日带秒
+        self.assertTrue(lines[1].endswith("刚才"))
+
+
 class TestDoctorPage(unittest.TestCase):
     def test_stale_candidates_section(self):  # Req: F5
         v = {"age_rank": [["t1", 900.0]], "last_seen_rank": [["t1", 940.0]],
