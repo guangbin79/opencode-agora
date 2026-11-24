@@ -27,6 +27,7 @@ escalate 同时落 events.jsonl 审计行（F8）。
 core 只 import stdlib，依赖全注入。
 """
 import json
+import math
 import shlex
 import subprocess
 import time
@@ -456,8 +457,10 @@ class Health:
         皆任务面产出；kind!=escalate 仍排除——escalate 行 from 被 router
         按 "up" 边归 worker、系服务合成非产出。store 读回 ts 恒为 str
         （F92 frontmatter 值一律 str）——float 收敛防异型比较炸 tick。
-        坏 ts 行（非数值 str/异型）沿缺 ts＝0.0 宽松口径收敛（B 册
-        suggestion：行在不炸健康面，时序语义不另造）。
+        坏 ts 行（非数值 str/异型/非有限值 nan·inf——float 原生可解析，
+        终闸 B 册 R1）沿缺 ts＝0.0 宽松口径收敛（B 册
+        suggestion：行在不炸健康面，时序语义不另造；NaN 基线会令产出
+        判据恒假＝误杀活 worker，inf 反向漏杀，同归 0.0 两向都修）。
         返回 None＝消息面读故障（窗尽判定按已产出跳过——宁漏杀不误杀，
         评审环 R2 B 册）；无匹配消息＝0.0（布防侧作基线＝宽松正确）。"""
         try:
@@ -469,9 +472,10 @@ class Health:
         if m is None:
             return 0.0
         try:
-            return float(m.get("ts") or 0.0)
+            v = float(m.get("ts") or 0.0)
         except (TypeError, ValueError):  # 坏 ts＝缺 ts：0.0 收敛不炸 tick
             return 0.0
+        return v if math.isfinite(v) else 0.0  # nan/inf 绕得过 float()——同归 0.0
 
     def _delivery_watch(self, tasks):
         """Req: F110 交付终局观测：external handoff 超龄未确认＋managed 未出版。

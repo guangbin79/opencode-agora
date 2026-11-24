@@ -709,6 +709,12 @@ class TestCoreHealth(unittest.TestCase):
         self.health.tick()  # 窗尽面：不抛；0.0 不构成产出证据
         self.assertEqual(stub.calls, ["t1"])  # 照零产出重派（缺 ts 同款语义）
         self.assertNotIn("t1", self.health._nudged)
+        for bad in ("nan", "inf", "1e999"):  # float 原生可解析的非有限值
+            self.store.write_message({"ts": bad, "task": "t1",
+                                      "kind": "note", "from": "s-w1",
+                                      "to": "main"}, "非有限值病理串")
+            self.assertEqual(self.health._task_msg_ts("t1"), 0.0,
+                             f"ts={bad} 须与缺 ts 同归 0.0（终闸 B 册 R1）")
 
     def test_zombie_no_redispatch_face_degrades_to_escalate(self):  # Req: F160②
         """未接重派面（app.task 缺席）：梯子到顶只升级（安全降级不空转）。"""
