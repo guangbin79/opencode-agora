@@ -1030,3 +1030,16 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：board_tui.py（tail_session 重构＋_tail_clock/_part_line/_inline_text，Req: F170）、tests/test_board_tui.py（TestTailSessionParts 三锚＋TestTailSessionFreshText 两锚＋_tail_db 真库同构夹具，Req: F170）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：grep -q session_part board_tui.py（base 56cbc98 红判别锚，实测 base 退出码 1）；python3 -m unittest tests.test_board_tui -q 全绿含新 5 锚（90 passed）；tests/test_board_tui.py 内 'Req: F170' ≥5 处；全量 python3 -m pytest tests/ -q 不回归。
+
+### F171 终态邮件人话化——邮件面单飞渲染（2026-11-24，ag-00d26c）
+
+**现状**：F63 终态邮件正文＝发往 dispatcher 会话的同一行服务合成文本，两去处共用（会话注入＋外呼邮件）；实例（2026-11-24 实发）：「任务 ag-7d7e1c merged @678f691 local=synced——沉淀: 聚本任务 note/task page 走 knowledge ingest——origin 未同步（ahead=1），请派发方自推」——机器位密语上屏，人类不可读；任务 state 有人类标题（title 字段）但邮件未用。
+
+**裁定**（用户 2026-11-24 方案 A）：邮件与会话行分家——邮件单独人话渲染，会话行逐字节不变。单点收口：msg.py notify_transition 的 self._mail(tid, text) 改传 _human_mail(tid, to, text, task)（模块级私有，纯字符串拼接不查 git 不 IO 不抛）；渲染契约——首行（＝邮件主题，email-send.sh 取首行）[agora] {状态词}：{title}（{tid}），状态词 merged→已合并／closed→已收口／blocked→受阻／cancelled→已取消，title 缺失回退 tid 不重复；正文（与主题空一行）＝概述行＋事实行（sha 在案才给：· 仓库/分支：{project_dir 末段} · {branch}（提交 {sha 前 7 位}），branch 优先 delivery.target_branch 回退 task.target_branch）＋merged 专属两行（· 本地已同步；delivery.origin_ahead>0 时改「远端尚未推送（领先 {n} 个提交）→ 需要你手动 git push」＋收尾沉淀提醒）＋兜底行恒在（· 原始通知：{text}）。gate.py _finish_local_delivered 的 publication 调用前移至 delivery 组装处，ahead 投影 d["origin_ahead"]（int；异常/非 int 省略键同 F54 降级口径），detail 拼接改用已取 pub（行为等价，F110 超龄判据零变化）。修订 F63「正文＝会话行同源」口径（零 worker 文本插值原则保留——原始通知行兜底）。
+
+**边界**：不动会话注入路径与文案（[agora] 头、kind=result、接线点 detail/body 逐字节）；不动 email-send.sh／notify-owner／health 的 stalled/escalate 邮件合成（二期）；不动 F63 窗去重/必达/审计（_mailed、email_sent 事件原样）；不做 HTML/附件/多收件人。既有 F63 测试中 4 处「邮件体==会话行」锚随口径修订改为人话形断言（会话行断言逐字节不动；test_core_health.py 直调 send_email 的 F63 锚零改动即绿）。
+
+**落点**：agorad/core/msg.py（_human_mail＋notify_transition 改线＋模块/方法口径注释，Req: F171）、agorad/core/gate.py（_finish_local_delivered 前移＋origin_ahead 投影，Req: F171）、tests/test_core_msg.py（TestHumanMail 六锚＋四 F63 邮件体锚修订，Req: F171）、tests/test_core_gate.py（TestOriginPublicationNote 两锚：投影＋异常省略，Req: F171）、docs/superpowers/specs/2026-11-24-terminal-mail-humanization-design.md、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：任务页 verify 登记——grep -q _human_mail agorad/core/msg.py；grep -q origin_ahead agorad/core/gate.py；test "$(grep -c 'Req: F171' tests/test_core_msg.py)" -ge 5；全量 python3 -m pytest tests/ -q 全绿（基线 2437 passed＋新锚）。
+**评审环 R1**（OCR〔zai-glm-local/glm-5.3〕产线 2 文件 0 findings＋零共享三分册 A 意图/B 崩溃/C 安全）：A 册 COVERED（4 low 观察：project_dir 缺失空位/理论 bool 边缘/title==tid 回退形/规格调用点清单与实仓出入——tasksvc/gatedelivery 实无 notify_transition 调用，零改动承诺平凡满足）；C 册 medium＝title 可源自 worker 嵌套建单直达邮件主题（tasksvc 压平只除空白，ANSI ESC/BEL 存活、无长度上限，信封单行健壮性）→修复＝_human_mail 主题净化：剥 C0/C1 控制字符＋截 120 字符、净化后空值回退 tid（纯文本 title 的社工残余为方案 A 设计固有——原始通知行本就携带服务合成 text，泄露面备案可接受）；C 册 low＋B 册 low＝isinstance(int) 放行 bool（True 渲染「领先 True 个提交」）→gate 投影与邮件渲染两闸改 type() is int；B 册 low＝project_dir 病态类型可抛（违「不抛」契约，dedup 键已占位时丢 F63 必达）→str() 归一；B 册确认：State.get deepcopy 快照并发安全、publication 前移行为等价且崩溃窗反改善（前移点 crash 走 F100 补终态重跑全链含邮件）、origin_ahead 新键下游（v3 adapter/storage/migrator/health F110）零拒绝面。记录不改：非 int truthy ahead 的 detail/邮件口径分叉（真实 publication 恒 int，detail 拼接保持行为等价口径）；branch 双缺失渲染字面 None（真实链路不可达）。新增锚：title 净化（剥控＋恰 120 截断＋净化空值回退 tid）。

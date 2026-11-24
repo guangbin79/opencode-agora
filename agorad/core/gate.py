@@ -1187,6 +1187,14 @@ class Gate:
                  error=None, attempt=attempt, delivered_at=time.time())  # Req: F110 未出版超龄判据
         if base is not None:
             d["base"] = base
+        try:  # Req: F110 出版对账：merged≠已推送 origin——ahead>0 随行提醒自推；
+            # Req: F171 前移至 delivery 组装处：ahead 投影 origin_ahead（邮件人话
+            # 渲染取用）；异常/非 int 省略键（同 F54 降级口径）
+            pub = self._gitx.publication(t["project_dir"], branch)
+            if type(pub.get("ahead")) is int:  # bool 非 int 语义（B/C 册 R1）
+                d["origin_ahead"] = pub["ahead"]
+        except Exception:  # 投影不可得降级省略，不阻塞交付通知（F54 口径）
+            pub = {}
         self._state.fail_streak_reset(tid)  # 全绿清连败（R12，_succeed 同口径）
         self._state.set_fields(tid, delivery=d)
         self._state.transition(tid, "merged", commit=sha)
@@ -1194,13 +1202,9 @@ class Gate:
         self._audit(tid, "merged", commit=sha, **extra)
         detail = (f"@{sha[:7]} local=synced——沉淀: 聚本任务 note/task page "
                   "走 knowledge ingest")
-        try:  # Req: F110 出版对账：merged≠已推送 origin——ahead>0 随行提醒自推
-            pub = self._gitx.publication(t["project_dir"], branch)
-            if pub.get("ahead"):
-                detail += (f"——origin 未同步（ahead={pub['ahead']}），"
-                           "请派发方自推")
-        except Exception:  # 投影不可得降级省略，不阻塞交付通知（F54 口径）
-            pass
+        if pub.get("ahead"):  # Req: F110（pub 已在组装处取，行为等价）
+            detail += (f"——origin 未同步（ahead={pub['ahead']}），"
+                       "请派发方自推")
         self._router.notify_transition(tid, "merged", detail)  # Req: F60/F110
         self._store.remove_credential(tid)  # F43：先删牌——env 回收败不得拦断
         self._reclaim_env(tid, t["env_dir"], "gate:finish_local_delivered")  # Req: ag-0e6ca3

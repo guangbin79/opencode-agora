@@ -2882,6 +2882,35 @@ class TestOriginPublicationNote(TestCoreGate):
                   if m["to"] == "disp1" and "local=synced" in m["body"]]
         self.assertTrue(all("origin 未同步" not in b for b in merged))
 
+    def test_merged_delivery_projects_origin_ahead(self):  # Req: F171
+        """ahead 投影进 delivery.origin_ahead（邮件人话渲染取用面）；0 照写。"""
+        self.seed(tb="main")
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gx.head_shas[self.integration] = SHA  # ff 直通
+        self.gx.pub_result = {"branch": "main", "ahead": 3}
+        self.gate.run("t1")
+        d = self.state.get("t1")["delivery"]
+        self.assertEqual(d.get("origin_ahead"), 3)
+        self.assertEqual(d["local_status"], "synced")  # 既有投影不回归
+
+    def test_publication_failure_omits_origin_ahead_flow_intact(self):  # Req: F171
+        """publication 抛异常：origin_ahead 键省略（F54 降级口径），交付流程不断。"""
+        def boom(repo_dir, branch=None):
+            raise RuntimeError("git refs 不可读")
+        self.seed(tb="main")
+        self.gx.publication = boom
+        self.state.set_fields("t1", delivery=dict(MANAGED_DELIVERY))
+        self.assertEqual(self.gate.accept_done("t1", "s-w1", SHA), "accepted")
+        self.gx.head_shas[self.integration] = SHA
+        self.gate.run("t1")
+        t = self.state.get("t1")
+        self.assertEqual(t["state"], "closed")  # 流程不断（终态照落）
+        self.assertNotIn("origin_ahead", t["delivery"])
+        merged = [m["body"] for m in self.store.read_messages()
+                  if m["to"] == "disp1" and "local=synced" in m["body"]]
+        self.assertTrue(all("origin 未同步" not in b for b in merged))  # 提醒同省略
+
 
 class TestDeliveryRecovery(TestCoreGate):
     """Req: F100 启动恢复：managed 投影非终态崩溃收敛——权威已含补终态（零

@@ -515,11 +515,15 @@ class TestLifecycleNotify(unittest.TestCase):
 
     # ---- F63 终态邮件必达 ----
 
-    def test_terminal_email_body_matches_session_line(self):  # Req: F63
-        """终态迁移触发邮件：正文与会话行同源服务合成（tid＋终态＋detail/sha）。"""
+    def test_terminal_email_body_humanized_keeps_session_line(self):  # Req: F63/F171
+        """终态迁移触发邮件（F63 必达面）：F171 起正文经人话渲染——原始通知行
+        兜底保留会话行合成文本（零 worker 文本插值原则不变）。"""
         body = "任务 t1 已 closed；commit=abc1234"
         self.r.notify_transition("t1", "closed", body=body)
-        self.assertEqual(self.mailed, [("t1", body)])
+        self.assertEqual(len(self.mailed), 1)
+        mail = self.mailed[0][1]
+        self.assertTrue(mail.startswith("[agora] 已收口：x（t1）\n\n"))  # Req: F171 主题行
+        self.assertIn(f"任务收口（环境已回收）。\n· 原始通知：{body}", mail)
 
     def test_replay_same_transition_email_deduped(self):  # Req: F63
         """重放去重恰一封：(tid,to,updated) 键在邮件外呼前置门，重放零二发。"""
@@ -532,7 +536,8 @@ class TestLifecycleNotify(unittest.TestCase):
         """(tid,60s) 窗只吞 merged→closed 门尾相邻对：窗内 closed 不发；会话行照推。"""
         self.r.notify_transition("t1", "merged", "@abc1234")
         self.r.notify_transition("t1", "closed", "commit=abc1234")
-        self.assertEqual([b for _, b in self.mailed], ["任务 t1 merged @abc1234"])
+        self.assertEqual([b.splitlines()[0] for _, b in self.mailed],
+                         ["[agora] 已合并：x（t1）"])  # Req: F171 恰一封（窗吞 closed）
         self.assertEqual(len(self.oc.events), 2)  # 两迁移会话行各推不吞
 
     def test_blocked_then_merged_same_window_both_sent(self):  # Req: F63（终闸 B 册）
@@ -541,8 +546,9 @@ class TestLifecycleNotify(unittest.TestCase):
         self.state.transition("t1", "done")  # 重派后快走完门（updated 必变）
         self.state.transition("t1", "merged")
         self.r.notify_transition("t1", "merged", "@abc1234")  # blocked 后 60s 内照发
-        self.assertEqual(self.mailed, [("t1", "任务 t1 已 blocked"),
-                                       ("t1", "任务 t1 merged @abc1234")])
+        self.assertEqual([b.splitlines()[0] for _, b in self.mailed],
+                         ["[agora] 受阻：x（t1）",
+                          "[agora] 已合并：x（t1）"])  # Req: F171 主题行形，两封各达
 
     def test_window_expiry_refires_after_60s(self):  # Req: F63
         """窗过期再发：距上次邮件 ≥60s 的后续终态不吞（假时钟注入）。"""
@@ -578,7 +584,8 @@ class TestLifecycleNotify(unittest.TestCase):
                               "dispatcher_sid": None, "worker_sid": "w9"})
         self.assertEqual(self.r.notify_transition("t9", "cancelled", body="任务 t9 已取消"),
                          None)  # 会话行落库零
-        self.assertEqual(self.mailed, [("t9", "任务 t9 已取消")])  # 邮件照发
+        self.assertEqual([b.splitlines()[0] for _, b in self.mailed],
+                         ["[agora] 已取消：x（t9）"])  # Req: F171 邮件照发（渲染体）
 
     def test_failed_send_window_not_consumed_retry_on_next(self):  # Req: F63
         """mail 返回 False＝确认败不占窗：merged 败后 closed 照发（必达重试）。"""
@@ -596,6 +603,128 @@ class TestLifecycleNotify(unittest.TestCase):
                    mail=lambda tid, b: send_email(self.store, tid, b))
         r.notify_transition("t1", "closed", "commit=abc1234")
         self.assertEqual(self.store.read_events("t1"), [])  # 零审计行＝零外呼
+
+
+class TestHumanMail(unittest.TestCase):
+    """Req: F171 终态邮件人话渲染：邮件面与会话行分家——首行＝主题
+    [agora] 状态词：{title}（{tid}），正文分层（概述/事实/push 提醒/收尾/原始
+    通知兜底）；会话行（oc.events 与消息库）逐字节不变。"""
+
+    SHA = "678f6912345678901234567890123456789abcdef"
+    SUMMARY = "修复登录超时"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(self.tmp)
+        self.oc = FakeOc()
+        self.mailed = []  # 邮件外呼记录：[(tid, body)]
+        self.seed()
+        self.state = State(self.store)
+        self.r = Router(self.store, self.state, self.oc,
+                        mail=lambda tid, b: self.mailed.append((tid, b)))
+
+    def seed(self):
+        self.store.append_state({"version": 1,
+                                 "tasks": {"t1": {
+                                     "state": "running", "fail_streak": 0,
+                                     "title": self.SUMMARY,
+                                     "created": 0.0, "updated": 0.0,
+                                     "project_dir": "/home/u/opencode-agora",
+                                     "target_branch": "main",
+                                     "commit": self.SHA,
+                                     "delivery": {"target_branch": "main",
+                                                  "commit": self.SHA,
+                                                  "origin_ahead": 1},
+                                     "dispatcher_sid": "d1",
+                                     "worker_sid": "w1"}},
+                                     "mail_read": {}})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_merged_full_form(self):  # Req: F171
+        """merged 全形：主题恰为 [agora] 已合并：{title}（{tid}）＋空行分层＋
+        事实行/git push 行/收尾提醒/原始通知行齐备；会话行逐字节不变。"""
+        detail = ("@678f691 local=synced——沉淀: 聚本任务 note/task page "
+                  "走 knowledge ingest——origin 未同步（ahead=1），请派发方自推")
+        mid = self.r.notify_transition("t1", "merged", detail)
+        mail = self.mailed[0][1]
+        lines = mail.splitlines()
+        self.assertEqual(lines[0], f"[agora] 已合并：{self.SUMMARY}（t1）")
+        self.assertEqual(lines[1], "")  # 主题与正文空一行
+        self.assertIn(f"「{self.SUMMARY}」已通过验证并自动合并。", lines)
+        self.assertIn("· 仓库/分支：opencode-agora · main（提交 678f691）", lines)
+        self.assertIn("· 本地已同步；远端尚未推送（领先 1 个提交）"
+                      "→ 需要你手动 git push", lines)
+        self.assertIn("· 收尾提醒：本任务笔记/任务页做一次知识沉淀"
+                      "（knowledge ingest）", lines)
+        self.assertIn(f"· 原始通知：任务 t1 merged {detail}", lines)
+        (m,) = [x for x in self.store.read_messages() if x["id"] == mid]
+        self.assertEqual(m["body"], f"任务 t1 merged {detail}")  # 会话行不变
+        self.assertEqual(self.oc.events[0][2],
+                         f"[agora] task t1 result from agorad\n任务 t1 merged {detail}")
+
+    def test_merged_no_push_line_when_ahead_missing_or_zero(self):  # Req: F171
+        """origin_ahead 缺失或 0：无 push 行，本地已同步为独立短行。"""
+        for delivery in ({"target_branch": "main", "commit": self.SHA},
+                         {"target_branch": "main", "commit": self.SHA,
+                          "origin_ahead": 0}):
+            self.mailed.clear()
+            self.r._notified.clear()
+            self.state.set_fields("t1", delivery=delivery)
+            self.r.notify_transition("t1", "merged", "@678f691 local=synced")
+            mail = self.mailed[0][1]
+            self.assertIn("· 本地已同步", mail.splitlines())
+            self.assertNotIn("git push", mail)
+
+    def test_blocked_form(self):  # Req: F171
+        """blocked：受阻主题＋概述＋原始通知；无事实行外层之外的 merged 专属行。"""
+        self.r.notify_transition("t1", "blocked", "3 次验证连败，请重派或取消")
+        mail = self.mailed[0][1]
+        self.assertEqual(mail.splitlines()[0], f"[agora] 受阻：{self.SUMMARY}（t1）")
+        self.assertIn("任务受阻——需重派（dispatch）或取消（cancel）。",
+                      mail.splitlines())
+        self.assertIn("· 原始通知：任务 t1 blocked 3 次验证连败，请重派或取消",
+                      mail.splitlines())
+        self.assertNotIn("收尾提醒", mail)
+
+    def test_cancelled_form(self):  # Req: F171
+        self.r.notify_transition("t1", "cancelled", body="任务 t1 已取消")
+        mail = self.mailed[0][1]
+        self.assertEqual(mail.splitlines()[0], f"[agora] 已取消：{self.SUMMARY}（t1）")
+        self.assertIn("任务已取消。", mail.splitlines())
+        self.assertIn("· 原始通知：任务 t1 已取消", mail.splitlines())
+
+    def test_closed_form(self):  # Req: F171
+        self.r.notify_transition("t1", "closed", "commit=678f691")
+        mail = self.mailed[0][1]
+        self.assertEqual(mail.splitlines()[0], f"[agora] 已收口：{self.SUMMARY}（t1）")
+        self.assertIn("任务收口（环境已回收）。", mail.splitlines())
+        self.assertIn("· 原始通知：任务 t1 closed commit=678f691",
+                      mail.splitlines())
+
+    def test_title_missing_falls_back_to_tid(self):  # Req: F171
+        """title 缺失回退 tid：主题不重复 tid，概述行用回退名。"""
+        self.state.set_fields("t1", title=None)
+        self.r.notify_transition("t1", "merged", "@678f691")
+        mail = self.mailed[0][1]
+        self.assertEqual(mail.splitlines()[0], "[agora] 已合并：t1")
+        self.assertIn("「t1」已通过验证并自动合并。", mail.splitlines())
+
+    def test_title_control_chars_stripped_and_capped(self):  # Req: F171
+        """主题净化（评审 C 册 R1）：title 剥 C0/C1 控制字符（ANSI 转义/换行
+        残余——tasksvc 压平面之外的自卫）＋截 120 字符；净化后空值回退 tid。"""
+        dirty = "红\x1b已合并：假主题\x07\n" + "长" * 200
+        self.state.set_fields("t1", title=dirty)
+        self.r.notify_transition("t1", "cancelled", body="任务 t1 已取消")
+        subject = self.mailed[0][1].splitlines()[0]
+        self.assertEqual(subject, f"[agora] 已取消：红已合并：假主题"
+                                  f"{'长' * 112}（t1）")  # 剥净＋恰 120 截断
+        self.assertNotIn("\x1b", self.mailed[0][1])
+        self.state.set_fields("t1", title="\x00\x1f\x7f")
+        self.r.notify_transition("t1", "blocked", "请重派")
+        self.assertEqual(self.mailed[1][1].splitlines()[0],
+                         "[agora] 受阻：t1")  # 净化后空值回退 tid
 
 
 class TestPeerBoard(unittest.TestCase):

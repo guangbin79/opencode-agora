@@ -18,8 +18,9 @@ inject_silent 免通知投递（落转录不调度回合），其余 kind 保持
 reopened 拒因摘要经 notify_transition 以 kind=result 实时直投 dispatcher——
 缓冲只收 note，天然旁路（终态优先级最高）；(tid,to,detail) 去重防重试窗口重推。
 F63 终态邮件必达：终态迁移经注入 mail 缝外呼公共 send_email（health 单实现），
-正文＝会话行同源服务合成（零 worker 文本），(tid,60s) 窗吞 merged→closed
-门尾相邻双发（merged 崩窗滞留仍有一封）。
+(tid,60s) 窗吞 merged→closed 门尾相邻双发（merged 崩窗滞留仍有一封）。
+邮件正文经 _human_mail 人话渲染（Req: F171——邮件与会话行分家：会话注入
+路径逐字节不变，原始通知行兜底保留合成行，零 worker 文本插值原则不变）。
 """
 import math
 import threading
@@ -38,6 +39,48 @@ _MAIL_WINDOW = 60  # F63：窗去重秒数——只吞 merged→closed 门尾相
 
 _SILENT_REPLAY = frozenset({"note"})  # F75 补交分级：silent 免弹窗面
 _NOTIFY_REPLAY = frozenset({"escalate"})  # ag-3016f1：escalate 补交走通知通道（唤醒）
+
+_MAIL_WORD = {"merged": "已合并", "closed": "已收口",  # Req: F171 终态邮件状态词
+              "blocked": "受阻", "cancelled": "已取消"}
+
+
+def _human_mail(tid, to, text, task):  # Req: F171
+    """终态邮件人话渲染（邮件面与会话行分家）：首行＝邮件主题
+    [agora] 状态词：{title}（{tid}）（title 缺失回退 tid 不重复）；正文＝概述行
+    ＋事实行（sha 在案才给）＋merged 专属（本地同步/远端领先 push 提醒＋收尾
+    沉淀提醒）＋原始通知行兜底。纯字符串拼接，不查 git 不 IO 不抛；to 已由
+    notify_transition 的 _TERMINAL_MAIL 闸住（函数内不防）。title 可源自
+    worker 嵌套建单（tasksvc 只压平空白）——剥控制字符＋截 120 字符净化
+    （评审 C 册 R1：ANSI 转义/信封单行健壮性）。"""
+    title = ("".join(c for c in str(task.get("title") or tid)
+                     if not ("\x00" <= c <= "\x1f"
+                             or "\x7f" <= c <= "\x9f"))[:120]) or tid
+    subject = (f"[agora] {_MAIL_WORD[to]}：{title}（{tid}）" if title != tid
+               else f"[agora] {_MAIL_WORD[to]}：{tid}")
+    lines = []
+    if to == "merged":
+        lines.append(f"「{title}」已通过验证并自动合并。")
+    elif to == "closed":
+        lines.append("任务收口（环境已回收）。")
+    elif to == "blocked":
+        lines.append("任务受阻——需重派（dispatch）或取消（cancel）。")
+    else:
+        lines.append("任务已取消。")
+    delivery = task.get("delivery") or {}
+    sha = task.get("commit") or delivery.get("commit")
+    if sha:  # 事实行整行 sha 闸：缺则省略
+        branch = delivery.get("target_branch") or task.get("target_branch")
+        repo = str(task.get("project_dir") or "").rstrip("/").rsplit("/", 1)[-1]
+        lines.append(f"· 仓库/分支：{repo} · {branch}（提交 {str(sha)[:7]}）")
+    if to == "merged":
+        ahead = delivery.get("origin_ahead")  # gate 交付投影（Req: F171）
+        lines.append(f"· 本地已同步；远端尚未推送（领先 {ahead} 个提交）"
+                     "→ 需要你手动 git push"
+                     if type(ahead) is int and ahead > 0  # bool 非 int 语义（B/C 册）
+                     else "· 本地已同步")
+        lines.append("· 收尾提醒：本任务笔记/任务页做一次知识沉淀（knowledge ingest）")
+    lines.append(f"· 原始通知：{text}")
+    return subject + "\n\n" + "\n".join(lines)
 
 
 def _wants_refs(kind, body, task):
@@ -134,8 +177,9 @@ class Router:
         F42 缓冲只收 note，天然旁路（分级）；去重键含迁移时点（state.updated）：
         同迁移重放（状态未再动，gate 重试/崩溃重排窗口）不重推，跨迁移照推——
         裸 (tid,to,detail) 键会吞 worker 修复后再败的合法重复（评审环 B 册）。
-        F63 终态邮件必达：to∈终态集且注入 mail 时外呼一封，正文＝会话行同源
-        服务合成（tid＋终态＋detail/sha，零 worker 文本插值）；独立于会话投递
+        F63 终态邮件必达：to∈终态集且注入 mail 时外呼一封，正文经 _human_mail
+        人话渲染（Req: F171——主题行用 title，原始通知行兜底合成行，零 worker
+        文本插值原则保留）；独立于会话投递
         ——dispatcher 未登记/落库 I/O 败不吞邮件兜底（必达恰在故障场景兑现）。
         (tid,60s) 窗只吞 merged→closed 门尾相邻对（merged 发信 60s 内到达的
         closed 视为同一事件的门尾重复——生产观测 merged 后必随 closed，双邮件
@@ -145,7 +189,8 @@ class Router:
         终态接线点保既有会话文案逐字节不变。通知面任何异常（未登记/落库 I/O）
         静默尽力而为：不得断裂门链。"""
         try:
-            key = (tid, to, self._state.get(tid).get("updated"))
+            task = self._state.get(tid)
+            key = (tid, to, task.get("updated"))
             if key in self._notified:
                 return None
             self._notified.add(key)
@@ -159,7 +204,9 @@ class Router:
                 last = self._mailed.get(tid)
                 if to != "closed" or last is None or now - last >= _MAIL_WINDOW:
                     try:  # 外缝异常不抛（send_email 内吞已返 False）
-                        if self._mail(tid, text) is not False:  # None/True 视同已交
+                        # Req: F171 邮件面人话渲染——会话行 text 逐字节不变
+                        if self._mail(tid, _human_mail(tid, to, text, task)) \
+                                is not False:  # None/True 视同已交
                             if to == "merged":  # 仅 merged 发信占窗：closed 照此判邻
                                 self._mailed[tid] = now
                     except Exception:
