@@ -1004,3 +1004,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/serverv3.py（`_is_chain_dispatcher`＋`_message_post` 链边闸，Req: F167）、tests/test_v3_server.py（TestMessagePostChainEdge 8 锚：五 kind 跨链 400 零落库/legacy 面同拒/零注入/dispatcher 跨链拒/root 活号外链拒/正向四边 200/父 worker 子任务 down 边/root 死号愈合保留，Req: F167）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：任务页 verify 登记 `python3 -m pytest tests/test_v3_server.py -q` 绿（53 passed）；v3 族回归（health_auth/contracts/v2_adapter/mcp_shell/architecture/notification_refs，201 passed）绿；全量 `python3 -m pytest tests/ -q` 不回归。
+
+### F168 board_tui 轮询自愈——daemon 重启换端口不僵死（2026-11-24，ag-73b881）
+
+**现状**：agorad 每次拉起绑随机端口（AGORA_PORT 缺省 0，install.sh 不钉），board_tui 只在启动时 discover() 一次并在整个 curses 会话把 base 钉死为值参——daemon 重启（本仓代码更新 kill+重 lift 的常态操作）换端口后，老 TUI 永远轮询死端口：offline 横幅＋行冻结，按 r 无效，只有重启 TUI 才恢复（实证 11-24 00:12 本机 45755→39331）；且状态头无末次成功帧时刻，帧陈旧不可感知（可搜性丢失无告警面）。
+
+**裁定**：run() 增可选 home 参（main 经 _home_path() 解析一次传入——home 解析链自 discover 抽单点共用）；poll() 失败且 home 在手时重读 service.json（discover(home)，root.token 亦随重读换新），base 变了即换新端点重试一次——端口漂移即恢复，err 随新帧成功清除；端口未漂移或 service.json 坏/缺＝真不可达，仍保旧帧＋离线横幅（err 语义不变，apply/fold 缓存重建不洗横幅口径不动）。取帧成功路径抽 _fetch() 单点（首轮失败重试共用，无重入环——每 poll 周期至多一次额外文件读）；_rebuild() 状态头追加 "frame HH:MM:SS"（末次成功帧时刻，离线期横幅常驻、帧时刻冻结＝陈旧可感知）。run 缺省 home=None 不自愈——既有直调（含测试夹具）语义零变化。
+
+**边界**：--selftest 面不动（一次性冒烟无会话期漂移问题）；坏帧（HTTP 200 但 build 炸）同走自愈判定——base 未变即不重试，与离线同口径；daemon 反复换端口最坏每周期重试一次（有界，无递归）；F158/F161 两形读牌口径经 discover 复用零变化。
+
+**落点**：board_tui.py（_home_path 抽取＋run(home)＋poll 自愈＋_fetch 抽取＋_rebuild 帧时刻，Req: F168）、tests/test_board_tui.py（TestPollSelfHeal 两锚：端口漂移换 base 重试清横幅＋新帧可见＋帧时刻；真不可达保旧帧＋横幅＋帧时刻，Req: F168）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：任务页 verify 登记 `python3 -m pytest tests/test_board_tui.py -q` 绿（85 passed＝83＋新 2 锚）；全量 `python3 -m pytest tests/ -q` 不回归（2437 passed, 105 subtests）。

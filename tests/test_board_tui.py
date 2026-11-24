@@ -1287,6 +1287,89 @@ class TestTailFollow(unittest.TestCase):
         self.assertNotIn("ln17", shown)       # 24 行屏 22 行窗：显 ln18..ln39
 
 
+def _drift_stub(title):
+    """F168 桩工厂：full 帧带可辨标题；alive=False 后 /board 一律 500。"""
+    class H(http.server.BaseHTTPRequestHandler):
+        alive = True
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(n)
+            if not H.alive:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            out = {"buckets": {}, "forest": ["t1"],
+                   "tasks": {"t1": trow(title=title)}, "events": []}
+            data = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    return H
+
+
+class TestPollSelfHeal(unittest.TestCase):
+    """Req: F168 轮询失败重读 service.json 自愈 base——daemon 重启换端口不僵死。"""
+
+    def setUp(self):
+        # 无头环境跑 run()：桩掉 curses 面（同 TestRunErrSemantics）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def _serve(self, handler):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.server_close)
+        return f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def _home_with(self, port):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".agora").mkdir(parents=True)
+        (home / ".agora" / "service.json").write_text(json.dumps({"port": port}))
+        (home / ".agora" / "root.token").write_text("tok\n")
+        return home
+
+    def test_port_drift_heals_base_and_clears_banner(self):  # Req: F168
+        old_h, new_h = _drift_stub("漂移前"), _drift_stub("漂移后")
+        old_base, new_base = self._serve(old_h), self._serve(new_h)
+        home = self._home_with(int(old_base.rsplit(":", 1)[1]))
+
+        def flip():  # daemon 重启换端口：旧端口死＋service.json 已指新端口
+            old_h.alive = False
+            (home / ".agora" / "service.json").write_text(json.dumps(
+                {"port": int(new_base.rsplit(":", 1)[1])}))
+        scr = _FlipStdscr([-1, -1, ord("q")], flip=flip)
+        run(scr, old_base, "tok", home)
+        heads = [s for _, s in scr.lines if s.startswith(" agora board")]
+        self.assertTrue(heads)
+        self.assertNotIn("offline", heads[-1])  # 换 base 重试成功即清横幅
+        self.assertTrue(any("漂移后" in s for _, s in scr.lines))  # 帧来自新端口
+        self.assertRegex(heads[-1], r"frame \d{2}:\d{2}:\d{2}")  # 末次成功帧时刻
+
+    def test_no_drift_keeps_offline_banner_and_frame_time(self):  # Req: F168
+        h = _drift_stub("目标")
+        base = self._serve(h)
+        home = self._home_with(int(base.rsplit(":", 1)[1]))  # 端口不变＝真不可达
+        scr = _FlipStdscr([-1, -1, ord("q")], flip=lambda: setattr(h, "alive", False))
+        run(scr, base, "tok", home)
+        heads = [s for _, s in scr.lines if s.startswith(" agora board")]
+        self.assertIn("offline", heads[-1])  # 无漂移＝保旧帧＋离线横幅
+        self.assertRegex(heads[-1], r"frame \d{2}:\d{2}:\d{2}")  # 陈旧可感知
+
+
 class _AlarmBoard(http.server.BaseHTTPRequestHandler):
     """F77 run() 夹具：/board 全帧＋/task_alarm 记录请求回执。"""
     calls = []

@@ -443,10 +443,16 @@ def _pointer_home():
         return None
 
 
+def _home_path(home=None):
+    """home 解析链单点（discover 与 run 失败自愈共用，Req: F168）：
+    显式 home → $AGORA_HOME → ~/.agora-home 指针 → 缺省 plaza。"""
+    return Path(home or os.environ.get("AGORA_HOME") or _pointer_home()
+                or Path.home() / ".opencode-agora-plaza")
+
+
 def discover(home=None):
     """root 牌＋端口：$AGORA_HOME/.agora/{root.token,service.json}。"""
-    home = Path(home or os.environ.get("AGORA_HOME") or _pointer_home()
-                or Path.home() / ".opencode-agora-plaza")
+    home = _home_path(home)
     sj = json.loads((home / ".agora" / "service.json").read_text(encoding="utf-8"))
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
     if token.startswith("{"):  # Req: F158 v3 authsvc 落 JSON 形（v2 install 纯文本）——两形同读
@@ -676,9 +682,10 @@ def draw_page(stdscr, title, lines, follow=False):
     stdscr.refresh()
 
 
-def run(stdscr, base, token):
+def run(stdscr, base, token, home=None):
     """主循环：画→getch 阻塞 interval（AGORA_BOARD_INTERVAL 可配）；按键即时用
-    内存模型重画，仅超时 -1 或 r 才 poll 拉 HTTP（避免每键 N+1 卡顿）。"""
+    内存模型重画，仅超时 -1 或 r 才 poll 拉 HTTP（避免每键 N+1 卡顿）。
+    home 在手时轮询失败重读 service.json 自愈 base（Req: F168）；缺省不自愈。"""
     interval = max(0.2, float(os.environ.get("AGORA_BOARD_INTERVAL", "5")))
     curses.curs_set(0)
     _init_colors()
@@ -690,19 +697,41 @@ def run(stdscr, base, token):
          "scollapsed": set(), "sids": set()}
     snap, events, page_tid, page_sid = None, None, None, None
     status, err, page = "loading…", None, []
+    last_ok = None                          # 末次成功帧时刻（Req: F168 陈旧可感知）
+
+    def _fetch():
+        """单次取帧入模型；成功才清离线横幅（缓存重建不洗掉 err）。"""
+        nonlocal snap, events, err, last_ok
+        snap, events = load_board(base, token)
+        last_ok = time.time()
+        m["titles"] = session_titles(  # F115 会话头标题：只读降级，板面优先
+            {t.get("dispatcher_sid") for t in snap.get("tasks", {}).values()}
+            - {None, "root"})
+        _rebuild()
+        err = None                     # 仅新帧成功才清离线横幅；缓存重建不洗掉 err
 
     def poll():
-        """拉一帧刷新内存模型；失败保旧行置 err（err 语义＝轮询离线）。"""
-        nonlocal status, err, snap, events
+        """拉一帧刷新内存模型；失败保旧行置 err（err 语义＝轮询离线）。
+        Req: F168 端口漂移自愈：home 在手时失败重读 service.json，base 变了
+        即换新端点重试一次（daemon 重启换端口即恢复）；端口未漂移或
+        service.json 不可读＝真不可达，仍保旧帧＋离线横幅。"""
+        nonlocal err, base, token
         try:
-            snap, events = load_board(base, token)
-            m["titles"] = session_titles(  # F115 会话头标题：只读降级，板面优先
-                {t.get("dispatcher_sid") for t in snap.get("tasks", {}).values()}
-                - {None, "root"})
-            _rebuild()
-            err = None                     # 仅新帧成功才清离线横幅；缓存重建不洗掉 err
-        except Exception as e:                     # 离线/坏帧：保旧行＋报因
+            _fetch()
+            return
+        except Exception as e:                 # 离线/坏帧：保旧行＋报因
             err = str(e)
+        try:
+            nb, nt = discover(home) if home is not None else (None, None)
+        except Exception:
+            return                             # service.json 坏/缺＝真离线
+        if nb is None or nb == base:
+            return                             # 端口未漂移＝真不可达
+        base, token = nb, nt
+        try:
+            _fetch()
+        except Exception as e:
+            err = str(e)                       # 新端点仍败：横幅换新因
 
     def _rebuild():
         """用当前（缓存）帧按 m['filter'] 重建行＋刷新状态头。"""
@@ -717,7 +746,10 @@ def run(stdscr, base, token):
                      for t in snap.get("tasks", {}).values()}  # 超集，折空块无副作用）
         m["sel"] = min(m["sel"], max(0, len(m["rows"]) - 1))
         _skip_bucket(m, down=True)
-        status = f"{len(m['rows'])} rows  poll {interval:g}s"
+        status = (f"{len(m['rows'])} rows  poll {interval:g}s"
+                  # Req: F168 末次成功帧时刻：离线期横幅常驻、帧时刻冻结＝陈旧可感知
+                  + (f"  frame {time.strftime('%H:%M:%S', time.localtime(last_ok))}"
+                     if last_ok is not None else ""))
 
     def _pull_detail():
         """F127 明细取新帧：失败保旧页，空页降级提示（doctor/tail 同款）。"""
@@ -830,8 +862,9 @@ def main(argv=None):
         _tty_setup()
         if "--selftest" in argv:
             return selftest()
-        base, token = discover()
-        curses.wrapper(run, base, token)
+        home = _home_path()   # Req: F168：解析一次传 run，轮询失败自愈重读 service.json
+        base, token = discover(home)
+        curses.wrapper(run, base, token, home)
         return 0
     except KeyboardInterrupt:
         return 0
