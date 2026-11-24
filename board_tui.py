@@ -451,7 +451,10 @@ def discover(home=None):
     token = (home / ".agora" / "root.token").read_text(encoding="utf-8").strip()
     if token.startswith("{"):  # Req: F158 v3 authsvc 落 JSON 形（v2 install 纯文本）——两形同读
         try:
-            token = str(json.loads(token)["token"])
+            tok = json.loads(token)["token"]
+            if not isinstance(tok, str) or not tok:  # Req: F161 对齐 CLI（F159 ②）：非串/空值＝坏形，勿 str 强转
+                raise ValueError("token 键须为非空字符串值")  # 不回显值——牌面防漏
+            token = tok
         except (ValueError, KeyError, TypeError) as e:
             raise ValueError(f"root.token JSON 坏形或缺 token 键: {e}") from None
     return f"http://127.0.0.1:{sj['port']}", token

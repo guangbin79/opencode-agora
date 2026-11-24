@@ -875,6 +875,29 @@ class _CancelStub(http.server.BaseHTTPRequestHandler):
             self.wfile.write(data)
 
 
+class TestDiscover(unittest.TestCase):
+    """F158 两形读牌：JSON 形非串/空 token 值带因拒——对齐 CLI F161/F159 ② 口径。"""
+
+    def _home(self, token):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".agora").mkdir(parents=True)
+        (home / ".agora" / "service.json").write_text(json.dumps({"port": 8080}))
+        (home / ".agora" / "root.token").write_text(token + "\n")
+        return home
+
+    def test_json_form_rejects_non_string_token(self):  # Req: F161 F158
+        for tok in ['{"token": null}', '{"token": 123}', '{"token": ""}',
+                    '{"token": {"a": 1}}', '{"token": [1]}']:
+            with self.subTest(token=tok):
+                with self.assertRaises(ValueError):
+                    board_tui.discover(self._home(tok))
+        self.assertEqual(  # 收紧不过度：串值形态照取（v2 纯文本同）
+            board_tui.discover(self._home("tok-plain"))[1], "tok-plain")
+        self.assertEqual(
+            board_tui.discover(self._home('{"token": "tok-v3"}'))[1], "tok-v3")
+
+
 class TestTryCancel(unittest.TestCase):
     def test_cancel_failure_is_not_offline(self):  # Req: F10/F11
         srv = http.server.HTTPServer(("127.0.0.1", 0), _CancelStub)

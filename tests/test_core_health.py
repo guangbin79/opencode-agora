@@ -689,6 +689,27 @@ class TestCoreHealth(unittest.TestCase):
                              for m in self.main_msgs()), 0)
         self.assertNotIn("t1", self.health._nudged)
 
+    def test_zombie_bad_ts_row_tolerated_keeps_semantics(self):  # Req: F160②（B 册 suggestion）
+        """末条消息行 ts 坏形（bit-rot/手改账本成非数值 str）：沿既有缺
+        ts＝0.0 时序口径收敛，布防面与窗尽面读 _task_msg_ts 皆不炸 tick；
+        行在而 ts 不可证 recency＝照零产出机械兜底（与缺 ts 行为一致，
+        不另造时序语义）。"""
+        stub = self._RedispatchStub()
+        self.app.task = stub
+        self.seed("t1")
+        self.state.set_fields("t1", created=0.0)
+        self.oc.liveness["s-w1"] = True
+        self.store.write_message({"ts": "not-a-number", "task": "t1",
+                                  "kind": "note", "from": "s-w1",
+                                  "to": "main"}, "坏 ts 产出锚")
+        self.health.tick()  # 布防面：坏 ts 行在场，拍僵＋nudge＋布防不抛
+        self.assertIn("t1", self.health._nudged)
+        self.assertEqual(self.health._task_msg_ts("t1"), 0.0)  # 坏 ts＝缺 ts
+        self._arm_and_travel("t1")
+        self.health.tick()  # 窗尽面：不抛；0.0 不构成产出证据
+        self.assertEqual(stub.calls, ["t1"])  # 照零产出重派（缺 ts 同款语义）
+        self.assertNotIn("t1", self.health._nudged)
+
     def test_zombie_no_redispatch_face_degrades_to_escalate(self):  # Req: F160②
         """未接重派面（app.task 缺席）：梯子到顶只升级（安全降级不空转）。"""
         self._zombie()  # app.task 已接桩

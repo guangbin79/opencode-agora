@@ -982,6 +982,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **评审环 R3**（OCR 复审 R2 diff，3 findings 全采纳；轮次＝终闸3 达上限收口）：①medium bug＝读故障跳过纯销账＝进程内闩死——持续候选任务边沿不再触发、_nudged 空、退避不重拍，单次瞬态 read_messages 故障即废整条梯子（R2 注释/用例 docstring 所称「边沿重爬」不成立）→修复＝None 分支回填布防下轮重读（None 期零动作，宁漏杀方向不变）＋锚扩展（恢复后解除布防）；②medium＝半失败 handler 零留痕静默重试环不可观测→修复＝best-effort auto_redispatch_error 审计（同 rejected 口径）；③low＝记账 fresh 重读无 None 回落（ AttributeError 被吞＝记账静默跳过）→`or t` 回落；④顺手＝TaskService 类 docstring「无锁无线程」随串行锁改写。全量 2363 passed 收口。
 
 **接管修正（ag-d17587，2026-11-22）**：唤醒有效判据收紧——last_seen 前移不单独构成产出（前任务僵死期输出冻结 1h+、last_seen 仍被 ~17min 微光刷新实证，疑 worker 会话插件后台轮询鉴权调用刷 touch）：①产出判据＝该任务新消息（任意 from、任意 kind 含 note；服务合成 escalate 行仍排除——router "up" 边归 worker）或业务行更新（updated 前移且状态未迁移——迁移走离集/易主/新鲜行预检各自收口，touch_seen 只进内存不碰 updated 故判据干净）；布防账 5→6 元组（last_seen 基线→updated 基线＋nudge 时 state；_worker_msg_ts→_task_msg_ts 放宽任意 from）。②离集两形：状态迁移离队（done/blocked 门侧接管）＝静默解除布防（R2 语义不变）；仅新鲜化离队（touch/busy）不销布防——窗尽照常零产出判定（否则微光反复离集/入集＝梯子永不可达窗尽）。③布防中再入僵只补 nudge 不重开窗（防微光循环覆写窗，F70 再提示语义保留）。④窗尽顺延（终闸 B 册）：回合进行中（busy updated>idle）硬判会撞 redispatch_stalled 的 busy fail-closed＝zombie 误报＋梯级误消费——busy 或同 tick 刚补 nudge（仅送达）时窗尽顺延（不销不拍），回合结束/下轮照判。⑤链根全量复审（R4，ag-d17587）：真面爬梯记账修——transition(dispatched) 清零 fail_streak 后纯回读把预检累计覆盖成 0，梯子恒 1 震荡、达限 zombie 永不可达（stub 桩测不出的形态）→回填 n=max(n, fresh) 保累计让位并发 bump＋真清零边锚；成功路径 send_email 包裹（审计落库异常不回填半失败）；renudged 仅 nudge 送达才顺延。新增锚：仅心跳前移仍重派（核心回归锚）/业务行更新解除/任意 from 消息解除/动作面炸回填＋auto_redispatch_error 留痕（R3 留痕面补锚）/busy 窗尽顺延/补 nudge 同 tick 顺延/真清零边爬梯穿透；用例 14→20。
+**坏 ts 容错（ag-22b20d，2026-11-24，B 册 suggestion）**：_task_msg_ts 末条匹配行 ts 非数值/异型（bit-rot、手改账本病理形态）原样 float() 抛异常炸整个 tick——布防面（`self._task_msg_ts(tid) or 0.0` 记基线）与窗尽面（msg_ts 判产出）双读点全暴露。沿既有「缺 ts＝0.0」时序口径收敛：坏 ts 行回 0.0（行在而 recency 不可证＝照零产出判定，不另造语义），消息面读故障 None 通道不变；锚 test_core_health.py::test_zombie_bad_ts_row_tolerated_keeps_semantics（布防＋窗尽双面不炸＋0.0＝缺 ts 同款语义，Req: F160②）。
 
 ### F161 agora CLI 两形读牌残差收口——JSON 形非串/空 token 值带因拒（2026-11-23，ag-7dcc15）
 
@@ -990,6 +991,7 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **边界**：board_tui.py／install.sh 同形读牌面不动——与 CLI 在病理形态（非串值）上有意分叉，统一口径归后续任务；无服务端/API 变化；agora-plugin/cred.ts（F159）本就严格，经此 CLI 与插件口径一致。
 **落点**：agora（discover 校验，Req: F161）、tests/test_agora_wait.py（TestWait::test_discover_json_form_rejects_non_string_token——非串/空值五形态拒锚＋串值形态不过度锚，Req: F161）、docs/reqs/opencode-agora.md（本条）。
 **验收**：任务页 verify 登记 `python3 -m pytest tests/test_agora_wait.py tests/test_main.py -q` 绿；F158 锚 test_v3_deployed_entrypoint.py::test_cli_discovery_reads_v3_service_json_and_both_token_forms 不回归；全量 `python3 -m pytest tests/ -q` 不回归。
+**残差收口（ag-22b20d，2026-11-24）**：边界「统一口径归后续任务」兑现其一——board_tui.discover `{` 分支同款校验（token 键 isinstance str 且非空否则经既有坏形包装 ValueError 带因，报因不回显值），补锚 tests/test_board_tui.py::TestDiscover（非串/空值五形态拒＋v2 纯文本/JSON 串值形态照取不过度锚，Req: F161）；install.sh 读牌面仍维持有意分叉（一次性装机冒烟面，病理形态未纳入）。
 
 ### F167 v3 message_post 链边授权恢复——非 done/peer kind 跨链 400（2026-11-24，ag-1b9ba3）
 
