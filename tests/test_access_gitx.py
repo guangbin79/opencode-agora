@@ -1089,18 +1089,18 @@ class TestContentSettledOnOrigin(TestPublishedOnOrigin):
         self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
                                                          "main"))
 
-    def test_blob_newline_path_rejected_as_mechanical(self):
-        # 评审环册B/C：文件名含换行（git 合法）经 -z 原样进 spec，一条 spec
-        # 裂成两条物理行、cat-file 对位破坏——行数守卫如实 RuntimeError
-        # （调用方本轮免判），不猜对位
+    def test_blob_newline_path_conservatively_unsetted(self):
+        # 评审环 R2 册C：文件名含换行（git 合法）经 -z 原样进 spec，一条 spec
+        # 裂成两条物理行、cat-file 对位破坏——条件由仓内容每轮复现，如实抛
+        # 会走免判通道 fail-open 永久压制看门狗：保守 False（升级照常）
         self._git(["checkout", "-q", "-b", "work"])
         (self.repo / "we\nird.py").write_text("x\n")
         self._git(["add", "-A"])
         self._git(["commit", "-m", "newline path"])
         d = self._git(["rev-parse", "HEAD"]).stdout.strip()
         self._set_origin(d)
-        with self.assertRaises(RuntimeError):
-            self.gx.blob_settled_on_origin(str(self.repo), d, "main")
+        self.assertFalse(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                        "main"))
 
 
 class TestRepoToolWorktree(unittest.TestCase):

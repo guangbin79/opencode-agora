@@ -564,18 +564,20 @@ class Health:
         elif self._gitx.lines_settled_on_origin(project_dir, commit, branch):
             layer = "lines"
         if not layer:
+            self._settled_audit.pop(tid, None)  # 边沿回落：重臂（真边沿触发
+            # 非一次性闩锁——窗口滑出后复发升级、再落定须重留审计行）
             return False
         key = (layer, commit, branch)
         if self._settled_audit.get(tid) == key:
             return True  # 已审边沿：驻留任务每轮 tick 不重落（防事件无界增长）
-        self._settled_audit[tid] = key
         try:
             self._store.append_event({"ts": time.time(), "actor": "health",
                                       "event": "content-settled",
                                       "task": tid, "layer": layer,
                                       "commit": commit, "branch": branch})
+            self._settled_audit[tid] = key  # 落账成功才记边沿：败则下轮重试
         except Exception:
-            pass
+            pass  # 审计尽力而为不逆转判定（F54 口径）：备忘不置位＝下轮重落
         return True
 
     def _infra_backstop_scan(self, tasks):  # Req: F130

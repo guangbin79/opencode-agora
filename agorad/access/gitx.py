@@ -672,8 +672,10 @@ class Gitx:
         一次进程收全窗口）→ 落定＝视同已发布。二进制可判（无 hunk 面的纯
         .so 交付，ag-455da2 形态二），文本亦可用（同 blob 强于同补丁）。
         变更文件集内任一文件交付树缺席（删除）或窗口全缺 blob＝无从对账
-        不落定；空补丁/无跟踪 ref→False；git 机械病如实 RuntimeError
-        （调用方本轮免判）。假阳性权衡（已接受）：窗口内后续 commit 携带
+        不落定；空补丁/无跟踪 ref→False；路径含换行致 cat-file 对位破坏
+        ＝保守 False（条件由仓内容每轮复现，走免判通道会 fail-open 永久
+        压制看门狗——评审环 R2 册C）；git 机械病如实 RuntimeError（调用
+        方本轮免判）。假阳性权衡（已接受）：窗口内后续 commit 携带
         相同 blob＝误判已发布——宁漏报升级不复读轰炸。"""
         commit = self._check_sha(commit)
         ref = f"refs/remotes/origin/{branch}"
@@ -701,13 +703,17 @@ class Gitx:
                       check=False, input_data="\n".join(specs) + "\n")
         if r.returncode != 0:
             raise RuntimeError(f"git cat-file --batch-check: {r.stderr.strip()}")
-        out_lines = r.stdout.splitlines()
+        # 行界只认 LF（splitlines 会按 \v/\f/\x85 等额外断行——评审环册B：
+        # 这些同为 git 合法文件名字节，徒增守卫误触面）
+        out_lines = r.stdout.split("\n")
+        if out_lines and not out_lines[-1]:
+            out_lines.pop()  # 尾随换行空段
         if len(out_lines) != len(specs):  # 每查询恰一行；路径含换行会把一条
-            # spec 裂成两条物理行、对位破坏（评审环册B/C）——机械病如实抛
-            # （调用方本轮免判），不猜对位
-            raise RuntimeError(
-                "git cat-file --batch-check: 响应行数≠查询数"
-                f"（{len(out_lines)}!={len(specs)}，路径含换行？）")
+            # spec 裂成两条物理行、对位破坏。该条件由仓内容确定性决定且每轮
+            # 复现——如实抛 RuntimeError 会走调用方「免判」通道 fail-open，
+            # 构造文件名即可永久压制 unpublished 看门狗（评审环 R2 册C）：
+            # 保守不落定（False＝升级照常），不猜对位
+            return False
         blob = {}
         for ln, spec in zip(out_lines, specs):
             parts = ln.split()

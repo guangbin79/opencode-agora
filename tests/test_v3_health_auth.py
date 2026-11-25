@@ -856,11 +856,17 @@ class TestDeliveryWatch(_Base):  # 断言10
             self.health.tick()
             self.health.tick()  # 驻留任务每轮重探：审计边沿触发只落一次
             self.assertEqual(self.escalate_kinds(tid), [], layer)
-            self.assertEqual(self.events(tid, "content-settled"),
-                             ["content-settled"])
             evs = [e for e in self.storage.events_for_task(tid)
                    if e.event == "content-settled"]
             self.assertEqual([e.detail.get("layer") for e in evs], [layer])
+            setattr(self.gitx, attr, False)
+            self.health.tick()  # 判定回落（窗口滑出形态）：边沿重臂
+            setattr(self.gitx, attr, True)
+            self.health.tick()  # 再命中：重留审计行（真边沿，非一次性闩锁）
+            evs = [e for e in self.storage.events_for_task(tid)
+                   if e.event == "content-settled"]
+            self.assertEqual([e.detail.get("layer") for e in evs],
+                             [layer, layer])
             setattr(self.gitx, attr, False)
 
     def test_unpublished_escalation_stops_when_content_settles(self):
