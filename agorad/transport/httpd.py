@@ -338,7 +338,11 @@ class _Handler(BaseHTTPRequestHandler):
                 raise NotChainEdge(f"{sid}->{tid}: done 仅任务 worker")
             r = app.gate.accept_done(tid, sid, body["body"].strip())
             if r != "accepted":
-                return {"result": r}
+                # ag-d03e0e done 拒收可见化：拒回＝同步报错（与「done 仅任务
+                # worker」同档 400——MCP 调用失败＋拒因原文），不再 200 result
+                # 成功形状（worker 零感知的「受理成功后异步拒」形态废除）；
+                # 拒因落消息面由 gate._deny_done 持久化。
+                raise ValueError(r)
             app.router.post(sid, ("up", tid), "done", str(body["body"]))
             self.gate_q.put(tid)  # 门体后台串行
             return {"result": "accepted"}

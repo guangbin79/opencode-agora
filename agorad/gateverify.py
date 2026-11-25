@@ -371,7 +371,18 @@ class GateVerifyService:
         return False
 
     def _deny(self, tid, code, message):
+        """ag-d03e0e 拒因落消息面：受理段拒因原文持久化为任务消息（from=gate、
+        kind=note→digest 缓冲免即时注入），check_mail/board 可查；留痕面尽力
+        而为（F54）：get_task 并入 try——存储读败视同无收件人，不得把结构化
+        拒回（400＋拒因）吹成 500。"""
         self._audit(tid, "done_rejected", note=code)
+        try:
+            t = self._store.get_task(tid)
+            if self._msg is not None and t is not None and t.worker_sid:
+                self._msg.post("gate", t.worker_sid, tid, "note",
+                               f"rejected:{code}: {message}")
+        except Exception:
+            pass
         return DoneReject(code, message)
 
     def _deny_anchor(self, tid, code, message):

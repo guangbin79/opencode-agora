@@ -153,6 +153,21 @@ class Router:
             raise NotChainEdge(f"{tid}: dispatcher 未登记")
         return self._deliver("agorad", to_sid, tid, kind, body)
 
+    def notify_worker(self, tid, kind, body):
+        """服务侧 worker 定向留痕（notify_dispatcher 的只落库镜像）。
+        ag-d03e0e done 拒收可见化：受理段拒因原文经此落任务消息（from=
+        agorad）。只落库不注入——调用方身处单线程串行 HTTP 环（B 册 R2：
+        OC 挂起时同步注入会 head-of-line 阻断全部工具面），worker 同回合
+        已收同步 MCP 报错，此处为消息库/check_mail 留痕面（未投递消息由
+        check_mail 补拉即送达）。worker 未登记＝无收件人，返回 None。"""
+        to_sid = self._state.get(tid).get("worker_sid")
+        if to_sid is None:
+            return None
+        with self._delivery_lock:
+            return self._store.write_message(
+                {"ts": time.time(), "task": tid, "kind": kind,
+                 "from": "agorad", "to": to_sid}, body)
+
     def notify_wait_resolved(self, tid, dep_tid, dep_state):
         """Req: F124 受控等待解除双通知（task 域登记即解析与 health tick
         解析共用）：等待任务 worker 注入 process 通知（依赖已结束及结果，

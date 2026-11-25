@@ -785,8 +785,8 @@ class TestNestedDispatchLoop(HttpdTest):
 
         st, r = call(self.port, "POST", "/post",
                      {"task": parent, "kind": "done", "body": SHA}, parent_token)
-        self.assertEqual(st, 200)
-        self.assertIn("rejected:children", r["result"])
+        self.assertEqual(st, 400)  # ag-d03e0e：拒收＝同步报错（非 200 result）
+        self.assertIn("rejected:children", r["error"])
         self.assertEqual(self.app.state.get(parent)["state"], "running")
 
         # 父会话死亡期间子任务结案：result 先留库，恢复后的同牌会话可补拉。

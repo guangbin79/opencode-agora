@@ -937,7 +937,8 @@ class TestDoneChain(_ChainBase):  # 断言6
                   wtok)  # worker 调用即开工→running
         s, b = self.call("post", {"task": tid, "kind": "done", "body": "zz"},
                          wtok)
-        self.assertTrue(str(b["result"]).startswith("rejected:body-format"))
+        self.assertEqual(s, 400)  # ag-d03e0e：拒收＝同步报错（非 200 result）
+        self.assertIn("rejected:body-format", b["error"])
 
 
 class TestMessageFace(_ChainBase):  # 断言7

@@ -389,7 +389,10 @@ class _V3Handler(BaseHTTPRequestHandler):
                                     f"{sid}->{tid}: done 仅任务 worker")
             r = stack.gate.accept_done(tid, sid, str(body).strip())
             if r != "accepted":
-                return {"result": str(r)}
+                # ag-d03e0e done 拒收可见化：拒回＝同步报错（与「done 仅任务
+                # worker」同档 invalid_argument/400——MCP 调用失败＋拒因原文），
+                # 不再 200 result 成功形状；拒因落消息面由 gateverify._deny 持久化。
+                raise ContractError("invalid_argument", str(r))
             stack.messaging.post(sid, row.dispatcher_sid, tid, "done",
                                  str(body))
             stack.enqueue(tid)  # 门体后台串行

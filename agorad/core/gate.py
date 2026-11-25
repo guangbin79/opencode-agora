@@ -558,9 +558,18 @@ class Gate:
         return self._deny_done(tid, tag, msg)
 
     def _deny_done(self, tid, tag, msg):
-        """F13：done 拒收统一出口——先审计 done_rejected（note=tag）再带因拒回。"""
+        """F13：done 拒收统一出口——先审计 done_rejected（note=tag）再带因拒回。
+        ag-d03e0e 拒因落消息面：拒因原文持久化为任务消息（from=agorad、
+        kind=note、只落库不注入——worker 同回合已收同步 MCP 报错；单线程
+        HTTP 环零网络 I/O），check_mail/消息库可查，fail_streak 不再是唯一
+        痕迹；留痕面尽力而为（F54）：败不吞同步拒回。"""
+        reason = f"rejected:{tag}: {msg}"
         self._audit(tid, "done_rejected", note=tag)
-        return f"rejected:{tag}: {msg}"
+        try:
+            self._router.notify_worker(tid, "note", reason)
+        except Exception:
+            pass
+        return reason
 
     def _ensure_clean_auto(self, tid, target, exempt, auto_ignored,
                            roster=None):  # Req: F97
