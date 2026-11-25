@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agorad.core import report
 from agorad.core.auth import EV_AUTH_DENIED
+from agorad.core.gate import dirty_face_warning  # ag-9a680b 派发前脏仓预警
 from agorad.core.health import _ACTIVE, KIND_STALLED
 from agorad.core.msg import NotChainEdge
 from agorad.core.peer import Rejected as PeerRejected
@@ -202,8 +203,21 @@ class _Handler(BaseHTTPRequestHandler):
                                             actor_sid=sid)}  # ag-f80309：归属记真实调用 sid
         if name == "task_dispatch":
             # 公共响应不带 worker 牌：凭据只经文件指针注入/拉取面（F43/F85）
+            # ag-9a680b 派发前只读脏仓预警：spawn 前 porcelain 非空即随响应
+            # 附警行——warn-only 绝不拦派发（终局拦截归交付门 local_target_dirty）
+            warn = ""
+            try:
+                records = app.gitx.status_records(
+                    app.state.get(body["task"])["project_dir"])
+                if records:
+                    warn = dirty_face_warning(records)
+            except Exception:
+                pass  # 探针病零影响派发（warn-only 契约）
             app.task.dispatch(body["task"], token, actor_sid=sid)
-            return {"task": body["task"]}
+            r = {"task": body["task"]}
+            if warn:
+                r["warning"] = warn
+            return r
         if name == "task_update":
             vc = body["verify_cmd"]
             to = body.get("timeout")  # F51：预算同权可改

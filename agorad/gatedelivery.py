@@ -20,7 +20,10 @@ merged）；F105 同基假冲突自愈（最新基重建再 rebase 恰一次、a
 quick 包络（F65/F67）：合并前 merge-base 累计 diff 超文件/行阈值按 verify
 红既有路径退回。干净检查（F97）：advance dirty 脏面全为「根级未跟踪隐藏
 整目录」→中央名册幂等入册＋exclude 写入＋同轮重试一次；混合脏面零部分
-豁免。交付轮残值（D3）：重派/新轮/确认面 reset conflict_files/attempt/
+豁免；ag-9a680b 起 dirty 终局按三形细分（tracked_dirty/untracked_only/
+untracked collision——gt-fc6fb2「would be overwritten by merge」家族归
+dirty 绝不入 non-ff 重试），明细随 delivery_failed note 送达派发方。
+交付轮残值（D3）：重派/新轮/确认面 reset conflict_files/attempt/
 base/error。崩溃恢复 recover()：failed+done 只补 blocked 绝不自动重试；
 pending+done+commit 本地 contains 判定（F109 零网络）已含即收口；外部驻
 留直通零接触。
@@ -89,6 +92,101 @@ def _append_roster(path, patterns):  # Req: F97
     p.write_bytes(data + "\n".join(missing).encode("utf-8") + b"\n")
 
 
+# ag-9a680b：local_target_dirty 三形细分——umbrella reason 字符串不变
+# （downstream 解析口径），sub-form 只进 note 明细。事故家族：gt-fc6fb2
+# （未跟踪 cron 产物撞 ff-merge 被误报 non-ff、worker 盲试循环）、ag-e35a42
+# （派发方 .req-gate 脏面）、2026-11-25 两例 agent 构建树——旧拒因无文件
+# 清单无形态区分，每次复发烧一轮人工诊断。
+_DIRTY_CAP = 20              # 三形明细路径行上限（通知面防过载）
+_DIRTY_NOTE_TAIL = 2000      # 脏面明细 note 截断（_TAIL 同族；入参自带 20 行上限）
+_DIRTY_DISPOSITION = (       # untracked_only 形固定处置句（任务页原文，一字不改）
+    "safe disposition: append paths to .git/info/exclude (local-only ignore) "
+    "or mv them out (byte-preserving quarantine) - never rm; tracked changes "
+    "always require human adjudication")
+
+
+def _dirty_face(records, incoming=()):
+    """porcelain 脏面 → 三形判定（纯函数）：tracked_dirty（M/A/D/R/C 等
+    已跟踪改动——人工裁决）、untracked_collision（未跟踪路径与 incoming
+    合并内容相撞——gt-fc6fb2「untracked working tree files would be
+    overwritten by merge」家族，绝不入 non-ff 重试）、untracked_only（纯
+    未跟踪零相撞——exclude/mv 处置）。porcelain 未跟踪目录折叠（?? dir/）
+    按前缀判撞（实证：git 对 ignored 路径径直覆写，撞面必为非忽略未跟踪）。
+    返回 (form, tracked, untracked, colliding)。"""
+    tracked = [r[3:] for r in records if not r.startswith("?? ")]
+    untracked = [r[3:] for r in records if r.startswith("?? ")]
+    colliding = [u for u in untracked if any(
+        i == u.rstrip("/") or i.startswith(u.rstrip("/") + "/")
+        for i in incoming)]
+    if tracked:
+        form = "tracked_dirty"
+    elif colliding:
+        form = "untracked_collision"
+    else:
+        form = "untracked_only"
+    return form, tracked, untracked, colliding
+
+
+def _capped(paths):
+    uniq = list(dict.fromkeys(paths))[:_DIRTY_CAP]  # 保序去重＋行上限
+    if len(paths) > _DIRTY_CAP:
+        uniq.append(f"…共 {len(paths)} 条，仅列前 {_DIRTY_CAP} 行")
+    return uniq
+
+
+def dirty_face_detail(records, incoming=()):
+    """三形明细 note（delivery_failed 的 note 通道送达派发方）。records 空
+    ＝脏面不在主检出 porcelain（持有目标支的其他 worktree/竞窗已消）——
+    如实降级不猜形。"""
+    if not records:
+        return ("dirty form: unknown——目标仓 porcelain 取数全净（脏面可能"
+                "在持有目标支的其他 worktree）；人工 git worktree list 判读")
+    form, tracked, untracked, colliding = _dirty_face(records, incoming)
+    if form == "tracked_dirty":
+        lines = [f"dirty form: tracked_dirty——{len(tracked)} 处已跟踪改动"
+                 "（M/A/D/R/C），requires human adjudication（绝不自动清洗/"
+                 "stash/rm）:"]
+        lines += _capped(tracked)
+        if untracked:  # 混合脏面：未跟踪随行面一并点名（处置归下句）
+            lines.append(f"另有 {len(untracked)} 条未跟踪路径随行: "
+                         + ", ".join(_capped(untracked)))
+        return "\n".join(lines)
+    if form == "untracked_collision":
+        lines = ["dirty form: untracked_collision——未跟踪路径与合并内容相撞"
+                 "（git: untracked working tree files would be overwritten "
+                 "by merge——gt-fc6fb2 家族，非 non-ff，禁整链重试盲试）。",
+                 # 处置句先行（评审环 R2）：路径清单再长也不丢「禁 exclude」
+                 # 指引——相撞路径 exclude 后合并会静默覆写丢字节（实证）
+                 "disposition: mv them out (byte-preserving quarantine) "
+                 "- never rm；相撞路径禁走 exclude——排除后合并会静默"
+                 "覆写丢字节（实证 git 对 ignored 路径径直 clobber）",
+                 f"colliding untracked paths (cap {_DIRTY_CAP}):"]
+        lines += _capped(colliding)
+        return "\n".join(lines)
+    lines = [f"dirty form: untracked_only——{len(untracked)} 条未跟踪路径，"
+             "与合并内容零相撞。",
+             # 处置句先行（评审环 R2）：路径清单再长也不把规格原句挤出帽口
+             _DIRTY_DISPOSITION,
+             f"untracked paths (cap {_DIRTY_CAP}):"]
+    lines += _capped(untracked)
+    return "\n".join(lines)
+
+
+def dirty_face_warning(records):
+    """派发时脏仓预警行（ag-9a680b）：必含「target repo is dirty」＋三形
+    摘要＋路径计数——warn-only，派发不受拦（终局拦截归交付门 dirty 面）。
+    派发时无 incoming 可判碰撞：纯未跟踪按 untracked_only 汇总（保守）。"""
+    if not records:
+        return ""
+    form, tracked, untracked, _ = _dirty_face(records)
+    paths = tracked + untracked
+    sample = ", ".join(paths[:3])
+    return (f"target repo is dirty: {form}（{len(tracked)} tracked + "
+            f"{len(untracked)} untracked path(s): {sample}"
+            + (f" 等 {len(paths)} 条" if len(paths) > 3 else "")
+            + "）——merge gate 将按 local_target_dirty 终局拦截")
+
+
 class DeliveryGitx(VerifyGitx):
     """gitx 交付面（access.gitx 结构化满足；调用必在 UoW 外）。advance 返回
     口径＝access：synced|non-ff|dirty|failed（占用/机械病归 failed→
@@ -104,6 +202,7 @@ class DeliveryGitx(VerifyGitx):
     def delivery_lock(self, repo_dir): ...
     def diff_stats(self, env_dir, branch=None) -> tuple[int, int, str]: ...
     def status_records(self, repo_dir) -> list[str]: ...
+    def diff_paths(self, repo_dir, a, b) -> list[str]: ...  # ag-9a680b 碰撞面
     def apply_ignore_roster(self, repo_dir, patterns): ...
     def env_on_disk(self, env_dir) -> bool: ...
 
@@ -427,7 +526,9 @@ class GateDeliveryService(GateVerifyService):
                 except (RuntimeError, ValueError) as e:  # 锁内环境病＝终局
                     fail = (attempt, "local_base", str(e))  # （F98 D2 口径）
                 if fail is None and st == "dirty":  # Req: F97 全根级未跟踪
-                    if self._auto_ignore_face(tid, target):  # 隐藏整目录→入册
+                    # ag-9a680b：撞面禁豁免（评审环 R2）——exclude 后合并对
+                    # ignored 路径径直覆写（实证），豁免撞面＝静默丢字节
+                    if self._auto_ignore_face(tid, target, base, deliver):
                         try:  # 同轮重试一次
                             st = self._gitx.advance_local_target(
                                 target, branch, deliver, base)
@@ -451,10 +552,13 @@ class GateDeliveryService(GateVerifyService):
         if st == "non-ff":  # 锁内 CAS 落空/分叉：整链重试
             self._audit(tid, "delivery_nonff", attempt=attempt, note=st)
             return "retry"
-        # dirty/failed：终局——本地权威未推进，绝不伪装 pending
-        return self._delivery_fail(
-            tid, attempt,
-            "local_target_dirty" if st == "dirty" else "local_target_busy")
+        if st == "dirty":  # ag-9a680b：三形细分随 note（umbrella reason 不变）
+            return self._delivery_fail(
+                tid, attempt, "local_target_dirty",
+                note=self._dirty_detail(tid, target, base, deliver),
+                note_cap=_DIRTY_NOTE_TAIL)
+        # failed：终局——本地权威未推进，绝不伪装 pending
+        return self._delivery_fail(tid, attempt, "local_target_busy")
 
     def _refresh_base(self, tid, target, branch, base):
         """F105 假冲突自愈判据：最新基重读。基前进＝审计 rebase_conflict_retry
@@ -473,10 +577,41 @@ class GateDeliveryService(GateVerifyService):
                     **{"from": base, "to": latest})
         return latest
 
-    def _auto_ignore_face(self, tid, target):  # Req: F97
+    def _dirty_detail(self, tid, target, base, deliver):
+        """dirty 终局三形明细取数（ag-9a680b）：porcelain 脏面＋incoming
+        （base..deliver diff 路径面）碰撞判定；取数病如实降级留痕（形未知
+        不猜——排除误导处置）。碰撞面取数败按零撞面汇总并附甄别提示
+        （exclude 处置仅对零撞面安全——实证 git 对 ignored 路径径直覆写）。"""
+        try:
+            records = self._gitx.status_records(target)
+        except Exception as e:
+            self._audit(tid, "dirty_face_probe_failed", note=str(e)[:200])
+            return (f"dirty form: unknown——目标仓 porcelain 取数失败"
+                    f"（{str(e)[:120]}）；人工 git status 判读")
+        incoming, degraded = (), False
+        try:
+            incoming = tuple(self._gitx.diff_paths(target, base, deliver))
+        except Exception as e:
+            self._audit(tid, "dirty_face_collision_probe_failed",
+                        note=str(e)[:200])
+            degraded = True
+        note = dirty_face_detail(records, incoming)
+        if degraded:
+            # caveat 前置（评审环 R2）：尾部 append 会被 20 条长路径挤出
+            # 帽口——前置保证「禁 exclude」甄别先于路径清单与处置句在场
+            note = ("碰撞面取数失败：这些未跟踪路径是否与交付内容相撞未证"
+                    "——处置前先人工核对；相撞路径只能 mv 出，禁 exclude"
+                    "（排除后合并会静默覆写丢字节）\n" + note)
+        return note
+
+    def _auto_ignore_face(self, tid, target, base=None, deliver=None):
         """advance dirty 自动豁免面：脏面全为「根级未跟踪隐藏整目录」→中央
         名册幂等追加＋exclude 写入（同轮重试一次）；混合脏面/名册面缺席＝
-        None 零部分豁免；取数病留痕（不静默废 F97）。"""
+        None 零部分豁免；取数病留痕（不静默废 F97）。ag-9a680b（评审环 R2
+        撞面闸）：base/deliver 在案时先判 porcelain∩incoming 撞面——撞面
+        禁豁免（exclude 后合并对 ignored 路径径直覆写＝静默丢字节，改由
+        terminal collision 明细指导 mv 出）；碰撞取数病＝fail-closed 跳过
+        豁免（人工经明细处置，宁拦勿覆写）。"""
         try:
             records = self._gitx.status_records(target)
         except (RuntimeError, ValueError) as e:
@@ -485,6 +620,18 @@ class GateDeliveryService(GateVerifyService):
         patterns = _auto_ignore_patterns(records)
         if not patterns or not self._roster_path:
             return None
+        if base and deliver:
+            try:
+                incoming = self._gitx.diff_paths(target, base, deliver)
+            except Exception as e:
+                self._audit(tid, "auto_ignore_collision_probe_failed",
+                            note=str(e)[:200])
+                return None  # fail-closed：碰撞不可证即不豁免
+            _, _, _, colliding = _dirty_face(records, incoming)
+            if colliding:
+                self._audit(tid, "auto_ignore_skipped_collision",
+                            note=" ".join(colliding)[:200])
+                return None
         _append_roster(self._roster_path, patterns)
         self._gitx.apply_ignore_roster(target, patterns)
         self._audit(tid, "auto_ignore", note=" ".join(patterns))
@@ -593,11 +740,13 @@ class GateDeliveryService(GateVerifyService):
     # ---- 终局/成功公共面 ----
 
     def _delivery_fail(self, tid, attempt, error, note="",
-                       conflict_files=None):
+                       conflict_files=None, note_cap=200):
         """交付失败终局（F98 专用边）：delivery.status=failed＋error/attempt
         （＋F105 conflict_files）＋done→blocked（delivery_failure=True）——
         非质量败：不计 fail_streak、不弹 worker、不自动取消/重派；env 留
-        现场，处置权在派发方。"""
+        现场，处置权在派发方。note_cap 缺省 200（push_failed 尾巴无界防
+        过载口径不变）；ag-9a680b 脏面三形明细走专用有界 note（入参自带
+        20 行上限）显式抬帽至 _DIRTY_NOTE_TAIL。"""
         now, msg = self._now(), None
         with self._store.uow():
             fresh = self._store.get_task(tid)
@@ -611,7 +760,7 @@ class GateDeliveryService(GateVerifyService):
             self._store.upsert_task(task)
             detail = {"error": error, "attempt": attempt}
             if note:
-                detail["note"] = str(note)[:200]
+                detail["note"] = str(note)[:note_cap]
             self._store.append_event(self._ev(
                 now, "gate", "delivery_failed", tid, detail))
             if self._msg is not None and task.dispatcher_sid:
@@ -620,7 +769,7 @@ class GateDeliveryService(GateVerifyService):
                 if conflict_files:
                     body += "；冲突文件: " + ", ".join(conflict_files)
                 if note:
-                    body += "；" + str(note)[:200]
+                    body += "；" + str(note)[:note_cap]
                 msg, _ = self._msg.record(
                     ts_ms=now, from_sid="gate", to_sid=task.dispatcher_sid,
                     task_id=tid, kind="result", body=body,

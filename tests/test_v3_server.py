@@ -497,6 +497,28 @@ class TestV3Routes(_Base):  # 断言2
         s, b = self.call("v3/task_cancel", {"task": "ag-nope"}, self.root)
         self.assertEqual((s, b["error"]["code"]), (404, "not_found"))
 
+    def test_dispatch_dirty_target_repo_warns_only(self):  # ag-9a680b (d)
+        # 派发前只读脏仓预警：spawn 前 porcelain 非空→响应附「target repo is
+        # dirty」警行＋三形摘要＋路径计数——warn-only，派发绝不被拦
+        tid = self.mk()
+        self.gitx.status_records_value = ["?? linux-arm64-out/",
+                                          "?? .req-gate/ag-x.md"]
+        s, b = self.call("v3/task_dispatch", {"task": tid}, self.root)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b["task"], tid)
+        self.assertIn("target repo is dirty", b.get("warning", ""))
+        self.assertIn("untracked_only", b["warning"])  # 三形摘要（派发时无撞面）
+        self.assertIn("2 untracked", b["warning"])     # 路径计数
+        self.assertIn("linux-arm64-out/", b["warning"])
+        self.assertEqual(self.stack.storage.get_task(tid).state,
+                         "dispatched")  # 警行不拦派发
+        self.assertIn("status_records", self.gitx.ops())  # 只读探针在派发面
+
+    def test_dispatch_clean_target_repo_no_warning(self):
+        tid = self.mk()
+        s, b = self.call("v3/task_dispatch", {"task": tid}, self.root)
+        self.assertEqual((s, b.get("warning", "")), (200, ""))  # 全净零警行
+
 
 class TestLegacyRoutes(_Base):  # 断言3
     def test_fifteen_routes_reachable(self):

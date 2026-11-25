@@ -82,6 +82,11 @@ class FakeGitx:
     def check_branch(self, repo_dir, branch):
         pass
 
+    def status_records(self, repo_dir):  # ag-9a680b 派发前脏仓预警取数面
+        self.status_reads = getattr(self, "status_reads", [])
+        self.status_reads.append(repo_dir)
+        return list(getattr(self, "status_records_value", []))
+
     def checkout(self, repo_dir, branch):  # Req: F94 钉支任务走显式支还原面
         self.checkouts = getattr(self, "checkouts", [])
         self.checkouts.append((repo_dir, branch))
@@ -268,6 +273,32 @@ class HttpdTest(unittest.TestCase):
 
 
 class TestHttpSmoke(HttpdTest):
+    def test_dispatch_dirty_target_repo_warns_only(self):  # ag-9a680b (d)
+        # 派发前只读脏仓预警：spawn 前 porcelain 非空→响应附「target repo is
+        # dirty」警行＋三形摘要＋路径计数——warn-only，派发绝不被拦
+        tid = self.create_task({"goal": "g", "project_dir": "/repo",
+                                "verify_cmd": "true",
+                                "verify_base_exempt": True})
+        self.gitx.status_records_value = ["?? linux-arm64-out/",
+                                          " M a.py"]
+        st, r = call(self.port, "POST", "/task_dispatch", {"task": tid},
+                     self.root)
+        self.assertEqual(st, 200)  # 脏仓不拦派发（warn-only）
+        self.assertIn("target repo is dirty", r.get("warning", ""))
+        self.assertIn("tracked_dirty", r["warning"])
+        self.assertIn("1 tracked + 1 untracked", r["warning"])
+        self.assertIn("linux-arm64-out/", r["warning"])
+        self.assertEqual(self.app.state.get(tid)["state"], "dispatched")
+        self.assertEqual(self.gitx.status_reads, ["/repo"])  # 只读探针恰一次
+
+    def test_dispatch_clean_target_repo_no_warning(self):  # ag-9a680b
+        tid = self.create_task({"goal": "g", "project_dir": "/repo",
+                                "verify_cmd": "true",
+                                "verify_base_exempt": True})
+        st, r = call(self.port, "POST", "/task_dispatch", {"task": tid},
+                     self.root)
+        self.assertEqual((st, r), (200, {"task": tid}))  # 全净：响应零增键
+
     def test_full_chain_create_dispatch_done_gate_close(self):  # Req: F2/F4/F7
         tid = self.create_task()
         wtok = self.dispatch_task(tid)

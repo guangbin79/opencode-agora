@@ -109,6 +109,8 @@ class FakeGitx:
         self.local_sha_results = []  # Req: F105 按次取值队列（tip 刷新窗口）
         self.advance_calls, self.advance_result = [], "synced"
         self.advance_results = []
+        self.status_records_value = []  # ag-9a680b 脏面三形注入（真 porcelain 形状）
+        self.diff_paths_value = []      # ag-9a680b 碰撞面注入（base..deliver）
 
     def rebase_onto(self, env_dir, integration, conflicts=None):
         self.rebase_calls.append((env_dir, integration))
@@ -247,6 +249,16 @@ class FakeGitx:
         if self.advance_results:
             return self.advance_results.pop(0)
         return self.advance_result
+
+    def status_records(self, repo_dir):  # ag-9a680b 脏面三形取数面
+        self.status_calls = getattr(self, "status_calls", [])
+        self.status_calls.append(repo_dir)
+        return list(self.status_records_value)
+
+    def diff_paths(self, repo_dir, a, b):  # ag-9a680b 碰撞面取数
+        self.diff_paths_calls = getattr(self, "diff_paths_calls", [])
+        self.diff_paths_calls.append((repo_dir, a, b))
+        return list(self.diff_paths_value)
 
 
 class FakeHealth:
@@ -2684,12 +2696,20 @@ class TestManagedLocalDelivery(TestCoreGate):
         self.in_gate_local(streak=2)  # 连败 2 在案：交付失败不得推到 3
         self.gx.head_shas[self.integration] = SHA
         self.gx.advance_result = "dirty"  # 检出面 WIP 在场：advance 守卫保全现场
+        # ag-9a680b：三形细分随 note（真 porcelain 形状——' M '＝3 字符前缀）
+        self.gx.status_records_value = [" M src/a.py", "?? out/"]
+        self.gx.diff_paths_value = ["src/b.py"]
         self.gate.run("t1")
         t = self.state.get("t1")
         self.assertEqual(t["state"], "blocked")
         self.assertEqual(t["fail_streak"], 2)  # 非质量败不计连败
         self.assertEqual((self.delivery()["status"], self.delivery()["error"]),
-                         ("failed", "local_target_dirty"))
+                         ("failed", "local_target_dirty"))  # umbrella 不变
+        ev = [e for e in self.store.read_events("t1")
+              if e["event"] == "delivery_failed"][0]
+        self.assertIn("tracked_dirty", ev["note"])   # 形摘要入审计
+        self.assertIn("src/a.py", ev["note"])        # 冒犯路径清单
+        self.assertIn("requires human adjudication", ev["note"])
         self.assertEqual(self.gx.checkouts, [])  # 不清洗不换支
         self.assertEqual(self.gx.removed, [])  # blocked 留 env 现场
         evs = [e["event"] for e in self.store.read_events("t1")]

@@ -22,6 +22,12 @@ _RAND = string.ascii_lowercase + string.digits
 # rmtree 撞写重试参数：worker 评审环进程合并后仍可能往 env/.review-loop/ 写文件
 _RMT_TRIES = 4
 _RMT_WAIT = 0.5
+# ag-9a680b（gt-fc6fb2 家族）：merge 拒绝「untracked working tree files
+# would be overwritten」＝脏面家族（dirty）——绝不报 failed（busy）更绝不
+# non-ff。advance 前置 porcelain 检查与 merge 之间的竞窗（构建进程并发写
+# 出产物）落此路由。
+_UNTRACKED_COLLIDE = re.compile(
+    r"untracked working tree files would be overwritten", re.IGNORECASE)
 
 
 class DirtyWorktree(RuntimeError):
@@ -240,6 +246,15 @@ class Gitx:
         """porcelain 脏面原始记录——v3 交付执行体 F97 自动豁免判定的取数面
         （只读；脏面判定与豁免裁归调用方；解析与 ensure_clean 同一单源）。"""
         return self._porcelain_records(repo_dir)
+
+    def diff_paths(self, repo_dir: str, a: str, b: str) -> list[str]:
+        """a..b 变更路径清单（ag-9a680b local_target_dirty 三形判定的碰撞面
+        取数：incoming 合并内容＝base..deliver diff 路径面；只读）。-z NUL
+        分隔：非引号 raw 路径与 porcelain -z 同口径（无 -z 时 core.quotePath
+        会 C 引号化非 ASCII/特殊路径，与 raw porcelain 路径永不相等——撞面
+        会被静默降级 zero-collision，评审环 R2）。"""
+        r = self._git(["diff", "--name-only", "-z", a, b], cwd=repo_dir)
+        return [p for p in r.stdout.split("\0") if p]
 
     def clean_ignore(self, repo_dir: str, env_value: str = "") -> list[str]:
         """clean-ignore 声明解析（ag-f5aa4d）：仓根 .agora/clean-ignore（一行一条，
@@ -644,9 +659,10 @@ class Gitx:
         先重读 tip 要求 expected_old 匹配（他写者已推进/分叉＝non-ff，整链
         重试口径）；支未被任何 worktree 检出＝update-ref 原子 CAS 推进；被
         检出＝仅在该检出内 merge --ff-only（干净且仍在 expected_old）——脏
-        ＝dirty（保全 WIP）、机械拒绝＝failed；绝不清洗/换支/stash/force，
-        绝不重写历史。返回 synced/non-ff/failed/dirty。expected_old=None＝
-        无从 CAS，按 non-ff 交调用方重取基线。"""
+        ＝dirty（保全 WIP；ag-9a680b：merge 输出「untracked ... would be
+        overwritten」同归 dirty，绝不 busy/non-ff）、机械拒绝＝failed；绝不
+        清洗/换支/stash/force，绝不重写历史。返回 synced/non-ff/failed/dirty。
+        expected_old=None＝无从 CAS，按 non-ff 交调用方重取基线。"""
         sha = self._check_sha(sha)  # malformed 在触 git 前拒（F96 信任边界同源）
         if expected_old is None:
             return "non-ff"
@@ -704,6 +720,12 @@ class Gitx:
         if (r.returncode == 0 and now.returncode == 0
                 and now.stdout.strip().lower() == sha):
             return "synced"
+        if _UNTRACKED_COLLIDE.search(r.stderr or "") \
+                or _UNTRACKED_COLLIDE.search(r.stdout or ""):
+            # ag-9a680b（gt-fc6fb2）：merge 拒绝覆写未跟踪文件＝脏面家族
+            # ——porcelain 前置检查与 merge 间的竞窗（并发构建写产物）落此；
+            # 归 dirty 交调用方三形细分，绝不 busy 更绝不 non-ff 盲试
+            return "dirty"
         return "failed"  # 干净同位仍拒＝占用/机械病（index.lock 等）：不清洗不强制
 
     def _holding_worktree(self, repo_dir: str, branch: str):  # Req: F100

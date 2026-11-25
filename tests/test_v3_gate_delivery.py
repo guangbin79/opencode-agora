@@ -32,7 +32,8 @@ from agorad.contracts import ContractError
 from agorad.domain import (Credential, DeliveryState, VerifySpec,
                            dispatch_secret_key)
 from agorad.gatedelivery import (GateDeliveryService, _append_roster,
-                                 _auto_ignore_patterns)
+                                 _auto_ignore_patterns, dirty_face_detail,
+                                 dirty_face_warning)
 from agorad.messaging import MessagingService
 from agorad.storage import Storage
 from agorad.tasksvc import TaskService
@@ -42,10 +43,12 @@ DISPATCHER, WORKER = "ses-d1", "ses-w1"
 BRANCH, TIP, C, E = "v3-runtime", "b" * 40, "c" * 40, "e" * 40
 TIP2, R = "2" * 40, "9" * 40
 # 断言4 安全面：交付循环可触 gitx 方法白名单（无 force/clean/stash/checkout 面）
+# ag-9a680b 增补两只读取数面（dirty 三形细分：porcelain 脏面＋碰撞 diff）
 SAFE_OPS = {"contains", "is_ancestor", "head", "local_branch_sha",
             "build_integration_at", "merge_ff", "rebase_onto",
             "materialize_checkout", "advance_local_target", "delivery_lock",
-            "remove_integration", "remove_env"}
+            "remove_integration", "remove_env", "status_records",
+            "diff_paths"}
 
 
 class LockStub:
@@ -79,6 +82,7 @@ class GitxDeliveryStub:
         self.advance_script = []           # 逐次弹出："synced"|"non-ff"|"dirty"|"failed"
         self.sync_marks_contained = True   # synced 是否置可达集（G2 幻影用）
         self.status_records_value = []
+        self.diff_paths_value = []         # ag-9a680b 碰撞面注入（base..deliver）
         self.roster_applied = []
         self.diff = (0, 0, "")
         self.lock = LockStub()
@@ -174,6 +178,10 @@ class GitxDeliveryStub:
     def status_records(self, repo_dir):
         self._rec("status_records", repo_dir)
         return list(self.status_records_value)
+
+    def diff_paths(self, repo_dir, a, b):
+        self._rec("diff_paths", repo_dir, a, b)
+        return list(self.diff_paths_value)
 
     def apply_ignore_roster(self, repo_dir, patterns):
         self._rec("apply_ignore_roster", repo_dir, list(patterns))
@@ -461,6 +469,95 @@ class TestManagedGreen(_Base):  # 断言1/2/4
         self.assertEqual(self.gate.run(tid), "blocked")
         self.assertEqual(self.storage.get_task(tid).delivery.error,
                          "local_target_busy")
+
+    # ---- ag-9a680b：local_target_dirty 三形细分（umbrella reason 不变） ----
+
+    def _run_dirty_face(self, records, incoming):
+        """脏面三形公共夹具：advance 拒 dirty → blocked 终局＋明细 note。"""
+        tid = self.seed("ag-df")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["dirty"]
+        self.gitx.status_records_value = list(records)
+        self.gitx.diff_paths_value = list(incoming)
+        self.assertEqual(self.gate.run(tid), "blocked")
+        return tid
+
+    def _delivery_failed_note(self, tid):
+        return [e.detail["note"] for e in self.storage.events_for_task(tid)
+                if e.event == "delivery_failed"][0]
+
+    def test_dirty_untracked_only_disposition(self):  # (a)
+        tid = self._run_dirty_face(
+            ["?? linux-arm64-out/", "?? .req-gate/ag-x.md"],
+            ["src/agorad/a.py", "tests/test_a.py"])
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.error, t.fail_streak),
+                         ("blocked", "local_target_dirty", 0))
+        self.assertEqual(self.advance_args(), [(C, TIP)])  # 无整链重试
+        body = "\n".join(self.text(m) for m in self.messages(DISPATCHER))
+        self.assertIn("untracked_only", body)
+        self.assertIn("linux-arm64-out/", body)   # 路径清单入通知面
+        self.assertIn(".req-gate/ag-x.md", body)
+        self.assertIn("safe disposition: append paths to .git/info/exclude "
+                      "(local-only ignore) or mv them out (byte-preserving "
+                      "quarantine) - never rm; tracked changes always require "
+                      "human adjudication", body)  # 处置句完整不被 200 帽截断
+        self.assertIn("untracked_only", self._delivery_failed_note(tid))
+
+    def test_dirty_tracked_requires_human_adjudication(self):  # (b)
+        # 记录用真 porcelain 形状（' M '＝unstaged modified，3 字符前缀）
+        tid = self._run_dirty_face([" M src/a.py", "?? out/"], [])
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.error),
+                         ("blocked", "local_target_dirty"))
+        body = "\n".join(self.text(m) for m in self.messages(DISPATCHER))
+        self.assertIn("tracked_dirty", body)
+        self.assertIn("requires human adjudication", body)
+        self.assertIn("src/a.py", body)  # 冒犯路径清单
+        self.assertIn("另有 1 条未跟踪路径随行: out/", body)  # 混合面一并点名
+
+    def test_dirty_untracked_collision_never_non_ff(self):  # (c)
+        tid = self._run_dirty_face(
+            ["?? linux-arm64-out/build.o"],
+            ["linux-arm64-out/build.o", "src/agorad/a.py"])
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.error),
+                         ("blocked", "local_target_dirty"))  # 撞面归 dirty 家族
+        self.assertEqual(self.advance_args(), [(C, TIP)])  # 恰一次：绝不 non-ff 整链重试
+        self.assertNotIn("delivery_nonff", self.events(tid))  # gt-fc6fb2 缺陷面
+        body = "\n".join(self.text(m) for m in self.messages(DISPATCHER))
+        self.assertIn("untracked_collision", body)
+        self.assertIn("linux-arm64-out/build.o", body)  # git 拒并文件名入明细
+        self.assertIn("would be overwritten by merge", body)
+        self.assertIn("never rm", body)
+
+    def test_dirty_face_probe_sick_degrades_formless(self):
+        # 取数病（真件 RuntimeError）：reason 不变、明细如实降级（形未知不
+        # 猜），绝不逆转终局——warn/detail 面 fail-open 只降明细不降拒因
+        tid = self.seed("ag-dfp")
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["dirty"]
+        orig = self.gitx.status_records
+
+        def boom(repo_dir):
+            raise RuntimeError("porcelain down")
+        self.gitx.status_records = boom
+        self.assertEqual(self.gate.run(tid), "blocked")
+        self.assertEqual(self.storage.get_task(tid).delivery.error,
+                         "local_target_dirty")
+        self.assertIn("unknown", self._delivery_failed_note(tid))
+        self.assertIn("dirty_face_probe_failed", self.events(tid))
+        self.gitx.status_records = orig  # 复原防泄漏后续用例
+
+    def test_dirty_empty_records_names_other_worktree(self):
+        # 主检出 porcelain 全净而 advance 报 dirty（脏面在持有支的其他
+        # worktree）——如实降级不猜形，绝不按零路径伪装 untracked_only
+        tid = self._run_dirty_face([], [])
+        self.assertEqual(self.storage.get_task(tid).delivery.error,
+                         "local_target_dirty")
+        self.assertIn("unknown", self._delivery_failed_note(tid))
 
     def test_git_surface_whitelisted(self):
         tid = self.seed("ag-m9")
@@ -850,6 +947,49 @@ class TestCleanCheck(_Base):  # 断言9
         self.assertEqual(self.storage.get_task(tid).delivery.attempt, 1)
         self.assertEqual(self.advance_args(), [(C, TIP), (C, TIP)])  # 同轮重试
 
+    def test_hidden_dir_face_colliding_not_exempted(self):
+        # ag-9a680b 评审环 R2（A1/B1）：撞面禁 F97 豁免——exclude 后合并对
+        # ignored 路径径直覆写＝静默丢字节；撞面走 terminal collision 明细
+        tid = self.seed("ag-s1c")
+        path = self._roster()
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["dirty"]
+        self.gitx.status_records_value = ["?? .cache/"]
+        self.gitx.diff_paths_value = [".cache/model.bin", "src/a.py"]
+        self.assertEqual(self.gate.run(tid), "blocked")  # 不入册不同轮重试
+        t = self.storage.get_task(tid)
+        self.assertEqual((t.state, t.delivery.error),
+                         ("blocked", "local_target_dirty"))
+        self.assertFalse(path.exists())  # 零豁免：名册未写
+        self.assertEqual(self.gitx.roster_applied, [])
+        self.assertEqual(len(self.advance_args()), 1)  # 无同轮重试
+        self.assertIn("auto_ignore_skipped_collision", self.events(tid))
+        body = "\n".join(self.text(m) for m in self.messages(DISPATCHER))
+        self.assertIn("untracked_collision", body)  # 撞面明细指导 mv 出
+        self.assertIn("never rm", body)
+
+    def test_hidden_dir_face_collision_probe_sick_skips_exemption(self):
+        # 碰撞取数病＝fail-closed：宁拦勿覆写（豁免跳过、留审计、terminal 收口）
+        tid = self.seed("ag-s1d")
+        self._roster()
+        self.green_script()
+        self.set_anchor(tid)
+        self.gitx.advance_script = ["dirty"]
+        self.gitx.status_records_value = ["?? .cache/"]
+        orig = self.gitx.diff_paths
+
+        def boom(repo_dir, a, b):
+            raise RuntimeError("diff down")
+        self.gitx.diff_paths = boom
+        self.assertEqual(self.gate.run(tid), "blocked")
+        self.assertEqual(self.gitx.roster_applied, [])  # 零豁免
+        self.assertIn("auto_ignore_collision_probe_failed", self.events(tid))
+        body = "\n".join(self.text(m) for m in self.messages(DISPATCHER))
+        self.assertIn("碰撞面取数失败", body)  # 降级甄别提示在场
+        self.assertIn("禁 exclude", body)
+        self.gitx.diff_paths = orig  # 复原防泄漏后续用例
+
     def test_mixed_dirty_face_no_partial_exemption(self):
         tid = self.seed("ag-s2")
         path = self._roster()
@@ -1050,6 +1190,69 @@ class TestPureHelpers(unittest.TestCase):  # 断言9/3 纯函数单源
             _append_roster(p, [".c/"])
             self.assertEqual(p.read_text(), ".a/\n.b/\n.c/\n")
 
+    # ---- ag-9a680b：三形细分纯函数（断言4/9 扩面） ----
+
+    def test_dirty_face_detail_untracked_only(self):
+        note = dirty_face_detail(["?? out/", "?? .req-gate/x.md"],
+                                 ["src/a.py"])
+        self.assertIn("untracked_only", note)
+        self.assertIn("out/", note)
+        self.assertIn(".req-gate/x.md", note)
+        self.assertIn("safe disposition: append paths to .git/info/exclude "
+                      "(local-only ignore) or mv them out (byte-preserving "
+                      "quarantine) - never rm; tracked changes always require "
+                      "human adjudication", note)
+
+    def test_dirty_face_detail_tracked(self):
+        # 记录用真 porcelain 形状（XY<space><path>：' M'=unstaged、'M '=staged）
+        note = dirty_face_detail([" M a.py", "M  b.py", "?? out/"], [])
+        self.assertIn("tracked_dirty", note)
+        self.assertIn("requires human adjudication", note)
+        self.assertIn("a.py", note)
+        self.assertIn("b.py", note)
+        self.assertNotIn("safe disposition", note)  # 处置句专属 untracked_only 形
+
+    def test_dirty_face_detail_collision(self):
+        # 目录折叠前缀判撞：?? dir/ 撞 incoming dir/x；零撞不误报
+        note = dirty_face_detail(["?? dir/", "?? loose.bin"],
+                                 ["dir/x.py", "dir/sub/y.py"])
+        self.assertIn("untracked_collision", note)
+        self.assertIn("dir/", note)
+        self.assertIn("would be overwritten by merge", note)
+        self.assertIn("never rm", note)
+        self.assertEqual(dirty_face_detail(["?? a"], ["b"]),  # 零撞＝纯未跟踪
+                         dirty_face_detail(["?? a"], []))
+
+    def test_dirty_face_detail_cap_20_lines(self):
+        note = dirty_face_detail([f"?? u{i}" for i in range(30)], [])
+        self.assertIn("u19\n", note)   # 前 20 行在
+        self.assertNotIn("u29", note)  # 超帽截断
+        self.assertIn("共 30 条，仅列前 20 行", note)
+
+    def test_dirty_face_detail_disposition_precedes_paths(self):
+        # 评审环 R2（OCR#1-3/#5）：安全指引先行——20 条长路径不把处置句/
+        # 「禁 exclude」挤出 note 帽口（截断面恒保全关键指引）
+        longs = [f"very/deep/agent/build/tree/p{i}/linux-arm64-out.bin"
+                 for i in range(20)]
+        note = dirty_face_detail([f"?? {p}" for p in longs], [])
+        self.assertLess(note.index("safe disposition"),
+                        note.index(longs[0]))  # 处置句先于路径清单
+        note = dirty_face_detail([f"?? {p}" for p in longs], [longs[0]])
+        self.assertIn("untracked_collision", note)
+        self.assertLess(note.index("disposition: mv them out"),
+                        note.index(longs[0]))  # 撞面处置句先于撞面清单
+
+    def test_dirty_face_detail_empty_records_unknown(self):
+        self.assertIn("unknown", dirty_face_detail([], []))
+
+    def test_dirty_face_warning_line(self):
+        w = dirty_face_warning(["?? out/", " M a.py"])
+        self.assertIn("target repo is dirty", w)
+        self.assertIn("tracked_dirty", w)
+        self.assertIn("1 tracked + 1 untracked", w)
+        self.assertIn("a.py", w)
+        self.assertEqual(dirty_face_warning([]), "")  # 全净零警行
+
 
 class TestConflictFilesRoundtrip(_Base):  # 断言10：投影残值持久化
     def test_conflict_files_persist_through_storage(self):
@@ -1117,6 +1320,118 @@ class TestAccessStatusRecords(unittest.TestCase):  # 评审环 R1 C1：取数面
             (Path(d) / "a.py").write_text("y", encoding="utf-8")
             self.assertEqual(sorted(Gitx().status_records(d)),
                              ["?? .cache/", "?? a.py"])
+
+
+class TestAdvanceCollisionRouting(unittest.TestCase):
+    """ag-9a680b（gt-fc6fb2 缺陷）：真 git 件验证「untracked working tree
+    files would be overwritten by merge」输出路由 dirty 家族——此前该输出落
+    advance 终端 failed（busy 家族），v2 前时代更被混报 non-ff 整链盲试。"""
+
+    def _repo(self):
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+
+        def g(*a):
+            subprocess.run(["git", *a], cwd=d, check=True,
+                           capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        (Path(d) / "f.txt").write_text("x", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        g("checkout", "-qb", "side")
+        (Path(d) / "colliding.txt").write_text("new", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "side")
+        g("checkout", "-q", "main")
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=d,
+                              capture_output=True, text=True).stdout.strip()
+        tip = subprocess.run(["git", "rev-parse", "side"], cwd=d,
+                             capture_output=True, text=True).stdout.strip()
+        return d, base, tip
+
+    def test_merge_output_collision_routes_dirty(self):
+        # 竞窗模拟：porcelain 前置检查通过后、merge 前未跟踪产物落盘（构建
+        # 进程并发写输出——gt-fc6fb2/ag-9a680b 事故形态）；merge 拒绝文案
+        # 「untracked working tree files would be overwritten by merge」
+        # 须归 dirty（交付门三形细分），绝不 failed/busy、绝不 non-ff
+        from pathlib import Path
+        from agorad.access.gitx import Gitx
+        d, base, tip = self._repo()
+
+        class _RaceGitx(Gitx):
+            def _git(self, args, cwd=None, check=True, timeout=None,
+                     input_data=None):
+                if args[:2] == ["merge", "--ff-only"]:
+                    (Path(cwd) / "colliding.txt").write_text(
+                        "junk", encoding="utf-8")  # 竞窗注入
+                return super()._git(args, cwd, check=check, timeout=timeout,
+                                    input_data=input_data)
+
+        self.assertEqual(
+            _RaceGitx().advance_local_target(d, "main", tip, base), "dirty")
+
+    def test_porcelain_precheck_routes_dirty(self):
+        # 非竞窗常规面：未跟踪产物在前置 porcelain 即检出（dirty 家族不变量）
+        from pathlib import Path
+        from agorad.access.gitx import Gitx
+        d, base, tip = self._repo()
+        (Path(d) / "colliding.txt").write_text("junk", encoding="utf-8")
+        self.assertEqual(
+            Gitx().advance_local_target(d, "main", tip, base), "dirty")
+
+    def test_clean_repo_advances_synced(self):
+        # 不变量：干净仓照常 ff 推进（本改动零接触成功路径）
+        from agorad.access.gitx import Gitx
+        d, base, tip = self._repo()
+        self.assertEqual(
+            Gitx().advance_local_target(d, "main", tip, base), "synced")
+
+    def test_diff_paths_incoming_face(self):
+        # 碰撞面取数：base..deliver diff 路径＝合并将写入的内容面
+        from agorad.access.gitx import Gitx
+        d, base, tip = self._repo()
+        self.assertEqual(Gitx().diff_paths(d, base, tip), ["colliding.txt"])
+
+    def test_diff_paths_raw_unquoted_non_ascii(self):
+        # 评审环 R2（OCR）：-z raw 路径与 porcelain -z 同口径——无 -z 时
+        # core.quotePath 会 C 引号化非 ASCII 路径（"\346\225\260..."），与
+        # raw porcelain 路径永不相等——撞面被静默降级 zero-collision
+        import subprocess as sp
+        import tempfile
+        from pathlib import Path
+        from agorad.access.gitx import Gitx
+        name = "数据构建产物.bin"
+        with tempfile.TemporaryDirectory() as d:
+            def g(*a):
+                sp.run(["git", *a], cwd=d, check=True,
+                       capture_output=True)
+            g("init", "-q", "-b", "main")
+            g("config", "user.email", "t@t")
+            g("config", "user.name", "t")
+            (Path(d) / "f.txt").write_text("x", encoding="utf-8")
+            g("add", "-A")
+            g("commit", "-qm", "base")
+            g("checkout", "-qb", "side")
+            (Path(d) / name).write_text("new", encoding="utf-8")
+            g("add", "-A")
+            g("commit", "-qm", "side")
+            g("checkout", "-q", "main")
+            base = sp.run(["git", "rev-parse", "HEAD"], cwd=d,
+                          capture_output=True, text=True).stdout.strip()
+            tip = sp.run(["git", "rev-parse", "side"], cwd=d,
+                         capture_output=True, text=True).stdout.strip()
+            gitx = Gitx()
+            self.assertEqual(gitx.diff_paths(d, base, tip), [name])
+            (Path(d) / name).write_text("junk", encoding="utf-8")
+            records = gitx.status_records(d)  # porcelain -z raw 面
+            self.assertEqual([r[3:] for r in records], [name])
+            self.assertIn(name, gitx.diff_paths(d, base, tip))  # 撞面可判
 
 
 if __name__ == "__main__":

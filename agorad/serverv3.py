@@ -41,6 +41,7 @@ from agorad.contracts import (API_VERSION, CATALOG, ContractError,
                               validate_task_create)
 from agorad.adapter import doctor as doctor_view
 from agorad.domain import Event
+from agorad.gatedelivery import dirty_face_warning  # ag-9a680b 派发前脏仓预警
 from agorad.healthsvc import KIND_STALLED
 
 _VERSION = "0.1.0"
@@ -292,8 +293,20 @@ class _V3Handler(BaseHTTPRequestHandler):
             row = stack.storage.get_task(tid)  # worker 调用即开工（v2 同款）
         if name == "task_dispatch":
             # 公共响应不带 worker 牌：凭据只经文件指针/拉取面（F43/F85）
+            # ag-9a680b 派发前只读脏仓预警：spawn 前 porcelain 非空即随响应
+            # 附警行——warn-only 绝不拦派发（终局拦截归交付门 local_target_dirty）
+            warn = ""
+            try:
+                records = stack.gitx.status_records(row.project_dir)
+                if records:
+                    warn = dirty_face_warning(records)
+            except Exception:
+                pass  # 探针病零影响派发（warn-only 契约）
             stack.tasks.dispatch(tid, sid, role)
-            return {"task": tid}
+            r = {"task": tid}
+            if warn:
+                r["warning"] = warn
+            return r
         if name == "task_update":
             stack.tasks.update_verify(tid, sid, role, params["verify_cmd"],
                                       timeout=params.get("timeout"))
