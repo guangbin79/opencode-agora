@@ -418,7 +418,8 @@ class Gate:
             if a is None:
                 return self._deny_anchor(
                     tid, f"任务 {tid} 合并前置失败：锚缺失/落后（.review-loop/"
-                    ".last-reviewed 缺失或不等于分支 HEAD，或 .review-base 链根"
+                    ".last-reviewed 缺失或不等于分支 HEAD，或 .review-loop/"
+                    ".review-base 链根"
                     "缺失——F111 双件齐全才算在锚）——跑评审环重建锚（==HEAD 且"
                     "评审环绿）后重新 post(done, commit)")
             if a.get("head") != commit:
@@ -897,8 +898,9 @@ class Gate:
                     self._quality_fail(  # ag-084a22 B：自动 reopened 回 worker 自愈
                         tid, "reopened",  # （无出边的驻留 done 态封死）
                         "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/"
-                        "未绿/链根漂移（F111：.review-base ≠ 任务起点）——重建锚"
-                        "（.last-reviewed ==HEAD 且评审环绿且 .review-base == 任务"
+                        "未绿/链根漂移（F111：.review-loop/.review-base ≠ 任务"
+                        "起点）——重建锚（.last-reviewed ==HEAD 且评审环绿且 "
+                        ".review-loop/.review-base == 任务"
                         "起点）后重新 post(done, commit)",
                         reason="锚缺失/落后/未绿/链根漂移")
                     return

@@ -299,7 +299,8 @@ class GateVerifyService:
         if a is None and not (t.review_cmd or "").strip():
             return self._deny_anchor(tid, "anchor", f"任务 {tid} 合并前置失败："
                                      "锚缺失/落后（.review-loop/.last-reviewed "
-                                     "缺失或不等于分支 HEAD，或 .review-base 链根"
+                                     "缺失或不等于分支 HEAD，或 .review-loop/"
+                                     ".review-base 链根"
                                      "缺失——F111 双件齐全才算在锚）——跑评审环"
                                      "重建锚（==HEAD 且评审环绿）后重新 "
                                      "post(done, commit)")
@@ -724,8 +725,9 @@ class GateVerifyService:
             self._quality_fail(
                 tid, "reopened",
                 "合并前置失败：verify 绿但合并时 .review-loop 锚缺失/落后/"
-                "未绿/链根漂移（F111：.review-base ≠ 任务起点）——重建锚"
-                "（.last-reviewed ==HEAD 且评审环绿且 .review-base == 任务"
+                "未绿/链根漂移（F111：.review-loop/.review-base ≠ 任务起点）"
+                "——重建锚（.last-reviewed ==HEAD 且评审环绿且 "
+                ".review-loop/.review-base == 任务"
                 "起点）后重新 post(done, commit)",
                 reason="锚缺失/落后/未绿/链根漂移")
             return "reopened"
