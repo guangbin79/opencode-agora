@@ -110,6 +110,8 @@ class PublicationGitx(typing.Protocol):
     def publication(self, repo_dir, branch=None) -> dict: ...
     def published_on_origin(self, repo_dir, commit, branch) -> bool: ...
     def patch_equivalent_on_origin(self, repo_dir, commit, branch) -> bool: ...
+    def blob_settled_on_origin(self, repo_dir, commit, branch) -> bool: ...
+    def lines_settled_on_origin(self, repo_dir, commit, branch) -> bool: ...
 
 
 class Notifier(typing.Protocol):
@@ -342,13 +344,18 @@ class HealthService:
                         pub = self._gitx.publication(t.project_dir,
                                                      t.target_branch)
                         # 分支 ahead 可能来自无关提交；交付 commit 也可能被
-                        # rebase 改 sha 后出版——sha 与补丁均不在 origin 才拍
+                        # rebase 改 sha 后出版；rebase 孪生还可能上下文漂移/
+                        # 纯二进制交付致 patch-id 两层失明——sha、补丁与内容
+                        # 落定（ag-b0efd4）均不在 origin 才拍
                         unpublished = bool(
                             pub and pub.get("origin_ref") and d.commit
                             and not self._gitx.published_on_origin(
                                 t.project_dir, d.commit, pub["branch"])
                             and not self._gitx.patch_equivalent_on_origin(
-                                t.project_dir, d.commit, pub["branch"]))
+                                t.project_dir, d.commit, pub["branch"])
+                            and not self._content_settled(
+                                tid, t.project_dir, d.commit,
+                                pub["branch"]))
                 except Exception:
                     continue  # 对账不可得：保账不清，本轮免判（下轮重试）
                 if unpublished:
@@ -368,6 +375,29 @@ class HealthService:
             for tid in list(book):
                 if tid not in tasks:  # 除籍出账
                     del book[tid]
+
+    def _content_settled(self, tid, project_dir, commit, branch) -> bool:
+        """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底，语义
+        自 v2 core/health.py 平移）：祖先与 patch-id 两层均未命中后，
+        per-file blob 落定（二进制可判）或新增行包含性（上下文漂移孪生）
+        任一命中即视同已出版——停升级并落 content-settled 审计行（判定层
+        ＋commit/branch 证据指针）；判定异常上抛交调用方本轮免判（下轮
+        重试）；审计败尽力而为不逆转判定。"""
+        layer = None
+        if self._gitx.blob_settled_on_origin(project_dir, commit, branch):
+            layer = "blob"
+        elif self._gitx.lines_settled_on_origin(project_dir, commit, branch):
+            layer = "lines"
+        if not layer:
+            return False
+        try:
+            with self._store.uow():
+                self._store.append_event(self._ev(
+                    self._now(), "health", "content-settled", tid,
+                    {"layer": layer, "commit": commit, "branch": branch}))
+        except Exception:
+            pass
+        return True
 
     # ---- 升级拍人 / 自检注入 / 活动心跳 ----
 

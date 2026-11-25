@@ -982,6 +982,114 @@ class TestPublishedOnOrigin(unittest.TestCase):
             str(self.repo), delivery, "ghost"))  # 无跟踪 ref：无从证实
 
 
+class TestContentSettledOnOrigin(TestPublishedOnOrigin):
+    """内容落定（ag-b0efd4 第三层）：unpublished 探针 rebase 孪生残留两
+    形态的漏判兜底——per-file blob 落定（二进制可判）与新增行包含性
+    （上下文漂移），真 git、零网络（update-ref 伪造 origin 跟踪 ref）。"""
+
+    def _commit_bytes(self, files, msg):
+        for name, blob in files.items():
+            (self.repo / name).write_bytes(blob)
+        self._git(["add", "-A"])
+        self._git(["commit", "-m", msg])
+        return self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+    def test_blob_settled_binary_twin(self):
+        # 形态二（ag-455da2，lib-maplibre-native master）：纯二进制交付——
+        # diff 无 hunk 面，hunk 层保守 False；孪生（同文件清单同终态）已
+        # 出版且旧 blob 漂移（index 行入 patch-id）致完整层也失明——
+        # per-file blob 落定命中：视同已发布
+        self._commit_bytes({"b1.so": b"V1-b1\x00", "b2.so": b"V1-b2\x00"},
+                           "seed")
+        self._git(["checkout", "-q", "-b", "work"])
+        d = self._commit_bytes({"b1.so": b"V2-b1\x00", "b2.so": b"V2-b2\x00"},
+                               "delivery")
+        self._git(["checkout", "-q", "main"])
+        self._commit_bytes({"b1.so": b"VX-b1\x00"}, "parallel")  # 旧 blob 漂移
+        twin = self._commit_bytes({"b1.so": b"V2-b1\x00",
+                                   "b2.so": b"V2-b2\x00"}, "twin")
+        self._set_origin(twin)
+        self.assertFalse(self.gx.published_on_origin(str(self.repo), d,
+                                                     "main"))
+        self.assertFalse(self.gx.patch_equivalent_on_origin(
+            str(self.repo), d, "main"))
+        self.assertTrue(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                       "main"))
+        self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
+                                                         "main"))
+
+    def test_lines_settled_context_drift_twin(self):
+        # 形态一（ag-70b05f，HXNativeApp MSC-26-RW033）：并行任务同文件
+        # 相邻行落条目——rebase 孪生 hunk 上下文含 MsgBox 行而交付不含，
+        # patch-id 两层均不命中；新增内容逐字节相同仅上下文漂移：行包含
+        # 性命中（blob 面因上下文漂移不命中——两判定分工）
+        self._commit({"src.py": "l1\nl2\nl3\nl4\n"}, "setup")
+        self._git(["checkout", "-q", "-b", "work"])
+        d = self._commit({"src.py": "l1\nl2\nentry\nl3\nl4\n"}, "delivery")
+        self._git(["checkout", "-q", "main"])
+        self._commit({"src.py": "l1\nl2\nMsgBox\nl3\nl4\n"}, "parallel")
+        twin = self._commit({"src.py": "l1\nl2\nMsgBox\nentry\nl3\nl4\n"},
+                            "twin")
+        self._set_origin(twin)
+        self.assertFalse(self.gx.published_on_origin(str(self.repo), d,
+                                                     "main"))
+        self.assertFalse(self.gx.patch_equivalent_on_origin(
+            str(self.repo), d, "main"))
+        self.assertFalse(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                        "main"))
+        self.assertTrue(self.gx.lines_settled_on_origin(str(self.repo), d,
+                                                        "main"))
+
+    def test_content_not_settled_when_genuinely_unpublished(self):
+        # 对照组（真未推）：三层全 False——照常升级（升级通道本体不动）
+        self._git(["checkout", "-q", "-b", "work"])
+        d = self._commit({"src.py": "v2", "new.py": "n1\n"}, "delivery")
+        self._set_origin(self.base)  # origin 停在交付前：内容真缺席
+        self.assertFalse(self.gx.published_on_origin(str(self.repo), d,
+                                                     "main"))
+        self.assertFalse(self.gx.patch_equivalent_on_origin(
+            str(self.repo), d, "main"))
+        self.assertFalse(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                        "main"))
+        self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
+                                                         "main"))
+        for probe in (self.gx.blob_settled_on_origin,
+                      self.gx.lines_settled_on_origin):
+            self.assertFalse(probe(str(self.repo), d, "ghost"))  # 无跟踪 ref
+
+    def test_window_excludes_stale_content(self):
+        # 窗口外陈旧内容不误判：孪生被 ≥window 个改掉同文件的后续提交推出
+        # 窗口（ls-tree 语义：窗口内树不再持该 blob）→ 不落定；默认窗口
+        # （50 commit）内孪生仍在：落定
+        self._git(["checkout", "-q", "-b", "work"])
+        d = self._commit({"src.py": "v2"}, "delivery")
+        self._git(["checkout", "-q", "main"])
+        self._commit({"src.py": "v2"}, "twin")
+        self._commit({"src.py": "fillA"}, "fillA")
+        self._commit({"src.py": "fillB"}, "fillB")
+        self._set_origin(self._git(["rev-parse", "HEAD"]).stdout.strip())
+        self.assertFalse(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                        "main", 2))
+        self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
+                                                         "main", 2))
+        self.assertTrue(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                       "main"))
+        self.assertTrue(self.gx.lines_settled_on_origin(str(self.repo), d,
+                                                        "main"))
+
+    def test_blob_partial_file_set_not_settled(self):
+        # 变更文件集须逐文件落定：仅部分文件内容在场（他因携带）不落定
+        self._git(["checkout", "-q", "-b", "work"])
+        d = self._commit({"a.py": "A1\n", "b.py": "B1\n"}, "delivery")
+        self._git(["checkout", "-q", "main"])
+        self._commit({"a.py": "A1\n", "other.py": "x\n"}, "partial")
+        self._set_origin(self._git(["rev-parse", "HEAD"]).stdout.strip())
+        self.assertFalse(self.gx.blob_settled_on_origin(str(self.repo), d,
+                                                        "main"))
+        self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
+                                                         "main"))
+
+
 class TestRepoToolWorktree(unittest.TestCase):
     """ag-4c6136 repo-tool 伪 worktree：<root>/<name> 检出的 .git 是指向
     <root>/.repo/projects/<name>.git 的符号链接——porcelain 把 gitdir 本身

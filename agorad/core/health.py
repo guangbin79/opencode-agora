@@ -510,15 +510,20 @@ class Health:
                                                   t.get("target_branch"))
                            if self._gitx else None)
                     # 祖先对账（ag-6c673c 误报）＋补丁等价对账（ag-4c6136
-                    # 误报）：分支 ahead 可能来自无关提交；交付 commit 也可能
-                    # 被派发方 rebase 改 sha 后出版——sha 与补丁均不在 origin
-                    # 才拍（cherry 对账空＝内容已出版）
+                    # 误报）＋内容落定（ag-b0efd4 孪生残留）：分支 ahead 可能
+                    # 来自无关提交；交付 commit 也可能被派发方 rebase 改 sha
+                    # 后出版；rebase 孪生还可能上下文漂移/纯二进制交付致
+                    # patch-id 两层失明——sha、补丁与内容落定均不在 origin
+                    # 才拍（三漏才复读轰炸）
                     unpublished = bool(
                         pub and pub.get("origin_ref") and d.get("commit")
                         and not self._gitx.published_on_origin(
                             t["project_dir"], d["commit"], pub["branch"])
                         and not self._gitx.patch_equivalent_on_origin(
-                            t["project_dir"], d["commit"], pub["branch"]))
+                            t["project_dir"], d["commit"], pub["branch"])
+                        and not self._content_settled(
+                            tid, t["project_dir"], d["commit"],
+                            pub["branch"]))
                 except Exception:
                     pub, unpublished = None, False  # 投影/对账不可得本轮免判（下轮重试）
                 if unpublished:
@@ -539,6 +544,29 @@ class Health:
             for tid in list(book):
                 if tid not in tasks:  # 除籍出账：防长驻 daemon 无界增长
                     del book[tid]
+
+    def _content_settled(self, tid, project_dir, commit, branch) -> bool:
+        """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底）：祖先
+        与 patch-id 两层均未命中后，per-file blob 落定（二进制可判，同 blob
+        强于同补丁）或新增行包含性（上下文漂移孪生）任一命中即视同已出版
+        ——停升级并落 content-settled 审计行（判定层＋commit/branch 证据
+        指针）；判定异常上抛交调用方本轮免判（下轮重试）；审计败尽力而为
+        不逆转判定（F54 口径）。"""
+        layer = None
+        if self._gitx.blob_settled_on_origin(project_dir, commit, branch):
+            layer = "blob"
+        elif self._gitx.lines_settled_on_origin(project_dir, commit, branch):
+            layer = "lines"
+        if not layer:
+            return False
+        try:
+            self._store.append_event({"ts": time.time(), "actor": "health",
+                                      "event": "content-settled",
+                                      "task": tid, "layer": layer,
+                                      "commit": commit, "branch": branch})
+        except Exception:
+            pass
+        return True
 
     def _infra_backstop_scan(self, tasks):  # Req: F130
         """verify_infra 驻留宽限兜底：到点仍 done∧非门内∧非 awaiting_external

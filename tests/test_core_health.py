@@ -1606,11 +1606,14 @@ class TestDeliveryWatch(TestCoreHealth):
 
     class FakeGitx:
         def __init__(self, ahead=0, published=True, origin_ref="o" * 40,
-                     patch_equiv=False):
+                     patch_equiv=False, blob_settled=False,
+                     lines_settled=False):
             self.ahead = ahead
             self.published = published
             self.origin_ref = origin_ref
             self.patch_equiv = patch_equiv
+            self.blob_settled = blob_settled
+            self.lines_settled = lines_settled
             self.calls = []
 
         def publication(self, repo_dir, branch=None):
@@ -1623,6 +1626,12 @@ class TestDeliveryWatch(TestCoreHealth):
 
         def patch_equivalent_on_origin(self, repo_dir, commit, branch):
             return self.patch_equiv
+
+        def blob_settled_on_origin(self, repo_dir, commit, branch):
+            return self.blob_settled
+
+        def lines_settled_on_origin(self, repo_dir, commit, branch):
+            return self.lines_settled
 
     def mk_watch(self, gitx=None, ext_after=1800.0, unpub_after=3600.0):
         return Health(self.state, self.oc, self.router, self.recover, self.app,
@@ -1713,6 +1722,37 @@ class TestDeliveryWatch(TestCoreHealth):
         h.tick()
         self.assertNotIn("unpublished", self.kinds())
         self.assertEqual(h._unpub_esc, {})  # 视同已出版：watch 出账
+
+    def test_unpublished_content_settled_twins_no_escalate(self):
+        # ag-b0efd4：rebase 孪生残留两形态（上下文漂移/纯二进制）——
+        # patch-id 两层失明，第三层内容落定（blob 落定/行包含性）任一命中
+        # 即视同已出版：不拍且出账，content-settled 审计行随判定层
+        for layer, attr in (("blob", "blob_settled"),
+                            ("lines", "lines_settled")):
+            with self.subTest(layer):
+                gx = self.FakeGitx(ahead=3, published=False)
+                setattr(gx, attr, True)
+                self.seed_delivered(updated_age=4000.0)
+                h = self.mk_watch(gitx=gx)
+                h.tick()
+                self.assertNotIn("unpublished", self.kinds())
+                self.assertEqual(h._unpub_esc, {})
+                evs = [e for e in self.store.read_events()
+                       if e.get("event") == "content-settled"]
+                self.assertEqual(evs[-1].get("layer"), layer)
+
+    def test_unpublished_escalation_stops_when_content_settles(self):
+        # 自愈（ag-b0efd4 判据 4）：复读中的升级序列在新逻辑下自动消解
+        # ——下轮探针判定即停，出账不连拍
+        gx = self.FakeGitx(ahead=3, published=False)
+        self.seed_delivered(updated_age=4000.0)
+        h = self.mk_watch(gitx=gx)
+        h.tick()
+        self.assertIn("unpublished", self.kinds())  # 旧口径：复读进行中
+        gx.lines_settled = True  # 新逻辑生效（孪生内容落定）
+        h.tick()
+        self.assertEqual(self.kinds().count("unpublished"), 1)  # 判定即停
+        self.assertEqual(h._unpub_esc, {})
 
     def test_unpublished_no_origin_ref_no_escalate(self):  # Req: F110
         gx = self.FakeGitx(ahead=0, published=False, origin_ref=None)

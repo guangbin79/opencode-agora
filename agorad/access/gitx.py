@@ -652,6 +652,148 @@ class Gitx:
         return Counter(p[0] for ln in r.stdout.splitlines()
                        if (p := ln.split()))
 
+    def _origin_window(self, repo_dir: str, ref: str,
+                       window: int) -> list[str]:  # Req: ag-b0efd4
+        """origin ref 最近 window 个 commit（rev-list --max-count，零网络
+        refs-only）——内容落定的有界窗口：只认 ref tip 侧最近 N 个，窗口外
+        陈旧内容不算（判据见 blob_settled_on_origin）。"""
+        revs = self._git(["rev-list", "--max-count", str(window), ref],
+                         cwd=repo_dir, check=False)
+        if revs.returncode != 0:
+            raise RuntimeError(f"git rev-list --max-count {window} {ref}: "
+                               f"{revs.stderr.strip()}")
+        return revs.stdout.split()
+
+    def blob_settled_on_origin(self, repo_dir: str, commit: str,
+                               branch: str, window: int = 50) -> bool:
+        """per-file blob 落定（ag-b0efd4「内容落定」判定一）：交付 commit
+        变更文件集的每个文件，在 origin 目标支最近 window 个 commit 任一
+        树上的 blob == 交付树 blob（cat-file --batch-check 逐 <rev>:<path>
+        一次进程收全窗口）→ 落定＝视同已发布。二进制可判（无 hunk 面的纯
+        .so 交付，ag-455da2 形态二），文本亦可用（同 blob 强于同补丁）。
+        变更文件集内任一文件交付树缺席（删除）或窗口全缺 blob＝无从对账
+        不落定；空补丁/无跟踪 ref→False；git 机械病如实 RuntimeError
+        （调用方本轮免判）。假阳性权衡（已接受）：窗口内后续 commit 携带
+        相同 blob＝误判已发布——宁漏报升级不复读轰炸。"""
+        commit = self._check_sha(commit)
+        ref = f"refs/remotes/origin/{branch}"
+        probe = self._git(["rev-parse", "--verify", "--quiet", ref],
+                          cwd=repo_dir, check=False)
+        if probe.returncode != 0:
+            return False  # 无跟踪 ref：出版无从证实
+        names = self._git(["diff-tree", "-r", "--no-renames", "--root",
+                           "--name-only", "-z", commit],
+                          cwd=repo_dir, check=False)
+        if names.returncode != 0:
+            raise RuntimeError(
+                f"git diff-tree --name-only {commit}: {names.stderr.strip()}")
+        toks = [p for p in names.stdout.split("\0") if p]
+        if toks and self._SHA40.fullmatch(toks[0]):
+            toks = toks[1:]  # diff-tree 前导 commit sha 行（-z 同以 NUL 断行）
+        if not toks:
+            return False  # 空补丁：无内容可对账
+        wins = self._origin_window(repo_dir, ref, window)
+        if not wins:
+            return False
+        specs = [f"{commit}:{p}" for p in toks] \
+            + [f"{w}:{p}" for w in wins for p in toks]
+        r = self._git(["cat-file", "--batch-check"], cwd=repo_dir,
+                      check=False, input_data="\n".join(specs) + "\n")
+        if r.returncode != 0:
+            raise RuntimeError(f"git cat-file --batch-check: {r.stderr.strip()}")
+        blob = {}
+        for ln, spec in zip(r.stdout.splitlines(), specs):  # 每查询恰一行
+            parts = ln.split()
+            if len(parts) == 3 and self._SHA40.fullmatch(parts[0]):
+                # <oid> <type> <size>；missing 行两段（路径含空格时三段但
+                # parts[0] 带 ':' 不入 40hex，拒收防对位误存）
+                blob[spec] = parts[0].lower()
+        for p in toks:
+            mine = blob.get(f"{commit}:{p}")
+            if not mine:
+                return False  # 交付树缺席（删除）：无从对账不落定
+            if not any(blob.get(f"{w}:{p}") == mine for w in wins):
+                return False
+        return True
+
+    def lines_settled_on_origin(self, repo_dir: str, commit: str,
+                                branch: str, window: int = 50) -> bool:
+        """新增行包含性（ag-b0efd4「内容落定」判定二）：交付 diff 各文件
+        「+」行集合 ⊆ origin 最近 window 内某 commit 同文件 diff「+」行
+        集合（排除上下文行，纯新增内容比对）→ 落定。覆盖上下文漂移孪生
+        （ag-70b05f 形态一：并行任务相邻行落条目致 rebase 孪生 hunk 上下文
+        漂移，patch-id 两层均失明而新增行逐字节相同）。纯新增面空（纯删除
+        /二进制/mode-only）＝无从对账不落定；无跟踪 ref→False；git 机械病
+        如实 RuntimeError（调用方本轮免判）。假阳性权衡（已接受，同判定一）：
+        窗口内后续 commit 合法携带相同新增行＝误判已发布——宁漏报升级不
+        复读轰炸。"""
+        commit = self._check_sha(commit)
+        ref = f"refs/remotes/origin/{branch}"
+        probe = self._git(["rev-parse", "--verify", "--quiet", ref],
+                          cwd=repo_dir, check=False)
+        if probe.returncode != 0:
+            return False
+        mine = self._git(["diff-tree", "-p", "-r", "--no-renames", "--root",
+                          commit], cwd=repo_dir, check=False)
+        if mine.returncode != 0:
+            raise RuntimeError(
+                f"git diff-tree -p {commit}: {mine.stderr.strip()}")
+        added = self._plus_lines(mine.stdout)
+        if not any(added.values()):
+            return False  # 纯删除/二进制/mode-only：无新增面可对账
+        wins = self._origin_window(repo_dir, ref, window)
+        if not wins:
+            return False
+        win = self._git(["diff-tree", "-p", "-r", "--no-renames", "--root",
+                         "--stdin"], cwd=repo_dir, check=False,
+                        input_data="\n".join(wins) + "\n")
+        if win.returncode != 0:
+            raise RuntimeError(f"git diff-tree -p --stdin: {win.stderr.strip()}")
+        return self._lines_contained(added, win.stdout)
+
+    @staticmethod
+    def _plus_lines(diff_text: str) -> dict[str, set]:  # Req: ag-b0efd4
+        """diff-tree -p 输出 → {path: 「+」行集合}（纯解析，零 git）。
+
+        文件归属认 `+++ b/<path>` 头——仅文件头区（未见 @@ 前）作数：hunk
+        正文内以 + 起头的内容行不会误判成头（正文区 + 行全归新增集合，含
+        「+++ b/x」形内容行）；`@@ -` 进正文区；diff --git/裸 sha 分段行
+        重置。删除文件（+++ /dev/null）与二进制（Binary files … differ）
+        无新增行不入集合。"""
+        out: dict[str, set] = {}
+        sha_line = Gitx._SHA40.fullmatch
+        path, body = None, False
+        for ln in diff_text.splitlines():
+            if ln.startswith("diff --git ") or sha_line(ln):
+                path, body = None, False
+            elif not body and ln.startswith("+++ b/"):
+                path = ln[6:]
+            elif ln.startswith("@@ -"):
+                body = True
+            elif body and ln.startswith("+"):
+                if path is not None:
+                    out.setdefault(path, set()).add(ln[1:])
+        return out
+
+    def _lines_contained(self, added: dict, win_text: str) -> bool:
+        """行包含判定：交付各文件 added[f] ⊆ 窗口内某 commit 同文件「+」
+        集合（各文件独立找 commit——拆分出版亦消解）。窗口 --stdin 流按
+        裸 sha 分段行切 commit（合并提交无 diff 面自然空段）。"""
+        sha_line = Gitx._SHA40.fullmatch
+        chunks, cur = [], None
+        for ln in win_text.splitlines():
+            if sha_line(ln):
+                if cur is not None:
+                    chunks.append(cur)
+                cur = []
+            elif cur is not None:
+                cur.append(ln)
+        if cur is not None:
+            chunks.append(cur)
+        per = [self._plus_lines("\n".join(c)) for c in chunks]
+        return all(any(lines.issubset(w.get(f, ())) for w in per)
+                   for f, lines in added.items() if lines)
+
     def advance_local_target(self, repo_dir: str, branch: str, sha: str,
                              expected_old) -> str:  # Req: F100
         """本地权威目标支推进（调用方持仓级交付锁）：CAS＋ff-only 双守卫。

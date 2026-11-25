@@ -73,13 +73,16 @@ class OcStub:
 
 
 class PubGitxStub:
-    """gitx 出版对账桩：publication/published_on_origin/patch 等价可预置。"""
+    """gitx 出版对账桩：publication/published_on_origin/patch 等价/内容
+    落定（blob 落定·行包含性）可预置。"""
 
     def __init__(self):
         self.pub = {"origin_ref": "refs/heads/v3-runtime", "branch":
                     "v3-runtime", "ahead": 2}
         self.published = False
         self.patch_eq = False
+        self.blob_settled = False
+        self.lines_settled = False
         self.raises = False
 
     def publication(self, repo_dir, branch=None):
@@ -92,6 +95,12 @@ class PubGitxStub:
 
     def patch_equivalent_on_origin(self, repo_dir, commit, branch):
         return self.patch_eq
+
+    def blob_settled_on_origin(self, repo_dir, commit, branch):
+        return self.blob_settled
+
+    def lines_settled_on_origin(self, repo_dir, commit, branch):
+        return self.lines_settled
 
 
 class FakeClock:
@@ -830,6 +839,43 @@ class TestDeliveryWatch(_Base):  # 断言10
                                                    commit="a" * 40))
             self.health.tick()
             self.assertEqual(self.escalate_kinds(tid), [], name)
+
+    def test_unpublished_content_settled_twins_suppress(self):
+        # ag-b0efd4：rebase 孪生残留两形态（上下文漂移/纯二进制）——第三层
+        # 内容落定（blob 落定/行包含性）任一命中即视同已出版：不拍且落
+        # content-settled 审计行（判定层随行）
+        for layer, attr in (("blob", "blob_settled"),
+                            ("lines", "lines_settled")):
+            tid = self.seed(f"ag-u-{layer}", state="closed",
+                            updated_ms=self.clock.ms - 61 * MIN,
+                            commit="a" * 40,
+                            delivery=DeliveryState(mode="managed",
+                                                   status="delivered",
+                                                   commit="a" * 40))
+            setattr(self.gitx, attr, True)
+            self.health.tick()
+            self.assertEqual(self.escalate_kinds(tid), [], layer)
+            evs = [e for e in self.storage.events_for_task(tid)
+                   if e.event == "content-settled"]
+            self.assertEqual([e.detail.get("layer") for e in evs], [layer])
+            setattr(self.gitx, attr, False)
+
+    def test_unpublished_escalation_stops_when_content_settles(self):
+        # 自愈（ag-b0efd4 判据 4）：退避窗已过旧口径必重拍，内容落定后
+        # 下轮探针判定即停
+        tid = self.seed("ag-u-heal", state="merged",
+                        updated_ms=self.clock.ms - 61 * MIN,
+                        commit="a" * 40,
+                        delivery=DeliveryState(mode="managed",
+                                               status="delivered",
+                                               commit="a" * 40))
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds(tid), [KIND_UNPUBLISHED])
+        self.gitx.lines_settled = True
+        self.clock.advance(GAP0_MS * 4)  # 退避窗已过：无判定必重拍
+        self.health.tick()
+        self.assertEqual(self.escalate_kinds(tid), [KIND_UNPUBLISHED])  # 即停
+        self.assertIn("content-settled", self.events(tid))
         self.gitx.published = False
         self.gitx.patch_eq = False
         self.gitx.raises = True  # 对账不可得：本轮免判（下轮重试）
