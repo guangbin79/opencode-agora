@@ -701,8 +701,15 @@ class Gitx:
                       check=False, input_data="\n".join(specs) + "\n")
         if r.returncode != 0:
             raise RuntimeError(f"git cat-file --batch-check: {r.stderr.strip()}")
+        out_lines = r.stdout.splitlines()
+        if len(out_lines) != len(specs):  # 每查询恰一行；路径含换行会把一条
+            # spec 裂成两条物理行、对位破坏（评审环册B/C）——机械病如实抛
+            # （调用方本轮免判），不猜对位
+            raise RuntimeError(
+                "git cat-file --batch-check: 响应行数≠查询数"
+                f"（{len(out_lines)}!={len(specs)}，路径含换行？）")
         blob = {}
-        for ln, spec in zip(r.stdout.splitlines(), specs):  # 每查询恰一行
+        for ln, spec in zip(out_lines, specs):
             parts = ln.split()
             if len(parts) == 3 and self._SHA40.fullmatch(parts[0]):
                 # <oid> <type> <size>；missing 行两段（路径含空格时三段但

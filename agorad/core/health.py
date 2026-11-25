@@ -157,6 +157,9 @@ class Health:
         self._unpublished_after = unpublished_after
         self._ext_esc = {}  # tid->(连拍次数 n, 末拍时刻)：external-stale 退避
         self._unpub_esc = {}  # tid->(n, last)：unpublished 退避
+        # tid->(layer, commit, branch)：content-settled 已审备忘（评审环册B——
+        # 边沿触发审计，防 merged/closed 驻留任务每轮 tick 重落事件无界增长）
+        self._settled_audit = {}
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72，内存态同上）
@@ -544,6 +547,9 @@ class Health:
             for tid in list(book):
                 if tid not in tasks:  # 除籍出账：防长驻 daemon 无界增长
                     del book[tid]
+        for tid in list(self._settled_audit):
+            if tid not in tasks:
+                del self._settled_audit[tid]
 
     def _content_settled(self, tid, project_dir, commit, branch) -> bool:
         """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底）：祖先
@@ -559,6 +565,10 @@ class Health:
             layer = "lines"
         if not layer:
             return False
+        key = (layer, commit, branch)
+        if self._settled_audit.get(tid) == key:
+            return True  # 已审边沿：驻留任务每轮 tick 不重落（防事件无界增长）
+        self._settled_audit[tid] = key
         try:
             self._store.append_event({"ts": time.time(), "actor": "health",
                                       "event": "content-settled",

@@ -161,6 +161,9 @@ class HealthService:
         self._env_gone_seen = set()  # env 丢失周期边沿记忆（F72）
         self._ext_esc = {}        # external-stale 退避
         self._unpub_esc = {}      # unpublished 退避
+        # tid->(layer, commit, branch)：content-settled 已审备忘（评审环册B——
+        # 边沿触发审计，防 merged/closed 驻留任务每轮 tick 重落事件无界增长）
+        self._settled_audit = {}
 
     # ---- tick 主循环 ----
 
@@ -375,6 +378,9 @@ class HealthService:
             for tid in list(book):
                 if tid not in tasks:  # 除籍出账
                     del book[tid]
+        for tid in list(self._settled_audit):
+            if tid not in tasks:
+                del self._settled_audit[tid]
 
     def _content_settled(self, tid, project_dir, commit, branch) -> bool:
         """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底，语义
@@ -390,6 +396,10 @@ class HealthService:
             layer = "lines"
         if not layer:
             return False
+        key = (layer, commit, branch)
+        if self._settled_audit.get(tid) == key:
+            return True  # 已审边沿：驻留任务每轮 tick 不重落（防事件无界增长）
+        self._settled_audit[tid] = key
         try:
             with self._store.uow():
                 self._store.append_event(self._ev(

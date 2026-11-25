@@ -854,7 +854,10 @@ class TestDeliveryWatch(_Base):  # 断言10
                                                    commit="a" * 40))
             setattr(self.gitx, attr, True)
             self.health.tick()
+            self.health.tick()  # 驻留任务每轮重探：审计边沿触发只落一次
             self.assertEqual(self.escalate_kinds(tid), [], layer)
+            self.assertEqual(self.events(tid, "content-settled"),
+                             ["content-settled"])
             evs = [e for e in self.storage.events_for_task(tid)
                    if e.event == "content-settled"]
             self.assertEqual([e.detail.get("layer") for e in evs], [layer])

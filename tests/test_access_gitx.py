@@ -1089,6 +1089,19 @@ class TestContentSettledOnOrigin(TestPublishedOnOrigin):
         self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
                                                          "main"))
 
+    def test_blob_newline_path_rejected_as_mechanical(self):
+        # 评审环册B/C：文件名含换行（git 合法）经 -z 原样进 spec，一条 spec
+        # 裂成两条物理行、cat-file 对位破坏——行数守卫如实 RuntimeError
+        # （调用方本轮免判），不猜对位
+        self._git(["checkout", "-q", "-b", "work"])
+        (self.repo / "we\nird.py").write_text("x\n")
+        self._git(["add", "-A"])
+        self._git(["commit", "-m", "newline path"])
+        d = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        self._set_origin(d)
+        with self.assertRaises(RuntimeError):
+            self.gx.blob_settled_on_origin(str(self.repo), d, "main")
+
 
 class TestRepoToolWorktree(unittest.TestCase):
     """ag-4c6136 repo-tool 伪 worktree：<root>/<name> 检出的 .git 是指向

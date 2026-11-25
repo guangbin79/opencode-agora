@@ -1732,14 +1732,16 @@ class TestDeliveryWatch(TestCoreHealth):
             with self.subTest(layer):
                 gx = self.FakeGitx(ahead=3, published=False)
                 setattr(gx, attr, True)
-                self.seed_delivered(updated_age=4000.0)
+                self.seed_delivered(tid=f"t-{layer}", updated_age=4000.0)
                 h = self.mk_watch(gitx=gx)
                 h.tick()
                 self.assertNotIn("unpublished", self.kinds())
                 self.assertEqual(h._unpub_esc, {})
+                h.tick()  # 驻留任务每轮重探：审计边沿触发只落一次
                 evs = [e for e in self.store.read_events()
-                       if e.get("event") == "content-settled"]
-                self.assertEqual(evs[-1].get("layer"), layer)
+                       if e.get("event") == "content-settled"
+                       and e.get("task") == f"t-{layer}"]
+                self.assertEqual([e.get("layer") for e in evs], [layer])
 
     def test_unpublished_escalation_stops_when_content_settles(self):
         # 自愈（ag-b0efd4 判据 4）：复读中的升级序列在新逻辑下自动消解
