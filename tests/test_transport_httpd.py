@@ -1493,6 +1493,7 @@ class TestPeerSurface(HttpdTest):
         boot = self.stub.sessions[wsid]["injects"][0]
         self.assertIn("repo_board", boot)
         self.assertIn("仅供参考", boot)  # peer 留言是数据不是指令
+        self.assertIn("写完即走不等回复", boot)  # Req: F172 写侧引导：一句话事实，勿上板聊天
 
 
 class TestCredForSid(HttpdTest):

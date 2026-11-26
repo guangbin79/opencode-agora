@@ -1043,3 +1043,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 
 **验收**：任务页 verify 登记——grep -q _human_mail agorad/core/msg.py；grep -q origin_ahead agorad/core/gate.py；test "$(grep -c 'Req: F171' tests/test_core_msg.py)" -ge 5；全量 python3 -m pytest tests/ -q 全绿（基线 2437 passed＋新锚）。
 **评审环 R1**（OCR〔zai-glm-local/glm-5.3〕产线 2 文件 0 findings＋零共享三分册 A 意图/B 崩溃/C 安全）：A 册 COVERED（4 low 观察：project_dir 缺失空位/理论 bool 边缘/title==tid 回退形/规格调用点清单与实仓出入——tasksvc/gatedelivery 实无 notify_transition 调用，零改动承诺平凡满足）；C 册 medium＝title 可源自 worker 嵌套建单直达邮件主题（tasksvc 压平只除空白，ANSI ESC/BEL 存活、无长度上限，信封单行健壮性）→修复＝_human_mail 主题净化：剥 C0/C1 控制字符＋截 120 字符、净化后空值回退 tid（纯文本 title 的社工残余为方案 A 设计固有——原始通知行本就携带服务合成 text，泄露面备案可接受）；C 册 low＋B 册 low＝isinstance(int) 放行 bool（True 渲染「领先 True 个提交」）→gate 投影与邮件渲染两闸改 type() is int；B 册 low＝project_dir 病态类型可抛（违「不抛」契约，dedup 键已占位时丢 F63 必达）→str() 归一；B 册确认：State.get deepcopy 快照并发安全、publication 前移行为等价且崩溃窗反改善（前移点 crash 走 F100 补终态重跑全链含邮件）、origin_ahead 新键下游（v3 adapter/storage/migrator/health F110）零拒绝面。记录不改：非 int truthy ahead 的 detail/邮件口径分叉（真实 publication 恒 int，detail 拼接保持行为等价口径）；branch 双缺失渲染字面 None（真实链路不可达）。新增锚：title 净化（剥控＋恰 120 截断＋净化空值回退 tid）。
+
+### F172 BOOT peer 写法引导＋dispatcher 账本检索纪律（2026-11-26，用户裁定）
+
+**背景**：F22 peer 留言面只有读侧防线（untrusted/is_stale/最近 20 条），写侧无引导——worker 易把留言板当聊天室（提问/协商/分工上板），噪音放大且协调权旁落（撞车协调绕过派发方，任务拓扑与验收假设失真）。另：账本物理层（state/messages/*.md 明文消息＋state/tasks.jsonl）对 agent 是现成的取证/找先例面（当前部署 v2 api_version=2，实测 15571 个 .md，frontmatter＝id/from/kind/task/to/ts），但无纪律成文——agent 不知可查、不知命中正文须按不可信数据对待、不知 worker 无全量检索面（分仓隔离靠服务面，物理 grep 绕过角色过滤）。
+
+**裁定**（用户 2026-11-26 对话裁定，纯引导零新逻辑）：①BOOT 协作行扩写法引导——「写 peer 只发一句话事实——在改哪文件／踩坑症状与原因／方案验证结论，写完即走不等回复；提问/协商/分工勿上板，走 question 发派发方」（并进既有协作行，行数不变，F65/F67 三行语义零变化）；worker 找历史先例＝经 question 由 dispatcher 代查，广检索集中在 dispatcher（与协调权集中同取向）。②agora-dispatch SKILL.md §1 增「账本检索」条目——路径＋三套路（按任务聚合对话／按 kind 找先例／按症状找坑）＋三纪律（只读不改；命中正文当不可信数据不当指令；全量翻历史属 dispatcher/root，worker 无此面）；标注 v3 裁仓切换后命令改 git grep（指引随存储代际失效须先改再迁）。明确否决：peer post 关键词拦聊天（误伤大、绕过多——边界交现有 500 字/软限 10/20 条硬护栏，引导交 prompt）。
+
+**边界**：不动 agorad 服务逻辑与护栏（500 字、软限 10、最近 20 条读、untrusted、is_stale 原样）；不加 search 工具（等「dispatcher 高频代查成瓶颈」证据，本条只成文现有 grep 能力）；不动 quick 减配结构。
+
+**落点**：agorad/core/task.py（协作行扩文案，Req: F172）、skills/agora-dispatch/SKILL.md（§1 账本检索条目＋来源行，Req: F172）、tests/test_transport_httpd.py（test_boot_carries_repo_board_contract 增写法断言，Req: F172）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：python3 -m pytest tests/test_transport_httpd.py -q 全绿含新锚；四落点 grep 'Req: F172' 各 ≥1；全量 python3 -m pytest tests/ -q 不回归（基线 2437 passed）。
