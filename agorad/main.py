@@ -324,7 +324,8 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
     app = App(store=store, state=state, auth=auth, router=router, task=task,
               peer=peer, gate=None, health=None, recover=recover, report=report,
               oc=oc, gitx=gitx, main_sid=main_sid, page_writer=page_writer,
-              verify_profiles=verify_profiles)  # Req: F126 doctor 注入面
+              verify_profiles=verify_profiles,  # Req: F126 doctor 注入面
+              verify_hygiene=find_verify_hygiene_issues)  # Req: F175：提案预检（F99 同一谓词，装配传递勿复制）
     health = Health(state, oc, router, recover, app, store=store,  # R25-A：活绑定
                     stale_candidates=report.stale_candidates,  # 僵态同口径（F5）
                     env_activity=report._env_activity,  # F59 env 活性同口径（禁兄弟 import）

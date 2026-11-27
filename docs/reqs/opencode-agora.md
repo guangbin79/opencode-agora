@@ -1091,3 +1091,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/core/task.py（BOOT done 行，Req: F174）、agorad/core/gate.py＋agorad/gateverify.py 拒因前缀化＋zero_commit（Req: F174）、agorad/core/msg.py＋agorad/messaging.py（parse_noop 纯函数双件——分层守卫禁共享 import，Router.record 落库不注入缝）、agorad/transport/httpd.py（_noop_archive）、agorad/serverv3.py（_message_post 同构分支）、skills/agora-dispatch/SKILL.md（§6）、tests/test_transport_httpd.py＋tests/test_v3_server.py（各三锚）＋tests/test_core_task.py（BOOT 前缀锚，Req: F174）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：python3 -m pytest tests/test_transport_httpd.py -q 全绿（含三锚）；grep -rq 'Req: F174' tests/；全量 python3 -m pytest tests/ -q 零失败（基线以任务起点 collect-only 实测为准）。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F175 verify 提案机械预检（2026-11-27，用户裁定）
+
+**背景**：worker post(kind=verify) 提案 → dispatcher 手工校验可执行性（F99 卫生形：绝对路径/裸 token/cd 形态）＋需求覆盖。前半是死检查——F99 登记闸谓词已存在（find_verify_hygiene_issues 单一规则），本条把它前移到提案时：脏提案服务自动打回（附报因），到 dispatcher 的提案只剩「需求覆盖」语义半。零风险：预检只读、驳回走既有下行通道。
+
+**裁定**：①提案预检（v2 httpd._post kind=verify up 边分支＋v3 serverv3._message_post 同款）——worker 上行 verify 提案在消息落库前过 F99 单一规则谓词（装配注入：v2 App.verify_hygiene 经 main.assemble 传递、v3 V3Stack.verify_hygiene 经 compose 装配注入——serverv3 传输层禁 core import；谓词复用勿复制）；blocking 报因非空 → 服务合成 verify_reject 下行消息投 worker（from=agorad 服务标识非 dispatcher sid；v2 走 Router.notify_worker 只落库不注入——worker 同回合已收同步回执、单线程串行 HTTP 环免 head-of-line（B 册 R2），v3 走 messaging.post 真实投递），body 附 F99 报因（code/fragment/hint 同款）＋「修正后重报」，消息不投递 dispatcher；审计 event=verify_precheck_reject（task、actor=worker sid、报因）；post 响应附回执 {"message": <合成消息 id>, "precheck_rejected": true, "reasons": <报因列表>}（净提案缺省无键——加键不破形状）；②GLOBAL_STATE 仅告警不拒（F99 登记闸 blocking 同口径）；③dispatcher skill §3 回填路步骤 1 后插一句（提案先过服务机械预检——脏提案已自动打回不占往返）。预检是前移非替代：F99 登记闸原样二次校验；verify_reject 人工通道（dispatcher 手工驳回）照旧可用。
+
+**边界**：不执行命令本体（只静态谓词——执行属 verify 门领地）；不动登记/锁定流程；不改 BOOT（自动驳回消息自带引导）；非本仓文件零改动。
+
+**落点**：agorad/core/app.py（verify_hygiene 注入面字段，Req: F175）、agorad/main.py（装配传递）、agorad/transport/httpd.py（_post 分支＋_verify_precheck，Req: F175）、agorad/compose.py（V3Stack verify_hygiene 装配注入，Req: F175）、agorad/serverv3.py（_message_post 同构分支＋_verify_precheck，Req: F175）、skills/agora-dispatch/SKILL.md（§3 一句）、tests/test_transport_httpd.py＋tests/test_v3_server.py（各两锚：test_verify_dirty_proposal_auto_reject／test_verify_clean_proposal_unchanged，Req: F175）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：python3 -m pytest tests/test_transport_httpd.py tests/test_core_msg.py -q 全绿；grep -rq 'precheck_rejected' agorad/ && grep -rq 'verify_precheck_reject' agorad/ && grep -q '机械预检' skills/agora-dispatch/SKILL.md && grep -rq 'Req: F175' tests/；全量 python3 -m pytest tests/ -q 零失败（基线以任务起点 collect-only 实测为准）。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。

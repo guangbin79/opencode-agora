@@ -43,6 +43,7 @@ from agorad.access import anchors
 from agorad.authsvc import ROOT_SID, AuthService
 from agorad.contracts import ContractError
 from agorad.core.peer import TAGS as _PEER_TAGS, claim_path, parse_tag  # Req: F173
+from agorad.core.verify_hygiene import find_verify_hygiene_issues  # Req: F175（core 纯函数复用勿复制；serverv3 传输层禁 core import，经 V3Stack 属性注入）
 from agorad.cutover import MessageFileExporter
 from agorad.domain import Event, epoch_ms, epoch_seconds
 from agorad.gatedelivery import GateDeliveryService
@@ -502,12 +503,15 @@ class V3Stack:
                  clock=None, injector=None, exporter=None, emailer=None,
                  verify_timeout=300, verify_ceiling=None, quick_max_files=3,
                  quick_max_lines=30, lock_wait_s=300.0, enforce=True,
-                 backend="sqlite"):
+                 backend="sqlite", verify_hygiene=None):
         self.home = str(home)
         self.oc, self.gitx, self.runner = oc, gitx, runner
         self.clock = clock or (lambda: epoch_ms(time.time()))
         self.write_lock = threading.RLock()
         self.backend = backend
+        # Req: F175 提案机械预检谓词（F99 单一规则，core 纯函数——compose 装配
+        # 层可入 core；serverv3 传输层禁 core import，经本属性注入，测试可换桩）
+        self.verify_hygiene = verify_hygiene or find_verify_hygiene_issues
         self.storage = _select_storage(self.home, backend, injector)
         repo = SerialRepo(self.storage, self.write_lock)
         self.repo = repo

@@ -370,7 +370,44 @@ class _Handler(BaseHTTPRequestHandler):
             archived = self._noop_archive(sid, tid, t, body["body"])
             if archived is not None:
                 return archived
+        if kind == "verify" and edge[0] == "up":  # Req: F175 提案机械预检
+            rejected = self._verify_precheck(sid, tid, t, body["body"])
+            if rejected is not None:
+                return rejected
         return {"message": app.router.post(sid, edge, kind, body["body"])}
+
+    def _verify_precheck(self, sid, tid, t, body):
+        """Req: F175 提案机械预检（F99 闸前移，两代同构——v3 落 serverv3.
+        _message_post）：worker 上行 verify 提案在落库前过 F99 单一规则谓词
+        （App 装配注入，未注入＝闸关照常规投递）——blocking 报因即①服务合成
+        verify_reject 下行投 worker（from=agorad 服务标识非 dispatcher sid，
+        同 done 拒因 notify_worker 形：只落库不注入——worker 同回合已收同步
+        回执，B 册 R2 免 head-of-line）②审计 verify_precheck_reject③提案
+        不投递 dispatcher④响应附 precheck_rejected 回执（加键不破形状）。
+        GLOBAL_STATE 仅告警不拒（F99 登记闸同口径）；谓词干净零变化。"""
+        fn = self.app.verify_hygiene
+        if fn is None:
+            return None
+        reasons = [f for f in fn(str(body), t["project_dir"])
+                   if f["blocking"]]
+        if not reasons:
+            return None
+        note = "; ".join(f"{f['code']}: {f['fragment']}"
+                         for f in reasons)[:200]
+        self.app.store.append_event(
+            {"ts": time.time(), "actor": sid,
+             "event": "verify_precheck_reject", "task": tid,
+             "note": note})
+        text = ("verify 提案机械预检未过（F99 卫生闸前移）——提案未送达派发方：\n"
+                + "\n".join(f"· {f['code']}: {f['fragment']} —— {f['hint']}"
+                            for f in reasons)
+                + "\n修正后重报")
+        mid = None
+        try:  # 留痕面尽力而为（F54）：消息面败不吞同步回执
+            mid = self.app.router.notify_worker(tid, "verify_reject", text)
+        except Exception:
+            pass
+        return {"message": mid, "precheck_rejected": True, "reasons": reasons}
 
     def _noop_archive(self, sid, tid, t, body):
         """Req: F174 no-op 申报自动归档：worker 上行 question 首行 no-op: 前缀＋

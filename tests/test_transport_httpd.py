@@ -1673,6 +1673,64 @@ class TestNoopAutoArchive(HttpdTest):
         self.assertIn("上游已修", reason)
 
 
+class TestVerifyPrecheck(HttpdTest):
+    """Req: F175 提案机械预检（F99 闸前移）：worker 上行 verify 提案在投递前
+    过 F99 单一规则谓词（App 装配注入）——脏提案服务自动打回（verify_reject
+    落 worker 不投 dispatcher＋verify_precheck_reject 审计行＋响应
+    precheck_rejected 回执）；净提案照常规投递零变化。"""
+
+    def test_verify_dirty_proposal_auto_reject(self):  # Req: F175
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        wsid = self.app.state.get(tid)["worker_sid"]
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "verify",
+                      "body": "cd /tmp && python3 -m pytest -q"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertTrue(r["precheck_rejected"])            # 回执：预检拒
+        self.assertEqual(r["reasons"][0]["code"], "ABSOLUTE_CD")  # F99 报因
+        self.assertIn("相对路径", r["reasons"][0]["hint"])  # hint 同款（修复指引）
+        # 提案本体零落库（不投递 dispatcher——消息库无 kind=verify 行）
+        self.assertFalse([x for x in self.app.store.read_messages()
+                          if x["kind"] == "verify"])
+        # worker 收到服务合成 verify_reject（from=agorad 非 dispatcher sid）
+        (m,) = [x for x in self.app.store.read_messages()
+                if x["kind"] == "verify_reject"]
+        self.assertEqual((m["from"], m["to"]), ("agorad", wsid))
+        self.assertIn("ABSOLUTE_CD", m["body"])            # 报因随消息
+        self.assertIn("修正后重报", m["body"])
+        self.assertEqual(r["message"], m["id"])
+        # 落库不注入形态到达 worker（check_mail 可补拉）
+        st, r = call(self.port, "POST", "/check_mail", {}, wtok)
+        self.assertTrue(any(x["kind"] == "verify_reject"
+                            and "ABSOLUTE_CD" in x["body"]
+                            for x in r["messages"]))
+        # dispatcher 收件无该提案
+        st, r = call(self.port, "POST", "/check_mail", {}, self.root)
+        self.assertFalse([x for x in r["messages"] if x["kind"] == "verify"])
+        # 审计行：event/task/actor=worker sid/报因
+        evs = [e for e in self.app.store.read_events(tid)
+               if e["event"] == "verify_precheck_reject"]
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0]["actor"], wsid)
+        self.assertIn("ABSOLUTE_CD", evs[0]["note"])
+
+    def test_verify_clean_proposal_unchanged(self):  # Req: F175
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "verify",
+                      "body": "python3 -m pytest tests/ -q"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(list(r), ["message"])  # 净提案缺省无键（形状零增）
+        self.assertEqual(self.app.state.get(tid)["state"], "running")
+        # 照常规投递 dispatcher（注入败留库，check_mail 可拉——既有断言形态）
+        st, r = call(self.port, "POST", "/check_mail", {}, self.root)
+        self.assertTrue(any(x["kind"] == "verify"
+                            and x["body"] == "python3 -m pytest tests/ -q"
+                            for x in r["messages"]))
+
+
 class TestCredForSid(HttpdTest):
     """F25 修正推改拉：/cred_for_sid 插件拉取面——sid 是在飞任务 worker_sid 且牌活
     → {tid, env_dir, token}，否则 404；无牌调用放行（回环单用户模型），每请求一行审计。"""

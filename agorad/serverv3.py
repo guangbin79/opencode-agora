@@ -452,8 +452,42 @@ class _V3Handler(BaseHTTPRequestHandler):
                                        f"noop_confirmed:{first[:120]}")
                     return {"message": msg.id, "auto_cancelled": True,
                             "reason": "noop_confirmed"}
+        if kind == "verify" and to == row.dispatcher_sid:  # Req: F175 提案机械预检
+            rejected = self._verify_precheck(sid, row, str(body))
+            if rejected is not None:
+                return rejected
         msg = stack.messaging.post(sid, to, tid, kind, str(body))
         return {"message": msg.id}
+
+    def _verify_precheck(self, sid, row, body):
+        """Req: F175 提案机械预检（F99 闸前移，两代同构——v2 落 httpd._post）：
+        worker 上行 verify 提案在投递前过 F99 单一规则谓词（V3Stack 装配注入
+        ——serverv3 禁 core import）——blocking 报因即①服务合成 verify_reject
+        下行投 worker（from=agorad 服务标识非 dispatcher sid）②审计
+        verify_precheck_reject③提案不投递 dispatcher④响应附 precheck_rejected
+        回执（加键不破形状）。GLOBAL_STATE 仅告警不拒（F99 登记闸同口径）。"""
+        stack = self.stack
+        fn = stack.verify_hygiene
+        if fn is None:
+            return None
+        reasons = [f for f in fn(body, row.project_dir) if f["blocking"]]
+        if not reasons:
+            return None
+        note = "; ".join(f"{f['code']}: {f['fragment']}"
+                         for f in reasons)[:200]
+        text = ("verify 提案机械预检未过（F99 卫生闸前移）——提案未送达派发方：\n"
+                + "\n".join(f"· {f['code']}: {f['fragment']} —— {f['hint']}"
+                            for f in reasons)
+                + "\n修正后重报")
+        with stack.repo.uow():
+            stack.storage.append_event(Event(
+                seq=0, ts_ms=stack.clock(), actor=sid,
+                event="verify_precheck_reject", task=row.id,
+                detail={"note": note}))
+        msg = stack.messaging.post("agorad", row.worker_sid, row.id,
+                                   "verify_reject", text)
+        return {"message": msg.id, "precheck_rejected": True,
+                "reasons": reasons}
 
     def _board_detail(self, tid, row, tasks_map):
         """单任务明细（Req: F144＝v2 report.detail 全形状）：全字段行

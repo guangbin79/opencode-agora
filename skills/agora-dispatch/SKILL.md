@@ -53,6 +53,9 @@ verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。�
 **回填（探索路）**：goal 未指定或 worker 发现更准确命令→现行流程：
 
 1. **回填**：worker 进环境勘察后 `post(kind=verify, body=命令)` 提案——你经 `check_mail` 收到（留库补拉面）。
+
+   （提案先过服务机械预检——F99 卫生形脏提案已被自动打回不占你往返；到达你这的提案，你只裁需求覆盖与语义可执行性。）
+
 2. **校验**：可执行性＋需求覆盖。不合格→`post(kind=verify_reject, body=驳回原因)`，实时注入 worker，其重报；驳回必须附因。
 3. **登记**：`task_update(task, verify_cmd)` → 状态 registered。空命令必拒。verify 未登记，worker 的 done 必被门拒收。
 4. **锁定**：登记即锁定——worker 改 verify 必拒（403＋审计）；修改权属派发方（你），登记后勿再动。

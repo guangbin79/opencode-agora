@@ -948,6 +948,67 @@ class TestNoopAutoArchive(_Base):  # Req: F174 no-op 申报自动归档（v3 同
         self.assertIn("上游已修", row.cancel_reason)
 
 
+class TestVerifyPrecheck(_Base):  # Req: F175 提案机械预检（v3 同构）
+    """worker 上行 verify 提案在投递前过 F99 单一规则谓词（V3Stack 装配注入
+    ——serverv3 传输层禁 core import）——脏提案服务自动打回（verify_reject
+    投 worker 不投 dispatcher＋verify_precheck_reject 审计行＋响应
+    precheck_rejected 回执）；净提案照常规投递零变化。"""
+
+    def _msgs(self, tid, kind):
+        return [m for m in self.stack.storage.messages_all()
+                if m.task_id == tid and m.kind == kind]
+
+    def test_verify_dirty_proposal_auto_reject(self):  # Req: F175
+        tid = self.mk()
+        wsid, wtok = self.to_running(tid)
+        row = self.stack.storage.get_task(tid)
+        s, b = self.call("v3/message_post", {"task": tid, "kind": "verify",
+                                             "body": "cd /tmp && python3 -m pytest -q"},
+                         wtok)
+        self.assertEqual(s, 200, b)
+        self.assertTrue(b["precheck_rejected"])            # 回执：预检拒
+        self.assertEqual(b["reasons"][0]["code"], "ABSOLUTE_CD")  # F99 报因
+        self.assertIn("相对路径", b["reasons"][0]["hint"])  # hint 同款（修复指引）
+        self.assertIsInstance(b["message"], int)
+        # 提案本体零落库（不投递 dispatcher——消息库无 kind=verify 行）
+        self.assertFalse(self._msgs(tid, "verify"))
+        # worker 收到服务合成 verify_reject（from=agorad 非 dispatcher sid）
+        (m,) = self._msgs(tid, "verify_reject")
+        self.assertEqual((m.from_sid, m.to_sid), ("agorad", wsid))
+        body = bytes(m.body).decode("utf-8", "replace")
+        self.assertIn("ABSOLUTE_CD", body)                 # 报因随消息
+        self.assertIn("修正后重报", body)
+        self.assertEqual(b["message"], m.id)
+        # 投递面：worker 实收（wake 注入），dispatcher 零提案注入
+        self.assertTrue([i for i in self.oc.injects
+                         if i[1] == wsid
+                         and f"task {tid} verify_reject from agorad" in i[2]
+                         and "ABSOLUTE_CD" in i[2]])
+        self.assertFalse([i for i in self.oc.injects
+                          if i[1] == row.dispatcher_sid
+                          and f"task {tid} verify from" in i[2]])
+        # 审计行：event/task/actor=worker sid/报因
+        evs = [e for e in self.stack.storage.events_for_task(tid)
+               if e.event == "verify_precheck_reject"]
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].actor, wsid)
+        self.assertIn("ABSOLUTE_CD", evs[0].detail["note"])
+
+    def test_verify_clean_proposal_unchanged(self):  # Req: F175
+        tid = self.mk()
+        _, wtok = self.to_running(tid)
+        s, b = self.call("v3/message_post", {"task": tid, "kind": "verify",
+                                             "body": "python3 -m pytest tests/ -q"},
+                         wtok)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(list(b), ["message"])  # 净提案缺省无键（形状零增）
+        self.assertEqual(self.stack.storage.get_task(tid).state, "running")
+        # 照常规投递 dispatcher（wake 实时注入）
+        self.assertTrue([i for i in self.oc.injects
+                         if f"task {tid} verify from" in i[2]
+                         and "python3 -m pytest tests/ -q" in i[2]])
+
+
 class TestMcpShell(_ChainBase):  # 断言4
     def setUp(self):
         super().setUp()
