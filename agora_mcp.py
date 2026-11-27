@@ -181,7 +181,9 @@ _TOOLS = [
      "inputSchema": {"type": "object", "properties": {
           "repo": {"type": "string",
                    "description": "仓根路径（root/dispatcher 诊断可指定；worker 忽略——"
-                                  "按本任务仓分区）"}}}},
+                                  "按本任务仓分区）"},
+          "tag": {"type": "string", "enum": ["claim", "fail", "fact"],
+                  "description": "Req: F173 类型过滤（描述文案随 B 单更新）"}}}},
     {"name": "wiki_read", "description": "读 wiki 页",
      "inputSchema": {"type": "object", "properties": {"path": _STR},
                      "required": ["path"]}},

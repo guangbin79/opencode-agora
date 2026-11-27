@@ -754,7 +754,7 @@ class TestPeerBoard(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_post_board_roundtrip(self):  # Req: F22
-        mid = self.pb.post("w1", "hello peers")
+        mid = self.pb.post("w1", "hello peers")["id"]  # Req: F173 回执形
         r = self.pb.board(self.state.snapshot(), self.pb.partition("w1"))
         self.assertEqual(r["repo"], "/repoA")  # 尾斜杠归一
         self.assertEqual([(t["tid"], t["title"], t["state"]) for t in r["tasks"]],
@@ -842,7 +842,7 @@ class TestPeerBoard(unittest.TestCase):
             self.pb.post("stranger", "x")  # 无任务行＝作者不可定
 
     def test_audit_event(self):  # Req: F22 护栏审计
-        mid = self.pb.post("w1", "audited")
+        mid = self.pb.post("w1", "audited")["id"]  # Req: F173 回执形
         ev = [e for e in self.store.read_events() if e["event"] == "peer_post"]
         self.assertEqual([(e["task"], e["repo"], e["mid"]) for e in ev],
                          [("t1", "/repoA", mid)])

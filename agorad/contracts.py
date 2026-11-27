@@ -179,7 +179,12 @@ CATALOG = {
                                 "view": _f("string", enum=("full",))},
                       _STAFF, "global", _BASE_ERR),
     "doctor": ToolSpec("doctor", {}, _STAFF, "global", _BASE_ERR),
-    "repo_board": ToolSpec("repo_board", {"repo": _f("string")},
+    "repo_board": ToolSpec("repo_board", {"repo": _f("string"),
+                                          # Req: F173 留言类型化过滤（值域
+                                          # 与 core.peer.TAGS 同值——本模块
+                                          # 零 import，字面镜像）
+                                          "tag": _f("string", enum=(
+                                              "claim", "fail", "fact"))},
                            _ANY, "global", _BASE_ERR),
     "wiki_read": ToolSpec("wiki_read", {"path": _f("string", True)},
                           _ANY, "global", _BASE_ERR + ("not_found",)),

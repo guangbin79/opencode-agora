@@ -703,7 +703,7 @@ class TestPeerBoardFace(_Base):  # B-4/OCR-3/OCR-5 修复锚：并发留言/多�
             try:
                 s, b = self.call("post", {"kind": "peer", "body": f"m{i}"},
                                  tok)
-                out.append(b.get("message"))
+                out.append(b["message"]["id"])  # Req: F173 回执形 {id, collision}
             except Exception as e:  # noqa: BLE001
                 errs.append(e)
 
@@ -719,6 +719,32 @@ class TestPeerBoardFace(_Base):  # B-4/OCR-3/OCR-5 修复锚：并发留言/多�
         self.assertEqual(len(set(out)), 8)  # mid 不撞号（写锁串行）
         s, b = self.call("repo_board", {"repo": "/repo"}, self.root)
         self.assertEqual(len(b["messages"]), 8)  # 最新在前全量在册
+
+    def test_v3_peer_tag_and_collision(self):  # Req: F173
+        t1, t2 = self.mk("c1"), self.mk("c2")
+        _, w1 = self.dispatch(t1)
+        _, w2 = self.dispatch(t2)
+        s, b = self.call("post", {"kind": "peer", "body": "认领:src/foo.py"},
+                         w1)
+        self.assertEqual((s, b["message"]["collision"]), (200, None))  # 首个撞车者
+        s, b = self.call("post", {"kind": "peer", "body": "认领: src/foo.py"},
+                         w2)
+        self.assertEqual(s, 200)
+        a1 = self.stack.storage.get_task(t1)
+        a2 = self.stack.storage.get_task(t2)
+        self.assertEqual(b["message"]["collision"],
+                         {"with_task": t1, "path": "src/foo.py",
+                          "author_env": a1.env_dir})  # v2 同款回执形状
+        s, b = self.call("repo_board", {}, w1)
+        self.assertEqual(s, 200)
+        self.assertEqual({m["body"]: m["tag"] for m in b["messages"]},
+                         {"认领:src/foo.py": "claim",
+                          "认领: src/foo.py": "claim"})  # claim 前缀落 tag
+        self.assertEqual({m["body"]: m.get("author_env")
+                          for m in b["messages"]},
+                         {"认领:src/foo.py": a1.env_dir,
+                          "认领: src/foo.py": a2.env_dir})  # claim 带 env 指针
+        self.assertEqual(b["fails"], [])  # F173 尾舱键恒在
 
 
 class TestMessagePostChainEdge(_Base):  # Req: F167 链边授权（C 册）

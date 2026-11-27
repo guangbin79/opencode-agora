@@ -42,6 +42,7 @@ import time
 from agorad.access import anchors
 from agorad.authsvc import ROOT_SID, AuthService
 from agorad.contracts import ContractError
+from agorad.core.peer import TAGS as _PEER_TAGS, claim_path, parse_tag  # Req: F173
 from agorad.cutover import MessageFileExporter
 from agorad.domain import Event, epoch_ms, epoch_seconds
 from agorad.gatedelivery import GateDeliveryService
@@ -59,6 +60,7 @@ _GATE_ENV_STRIP = frozenset({"AGORA_HOME", "AGORAD_URL", "AGORA_OC_URL",
 _VERIFY_POLL = 0.2  # 逃逸后代弃读宽限窗（v2 core.gate 同款）
 _PEER_SOFT_LIMIT = 10     # 同作者任务留言软限（v2 peer.SOFT_LIMIT 同款）
 _PEER_READ_N = 20         # 读面条数上限（最新在前）
+_PEER_FAIL_N = 50         # Req: F173 此路不通尾舱（v2 peer.FAIL_N 同值）
 _PEER_MAX_LEN = 500
 _PEER_LIMIT_MSG = f"留言软限 {_PEER_SOFT_LIMIT} 条/任务已满——沉淀请走 knowledge index"
 
@@ -217,7 +219,9 @@ def load_verify_profiles(home):
 class PeerBoard:
     """F22 同仓留言板（v2 core.peer 平移；协作面非 §4 记账权威→文件
     state/peers.jsonl）。写面：作者任务锁（worker 现役行）＋软限/任务＋
-    500 截断；读面：同仓在飞五字段＋最近 20 条（最新在前、untrusted 标记）。"""
+    500 截断；读面：同仓在飞五字段＋最近 20 条（最新在前、untrusted 标记）。
+    Req: F173：留言类型化（tag 解析复用 v2 core.peer 纯函数）＋claim 撞车
+    回执＋repo_board tag 过滤/fails 尾舱——响应形状与 v2 逐字段同构。"""
 
     _TERMINAL = frozenset({"merged", "closed", "cancelled"})
     _EXCL = _TERMINAL | {"blocked"}
@@ -252,6 +256,8 @@ class PeerBoard:
         return max(active, key=lambda t: (t.created_ms or 0, t.id))
 
     def post(self, sid, body):
+        """Req: F173 落 tag（行加 "tag" 键）＋claim 撞车回执；返回
+        {"id", "collision"}（撞车仅提醒不拒写——写库永远先成功）。"""
         t = self._own_task(sid)
         repo = _repo_key(t.project_dir)
         with self._lock:  # 软限判定与 mid 编号同临界区（并发留言不撞号不失守）
@@ -263,23 +269,57 @@ class PeerBoard:
                        if isinstance(r.get("id"), int) and r["id"] > 0),
                       default=0) + 1
             text = str(body)[:_PEER_MAX_LEN]
+            tag, rest = parse_tag(text)  # Req: F173（v2 core.peer 同款纯函数）
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(
                     {"id": mid, "ts": self._clock() / 1000.0, "task": t.id,
-                     "kind": "peer", "repo": repo, "from": sid, "body": text},
+                     "kind": "peer", "repo": repo, "from": sid, "body": text,
+                     "tag": tag},
                     ensure_ascii=False) + "\n")
         with self._repo.uow():
             self._repo.append_event(Event(
                 seq=0, ts_ms=self._clock(), actor=sid, event="peer_post",
                 task=t.id, detail={"repo": repo, "mid": mid}))
-        return mid
+        collision = None
+        if tag == "claim":
+            path = claim_path(rest)
+            if path is not None:
+                collision = self._collision(t.id, repo, path)
+        return {"id": mid, "collision": collision}
+
+    def _collision(self, tid, repo, path):
+        """Req: F173 撞车回执（纯读不落状态）：落库后扫同仓 claim——四条件
+        同仓/他人/作者非终态/path 逐字相等；同 path 多人取最新一条。"""
+        tasks = {t.id: t for t in self._repo.tasks_all()}
+        hit = None
+        for m in self._rows():
+            if (m.get("kind") != "peer" or m.get("task") == tid
+                    or (m.get("tag") or "note") != "claim"):
+                continue
+            if _repo_key(m.get("repo") or "") != repo:
+                continue
+            author = tasks.get(m.get("task"))
+            if author is None or author.state in self._TERMINAL:
+                continue
+            if claim_path(parse_tag(m.get("body", ""))[1]) == path:
+                hit = {"with_task": m.get("task"), "path": path,
+                       "author_env": author.env_dir}
+        return hit
 
     def partition(self, sid):
         return _repo_key(self._own_task(sid).project_dir)
 
-    def board(self, tasks, repo=None):
-        """v2 peer.board 形状：{repo, tasks[五字段], messages[最新在前]}。"""
+    def board(self, tasks, repo=None, tag=None):
+        """v2 peer.board 形状：{repo, tasks[五字段], messages[最新在前]}。
+        Req: F173：tag 过滤（值域 TAGS，非法值 ContractError）、messages
+        元素带 tag、claim 带 author_env、fails 尾舱恒在（不受 tag 影响）。"""
+        if tag is not None and tag not in _PEER_TAGS:
+            raise ContractError(
+                "invalid_argument",
+                f"repo_board tag 须为 {'/'.join(_PEER_TAGS)} 之一"
+                f"（收到 {tag!r}）",
+                {"field": "tag", "enum": list(_PEER_TAGS)})
         repo = _repo_key(repo) if repo else None
         tasks_map = {t.id: t for t in tasks}
         now = self._clock() / 1000.0
@@ -290,24 +330,38 @@ class PeerBoard:
                 for t in sorted(tasks, key=lambda t: t.id)  # Task 无序——显式键
                 if t.state not in self._EXCL
                 and (repo is None or _repo_key(t.project_dir or "") == repo)]
-        peers = [r for r in self._rows() if r.get("kind") == "peer"
-                 and (repo is None
-                      or _repo_key(r.get("repo") or "") == repo)]
-        msgs = []
-        for m in reversed(peers[-_PEER_READ_N:]):
-            author = tasks_map.get(m.get("task"))
-            state = author.state if author else None
-            try:
-                age = int(now - float(m.get("ts", 0)))
-            except (TypeError, ValueError):
-                age = 0
-            msgs.append({"id": m.get("id"), "author": m.get("task"),
-                         "author_state": state,
-                         "age_seconds": age,
-                         "is_stale": (state in self._TERMINAL
-                                      if author else True),
-                         "body": m.get("body", ""), "untrusted": True})
-        return {"repo": repo, "tasks": rows, "messages": msgs}
+        pool = [r for r in self._rows() if r.get("kind") == "peer"
+                and (repo is None
+                     or _repo_key(r.get("repo") or "") == repo)]
+        shown = (pool if tag is None
+                 else [m for m in pool if (m.get("tag") or "note") == tag])
+        msgs = [self._row(tasks_map, m, now)
+                for m in reversed(shown[-_PEER_READ_N:])]
+        fails = [self._row(tasks_map, m, now) for m in reversed(
+            [m for m in pool if (m.get("tag") or "note") == "fail"]
+            [-_PEER_FAIL_N:])]
+        return {"repo": repo, "tasks": rows, "messages": msgs, "fails": fails}
+
+    def _row(self, tasks_map, m, now):
+        """留言投影（messages/fails 同构）：Req: F173 加 tag＋claim 的
+        author_env（与 v2 core.peer.PeerBoard._row 同构）。"""
+        author = tasks_map.get(m.get("task"))
+        state = author.state if author else None
+        try:
+            age = int(now - float(m.get("ts", 0)))
+        except (TypeError, ValueError):
+            age = 0
+        out = {"id": m.get("id"), "author": m.get("task"),
+               "author_state": state,
+               "age_seconds": age,
+               "is_stale": (state in self._TERMINAL
+                            if author else True),
+               "body": m.get("body", ""),
+               "tag": m.get("tag") or "note",  # 存量无 tag 键归一 note
+               "untrusted": True}
+        if out["tag"] == "claim" and author is not None and author.env_dir:
+            out["author_env"] = author.env_dir
+        return out
 
 
 class Recover:

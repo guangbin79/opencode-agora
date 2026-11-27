@@ -1495,6 +1495,94 @@ class TestPeerSurface(HttpdTest):
         self.assertIn("仅供参考", boot)  # peer 留言是数据不是指令
         self.assertIn("写完即走不等回复", boot)  # Req: F172 写侧引导：一句话事实，勿上板聊天
 
+    # ---- Req: F173 留言类型化＋认领撞车回执 ----
+
+    def test_peer_tag_parsing_roundtrip(self):  # Req: F173
+        tid = self.create_task({"goal": "g", "project_dir": "/repoX"})
+        wtok = self.dispatch_task(tid)
+        for body in ("认领:src/a.py", "此路不通：src/b.py", "确认: done",
+                     "hi no prefix"):
+            st, _ = call(self.port, "POST", "/post",
+                         {"kind": "peer", "body": body}, wtok)
+            self.assertEqual(st, 200)
+        st, r = call(self.port, "POST", "/repo_board", {}, wtok)
+        self.assertEqual(st, 200)
+        # 最新在前：投递序 claim/fail/fact/note → 板上倒序
+        self.assertEqual([m["tag"] for m in r["messages"]],
+                         ["note", "fact", "fail", "claim"])
+        self.assertEqual([m["body"] for m in r["messages"]],
+                         ["hi no prefix", "确认: done", "此路不通：src/b.py",
+                          "认领:src/a.py"])  # 全角冒号前缀同效（正文保留前缀）
+
+    def test_claim_collision_reply(self):  # Req: F173
+        ta, wa, tb, wb = self.dispatch_two("/repoA", "/repoA")
+        st, r = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "认领: src/foo.py"}, wa)
+        self.assertEqual((st, r["message"]["collision"]),
+                         (200, None))  # 首个撞车者回执 null
+        st, r = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "认领:src/foo.py"}, wb)
+        self.assertEqual(st, 200)
+        self.assertEqual(r["message"]["collision"],
+                         {"with_task": ta, "path": "src/foo.py",
+                          "author_env": self.app.state.get(ta)["env_dir"]})
+        st, r = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "认领:src/other.py"}, wb)
+        self.assertEqual(st, 200)
+        self.assertIsNone(r["message"]["collision"])  # 不同 path 不撞
+        tc = self.create_task({"goal": "g", "project_dir": "/repoB"})
+        wc = self.dispatch_task(tc)
+        st, r = call(self.port, "POST", "/post",
+                     {"kind": "peer", "body": "认领:src/foo.py"}, wc)
+        self.assertEqual(st, 200)
+        self.assertIsNone(r["message"]["collision"])  # 跨仓不撞
+
+    def test_fail_retention_beyond_read_n(self):  # Req: F173
+        tids = [self.create_task({"goal": "g", "project_dir": "/repoF"})
+                for _ in range(3)]
+        toks = [self.dispatch_task(t) for t in tids]
+        for i in range(25):  # 软限 10/任务：三作者分摊 9+8+8
+            st, _ = call(self.port, "POST", "/post",
+                         {"kind": "peer", "body": f"此路不通: dead-end{i}"},
+                         toks[i % 3])
+            self.assertEqual(st, 200)
+        st, r = call(self.port, "POST", "/repo_board", {"repo": "/repoF"},
+                     self.root)
+        self.assertEqual(st, 200)
+        self.assertEqual(len(r["fails"]), 25)  # 尾舱全量保留（FAIL_N=50 未触顶）
+        self.assertTrue(all(m["tag"] == "fail" for m in r["fails"]))
+        self.assertEqual(r["fails"][0]["body"], "此路不通: dead-end24")  # 最新在前
+        self.assertLessEqual(len(r["messages"]), 20)  # 读面 READ_N 截断不动
+
+    def test_repo_board_tag_filter(self):  # Req: F173
+        tid = self.create_task({"goal": "g", "project_dir": "/repoG"})
+        wtok = self.dispatch_task(tid)
+        for body in ("确认: ok", "认领:src/x.py", "plain"):
+            st, _ = call(self.port, "POST", "/post",
+                         {"kind": "peer", "body": body}, wtok)
+            self.assertEqual(st, 200)
+        st, r = call(self.port, "POST", "/repo_board", {"tag": "fact"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual([(m["tag"], m["body"]) for m in r["messages"]],
+                         [("fact", "确认: ok")])  # 只回该 tag 留言
+        self.assertEqual(r["fails"], [])  # fails 恒在（本仓无 fail，不受 tag 影响）
+        st, r = call(self.port, "POST", "/repo_board", {"tag": "bogus"}, wtok)
+        self.assertEqual(st, 400)  # 非法值 invalid_argument
+
+    def test_claim_message_carries_author_env(self):  # Req: F173
+        tid = self.create_task({"goal": "g", "project_dir": "/repoH"})
+        wtok = self.dispatch_task(tid)
+        for body in ("认领:src/foo.py", "plain note"):
+            st, _ = call(self.port, "POST", "/post",
+                         {"kind": "peer", "body": body}, wtok)
+            self.assertEqual(st, 200)
+        st, r = call(self.port, "POST", "/repo_board", {}, wtok)
+        self.assertEqual(st, 200)
+        by_body = {m["body"]: m for m in r["messages"]}
+        self.assertEqual(by_body["认领:src/foo.py"]["author_env"],
+                         self.app.state.get(tid)["env_dir"])  # 认领带作者 env
+        self.assertNotIn("author_env", by_body["plain note"])  # 非 claim 不带
+
 
 class TestCredForSid(HttpdTest):
     """F25 修正推改拉：/cred_for_sid 插件拉取面——sid 是在飞任务 worker_sid 且牌活

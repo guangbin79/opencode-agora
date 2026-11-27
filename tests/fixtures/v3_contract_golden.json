@@ -58,7 +58,9 @@
    },
    "repo_board": {
     "required": [],
-    "enums": {}
+    "enums": {
+     "tag": ["claim", "fail", "fact"]
+    }
    },
    "wiki_read": {
     "required": ["path"],
@@ -90,7 +92,7 @@
  "http_string_fields": {
   "board": ["task", "view"],
   "post": ["task", "kind", "body"],
-  "repo_board": ["repo"],
+  "repo_board": ["repo", "tag"],
   "reverify": ["task"],
   "task_alarm": ["task"],
   "task_cancel": ["task"],

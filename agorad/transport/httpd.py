@@ -55,7 +55,7 @@ _STRING_FIELDS = {
     "task_wait": ("task",),  # Req: F124（wait_on 可 null＝清除，不入公共字符串面）
     "post": ("task", "kind", "body"),
     "board": ("task", "view"),
-    "repo_board": ("repo",),
+    "repo_board": ("repo", "tag"),  # Req: F173 tag 过滤参数（值域归 board 域）
     "wiki_read": ("path",),
     "wiki_write": ("path", "text"),
     "task_nudge": ("task", "body"),
@@ -280,7 +280,8 @@ class _Handler(BaseHTTPRequestHandler):
             snap = app.state.snapshot()
             repo = (app.peer.partition(sid) if role == "worker"
                     else body.get("repo"))
-            return app.peer.board(snap, repo)
+            # Req: F173：tag 过滤透传（非法值 board 域 ValueError→400）
+            return app.peer.board(snap, repo, body.get("tag"))
         if name == "wiki_read":
             return {"text": self._wiki(body["path"]).read_text(
                 encoding="utf-8", errors="replace")}  # 页面可含坏字节：降级 U+FFFD 不 500
@@ -342,6 +343,7 @@ class _Handler(BaseHTTPRequestHandler):
         if kind == "peer":  # F22 写面：无任务目标，作者＝调用者任务；仅 worker 牌
             if role != "worker":
                 raise PeerRejected("peer 留言仅 worker 牌可写")
+            # Req: F173：回执形 {"id", "collision"}（撞车提醒不拒写）
             return {"message": app.peer.post(sid, body["body"])}
         tid = body["task"]
         if kind not in _POST_KINDS:  # F13 客户端 kind 白名单；内部直调 Router 不经此路

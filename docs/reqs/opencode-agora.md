@@ -1055,3 +1055,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/core/task.py（协作行扩文案，Req: F172）、skills/agora-dispatch/SKILL.md（§1 账本检索条目＋来源行，Req: F172）、tests/test_transport_httpd.py（test_boot_carries_repo_board_contract 增写法断言，Req: F172）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：python3 -m pytest tests/test_transport_httpd.py -q 全绿含新锚；四落点 grep 'Req: F172' 各 ≥1；全量 python3 -m pytest tests/ -q 不回归（基线 2437 passed）。
+
+### F173 peer 留言类型化＋认领撞车回执（2026-11-27，ag-7fb3af A 面）
+
+**背景**：F22 留言板是无类型公告——同仓并行 worker 无结构化「认领/此路不通/确认」状态，认领撞车（两任务改同文件）只能靠人工对读，此路不通经验无独立保留面。规格页 spec/f173-a-peer-typed-board.md（wiki）钉死接口契约。
+
+**裁定**：①写面 tag 解析——首行前缀「认领:／此路不通:／确认:」（全角半角冒号等价）→ claim/fail/fact/note，落库 v2 frontmatter tag 键／v3 peers.jsonl 行 tag 键，存量无键读面归一 note；②post(kind=peer) 响应 {"message": {"id", "collision"}}——collision＝同仓他人非终态同 path claim 提醒（同 path 多人取最新），写库永远先成功、不落状态不发事件；claim path＝去前缀首 token 含 / 或 .；③repo_board 新增可选 tag 参数（enum claim/fail/fact，非法 400 invalid_argument）、messages[] 元素带 tag、claim 带 author_env、顶层 fails 尾舱 FAIL_N=50（不受 tag 影响）；④v2/v3 两代形状逐字段同构（tag 解析/路径提取为 core.peer 模块级纯函数，compose 复用——架构守卫放行 compose→core 单向）；⑤B 面（BOOT/skill/MCP 壳文案）另单。
+
+**边界**：不动软限 10/500 截断/READ_N 20/分区/untrusted/is_stale 口径、消息库 to="" 不变量、peers.jsonl 撕裂容错、gitstore；collision 零副作用。
+
+**落点**：agorad/core/peer.py（TAGS/FAIL_N/parse_tag/claim_path＋post 撞车＋board tag 过滤/fails/author_env，Req: F173）、agorad/compose.py（v3 PeerBoard 同款＋import v2 纯函数，Req: F173）、agorad/transport/httpd.py（repo_board 透传 tag＋_STRING_FIELDS，Req: F173）、agorad/serverv3.py（透传＋_TOOL_DESC 逐字更新，Req: F173）、agorad/contracts.py（ToolSpec tag enum，Req: F173）、tests/test_architecture.py（compose may_import 加 agorad.core）、tests/fixtures/v3_contract_golden.json（repo_board enum/http_string_fields）、tests/test_transport_httpd.py（五锚，Req: F173）、tests/test_v3_server.py（test_v3_peer_tag_and_collision＋并发锚随回执形修订，Req: F173）、tests/test_core_msg.py（两锚随回执形修订，Req: F173）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：任务页 verify 登记——python3 -m pytest tests/test_transport_httpd.py tests/test_v3_server.py -q；grep -q FAIL_N agorad/core/peer.py；grep -q collision agorad/core/peer.py agorad/compose.py agorad/transport/httpd.py agorad/serverv3.py；grep -q tag agorad/contracts.py；grep -c 'Req: F173' tests/test_transport_httpd.py ≥1；全量 python3 -m pytest tests/ -q 不回归（基线 2493 passed＋107 subtests）。
