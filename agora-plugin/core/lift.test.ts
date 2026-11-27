@@ -11,7 +11,7 @@ import { cacheCredential, getCredential } from "./cred";
 import { onInject } from "./inject";
 import { ensureOnce, ensureService, LiftTimeout, resetLift } from "./lift";
 
-const STUB = join(import.meta.dir, "tests", "stub_agorad.py");
+const STUB = join(import.meta.dir, "..", "tests", "stub_agorad.py");
 const PLACEHOLDER_OC = "http://127.0.0.1:59999"; // 占位：桩不消费，只为过必传门
 let root: string;
 let home: string;

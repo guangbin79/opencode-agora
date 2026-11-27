@@ -8,7 +8,7 @@ ERROR_TABLE）；timer 两端点真接线（Req: F145）；approval 两端点 50
 not_implemented 占位（服务本体归 T16 接线——文档注明，非语义缺失）。
 
 legacy 根路由（v2 兼容面，经 F141 适配层→v3 服务）：15 旧工具＋
-cred_for_sid/task_nudge/task_alarm＋GET /view、/health；响应形状对
+cred_for_sid/gate_deny/task_nudge/task_alarm＋GET /view、/health；响应形状对
 tests/fixtures/v3_contract_golden.json 抽样锚（board 键集/doctor 键/
 messages dict 形状）；错误＝v2 平面 {"error": msg}（error_response）。
 
@@ -27,6 +27,7 @@ import dataclasses
 import html
 import json
 import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,17 @@ _PULL_STATES = frozenset({"dispatched", "running", "done", "verify_failed",
                           "reopened", "blocked"})  # v2 cred 拉取面在飞口径
 _ACTIVE = frozenset({"dispatched", "running", "done", "verify_failed",
                      "reopened", "blocked"})
+
+# Req: F176 /gate_deny 字段校验面（v2 httpd 同构双件）：类型/长度上限/控制符
+# 压平（F49 同款口径——DEL/C1/Unicode 行界显式 \uXXXX 转义，恰一行不可伪造；
+# 含孤立代理段 D800–DFFF：不压平则 utf-8 落账编码失败丢行——C 册 round1 实锤）
+_GATE_DENY_CAPS = (("sid", 128), ("tool", 64), ("target", 512), ("reason", 256))
+_GATE_DENY_CTRL = str.maketrans({c: "\\u%04x" % c
+                                 for c in (*range(0x20), *range(0x7f, 0xa0),
+                                           0x2028, 0x2029,
+                                           *range(0xd800, 0xe000))})
+_GATE_DENY_WINDOW_S = 30.0  # 服务端节流窗（内存态——gt-a18ef6：追加禁 O(调用数) 无界）
+_GATE_DENY_LOCK = threading.Lock()  # ThreadingHTTPServer 并发下节流内存态互斥
 
 _TOOL_DESC = {
     "task_create": "登记任务（todo）（dispatcher/root；worker 建嵌套子任务）",
@@ -228,6 +240,8 @@ class _V3Handler(BaseHTTPRequestHandler):
         stack = self.stack
         if name == "cred_for_sid":  # 插件拉取面先于鉴权（缓存未命中才拉）
             return self._cred_for_sid(body)
+        if name == "gate_deny":  # Req: F176 shim 拒绝审计上报面（信息面无鉴权）
+            return self._gate_deny(body)
         if name not in LEGACY_ROUTES and name not in (
                 "task_nudge", "task_alarm"):
             return self._json(404, {"error": "not found"})
@@ -614,6 +628,42 @@ class _V3Handler(BaseHTTPRequestHandler):
         return next(((t.id, t) for t in self.stack.storage.tasks_all()
                      if t.worker_sid == asker and t.state in _PULL_STATES
                      and t.env_dir), None)
+
+    def _gate_deny(self, body):
+        """Req: F176 shim 拒绝审计上报面（v2 httpd 平移）：字段校验（类型/上限/
+        控制符压平）→ event=gate_deny 审计行（标注 shim 上报源）；同 (sid,tool,
+        reason) 30s 窗内丢弃（内存态节流挂 stack——ThreadingHTTPServer 加锁；
+        gt-a18ef6 教训：追加禁 O(调用数) 无界）。回环单用户信任模型
+        （/cred_for_sid 同口径）。"""
+        flat = {}
+        for k, cap in _GATE_DENY_CAPS:
+            v = body.get(k, "")
+            if not isinstance(v, str):
+                return self._json(400, {"error": f"{k} 须为字符串"})
+            flat[k] = v.translate(_GATE_DENY_CTRL)[:cap]
+        ts = body.get("ts", 0)
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            return self._json(400, {"error": "ts 须为数字"})
+        key = (flat["sid"], flat["tool"], flat["reason"])
+        throttled = False
+        with _GATE_DENY_LOCK:  # 审计与应答 I/O 在锁外（uow 自串行；stalled reader 不得占全局锁）
+            seen = getattr(self.stack, "_gate_deny_seen", None)
+            if seen is None:
+                seen = self.stack._gate_deny_seen = {}
+            now = time.time()
+            if key in seen and now - seen[key] < _GATE_DENY_WINDOW_S:
+                throttled = True
+            else:
+                seen[key] = now
+                for k in [k for k, t in seen.items()  # 出账：只留窗内活跃键（有界）
+                          if now - t >= _GATE_DENY_WINDOW_S]:
+                    del seen[k]
+        if throttled:
+            return self._json(200, {"ok": True, "throttled": True})
+        self._audit(flat["sid"] or "?", "gate_deny", None,
+                    f"shim tool={flat['tool']} target={flat['target']} "
+                    f"reason={flat['reason']} ts={ts}")
+        return self._json(200, {"ok": True})
 
     def _audit(self, actor, event, task, note):
         try:

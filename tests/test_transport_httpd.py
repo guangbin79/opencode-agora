@@ -1874,6 +1874,58 @@ class TestRootPoisonReissue(HttpdTest):
         self.assertEqual(len(ev), 1)  # 不因污染叠加重签
 
 
+class TestGateDeny(HttpdTest):
+    """Req: F176 shim 拒绝审计上报面：POST /gate_deny 信息面（无鉴权，回环
+    单用户口径同 /cred_for_sid）——字段校验（类型/长度上限/控制符压平）后落
+    event=gate_deny 审计行（标注 shim 上报源）；服务端节流防线：同
+    (sid,tool,reason) 30s 窗内后续丢弃（内存态——gt-a18ef6 教训：追加禁
+    O(调用数) 无界，节流禁每事件全量落盘）。"""
+
+    def test_report_lands_gate_deny_event(self):  # Req: F176
+        st, r = call(self.port, "POST", "/gate_deny", {
+            "sid": "s" * 300, "tool": "edit", "target": "/repo/a\u000a\ud800md",
+            "reason": "被拦：无凭据", "ts": 1795000000123})
+        self.assertEqual(st, 200)
+        self.assertTrue(r.get("ok"))
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "gate_deny"]
+        self.assertEqual(len(ev), 1)  # 正常上报落账（kind=gate_deny 一行）
+        e = ev[0]
+        self.assertEqual(e["actor"], "s" * 128)  # 长度上限（超长截断）
+        self.assertIsNone(e.get("task"))
+        self.assertIn("shim", e["note"])  # 标注 shim 上报源
+        self.assertIn("edit", e["note"])
+        self.assertIn("\\u000a", e["note"])  # 控制符压平（恰一行不可伪造）
+        # 孤立代理压平（C 册 round1 实锤：JS/Python JSON 往返物化 \ud800，
+        # 不压平则 utf-8 落账 UnicodeEncodeError 丢行＝选择性湮灭审计）
+        self.assertIn("\\ud800", e["note"])
+        self.assertNotIn("\n", e["note"])
+        self.assertNotIn("\ud800", e["note"])
+        self.assertIn("被拦：无凭据", e["note"])
+
+    def test_bad_shape_rejected(self):  # Req: F176
+        st, _ = call(self.port, "POST", "/gate_deny",
+                     {"sid": 123, "tool": "edit"})
+        self.assertEqual(st, 400)  # 坏类型拒（非 2xx）
+        st, _ = call(self.port, "POST", "/gate_deny",
+                     {"sid": "s", "tool": "edit", "target": "",
+                      "reason": "r", "ts": "now"})
+        self.assertEqual(st, 400)  # ts 非数字拒
+        st, _ = call(self.port, "POST", "/gate_deny", [1])
+        self.assertEqual(st, 400)  # body 非 JSON 对象（既有口径）
+
+    def test_same_key_throttled_within_30s_window(self):  # Req: F176
+        body = {"sid": "ses-deny-2", "tool": "edit", "target": "/x.md",
+                "reason": "r", "ts": 1}
+        st1, _ = call(self.port, "POST", "/gate_deny", body)
+        st2, r2 = call(self.port, "POST", "/gate_deny", dict(body))
+        self.assertEqual((st1, st2), (200, 200))
+        self.assertTrue(r2.get("throttled"))  # 窗内合并＝丢后续
+        ev = [e for e in self.app.store.read_events()
+              if e["event"] == "gate_deny"]
+        self.assertEqual(len(ev), 1)  # 账本零追加
+
+
 class TestOutOfBandChain(HttpdTest):
     """ag-af96bb② 全链：deliverable 建单→派发→零提交 done→verify 绿→closed（零合入）。"""
 

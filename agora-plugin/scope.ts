@@ -5,7 +5,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { agoraHome } from "./hook";
+import { agoraHome } from "./core/hook";
 
 function norm(p: string): string {
   return p.replace(/\/+$/, "");

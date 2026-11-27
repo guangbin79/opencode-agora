@@ -3,5 +3,6 @@ include install.sh
 include agora
 recursive-include agora-plugin *.ts
 exclude agora-plugin/*.test.ts
+exclude agora-plugin/core/*.test.ts
 prune agora-plugin/tests
 recursive-include skills *

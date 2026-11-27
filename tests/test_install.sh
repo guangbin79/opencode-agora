@@ -73,6 +73,12 @@ ADSESS=""
 chk "夹具 agorad 脱会话（sess≠测试 shell，gt-71b6af）" bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$ADSESS" "$MYSESS"
 chk "P2-13 载荷指纹落盘且==源仓 HEAD" bash -c '[ "$(sed -n 1p "$1/.agora/agorad/PAYLOAD_VERSION")" = "$2" ] && [ "$(sed -n 2p "$1/.agora/agorad/PAYLOAD_VERSION")" = "$(git -C "$2" rev-parse HEAD)" ]' _ "$A1" "$REPO"
 
+# Req: F176 旧平铺插件件迁移收敛 seed（复用轮前投毒——重跑 install 后应被抹）
+mkdir -p "$H1/.config/opencode/plugins/agora"
+for f in cred envPath hook inject lift; do
+  : > "$H1/.config/opencode/plugins/agora/$f.ts"
+done
+
 # ---- 复用实例轮（agorad_alive→LOG 空）：cleanup 残牌扫尾实路径（task-bb4ad2）----
 # AD1 仍活着：此轮走复用分支不拉起，seed 的残 .bak 只能由 AGORA_HOME 键扫尾收敛
 printf 'AGORA_ROOT_TOKEN: seeded-reuse-bak\n' > "$A1/.agora/install-agorad.log.bak"
@@ -97,11 +103,15 @@ assert a["type"] == "local", a
 assert a["command"][1] == sys.argv[2], a' "$OCJ" "$REPO/agora_mcp.py"
 
 chk "插件复制 index.ts (Req: F1)" cmp -s "$REPO/agora-plugin/index.ts" "$H1/.config/opencode/plugins/agora/index.ts"
-chk "插件复制 lift.ts (Req: F1)"  cmp -s "$REPO/agora-plugin/lift.ts"  "$H1/.config/opencode/plugins/agora/lift.ts"
-chk "插件复制 hook/cred/inject (Req: F1)" bash -c '
-for f in hook cred inject; do
-  cmp -s "$1/agora-plugin/$f.ts" "$2/plugins/agora/$f.ts" || exit 1
+chk "插件复制 core/lift.ts (Req: F176)"  cmp -s "$REPO/agora-plugin/core/lift.ts"  "$H1/.config/opencode/plugins/agora/core/lift.ts"
+chk "插件复制 core/hook/cred/inject/envPath/audit (Req: F176)" bash -c '
+for f in hook cred inject envPath audit; do
+  cmp -s "$1/agora-plugin/core/$f.ts" "$2/plugins/agora/core/$f.ts" || exit 1
 done' _ "$REPO" "$H1/.config/opencode"
+chk "旧平铺件随重装收敛（Req: F176）" bash -c '
+for f in cred envPath hook inject lift; do
+  [ ! -e "$1/plugins/agora/$f.ts" ] || exit 1
+done' _ "$H1/.config/opencode"
 chk "测试件不随装（无 *.test.ts）(Req: F1)" bash -c '
 [[ -z "$(find "$1/plugins/agora" -name "*.test.ts")" ]]' _ "$H1/.config/opencode"
 
@@ -218,8 +228,12 @@ newfix
 H5="$FIX/home"; A5="$FIX/plaza"; PKGROOT="$FIX/pkgroot"; BIN5="$FIX/bin"
 mkdir -p "$H5" "$PKGROOT/agora-plugin" "$PKGROOT/skills/agora-dispatch" "$PKGROOT/skills/agora-ops" "$BIN5" "$H5/.local/bin" "$BIN5/fakevenv"
 ln -sf "$BIN5/fakevenv/agora-board" "$H5/.local/bin/agora-board"  # 模拟 pipx 同路径活链接（round-2 B 册回归锚）
-for f in cred envPath hook index inject lift scope; do  # 只放 7 个非测试 ts（wheel 数据面同清单）
+for f in index scope; do  # 顶层接线层＋scope（wheel 数据面同清单）
   cp "$REPO/agora-plugin/$f.ts" "$PKGROOT/agora-plugin/"
+done
+mkdir -p "$PKGROOT/agora-plugin/core"  # Req: F176 判定核心子目录（含 audit）
+for f in audit cred envPath hook inject lift; do
+  cp "$REPO/agora-plugin/core/$f.ts" "$PKGROOT/agora-plugin/core/"
 done
 cp "$REPO/skills/agora-dispatch/SKILL.md" "$PKGROOT/skills/agora-dispatch/"
 cp "$REPO/skills/agora-ops/SKILL.md" "$PKGROOT/skills/agora-ops/"
@@ -236,8 +250,8 @@ out5=$(env -u AGORA_PORT -u AGORA_OC_URL -u AGORA_OC_PASSWORD HOME="$H5" AGORA_H
        PATH="$BIN5:$PATH" bash "$PKGROOT/install.sh" 2>&1)
 rc5=$?
 chk "pkg 模式 install 退出 0 (Req: F31)" [ "$rc5" -eq 0 ]
-chk "pkg: 7 个非测试 ts 落插件目录且无测试件 (Req: F31)" bash -c '
-[ "$(find "$1/plugins/agora" -name "*.ts" | wc -l)" -eq 7 ] && [[ -z "$(find "$1/plugins/agora" -name "*.test.ts")" ]]' _ "$H5/.config/opencode"
+chk "pkg: 8 个非测试 ts 落插件目录且无测试件 (Req: F176)" bash -c '
+[ "$(find "$1/plugins/agora" -name "*.ts" | wc -l)" -eq 8 ] && [[ -z "$(find "$1/plugins/agora" -name "*.test.ts")" ]]' _ "$H5/.config/opencode"
 chk "pkg: skills 两剧本在位 (Req: F31)" bash -c '
 for s in agora-dispatch agora-ops; do
   cmp -s "$1/skills/$s/SKILL.md" "$2/skills/$s/SKILL.md" || exit 1

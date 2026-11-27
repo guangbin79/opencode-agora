@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { isDormant, loadInactiveRepos } from "./scope";
-import { resetLift } from "./lift";
+import { resetLift } from "./core/lift";
 import { default as entry, setEnforce } from "./index";
 
 let root: string;

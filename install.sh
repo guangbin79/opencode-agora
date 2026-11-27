@@ -107,11 +107,20 @@ p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf
 PY
 
 # ---- 4) 插件复制（opencode 只扫插件目录；整目录复制保相对导入；测试件不随装）----
-mkdir -p "$PLUGIN_DIR"
+mkdir -p "$PLUGIN_DIR" "$PLUGIN_DIR/core"
 for f in "$SRC"/agora-plugin/*.ts; do
   case "$f" in *.test.ts) continue ;; esac
   cp -f "$f" "$PLUGIN_DIR"/
 done
+# Req: F176 core/ 子目录（harness 无关判定核心）随装——index 相对导入依赖目录形状
+for f in "$SRC"/agora-plugin/core/*.ts; do
+  case "$f" in *.test.ts) continue ;; esac
+  cp -f "$f" "$PLUGIN_DIR/core/"/
+done
+# Req: F176 布局迁移收敛：抹旧平铺件防混版滞留（fresh 装无此五件＝no-op，幂等不变；
+# 4b rm -rf 载荷/旧 board_tui 清理同款惯例）
+rm -f "$PLUGIN_DIR/cred.ts" "$PLUGIN_DIR/envPath.ts" "$PLUGIN_DIR/hook.ts" \
+      "$PLUGIN_DIR/inject.ts" "$PLUGIN_DIR/lift.ts"
 
 # ---- 4a) skills 复制（主会话编排剧本；纯 md 整目录拷，同值覆写＝幂等）----
 mkdir -p "$OC_DIR/skills"

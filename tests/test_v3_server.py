@@ -1407,5 +1407,51 @@ class TestV3StackOnGitServerPort(_ChainBase):  # Req: F155——Git 后端服务
         self.assertEqual(artifacts, [])  # 全程零 SQLite 件
 
 
+class TestGateDenyReport(_Base):  # Req: F176
+    """shim 拒绝审计上报面（legacy 根路由与 /cred_for_sid 同位接入：信息面
+    无鉴权）——字段校验（类型/上限/控制符压平）→ event=gate_deny 审计行
+    （标注 shim 上报源）；同 (sid,tool,reason) 30s 窗节流（内存态）。"""
+
+    def test_report_lands_gate_deny_event(self):  # Req: F176
+        s, b = self.call("gate_deny", {
+            "sid": "s" * 300, "tool": "edit", "target": "/repo/a\u000a\ud800md",
+            "reason": "被拦：无凭据", "ts": 1795000000123})
+        self.assertEqual(s, 200)
+        self.assertTrue(b.get("ok"))
+        evs = [e for e in self.stack.storage.events_all()
+               if e.event == "gate_deny"]
+        self.assertEqual(len(evs), 1)  # 正常上报落账（kind=gate_deny 一行）
+        ev = evs[0]
+        self.assertEqual(ev.actor, "s" * 128)  # 长度上限（超长截断）
+        self.assertEqual(ev.task, "")  # 无任务归属（域模型缺省空串）
+        note = (ev.detail or {}).get("note", "")
+        self.assertIn("shim", note)  # 标注 shim 上报源
+        self.assertIn("edit", note)
+        self.assertIn("\\u000a", note)  # 控制符压平（恰一行不可伪造）
+        # 孤立代理压平（C 册 round1 实锤：不压平则 v3 _audit 静默丢行）
+        self.assertIn("\\ud800", note)
+        self.assertNotIn("\n", note)
+        self.assertNotIn("\ud800", note)
+        self.assertIn("被拦：无凭据", note)
+
+    def test_bad_shape_rejected_400(self):  # Req: F176
+        s, _ = self.call("gate_deny", {"sid": 7, "tool": "edit"})
+        self.assertEqual(s, 400)  # 坏类型拒（非 2xx）
+        s, _ = self.call("gate_deny", {"sid": "s", "tool": "edit",
+                                       "target": "", "reason": "r", "ts": "t"})
+        self.assertEqual(s, 400)  # ts 非数字拒
+
+    def test_same_key_throttled_within_30s_window(self):  # Req: F176
+        body = {"sid": "ses-deny-2", "tool": "edit", "target": "/x.md",
+                "reason": "r", "ts": 1}
+        s1, _ = self.call("gate_deny", body)
+        s2, b2 = self.call("gate_deny", dict(body))
+        self.assertEqual((s1, s2), (200, 200))
+        self.assertTrue(b2.get("throttled"))  # 窗内合并＝丢后续
+        evs = [e for e in self.stack.storage.events_all()
+               if e.event == "gate_deny"]
+        self.assertEqual(len(evs), 1)  # 账本零追加
+
+
 if __name__ == "__main__":
     unittest.main()

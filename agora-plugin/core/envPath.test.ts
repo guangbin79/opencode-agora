@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { augmentPath, onShellCreate } from "./envPath";
-import { default as entry } from "./index";
+import { default as entry } from "../index";
 
 const STRIPPED = ".opencode/bin:/usr/local/bin:/usr/bin:/bin"; // worker 实测剥离态
 

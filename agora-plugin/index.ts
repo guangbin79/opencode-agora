@@ -7,16 +7,17 @@
  * 会话 cwd＝ctx.session.get({sessionID}).location.directory（异步取，失败回落 process.cwd()）。
  * 语义与 agorad 服务侧一致：豁免面 B3、读引导、主会话例外、服务不可达默认拒。
  */
-import { onShellCreate, type ShellCreatePayload } from "./envPath";
-import { getCredential, pullCredential, readRootToken, type PullResult } from "./cred";
-import { onInject } from "./inject";
+import { onShellCreate, type ShellCreatePayload } from "./core/envPath";
+import { getCredential, pullCredential, readRootToken, type PullResult } from "./core/cred";
+import { onInject } from "./core/inject";
 import {
   AGORAD_TIMEOUT_MS, agoradUrl, ensureOnce, resetLift, LIFT_RECOVER, type LiftResult,
-} from "./lift";
+} from "./core/lift";
 import { isDormant } from "./scope";
+import { reportDeny } from "./core/audit";
 import {
   enforceRelevant, fold, isWriteTool, mailQuestion, NO_CRED_HINT, questionGate, readishGated, shouldBlock,
-} from "./hook";
+} from "./core/hook";
 
 // 稳定运行时 ctx 本地面类型（只注本插件消费面，不引 @opencode 包）
 interface OcToolEvent {
@@ -171,6 +172,13 @@ export default {
             : "agorad 拉取不可达/异常（安全向拒）";
           hint = `${hint}（${why}）`;
         }
+        // Req: F176 拒绝审计异步上报：fire-and-forget——同 (sid,tool,reason) 键
+        // 30s 节流；失败/不可达静默吞、禁在判定路径 await、不改拒因文案与判定
+        // 语义。端口复用 lift 既有机制（与 /cred_for_sid 同源）；lift 败态零上报
+        // （不可达无从发，恢复后首次拒绝照常首发）。
+        reportDeny(lift?.ok ? lift.port : null, {
+          sid: event.sessionID, tool: event.tool, target, reason: hint,
+        });
         throw new Error(lift && !lift.ok ? `${hint}（${LIFT_RECOVER}；拒因：${lift.reason}）` : hint);
       }
     });

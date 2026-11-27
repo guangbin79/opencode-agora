@@ -14,7 +14,7 @@ import {
   cacheCredential, getCredential, pullCredential, resetCredPull, type Cred,
 } from "./cred";
 import { resetLift } from "./lift";
-import { default as entry, setEnforce } from "./index";
+import { default as entry, setEnforce } from "../index";
 
 let root: string; // 非豁免夹具根（/tmp 下但不在 /tmp/opencode 内）
 let repo: string; // git 仓夹具（.git 目录桩）

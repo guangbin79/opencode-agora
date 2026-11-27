@@ -3,6 +3,7 @@
 shortcut: wheel 构建冒烟走网络（pip 拉 setuptools）不入套件，防 flaky——
 构建链证据由任务页验收节的人工 venv 冒烟承担，套件只锁源级契约。
 """
+import re
 import unittest
 from pathlib import Path
 
@@ -39,10 +40,21 @@ class PyprojectContractTest(unittest.TestCase):
         for key in (
             '"share/opencode-agora"',
             '"share/opencode-agora/agora-plugin"',
+            '"share/opencode-agora/agora-plugin/core"',
             '"share/opencode-agora/skills/agora-dispatch"',
             '"share/opencode-agora/skills/agora-ops"',
         ):
-            self.assertIn(f"{key} =", self.text)  # Req: F31
+            self.assertIn(f"{key} =", self.text)  # Req: F31；core 键 Req: F176
+
+    def test_plugin_data_files_match_repo(self):  # Req: F176
+        """数据面清单↔仓内非测试 ts 盘点同步锁（防排除规则漂移静默漏装——
+        F176 平铺迁 core/ 时由 OCR round1 实证漂移可静默漏装）。"""
+        listed = sorted(re.findall(r'"(agora-plugin/[^"\n]+\.ts)"', self.text))
+        on_disk = sorted(
+            str(p.relative_to(REPO))
+            for p in REPO.glob("agora-plugin/**/*.ts")
+            if not p.name.endswith(".test.ts"))
+        self.assertEqual(listed, on_disk)
 
     def test_version_attr(self):
         self.assertIn('attr = "agorad.main._VERSION"', self.text)

@@ -1,5 +1,6 @@
 """入向 JSON 口（B4）：15 工具端点＋/cred_for_sid（凭据拉取＋每窗口 dispatcher
-牌签发面）＋/view＋/health；单线程串行＋后台门队列。
+牌签发面）＋/gate_deny（shim 拒绝审计上报，Req: F176）＋/view＋/health；
+单线程串行＋后台门队列。
 
 门队列消费经 gate.run_guarded（P0-1 看门狗，ag-9c4cbb）：门级硬顶到点杀本门
 子进程组＋blocked(gate_overrun) 终局，单个挂死门不再堵死后续 done 任务；门体
@@ -62,6 +63,17 @@ _STRING_FIELDS = {
     "task_alarm": ("task",),
 }
 
+# Req: F176 /gate_deny 字段校验面：类型/长度上限/控制符压平（F49 同款口径——
+# DEL/C1/Unicode 行界按 Python splitlines 行界显式 \uXXXX 转义，恰一行不可伪造；
+# 含孤立代理段 D800–DFFF：JS/Python JSON 往返均物化该类，不压平则 utf-8 落账
+# UnicodeEncodeError 丢行＝选择性湮灭审计——C 册 round1 实锤）
+_GATE_DENY_CAPS = (("sid", 128), ("tool", 64), ("target", 512), ("reason", 256))
+_GATE_DENY_CTRL = str.maketrans({c: "\\u%04x" % c
+                                 for c in (*range(0x20), *range(0x7f, 0xa0),
+                                           0x2028, 0x2029,
+                                           *range(0xd800, 0xe000))})
+_GATE_DENY_WINDOW_S = 30.0  # 服务端节流窗（内存态——gt-a18ef6：追加禁 O(调用数) 无界）
+
 
 def _string_field(value, field: str) -> str:
     if not isinstance(value, str):
@@ -106,8 +118,8 @@ class _Handler(BaseHTTPRequestHandler):
         sid = None
         try:
             name = self.path.strip("/").split("?")[0]
-            if name not in _TOOLS and name not in ("cred_for_sid", "task_nudge",
-                                                   "task_alarm"):
+            if name not in _TOOLS and name not in ("cred_for_sid", "gate_deny",
+                                                   "task_nudge", "task_alarm"):
                 return self._json(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -115,6 +127,8 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("body 须为 JSON 对象")
             if name == "cred_for_sid":  # 插件拉取面先于鉴权：无牌是常态（缓存未命中才拉）
                 return self._cred_for_sid(body)
+            if name == "gate_deny":  # Req: F176 shim 拒绝审计上报面（信息面无鉴权）
+                return self._gate_deny(body)
             token = self.headers.get("X-Agora-Token", "")
             ident = self.app.auth.identify(token)
             if ident is None:
@@ -560,6 +574,40 @@ class _Handler(BaseHTTPRequestHandler):
                                      "note": f"dispatcher:{asker}"
                                              + (" root-poison reissue" if poisoned else "")})
         return self._json(200, {"token": tok, "role": "dispatcher"})
+
+    def _gate_deny(self, body):
+        """Req: F176 shim 拒绝审计上报面：插件（及后续 pi/dsh shim）判定链产出
+        拒时 fire-and-forget POST——信息面无鉴权（回环单用户口径同 /cred_for_sid）。
+        字段校验（类型/长度上限/控制符压平）→ 一行 event=gate_deny 审计（标注
+        shim 上报源）；服务端节流防线：同 (sid,tool,reason) 30s 窗内后续丢弃——
+        防失控循环撑爆审计账本（gt-a18ef6 教训：节流走内存态，禁每事件全量落盘）。"""
+        flat = {}
+        for k, cap in _GATE_DENY_CAPS:
+            v = body.get(k, "")
+            if not isinstance(v, str):
+                return self._json(400, {"error": f"{k} 须为字符串"})
+            flat[k] = v.translate(_GATE_DENY_CTRL)[:cap]
+        ts = body.get("ts", 0)
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            return self._json(400, {"error": "ts 须为数字"})
+        key = (flat["sid"], flat["tool"], flat["reason"])
+        # 内存态节流挂 app（单线程串行免锁；测试夹具逐 app 隔离防窗串扰）
+        seen = getattr(self.app, "_gate_deny_seen", None)
+        if seen is None:
+            seen = self.app._gate_deny_seen = {}
+        now = time.time()
+        if key in seen and now - seen[key] < _GATE_DENY_WINDOW_S:
+            return self._json(200, {"ok": True, "throttled": True})
+        seen[key] = now
+        for k in [k for k, t in seen.items()  # 出账：只留窗内活跃键（内存态有界）
+                  if now - t >= _GATE_DENY_WINDOW_S]:
+            del seen[k]
+        self.app.store.append_event({
+            "ts": now, "actor": flat["sid"] or "?", "event": "gate_deny",
+            "task": None,
+            "note": (f"shim tool={flat['tool']} target={flat['target']} "
+                     f"reason={flat['reason']} ts={ts}")})
+        return self._json(200, {"ok": True})
 
     def _wiki(self, rel):
         root = (Path(self.app.store.home) / "wiki").resolve()

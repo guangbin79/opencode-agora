@@ -22,7 +22,7 @@ export interface LiftOpts {
   intervalMs?: number;
 }
 
-const DEFAULT_SCRIPT = join(import.meta.dir, "..", "agorad", "main.py");
+const DEFAULT_SCRIPT = join(import.meta.dir, "..", "..", "agorad", "main.py"); // core/ 子目录后仓根＝上两级
 /** proc 只消费 kill：类型收窄免引 Bun 命名空间（测试桩同形）。 */
 interface Killable {
   kill(): void;

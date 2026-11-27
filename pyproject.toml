@@ -29,13 +29,16 @@ include = ["agorad*"]
 [tool.setuptools.data-files]
 "share/opencode-agora" = ["install.sh", "agora"]
 "share/opencode-agora/agora-plugin" = [
-    "agora-plugin/cred.ts",
-    "agora-plugin/envPath.ts",
-    "agora-plugin/hook.ts",
     "agora-plugin/index.ts",
-    "agora-plugin/inject.ts",
-    "agora-plugin/lift.ts",
     "agora-plugin/scope.ts",
+]
+"share/opencode-agora/agora-plugin/core" = [
+    "agora-plugin/core/audit.ts",
+    "agora-plugin/core/cred.ts",
+    "agora-plugin/core/envPath.ts",
+    "agora-plugin/core/hook.ts",
+    "agora-plugin/core/inject.ts",
+    "agora-plugin/core/lift.ts",
 ]
 "share/opencode-agora/skills/agora-dispatch" = ["skills/agora-dispatch/SKILL.md"]
 "share/opencode-agora/skills/agora-ops" = ["skills/agora-ops/SKILL.md"]

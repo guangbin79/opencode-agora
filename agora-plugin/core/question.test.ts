@@ -10,7 +10,7 @@ import { join } from "node:path";
 
 import { mailQuestion, QUESTION_HINT, questionGate, setMailRunner } from "./hook";
 import { cacheCredential, type Cred } from "./cred";
-import { default as entry } from "./index";
+import { default as entry } from "../index";
 
 let home: string; // $AGORA_HOME 夹具（.agora/email.json 按用例落/删）
 let savedEnv: string | undefined;
