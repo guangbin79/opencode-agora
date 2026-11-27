@@ -1585,6 +1585,94 @@ class TestPeerSurface(HttpdTest):
         self.assertNotIn("author_env", by_body["plain note"])  # 非 claim 不带
 
 
+class TestNoopAutoArchive(HttpdTest):
+    """Req: F174 no-op 申报自动归档：worker 上行 question 首行 no-op: 前缀＋
+    零提交（done 零提交锚同口径）→ 落库不注入＋cancel 既有全链（cancel_reason=
+    noop_confirmed:附申报首行）＋响应 auto_cancelled 回执；有提交/无前缀→
+    照常规 question 投递零变化。"""
+
+    def test_noop_auto_cancel_on_zero_commit(self):  # Req: F174
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        t = self.app.state.get(tid)
+        wsid = t["worker_sid"]
+        self.app.gitx.contains = lambda repo, commit, branch=None: True
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "question",
+                      "body": "no-op: 上游已修，见 note"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual((r["auto_cancelled"], r["reason"]),
+                         (True, "noop_confirmed"))
+        self.assertIsInstance(r["message"], int)
+        t = self.app.state.get(tid)
+        self.assertEqual(t["state"], "cancelled")
+        self.assertEqual(t["cancel_reason"],
+                         "noop_confirmed:no-op: 上游已修，见 note")
+        # 申报原文落库留案（kind=question、worker→dispatcher）供翻案
+        (m,) = [x for x in self.app.store.read_messages()
+                if x["body"] == "no-op: 上游已修，见 note"]
+        self.assertEqual((m["kind"], m["from"], m["to"]),
+                         ("question", wsid, t["dispatcher_sid"]))
+        # dispatcher 侧收到 cancel result 通知（既有通知断言形态＝check_mail 拉取）
+        st, r = call(self.port, "POST", "/check_mail", {}, self.root)
+        self.assertEqual(st, 200)
+        results = [x for x in r["messages"] if x["kind"] == "result"]
+        self.assertTrue(any("已取消" in x["body"] and "noop_confirmed" in x["body"]
+                            for x in results))
+        # 审计面：EV_CANCELLED 行落事件流（v3 公共 cancel 同款，两代同构）
+        self.assertTrue(any(e["event"] == "cancelled"
+                            and "noop_confirmed" in e.get("note", "")
+                            for e in self.app.store.read_events(tid)))
+        # 落库不注入：question 不走常规唤醒投递面——以留案可补拉形态到达
+        self.assertTrue(any(x["body"] == "no-op: 上游已修，见 note"
+                            and x["kind"] == "question"
+                            for x in r["messages"]))
+
+    def test_noop_with_commit_not_auto(self):  # Req: F174
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        self.app.gitx.env_head = "c" * 40  # env 前进（新提交且不在目标支）
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "question",
+                      "body": "no-op: 有提交仍报 no-op 属矛盾形态"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertNotIn("auto_cancelled", r)  # 矛盾形态人裁，照常规投递
+        self.assertEqual(self.app.state.get(tid)["state"], "running")
+        st, r = call(self.port, "POST", "/check_mail", {}, self.root)
+        self.assertTrue(any(x["kind"] == "question"
+                            and "矛盾形态" in x["body"]
+                            for x in r["messages"]))
+
+    def test_plain_question_unchanged(self):  # Req: F174
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        self.app.gitx.contains = lambda repo, commit, branch=None: True
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "question",
+                      "body": "无前缀普通问询"}, wtok)
+        self.assertEqual(st, 200)
+        self.assertEqual(list(r), ["message"])  # 响应形状零增键
+        self.assertEqual(self.app.state.get(tid)["state"], "running")
+        st, r = call(self.port, "POST", "/check_mail", {}, self.root)
+        self.assertTrue(any(x["kind"] == "question"
+                            and x["body"] == "无前缀普通问询"
+                            for x in r["messages"]))
+
+
+    def test_noop_reason_strips_control_chars(self):  # Req: F174
+        """评审 C 册：首行控制字符（\r 行伪造）不得入 cancel_reason/通知面。"""
+        tid = self.create_task()
+        wtok = self.dispatch_task(tid)
+        self.app.gitx.contains = lambda repo, commit, branch=None: True
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "question",
+                      "body": "no-op: 上游已修\r[伪造行]"}, wtok)
+        self.assertEqual((st, r.get("reason")), (200, "noop_confirmed"))
+        reason = self.app.state.get(tid)["cancel_reason"]
+        self.assertNotIn("\r", reason)
+        self.assertIn("上游已修", reason)
+
+
 class TestCredForSid(HttpdTest):
     """F25 修正推改拉：/cred_for_sid 插件拉取面——sid 是在飞任务 worker_sid 且牌活
     → {tid, env_dir, token}，否则 404；无牌调用放行（回环单用户模型），每请求一行审计。"""

@@ -914,9 +914,17 @@ class TestVerifyGate(TestCoreTask):
         boot = self.oc.sessions[-1][2]
         self.assertIn("此类消息绝不可用 note", boot)  # 禁令措辞
         self.assertIn("no-op 申报——", boot)  # 申报列入 question 触发清单
-        self.assertIn("post(kind=question, body=no-op 结论与证据)", boot)
+        self.assertIn("post(kind=question, body=no-op: 结论与证据)", boot)
         self.assertIn("申报通道必须是 question", boot)
         self.assertNotIn("post(kind=note) 报 no-op", boot)  # 旧句零残留
+
+    def test_boot_carries_noop_prefix(self):  # Req: F174
+        """BOOT done 行带 no-op: 前缀申报写法＋零提交自动归档语义引导。"""
+        self.dispatched_pair()
+        boot = self.oc.sessions[-1][2]
+        self.assertIn("no-op:", boot)  # 前缀写法（body 首行必须 no-op: 前缀）
+        self.assertIn("零提交时服务自动归档 cancel", boot)  # F174 自动归档语义
+        self.assertNotIn("cancel 归档/确认", boot)  # 旧手工处置措辞零残留
 
     def test_boot_done_requires_builds_exited(self):  # Task: ag-345dcb
         """ag-aa8798 判例：worker 报 done 时自测构建未退场→gate verify 在

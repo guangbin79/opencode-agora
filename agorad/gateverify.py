@@ -325,7 +325,7 @@ class GateVerifyService:
             return self._deny_anchor(tid, "vacuous-done", f"任务 {tid} 零提交"
                                      " done 拒收：本任务相对目标分支无新增提交"
                                      "——若无需改动或活已被上游完成，"
-                                     "post(kind=question, body=no-op 结论与证据) "
+                                     "post(kind=question, body=no-op: 结论与证据) "
                                      "申报——需派发方处置；勿空回填 done")
         if a is not None and not a.get("clean"):  # F114 门审任务全免
             return self._deny_anchor(tid, "anchor", f"任务 {tid} 合并前置失败："
@@ -369,6 +369,23 @@ class GateVerifyService:
         except RuntimeError:
             self._audit(t.id, "zero_commit_probe_failed")
         return False
+
+    def zero_commit(self, tid):  # Req: F174
+        """no-op 申报零提交判定：done 零提交锚同口径（F69 contains 探针＋
+        ag-1ae0f1 空集放行判据）以 env 当前 HEAD 为判据；谓词病＝False
+        （判据不可确立→照常规投递人裁，带痕同 accept_done 口径）。v2
+        core/gate.py 同构。"""
+        t = self._store.get_task(tid)
+        if not t.env_dir:
+            return False
+        try:
+            head = self._gitx.head(t.env_dir)
+            vacuous = self._gitx.contains(t.project_dir, head,
+                                          t.target_branch)
+        except RuntimeError:
+            self._audit(tid, "zero_commit_probe_failed")
+            return False
+        return vacuous and not self._vacuous_delivered(t, head)
 
     def _deny(self, tid, code, message):
         """ag-d03e0e 拒因落消息面：受理段拒因原文持久化为任务消息（from=gate、

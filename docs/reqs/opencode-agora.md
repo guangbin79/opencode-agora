@@ -1079,3 +1079,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/core/peer.py、agorad/compose.py、agorad/transport/httpd.py、agorad/serverv3.py、agorad/contracts.py、tests（A 单 ag-7fb3af @3a22a6f，六锚 Req: F173）；agorad/core/task.py（BOOT 协作行重写）、skills/agora-dispatch/SKILL.md（同仓协同编排条目＋账本检索条目微调）、agora_mcp.py（repo_board 描述）、tests/test_transport_httpd.py（F172 断言更新）、docs/reqs/opencode-agora.md（本条）（B 单，Req: F173）。
 
 **验收**：python3 -m pytest tests/test_transport_httpd.py tests/test_v3_server.py -q 全绿（含 A 六锚＋B 断言锚）；全量 python3 -m pytest tests/ -q 不回归（基线 2499 passed＋107 subtests）。
+
+### F174 no-op 申报自动归档（2026-11-27，用户裁定）
+
+**背景**：worker 申报「无需改动」（post(kind=question, body=no-op 结论与证据)）→ dispatcher 收到后手动 cancel 归档——dispatcher 读了理由后的动作几乎恒为 cancel，纯走形式的手工环节。本条把机械动作下沉服务：格式化 no-op 申报＋零提交 → 自动归档，实时通知保住事后翻案权（cancel 存档不删记录，误判重开一单即回）。
+
+**裁定**：①申报格式约定——BOOT done 行改写（body 首行必须 no-op: 前缀，前缀化后零提交时服务自动归档，误判由派发方重开新单）；gate/gateverify 两处拒因引导文案同步前缀化（语义不变）；②服务自动归档（v2 httpd._post＋v3 serverv3._message_post 两代同构）——worker 上行 question 首行 no-op: 前缀（全/半角冒号等价，F173 口径）＋零提交（复用 done 零提交锚既有判定：contains 探针＋ag-1ae0f1 空集放行判据，gate 新增 zero_commit 方法两代同构，env 当前 HEAD 为判据）→ 申报原文落库不注入（留案供翻案，check_mail/pull 可补拉）＋程序化调 cancel 既有全链（reason=noop_confirmed:附申报首行摘要——级联/凭据作废/配额释放/env 回收/通知零新写，result 通知实时达派发方）＋post 响应附 {"auto_cancelled": true, "reason": "noop_confirmed"} 回执（加键不破形状）；不满足（无前缀/有提交）→ 照常规 question 投递零变化（有提交报 no-op 属矛盾形态人裁）；③dispatcher skill §6 文案同步（收到 noop_confirmed 通知后翻一眼理由，误判重开新单即可）。
+
+**边界**：不做 verify base 绿前置检查；不动 cancel 既有链与 question 其他 kind 行为；worker 无新 cancel 权限（自动归档是服务内部动作，不经 httpd 角色闸）；quick 任务同样适用；非本仓文件零改动。
+
+**落点**：agorad/core/task.py（BOOT done 行，Req: F174）、agorad/core/gate.py＋agorad/gateverify.py 拒因前缀化＋zero_commit（Req: F174）、agorad/core/msg.py＋agorad/messaging.py（parse_noop 纯函数双件——分层守卫禁共享 import，Router.record 落库不注入缝）、agorad/transport/httpd.py（_noop_archive）、agorad/serverv3.py（_message_post 同构分支）、skills/agora-dispatch/SKILL.md（§6）、tests/test_transport_httpd.py＋tests/test_v3_server.py（各三锚）＋tests/test_core_task.py（BOOT 前缀锚，Req: F174）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：python3 -m pytest tests/test_transport_httpd.py -q 全绿（含三锚）；grep -rq 'Req: F174' tests/；全量 python3 -m pytest tests/ -q 零失败（基线以任务起点 collect-only 实测为准）。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。

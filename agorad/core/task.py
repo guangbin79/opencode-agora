@@ -1110,7 +1110,7 @@ class TaskService:
         else:
             contract = ("contract: 只在 env 内工作；结论经 post(done) 回填，"
                         "body=完整 commit sha，结论文本走 note")
-            done = ("done: 每次提交后须重跑评审环维护 F111 双件锚（.review-loop/.last-reviewed 追上 HEAD＋.review-loop/.review-base 链根＝任务起点 sha，已存在沿旧值不动），然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=question, body=no-op 结论与证据) 申报——需派发方处置（cancel 归档/确认），补充细节可另发 note，但申报通道必须是 question；结论文本另发 post(kind=note)")
+            done = ("done: 每次提交后须重跑评审环维护 F111 双件锚（.review-loop/.last-reviewed 追上 HEAD＋.review-loop/.review-base 链根＝任务起点 sha，已存在沿旧值不动），然后 post(done, body=完整40位sha, 无附言)；done 必须携带本任务分支的新提交（零提交 done 必拒）；发现无需改动或活已被上游完成 → post(kind=question, body=no-op: 结论与证据) 申报（body 首行必须 no-op: 前缀）——零提交时服务自动归档 cancel（结果实时通知派发方，误判由派发方重开新单）；补充细节可另发 note，但申报通道必须是 question；结论文本另发 post(kind=note)")
         nested = "" if quick else (
             "嵌套: task_create(缺省继承父任务 project_dir 与验证配置；project_dir/"
             "target_branch/verify_cmd 显式传入即拒)→dispatch 子任务；done 仅子 worker 申报，closed/blocked/cancelled "

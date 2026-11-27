@@ -109,6 +109,26 @@ def _reference_lines(tid, mid, task, home):
     return "\n".join(lines)
 
 
+# Req: F174 no-op 申报前缀（全/半角冒号等价，F173 口径）；v3 同构副本在
+# agorad/messaging.py——分层守卫（transport 仅 core、serverv3 不入 core）
+# 禁共享 import，纯函数双件是分层税
+_NOOP_PREFIXES = ("no-op:", "no-op：")
+
+
+def parse_noop(body):
+    """Req: F174：首行（第一个换行前）以 no-op:/no-op： 开头 → (True, 首行)；
+    否则 (False, None)。首行剥离 C0/C1 控制字符（_human_mail 同款）——返回值
+    直入 cancel_reason 通知面，防行伪造（评审 C 册）。"""
+    first = str(body).split("\n", 1)[0]
+    for p in _NOOP_PREFIXES:
+        if first.startswith(p):
+            clean = "".join(c for c in first
+                            if not ("\x00" <= c <= "\x1f"
+                                    or "\x7f" <= c <= "\x9f"))
+            return True, clean
+    return False, None
+
+
 class NotChainEdge(Exception):
     """寻址非链边：方向非法/任务缺席/对方未登记/from_sid 非任务另一方。"""
 
@@ -145,6 +165,19 @@ class Router:
         to_sid = self._resolve(from_sid, to_edge)
         return self._deliver(from_sid, to_sid, to_edge[1], kind, body,
                              silent, notify)
+
+    def record(self, from_sid, tid, kind, body):
+        """Req: F174 no-op 申报落库面：落库不注入（notify_worker 的链边镜像）
+        ——申报原文留案供翻案（check_mail 可补拉），唤醒由 cancel result 通知
+        接管。返回 mid；dispatcher 未登记＝无收件人沿 notify_dispatcher 口径
+        抛 NotChainEdge。"""
+        to_sid = self._state.get(tid).get("dispatcher_sid")
+        if to_sid is None:
+            raise NotChainEdge(f"{tid}: dispatcher 未登记")
+        with self._delivery_lock:
+            return self._store.write_message(
+                {"ts": time.time(), "task": tid, "kind": kind,
+                 "from": from_sid, "to": to_sid}, body)
 
     def notify_dispatcher(self, tid, kind, body):
         """服务侧结果回传：子任务尚无 worker 链边时也能通知其父 dispatcher。"""

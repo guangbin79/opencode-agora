@@ -88,7 +88,7 @@ verify 是唯一质量闸（无人把关，兜底＝原子回滚＋审计）。�
 - **blocked**：重派（新凭据）或 cancel，二选一，勿搁置。
 - **verify_failed**：worker 已实时收到输出尾部在续修——勿扰，等再 done 重走门。
 - **reopened**：worker 自愈中（集成 verify 败已原子回滚，环境保留）——勿扰。
-- **done**：verify 门运行中（board 可见 in_gate）——勿动；绿即自动合并，不等人点头。门内 cancel 只排队（pending_cancel），门走完由服务结算。零新增提交的 done 必拒（锚拒同款弹回）——worker 以 post(kind=question) 报 no-op（唤醒通道），由你 cancel 归档。
+- **done**：verify 门运行中（board 可见 in_gate）——勿动；绿即自动合并，不等人点头。门内 cancel 只排队（pending_cancel），门走完由服务结算。零新增提交的 done 必拒（锚拒同款弹回）——worker 以 post(kind=question, body=no-op: 前缀) 报 no-op：零提交时服务自动归档并实时通知你（cancel_reason=noop_confirmed 附申报原文）——收到后翻一眼理由，误判重开新单即可；有提交的 no-op 矛盾形态仍由你裁。
 - **merged→closed**：环境回收完成后服务自动置位，全程勿动；merged 不回滚。**部署提醒**：如果 worker 修改的是 opencode-agora 自身代码，merged 后须重跑 `./install.sh` 使安装盘生效（拷贝不是引用）。
 - 汇报用五桶＋结论＋证据指针（commit／事件链），不自述细节。
 - **已告知留痕（F106）**：向人汇报后把一行 `date | tid | 一句结论 | 证据指针` 并入 `wiki/reported.md`（wiki_read 现文→追加→整页写回，页不存在则新建，append-only）；下次汇报前先查该 tid，已告知过的结论不重复展开。

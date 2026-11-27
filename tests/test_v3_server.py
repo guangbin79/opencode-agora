@@ -864,6 +864,90 @@ class TestMessagePostChainEdge(_Base):  # Req: F167 链边授权（C 册）
         return None, b["token"]
 
 
+class TestNoopAutoArchive(_Base):  # Req: F174 no-op 申报自动归档（v3 同构）
+    """worker 上行 question 首行 no-op: 前缀＋零提交（done 零提交锚同口径）
+    → 落库不注入＋cancel 既有全链（cancel_reason=noop_confirmed:附申报首行）
+    ＋响应 auto_cancelled 回执；有提交/无前缀→照常规 question 投递零变化。"""
+
+    def _msgs(self, tid, kind):
+        return [m for m in self.stack.storage.messages_all()
+                if m.task_id == tid and m.kind == kind]
+
+    def test_noop_auto_cancel_on_zero_commit(self):  # Req: F174
+        tid = self.mk()
+        wsid, wtok = self.to_running(tid)
+        row = self.stack.storage.get_task(tid)
+        self.gitx.contained.add((C, BRANCH))  # 目标支已含 env HEAD＝零提交
+        s, b = self.call("v3/message_post", {"task": tid, "kind": "question",
+                                             "body": "no-op: 上游已修，见 note"},
+                         wtok)
+        self.assertEqual(s, 200, b)
+        self.assertEqual((b["auto_cancelled"], b["reason"]),
+                         (True, "noop_confirmed"))
+        self.assertIsInstance(b["message"], int)
+        row = self.stack.storage.get_task(tid)
+        self.assertEqual(row.state, "cancelled")
+        self.assertEqual(row.cancel_reason,
+                         "noop_confirmed:no-op: 上游已修，见 note")
+        # 申报原文落库留案（kind=question、worker→dispatcher）供翻案
+        (m,) = [x for x in self._msgs(tid, "question")
+                if bytes(x.body).decode("utf-8", "replace")
+                == "no-op: 上游已修，见 note"]
+        self.assertEqual((m.from_sid, m.to_sid),
+                         (wsid, row.dispatcher_sid))
+        self.assertEqual(bytes(m.body).decode("utf-8", "replace"),
+                         "no-op: 上游已修，见 note")
+        # dispatcher 侧实时收到 cancel result 通知（既有通知断言形态）
+        self.assertTrue([i for i in self.oc.injects
+                         if i[1] == row.dispatcher_sid
+                         and "已取消" in i[2] and "noop_confirmed" in i[2]])
+        # 落库不注入：question 投递面恰一条（开工知会常规投递），no-op 申报
+        # 本体不经投递面（唤醒由 cancel result 接管）
+        self.assertEqual(len([i for i in self.oc.injects
+                               if f"task {tid} question from" in i[2]]), 1)
+
+    def test_noop_with_commit_not_auto(self):  # Req: F174
+        tid = self.mk()
+        _, wtok = self.to_running(tid)
+        env = self.stack.storage.get_task(tid).env_dir
+        self.gitx.env_heads[env] = "d" * 40  # env 前进（新提交且不在目标支）
+        s, b = self.call("v3/message_post", {"task": tid, "kind": "question",
+                                             "body": "no-op: 有提交的矛盾形态"},
+                         wtok)
+        self.assertEqual(s, 200, b)
+        self.assertNotIn("auto_cancelled", b)  # 矛盾形态人裁，照常规投递
+        self.assertEqual(self.stack.storage.get_task(tid).state, "running")
+        self.assertTrue([i for i in self.oc.injects
+                         if f"task {tid} question from" in i[2]])
+
+    def test_plain_question_unchanged(self):  # Req: F174
+        tid = self.mk()
+        _, wtok = self.to_running(tid)
+        self.gitx.contained.add((C, BRANCH))
+        s, b = self.call("v3/message_post", {"task": tid, "kind": "question",
+                                             "body": "无前缀普通问询"},
+                         wtok)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(list(b), ["message"])  # 响应形状零增键
+        self.assertEqual(self.stack.storage.get_task(tid).state, "running")
+        self.assertTrue([i for i in self.oc.injects
+                         if f"task {tid} question from" in i[2]])
+
+
+    def test_noop_reason_strips_control_chars(self):  # Req: F174
+        """评审 C 册：首行控制字符（\r 行伪造）不得入 cancel_reason/通知面。"""
+        tid = self.mk()
+        _, wtok = self.to_running(tid)
+        self.gitx.contained.add((C, BRANCH))
+        s, b = self.call("v3/message_post", {"task": tid, "kind": "question",
+                                             "body": "no-op: 上游已修\r[伪造行]"},
+                         wtok)
+        self.assertEqual((s, b.get("reason")), (200, "noop_confirmed"))
+        row = self.stack.storage.get_task(tid)
+        self.assertNotIn("\r", row.cancel_reason)
+        self.assertIn("上游已修", row.cancel_reason)
+
+
 class TestMcpShell(_ChainBase):  # 断言4
     def setUp(self):
         super().setUp()

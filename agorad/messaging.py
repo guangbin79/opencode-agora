@@ -39,6 +39,25 @@ LEASE_MS = 30_000       # §5 inflight lease（时钟可注入超时）
 DIGEST_N = 5            # §5 digest 冲刷条数阈值
 DIGEST_T_MS = 120_000   # §5 digest 最旧存龄阈值
 
+# Req: F174 no-op 申报前缀（全/半角冒号等价，F173 口径）；v2 同构副本在
+# agorad/core/msg.py——分层守卫（transport 仅 core、serverv3 不入 core）
+# 禁共享 import，纯函数双件是分层税
+_NOOP_PREFIXES = ("no-op:", "no-op：")
+
+
+def parse_noop(body):
+    """Req: F174：首行（第一个换行前）以 no-op:/no-op： 开头 → (True, 首行)；
+    否则 (False, None)。首行剥离 C0/C1 控制字符（_human_mail 同款）——返回值
+    直入 cancel_reason 通知面，防行伪造（评审 C 册）。"""
+    first = str(body).split("\n", 1)[0]
+    for p in _NOOP_PREFIXES:
+        if first.startswith(p):
+            clean = "".join(c for c in first
+                            if not ("\x00" <= c <= "\x1f"
+                                    or "\x7f" <= c <= "\x9f"))
+            return True, clean
+    return False, None
+
 
 class MessageStore(typing.Protocol):
     """storage 公开仓库接口（结构化；agorad.storage.Storage 天然满足）。"""

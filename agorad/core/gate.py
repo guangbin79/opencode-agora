@@ -538,7 +538,7 @@ class Gate:
         if vacuous and not self._vacuous_delivered(tid, t, commit):
             return self._deny_anchor(  # 真零提交（空集且无在案交付）＝锚拒同款弹回
                 tid, f"任务 {tid} 零提交 done 拒收：本任务相对目标分支无新增提交"
-                "——若无需改动或活已被上游完成，post(kind=question, body=no-op "
+                "——若无需改动或活已被上游完成，post(kind=question, body=no-op: "
                 "结论与证据) 申报——需派发方处置（cancel 归档/确认）；question "
                 "唤醒派发方、note 不唤醒勿用；勿空回填 done", tag="vacuous-done")
         if a is not None and not a.get("clean"):  # F114：门审任务 a=None 全免
@@ -583,6 +583,22 @@ class Gate:
         except RuntimeError:  # gitx 失败契约；编程错误照崩不静默
             self._audit(tid, "zero_commit_probe_failed")
         return False
+
+    def zero_commit(self, tid):
+        """Req: F174 no-op 申报零提交判定：done 零提交锚同口径（F69 contains
+        探针＋ag-1ae0f1 空集放行判据）以 env 当前 HEAD 为判据；谓词病＝False
+        （判据不可确立→照常规投递人裁，带痕同 accept_done 口径）。"""
+        t = self._state.get(tid)
+        if not t.get("env_dir"):
+            return False
+        try:
+            head = self._gitx.head(t["env_dir"])
+            vacuous = self._gitx.contains(t["project_dir"], head,
+                                          t.get("target_branch"))
+        except RuntimeError:  # gitx 失败契约；编程错误照崩不静默
+            self._audit(tid, "zero_commit_probe_failed")
+            return False
+        return vacuous and not self._vacuous_delivered(tid, t, head)
 
     def _accept_out_of_band(self, tid, worker_sid, ref):
         """ag-af96bb② review-only（deliverable=out_of_band）done 受理豁免分支：

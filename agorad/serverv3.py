@@ -43,6 +43,7 @@ from agorad.adapter import doctor as doctor_view
 from agorad.domain import Event
 from agorad.gatedelivery import dirty_face_warning  # ag-9a680b 派发前脏仓预警
 from agorad.healthsvc import KIND_STALLED
+from agorad.messaging import parse_noop  # Req: F174 前缀判定
 
 _VERSION = "0.1.0"
 _SERVICE_JSON = ".agora/service.json"
@@ -428,6 +429,29 @@ class _V3Handler(BaseHTTPRequestHandler):
         if not to:
             raise ContractError("conflict",
                                 f"任务 {tid} 无收件人（worker 未派发）")
+        # Req: F174 no-op 申报自动归档（worker 上行 question）：首行 no-op:
+        # 前缀＋零提交（gate 既有 done 零提交锚判定）→ 申报原文落库不注入
+        # （留案供翻案，pull 可补拉）＋程序化 cancel（reason=noop_confirmed:
+        # 附首行摘要——级联/凭据作废/回收/通知走 cancel 既有全链，result
+        # 通知实时达派发方；服务内部动作不经角色闸）；不满足照常规投递零变化。
+        if kind == "question" and to == row.dispatcher_sid:
+            hit, first = parse_noop(body)
+            if hit and stack.gate.zero_commit(tid):
+                # TOCTOU 收窄（评审 B 册）：zero_commit git 探针期间并发写者
+                # （重派改绑/他方 cancel）可能已动行——破坏性动作前按新鲜行
+                # 复验绑定与状态；失效即弃归档照常规投递
+                fresh = stack.storage.get_task(tid)
+                if (fresh.worker_sid == sid
+                        and fresh.state not in ("merged", "closed",
+                                                "cancelled")):
+                    with stack.repo.uow():
+                        msg, _ = stack.messaging.record(
+                            ts_ms=stack.clock(), from_sid=sid, to_sid=to,
+                            task_id=tid, kind="question", body=str(body))
+                    stack.tasks.cancel(tid, sid, "root",
+                                       f"noop_confirmed:{first[:120]}")
+                    return {"message": msg.id, "auto_cancelled": True,
+                            "reason": "noop_confirmed"}
         msg = stack.messaging.post(sid, to, tid, kind, str(body))
         return {"message": msg.id}
 

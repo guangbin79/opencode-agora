@@ -22,9 +22,9 @@ from agorad.core import report
 from agorad.core.auth import EV_AUTH_DENIED
 from agorad.core.gate import dirty_face_warning  # ag-9a680b 派发前脏仓预警
 from agorad.core.health import _ACTIVE, KIND_STALLED
-from agorad.core.msg import NotChainEdge
+from agorad.core.msg import NotChainEdge, parse_noop  # Req: F174 前缀判定
 from agorad.core.peer import Rejected as PeerRejected
-from agorad.core.state import EV_RUNNING, InvalidTransition
+from agorad.core.state import EV_CANCELLED, EV_RUNNING, InvalidTransition
 from agorad.core.task import Rejected
 from agorad.core.verify_hygiene import find_verify_hygiene_issues
 
@@ -366,7 +366,43 @@ class _Handler(BaseHTTPRequestHandler):
             app.bind_dispatcher(role, sid, t)  # F21：root 持牌＋登记号死→改绑后放行
             t = app.state.get(tid)
         edge = ("down", tid) if self.app.router.is_dispatcher(sid, t) else ("up", tid)
+        if kind == "question" and edge[0] == "up":  # Req: F174 worker 上行申报面
+            archived = self._noop_archive(sid, tid, t, body["body"])
+            if archived is not None:
+                return archived
         return {"message": app.router.post(sid, edge, kind, body["body"])}
+
+    def _noop_archive(self, sid, tid, t, body):
+        """Req: F174 no-op 申报自动归档：worker 上行 question 首行 no-op: 前缀＋
+        零提交（gate 既有 done 零提交锚判定）→ 申报原文落库不注入（留案供翻案，
+        check_mail 可补拉）＋程序化 cancel（reason=noop_confirmed:附首行摘要；
+        级联/凭据作废/回收/通知走 cancel 既有全链——result 通知实时达派发方）。
+        服务内部动作不经角色闸；不满足/判据不可立→None 照常规 question 投递。"""
+        if t.get("worker_sid") != sid or not t.get("dispatcher_sid"):
+            return None
+        hit, first = parse_noop(body)
+        if not hit or not self.app.gate.zero_commit(tid):
+            return None
+        # TOCTOU 收窄（评审 B 册）：zero_commit 跑多个 git 子进程期间，health
+        # tick reinject 可改绑 worker_sid、并发写者可把行推进终态——破坏性
+        # 动作前按新鲜行复验绑定与状态；失效即弃归档照常规投递（链边/状态
+        # 闸自然裁决），防僵尸申报误杀重派接替者
+        fresh = self.app.state.get(tid)
+        if (fresh.get("worker_sid") != sid
+                or fresh["state"] in ("merged", "closed", "cancelled")):
+            return None
+        mid = self.app.router.record(sid, tid, "question", body)
+        # stop_after_failed 同款内部程序化 seam（public cancel 无 reason 形参
+        # 且带角色闸/忙碌闸——自动归档是零提交服务动作，两闸语义均不适用）；
+        # EV_CANCELLED 审计行显式补齐（v3 公共 cancel 自带，两代同构；n=0
+        # ＝done-in-gate 排队，note 沿 public cancel cancelled={n} 同口径如实）
+        n = self.app.task._cancel_one(tid, sid,
+                                      f"noop_confirmed:{first[:120]}")
+        self.app.store.append_event(
+            {"ts": time.time(), "actor": sid, "event": EV_CANCELLED,
+             "task": tid, "note": f"noop_confirmed cancelled={n}"})
+        return {"message": mid, "auto_cancelled": True,
+                "reason": "noop_confirmed"}
 
     def _task_nudge(self, sid, role, body, row):
         """F73 board 手动提示面：root 任意任务；任务派发方限己任务链。
