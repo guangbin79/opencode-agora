@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -893,9 +894,9 @@ class TestPublishedOnOrigin(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _git(self, args, cwd=None, check=True):
+    def _git(self, args, cwd=None, check=True, env=None):
         r = subprocess.run(["git", *args], cwd=str(cwd or self.repo),
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
         if check and r.returncode != 0:
             raise AssertionError(f"git {args}: {r.stderr}")
         return r
@@ -905,6 +906,16 @@ class TestPublishedOnOrigin(unittest.TestCase):
             (self.repo / name).write_text(content)
         self._git(["add", "-A"])
         self._git(["commit", "-m", msg])
+        return self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+    def _commit_at(self, files, msg, ts):
+        # 钉 committer/author 日期（epoch 秒）——ag-0bdf33 时间窗锚测试用
+        env = {**os.environ, "GIT_COMMITTER_DATE": f"@{int(ts)}",
+               "GIT_AUTHOR_DATE": f"@{int(ts)}"}
+        for name, content in files.items():
+            (self.repo / name).write_text(content)
+        self._git(["add", "-A"])
+        self._git(["commit", "-m", msg], env=env)
         return self._git(["rev-parse", "HEAD"]).stdout.strip()
 
     def _set_origin(self, sha):
@@ -1056,26 +1067,48 @@ class TestContentSettledOnOrigin(TestPublishedOnOrigin):
         for probe in (self.gx.blob_settled_on_origin,
                       self.gx.lines_settled_on_origin):
             self.assertFalse(probe(str(self.repo), d, "ghost"))  # 无跟踪 ref
+            # ag-0bdf33：时间窗内无孪生（真未推）→ 照常不落定（升级照常）
+            self.assertFalse(probe(str(self.repo), d, "main",
+                                   since=time.time() - 3600))
 
     def test_window_excludes_stale_content(self):
-        # 窗口外陈旧内容不误判：孪生被 ≥window 个改掉同文件的后续提交推出
-        # 窗口（ls-tree 语义：窗口内树不再持该 blob）→ 不落定；默认窗口
-        # （50 commit）内孪生仍在：落定
+        # 时间窗锚（ag-0bdf33）：交付时间前的陈旧内容不误判——孪生内容
+        # 复刻于交付前（committer date 钉旧）被 --since 排除 → 不落定；
+        # 同内容提交于交付后（diff 面携带同新增）→ 落定
+        now = time.time()
         self._git(["checkout", "-q", "-b", "work"])
         d = self._commit({"src.py": "v2"}, "delivery")
         self._git(["checkout", "-q", "main"])
-        self._commit({"src.py": "v2"}, "twin")
-        self._commit({"src.py": "fillA"}, "fillA")
-        self._commit({"src.py": "fillB"}, "fillB")
+        stale = self._commit_at({"src.py": "v2"}, "stale twin", now - 3600)
+        self._set_origin(stale)
+        self.assertFalse(self.gx.blob_settled_on_origin(
+            str(self.repo), d, "main", since=now))
+        self.assertFalse(self.gx.lines_settled_on_origin(
+            str(self.repo), d, "main", since=now))
+        self._commit_at({"src.py": "other"}, "parallel", now + 30)
+        fresh = self._commit_at({"src.py": "v2"}, "fresh twin", now + 60)
+        self._set_origin(fresh)
+        self.assertTrue(self.gx.blob_settled_on_origin(
+            str(self.repo), d, "main", since=now))
+        self.assertTrue(self.gx.lines_settled_on_origin(
+            str(self.repo), d, "main", since=now))
+
+    def test_time_window_survives_parallel_commit_flood(self):
+        # ag-0bdf33 改锚动机（ag-70b05f 第 4 次复读实证）：两日并行开发把
+        # 孪生挤出「HEAD 起 50」计数窗——时间锚窗不随提交数漂移：孪生在
+        # 交付时间之后、隔 60 个后续提交之外仍落定
+        now = time.time()
+        self._git(["checkout", "-q", "-b", "work"])
+        d = self._commit_at({"src.py": "v2"}, "delivery", now - 86400)
+        self._git(["checkout", "-q", "main"])
+        self._commit_at({"src.py": "v2"}, "twin", now - 43200)
+        for i in range(60):  # 并行开发形态：60 个改同文件的后续提交
+            self._commit({"src.py": f"fill{i}"}, f"fill{i}")
         self._set_origin(self._git(["rev-parse", "HEAD"]).stdout.strip())
-        self.assertFalse(self.gx.blob_settled_on_origin(str(self.repo), d,
-                                                        "main", 2))
-        self.assertFalse(self.gx.lines_settled_on_origin(str(self.repo), d,
-                                                         "main", 2))
-        self.assertTrue(self.gx.blob_settled_on_origin(str(self.repo), d,
-                                                       "main"))
-        self.assertTrue(self.gx.lines_settled_on_origin(str(self.repo), d,
-                                                        "main"))
+        self.assertTrue(self.gx.blob_settled_on_origin(
+            str(self.repo), d, "main", since=now - 86400))
+        self.assertTrue(self.gx.lines_settled_on_origin(
+            str(self.repo), d, "main", since=now - 86400))
 
     def test_blob_partial_file_set_not_settled(self):
         # 变更文件集须逐文件落定：仅部分文件内容在场（他因携带）不落定

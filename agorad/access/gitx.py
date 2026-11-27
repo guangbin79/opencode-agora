@@ -653,22 +653,33 @@ class Gitx:
                        if (p := ln.split()))
 
     def _origin_window(self, repo_dir: str, ref: str,
-                       window: int) -> list[str]:  # Req: ag-b0efd4
-        """origin ref 最近 window 个 commit（rev-list --max-count，零网络
-        refs-only）——内容落定的有界窗口：只认 ref tip 侧最近 N 个，窗口外
-        陈旧内容不算（判据见 blob_settled_on_origin）。"""
-        revs = self._git(["rev-list", "--max-count", str(window), ref],
-                         cwd=repo_dir, check=False)
+                       since=None) -> list[str]:  # Req: ag-0bdf33
+        """origin ref 自 since（epoch 秒，交付时间锚）起的 reachable commit
+        （rev-list --since，零网络 refs-only）——内容落定的有界窗口：交付
+        时间前的陈旧内容不算（判据见 blob_settled_on_origin）。ag-0bdf33
+        改锚：原「HEAD 起 N commit」计数窗随并行开发漂移——两日并行把
+        孪生挤出 50 commit 窗致复读复活（ag-70b05f 第 4 次升级实证）；
+        时间窗只随交付时间走，不随提交数漂移。since=None＝无锚全史（直接
+        测试）。
+        shortcut: 窗口无提交数上限——久驻未出版＋高频仓下探针成本随交付
+        时长线性涨（每 tick 全窗重算），量级失控再加退避节流或 max-count
+        安全帽（评审环 R2 low，非本任务语义）"""
+        args = ["rev-list"]
+        if since is not None:
+            args.append(f"--since=@{int(since)}")
+        args.append(ref)
+        revs = self._git(args, cwd=repo_dir, check=False)
         if revs.returncode != 0:
-            raise RuntimeError(f"git rev-list --max-count {window} {ref}: "
+            raise RuntimeError(f"git rev-list {' '.join(args[1:])}: "
                                f"{revs.stderr.strip()}")
         return revs.stdout.split()
 
     def blob_settled_on_origin(self, repo_dir: str, commit: str,
-                               branch: str, window: int = 50) -> bool:
+                               branch: str, since=None) -> bool:
         """per-file blob 落定（ag-b0efd4「内容落定」判定一）：交付 commit
-        变更文件集的每个文件，在 origin 目标支最近 window 个 commit 任一
-        树上的 blob == 交付树 blob（cat-file --batch-check 逐 <rev>:<path>
+        变更文件集的每个文件，在 origin 目标支自交付时间（since 时间锚，
+        ag-0bdf33——交付前陈旧内容不算）起的 reachable 窗口任一 commit 树上
+        的 blob == 交付树 blob（cat-file --batch-check 逐 <rev>:<path>
         一次进程收全窗口）→ 落定＝视同已发布。二进制可判（无 hunk 面的纯
         .so 交付，ag-455da2 形态二），文本亦可用（同 blob 强于同补丁）。
         变更文件集内任一文件交付树缺席（删除）或窗口全缺 blob＝无从对账
@@ -694,7 +705,7 @@ class Gitx:
             toks = toks[1:]  # diff-tree 前导 commit sha 行（-z 同以 NUL 断行）
         if not toks:
             return False  # 空补丁：无内容可对账
-        wins = self._origin_window(repo_dir, ref, window)
+        wins = self._origin_window(repo_dir, ref, since)
         if not wins:
             return False
         specs = [f"{commit}:{p}" for p in toks] \
@@ -730,9 +741,10 @@ class Gitx:
         return True
 
     def lines_settled_on_origin(self, repo_dir: str, commit: str,
-                                branch: str, window: int = 50) -> bool:
+                                branch: str, since=None) -> bool:
         """新增行包含性（ag-b0efd4「内容落定」判定二）：交付 diff 各文件
-        「+」行集合 ⊆ origin 最近 window 内某 commit 同文件 diff「+」行
+        「+」行集合 ⊆ origin 自交付时间（since 时间锚，ag-0bdf33——交付前
+        陈旧内容不算）起的 reachable 窗口内某 commit 同文件 diff「+」行
         集合（排除上下文行，纯新增内容比对）→ 落定。覆盖上下文漂移孪生
         （ag-70b05f 形态一：并行任务相邻行落条目致 rebase 孪生 hunk 上下文
         漂移，patch-id 两层均失明而新增行逐字节相同）。纯新增面空（纯删除
@@ -754,7 +766,7 @@ class Gitx:
         added = self._plus_lines(mine.stdout)
         if not any(added.values()):
             return False  # 纯删除/二进制/mode-only：无新增面可对账
-        wins = self._origin_window(repo_dir, ref, window)
+        wins = self._origin_window(repo_dir, ref, since)
         if not wins:
             return False
         win = self._git(["diff-tree", "-p", "-r", "--no-renames", "--root",

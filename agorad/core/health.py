@@ -157,8 +157,10 @@ class Health:
         self._unpublished_after = unpublished_after
         self._ext_esc = {}  # tid->(连拍次数 n, 末拍时刻)：external-stale 退避
         self._unpub_esc = {}  # tid->(n, last)：unpublished 退避
-        # tid->(layer, commit, branch)：content-settled 已审备忘（评审环册B——
-        # 边沿触发审计，防 merged/closed 驻留任务每轮 tick 重落事件无界增长）
+        # tid->(layer, commit, branch)：content-settled 已审边沿（评审环册B
+        # 防事件重落）；ag-0bdf33 权威备忘持久化在任务行 delivery.settled
+        # （daemon 重启随 tasks.jsonl 加载），此内存账只护持久化失败后的
+        # 本进程重落
         self._settled_audit = {}
         self._stale_seen = set()  # 僵态候选边沿记忆（内存态，崩溃回退＝重拍一次）
         self._stale_esc = {}  # tid->(连拍次数 n, 末拍时刻)：重复升级退避（内存态）
@@ -487,7 +489,9 @@ class Health:
         external-stale＝done＋awaiting_external 且 handoff_at 超龄（issue-agent
         等外部派发方失联的兜底告警）；unpublished＝managed delivered 且
         publication ahead>0 且超龄（origin 长期缺交付的提醒）。重复升级按
-        _stale_gap 退避；确认/出版/除籍即出账，再犯再拍。"""
+        _stale_gap 退避；确认/出版/除籍即出账，再犯再拍。content-settled
+        备忘持久化（ag-0bdf33）：delivery.settled 在案＝永久出账（daemon
+        重启自 tasks.jsonl 加载，免三层判定与升级）。"""
         now = time.time()
         for tid, t in tasks.items():
             d = t.get("delivery") or {}
@@ -508,16 +512,21 @@ class Health:
                     and d.get("status") == "delivered"
                     and now - (d.get("delivered_at") or t.get("updated")
                                or 0.0) > self._unpublished_after):
+                # ag-0bdf33 备忘持久化：delivery.settled 在案（daemon 启动
+                # 自 tasks.jsonl 加载，重启不失忆）＝内容已落定的永久出账
+                # ——探针免全部三层判定与升级（publication 亦免，零 gitx 面）
                 try:
                     pub = (self._gitx.publication(t["project_dir"],
                                                   t.get("target_branch"))
-                           if self._gitx else None)
+                           if self._gitx and not d.get("settled")
+                           else None)
                     # 祖先对账（ag-6c673c 误报）＋补丁等价对账（ag-4c6136
-                    # 误报）＋内容落定（ag-b0efd4 孪生残留）：分支 ahead 可能
-                    # 来自无关提交；交付 commit 也可能被派发方 rebase 改 sha
-                    # 后出版；rebase 孪生还可能上下文漂移/纯二进制交付致
-                    # patch-id 两层失明——sha、补丁与内容落定均不在 origin
-                    # 才拍（三漏才复读轰炸）
+                    # 误报）＋内容落定（ag-b0efd4 孪生残留；ag-0bdf33 窗口
+                    # 改锚——内容落定窗自交付时间起算，不随并行提交数漂移）：
+                    # 分支 ahead 可能来自无关提交；交付 commit 也可能被派发
+                    # 方 rebase 改 sha 后出版；rebase 孪生还可能上下文漂移/
+                    # 纯二进制交付致 patch-id 两层失明——sha、补丁与内容
+                    # 落定均不在 origin 才拍（三漏才复读轰炸）
                     unpublished = bool(
                         pub and pub.get("origin_ref") and d.get("commit")
                         and not self._gitx.published_on_origin(
@@ -526,7 +535,9 @@ class Health:
                             t["project_dir"], d["commit"], pub["branch"])
                         and not self._content_settled(
                             tid, t["project_dir"], d["commit"],
-                            pub["branch"]))
+                            pub["branch"],
+                            d.get("delivered_at") or t.get("updated")
+                            or 0.0))
                 except Exception:
                     pub, unpublished = None, False  # 投影/对账不可得本轮免判（下轮重试）
                 if unpublished:
@@ -551,33 +562,55 @@ class Health:
             if tid not in tasks:
                 del self._settled_audit[tid]
 
-    def _content_settled(self, tid, project_dir, commit, branch) -> bool:
-        """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底）：祖先
-        与 patch-id 两层均未命中后，per-file blob 落定（二进制可判，同 blob
-        强于同补丁）或新增行包含性（上下文漂移孪生）任一命中即视同已出版
-        ——停升级并落 content-settled 审计行（判定层＋commit/branch 证据
-        指针）；判定异常上抛交调用方本轮免判（下轮重试）；审计败尽力而为
-        不逆转判定（F54 口径）。"""
+    def _content_settled(self, tid, project_dir, commit, branch,
+                         since=None) -> bool:
+        """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底；
+        ag-0bdf33 备忘持久化＋时间窗锚）：祖先与 patch-id 两层均未命中后，
+        per-file blob 落定（二进制可判，同 blob 强于同补丁）或新增行包含性
+        （上下文漂移孪生）任一命中即视同已出版——停升级并把备忘持久化到
+        任务行 delivery.settled={layer,commit,branch,at}（tasks.jsonl 随
+        daemon 重启加载，探针命中即永久出账——重启失忆不再复发复读），
+        同时落 content-settled 审计行（判定层＋commit/branch 证据指针，
+        注明 persisted）；判定窗口＝自交付时间起的 reachable 窗口（since
+        锚，不随并行提交数漂移）；判定异常上抛交调用方本轮免判（下轮
+        重试）；持久化/审计败尽力而为不逆转判定（F54 口径）。"""
         layer = None
-        if self._gitx.blob_settled_on_origin(project_dir, commit, branch):
+        if self._gitx.blob_settled_on_origin(project_dir, commit, branch,
+                                             since=since):
             layer = "blob"
-        elif self._gitx.lines_settled_on_origin(project_dir, commit, branch):
+        elif self._gitx.lines_settled_on_origin(project_dir, commit, branch,
+                                                since=since):
             layer = "lines"
         if not layer:
-            self._settled_audit.pop(tid, None)  # 边沿回落：重臂（真边沿触发
-            # 非一次性闩锁——窗口滑出后复发升级、再落定须重留审计行）
+            self._settled_audit.pop(tid, None)  # 边沿回落：重臂（首落定前
+            # 判定 miss 照常升级；已持久化任务探针先跳不至此——备忘＝
+            # 永久闩，重启/判定回落均不复读）
             return False
         key = (layer, commit, branch)
         if self._settled_audit.get(tid) == key:
             return True  # 已审边沿：驻留任务每轮 tick 不重落（防事件无界增长）
+        persisted = False
+        try:
+            d = dict((self._state.get(tid) or {}).get("delivery") or {})
+            d["settled"] = {"layer": layer, "commit": commit,
+                            "branch": branch, "at": time.time()}
+            self._state.set_fields(tid, delivery=d)
+            persisted = True
+        except Exception:
+            pass  # 持久化尽力而为不逆转判定（F54 口径）：备忘不置位＝下轮
+            # 重落（审计行随之重发一条，append-only 账本可接受）
         try:
             self._store.append_event({"ts": time.time(), "actor": "health",
                                       "event": "content-settled",
                                       "task": tid, "layer": layer,
-                                      "commit": commit, "branch": branch})
-            self._settled_audit[tid] = key  # 落账成功才记边沿：败则下轮重试
+                                      "commit": commit, "branch": branch,
+                                      "note": "persisted" if persisted
+                                      else "memo_not_persisted"})
         except Exception:
-            pass  # 审计尽力而为不逆转判定（F54 口径）：备忘不置位＝下轮重落
+            pass  # 审计行尽力而为（F54）：败不拦判定；持久化已先行——备忘
+            # 在案即权威（探针短路后审计缺行不再可重试，如实接受）
+        if persisted:
+            self._settled_audit[tid] = key  # 持久化成功才记边沿：败则下轮重试
         return True
 
     def _infra_backstop_scan(self, tasks):  # Req: F130

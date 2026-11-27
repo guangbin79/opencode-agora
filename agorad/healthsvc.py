@@ -110,8 +110,10 @@ class PublicationGitx(typing.Protocol):
     def publication(self, repo_dir, branch=None) -> dict: ...
     def published_on_origin(self, repo_dir, commit, branch) -> bool: ...
     def patch_equivalent_on_origin(self, repo_dir, commit, branch) -> bool: ...
-    def blob_settled_on_origin(self, repo_dir, commit, branch) -> bool: ...
-    def lines_settled_on_origin(self, repo_dir, commit, branch) -> bool: ...
+    def blob_settled_on_origin(self, repo_dir, commit, branch,
+                               since=None) -> bool: ...
+    def lines_settled_on_origin(self, repo_dir, commit, branch,
+                                since=None) -> bool: ...
 
 
 class Notifier(typing.Protocol):
@@ -358,7 +360,8 @@ class HealthService:
                                 t.project_dir, d.commit, pub["branch"])
                             and not self._content_settled(
                                 tid, t.project_dir, d.commit,
-                                pub["branch"]))
+                                pub["branch"],
+                                delivered_base / 1000.0))
                 except Exception:
                     continue  # 对账不可得：保账不清，本轮免判（下轮重试）
                 if unpublished:
@@ -382,17 +385,23 @@ class HealthService:
             if tid not in tasks:
                 del self._settled_audit[tid]
 
-    def _content_settled(self, tid, project_dir, commit, branch) -> bool:
+    def _content_settled(self, tid, project_dir, commit, branch,
+                         since=None) -> bool:
         """第三层「内容落定」（ag-b0efd4，unpublished 孪生残留兜底，语义
-        自 v2 core/health.py 平移）：祖先与 patch-id 两层均未命中后，
-        per-file blob 落定（二进制可判）或新增行包含性（上下文漂移孪生）
-        任一命中即视同已出版——停升级并落 content-settled 审计行（判定层
-        ＋commit/branch 证据指针）；判定异常上抛交调用方本轮免判（下轮
-        重试）；审计败尽力而为不逆转判定。"""
+        自 v2 core/health.py 平移；ag-0bdf33 时间窗锚）：祖先与 patch-id
+        两层均未命中后，per-file blob 落定（二进制可判）或新增行包含性
+        （上下文漂移孪生）任一命中即视同已出版——停升级并落 content-settled
+        审计行（判定层＋commit/branch 证据指针）；判定窗口＝自交付时间
+        （since 锚，秒）起的 reachable 窗口（delivered_base 毫秒经调用方
+        换算）；判定异常上抛交调用方本轮免判（下轮重试）；审计败尽力而为
+        不逆转判定。备忘持久化（delivery.settled）属 v2 tasks.jsonl 面
+        （ag-0bdf33），v3 DeliveryState 暂无该投影——另案。"""
         layer = None
-        if self._gitx.blob_settled_on_origin(project_dir, commit, branch):
+        if self._gitx.blob_settled_on_origin(project_dir, commit, branch,
+                                             since=since):
             layer = "blob"
-        elif self._gitx.lines_settled_on_origin(project_dir, commit, branch):
+        elif self._gitx.lines_settled_on_origin(project_dir, commit, branch,
+                                                since=since):
             layer = "lines"
         if not layer:
             self._settled_audit.pop(tid, None)  # 边沿回落：重臂（真边沿触发

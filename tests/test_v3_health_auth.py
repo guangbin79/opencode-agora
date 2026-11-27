@@ -83,6 +83,7 @@ class PubGitxStub:
         self.patch_eq = False
         self.blob_settled = False
         self.lines_settled = False
+        self.settled_since = []  # ag-0bdf33：内容落定探针 since 锚记录
         self.raises = False
 
     def publication(self, repo_dir, branch=None):
@@ -96,10 +97,12 @@ class PubGitxStub:
     def patch_equivalent_on_origin(self, repo_dir, commit, branch):
         return self.patch_eq
 
-    def blob_settled_on_origin(self, repo_dir, commit, branch):
+    def blob_settled_on_origin(self, repo_dir, commit, branch, since=None):
+        self.settled_since.append(since)
         return self.blob_settled
 
-    def lines_settled_on_origin(self, repo_dir, commit, branch):
+    def lines_settled_on_origin(self, repo_dir, commit, branch, since=None):
+        self.settled_since.append(since)
         return self.lines_settled
 
 
@@ -867,6 +870,11 @@ class TestDeliveryWatch(_Base):  # 断言10
                    if e.event == "content-settled"]
             self.assertEqual([e.detail.get("layer") for e in evs],
                              [layer, layer])
+            # ag-0bdf33：内容落定窗自交付时间起算——探针锚＝
+            # updated_ms 换算秒（DeliveryState 无 delivered_at 回退任务行）
+            self.assertTrue(self.gitx.settled_since)
+            self.assertTrue(all(s == (self.clock.ms - 61 * MIN) / 1000.0
+                                for s in self.gitx.settled_since))
             setattr(self.gitx, attr, False)
 
     def test_unpublished_escalation_stops_when_content_settles(self):

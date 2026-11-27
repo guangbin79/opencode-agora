@@ -1615,6 +1615,7 @@ class TestDeliveryWatch(TestCoreHealth):
             self.blob_settled = blob_settled
             self.lines_settled = lines_settled
             self.calls = []
+            self.probe_calls = []  # ag-0bdf33：内容落定探针调用（含 since 锚）
 
         def publication(self, repo_dir, branch=None):
             self.calls.append((repo_dir, branch))
@@ -1627,10 +1628,14 @@ class TestDeliveryWatch(TestCoreHealth):
         def patch_equivalent_on_origin(self, repo_dir, commit, branch):
             return self.patch_equiv
 
-        def blob_settled_on_origin(self, repo_dir, commit, branch):
+        def blob_settled_on_origin(self, repo_dir, commit, branch,
+                                   since=None):
+            self.probe_calls.append(("blob", since))
             return self.blob_settled
 
-        def lines_settled_on_origin(self, repo_dir, commit, branch):
+        def lines_settled_on_origin(self, repo_dir, commit, branch,
+                                    since=None):
+            self.probe_calls.append(("lines", since))
             return self.lines_settled
 
     def mk_watch(self, gitx=None, ext_after=1800.0, unpub_after=3600.0):
@@ -1726,7 +1731,9 @@ class TestDeliveryWatch(TestCoreHealth):
     def test_unpublished_content_settled_twins_no_escalate(self):
         # ag-b0efd4：rebase 孪生残留两形态（上下文漂移/纯二进制）——
         # patch-id 两层失明，第三层内容落定（blob 落定/行包含性）任一命中
-        # 即视同已出版：不拍且出账，content-settled 审计行随判定层
+        # 即视同已出版：不拍且出账，content-settled 审计行随判定层。
+        # ag-0bdf33：命中即持久化 delivery.settled（审计行注明 persisted）
+        # ——此后判定回落（窗口滑出/重启）亦永久出账，不再重判重落
         for layer, attr in (("blob", "blob_settled"),
                             ("lines", "lines_settled")):
             with self.subTest(layer):
@@ -1740,20 +1747,30 @@ class TestDeliveryWatch(TestCoreHealth):
                        and e.get("task") == f"t-{layer}"]
                 self.assertEqual(esc, [])  # 视同已出版：不拍
                 self.assertEqual(h._unpub_esc, {})
-                h.tick()  # 驻留任务每轮重探：审计边沿触发只落一次
+                st = self.state.get(f"t-{layer}")["delivery"]["settled"]
+                self.assertEqual((st["layer"], st["commit"], st["branch"]),
+                                 (layer, "c" * 40, "main"))  # 备忘入任务行
                 evs = [e for e in self.store.read_events()
                        if e.get("event") == "content-settled"
                        and e.get("task") == f"t-{layer}"]
                 self.assertEqual([e.get("layer") for e in evs], [layer])
+                self.assertEqual(evs[0].get("note"), "persisted")
+                probes, pubs = list(gx.probe_calls), list(gx.calls)
+                h.tick()  # 驻留任务再探：备忘在案零重判零重落
+                self.assertEqual(gx.probe_calls, probes)
+                self.assertEqual(gx.calls, pubs)
                 setattr(gx, attr, False)
-                h.tick()  # 判定回落（窗口滑出形态）：边沿重臂
-                setattr(gx, attr, True)
-                h.tick()  # 再命中：重留审计行（真边沿，非一次性闩锁）
-                evs = [e for e in self.store.read_events()
-                       if e.get("event") == "content-settled"
-                       and e.get("task") == f"t-{layer}"]
-                self.assertEqual([e.get("layer") for e in evs],
-                                 [layer, layer])
+                h.tick()  # 判定回落（原窗口滑出重臂形态）：永久出账
+                self.assertEqual(gx.probe_calls, probes)
+                self.assertEqual(gx.calls, pubs)
+                self.assertEqual(
+                    [e for e in self.store.read_events()
+                     if e.get("event") == "escalate"
+                     and e.get("task") == f"t-{layer}"], [])
+                self.assertEqual(
+                    [e.get("layer") for e in self.store.read_events()
+                     if e.get("event") == "content-settled"
+                     and e.get("task") == f"t-{layer}"], [layer])
 
     def test_unpublished_escalation_stops_when_content_settles(self):
         # 自愈（ag-b0efd4 判据 4）：复读中的升级序列在新逻辑下自动消解
@@ -1767,6 +1784,47 @@ class TestDeliveryWatch(TestCoreHealth):
         h.tick()
         self.assertEqual(self.kinds().count("unpublished"), 1)  # 判定即停
         self.assertEqual(h._unpub_esc, {})
+
+    def test_content_settled_persists_across_daemon_restart(self):
+        # ag-0bdf33 判据①（重启失忆终修）：settle 落任务行 delivery.settled
+        # 后模拟 daemon 重启（新 Health 实例同 store/state——内存账清零、
+        # 判定源改判 miss）——新实例凭持久化备忘不重判（零探针/零
+        # publication）不升级，审计不重落
+        gx = self.FakeGitx(ahead=3, published=False, lines_settled=True)
+        self.seed_delivered(updated_age=4000.0)
+        self.mk_watch(gitx=gx).tick()
+        self.assertEqual(self.kinds(), [])  # 落定：不拍
+        self.assertTrue(self.state.get("t1")["delivery"]["settled"])
+        gx.lines_settled = False  # 重启后重判将 miss（孪生挤出窗形态）
+        gx.probe_calls.clear()
+        gx.calls.clear()
+        h2 = self.mk_watch(gitx=gx)  # 模拟 agorad 重启：新实例同账本
+        h2.tick()
+        self.assertEqual(self.kinds(), [])  # 持久化备忘：不升级
+        self.assertEqual(gx.calls, [])  # 免全部三层判定（零 publication）
+        self.assertEqual(gx.probe_calls, [])
+        self.assertEqual(
+            [e.get("event") for e in self.store.read_events()
+             if e.get("event") == "content-settled"],
+            ["content-settled"])  # 审计恰一条（重启不重落）
+
+    def test_unpublished_probe_anchors_window_at_delivery_time(self):
+        # ag-0bdf33 判据②：内容落定窗自交付时间起算——探针 since 锚＝
+        # delivery.delivered_at（缺席回退任务行 updated）
+        gx = self.FakeGitx(ahead=3, published=False, blob_settled=True)
+        self.seed_delivered(updated_age=4000.0)
+        delivered_at = self.state.get("t1")["delivery"]["delivered_at"]
+        self.mk_watch(gitx=gx).tick()
+        self.assertEqual(gx.probe_calls, [("blob", delivered_at)])
+        gx2 = self.FakeGitx(ahead=3, published=False, blob_settled=True)
+        self.seed("t2", state="closed")
+        row = self.state.get("t2")
+        row["delivery"] = {"mode": "managed", "status": "delivered",
+                           "commit": "c" * 40}  # 无 delivered_at
+        row["updated"] = time.time() - 4000.0
+        self.state.add("t2", row)  # 整行重播：updated 钉旧（年龄闸可过）
+        self.mk_watch(gitx=gx2).tick()
+        self.assertEqual(gx2.probe_calls, [("blob", row["updated"])])
 
     def test_unpublished_no_origin_ref_no_escalate(self):  # Req: F110
         gx = self.FakeGitx(ahead=0, published=False, origin_ref=None)
