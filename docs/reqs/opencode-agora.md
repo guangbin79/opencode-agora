@@ -1067,3 +1067,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/core/peer.py（TAGS/FAIL_N/parse_tag/claim_path＋post 撞车＋board tag 过滤/fails/author_env，Req: F173）、agorad/compose.py（v3 PeerBoard 同款＋import v2 纯函数，Req: F173）、agorad/transport/httpd.py（repo_board 透传 tag＋_STRING_FIELDS，Req: F173）、agorad/serverv3.py（透传＋_TOOL_DESC 逐字更新，Req: F173）、agorad/contracts.py（ToolSpec tag enum，Req: F173）、tests/test_architecture.py（compose may_import 加 agorad.core）、tests/fixtures/v3_contract_golden.json（repo_board enum/http_string_fields）、tests/test_transport_httpd.py（五锚，Req: F173）、tests/test_v3_server.py（test_v3_peer_tag_and_collision＋并发锚随回执形修订，Req: F173）、tests/test_core_msg.py（两锚随回执形修订，Req: F173）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：任务页 verify 登记——python3 -m pytest tests/test_transport_httpd.py tests/test_v3_server.py -q；grep -q FAIL_N agorad/core/peer.py；grep -q collision agorad/core/peer.py agorad/compose.py agorad/transport/httpd.py agorad/serverv3.py；grep -q tag agorad/contracts.py；grep -c 'Req: F173' tests/test_transport_httpd.py ≥1；全量 python3 -m pytest tests/ -q 不回归（基线 2493 passed＋107 subtests）。
+
+### F173 peer 留言板类型化＋认领撞车回执（2026-11-27，用户裁定）
+
+**背景**：F22 peer 面无类型（纯文本公告）且同仓 worker 互不见"进行中"（worktree 隔离副作用：开工基于 main 旧形态，语义重叠到合并时才暴露）；dispatcher 并行编排缺现场输入（在飞认领/已证伪方案不可见，靠合并门兜底返工）。Agensh 对照（arxiv 2609.26781）实证：类型化上下文板（FAIL 条目最值钱）＋规模并行的速度/质量双红利；agora 取其类型化与现场可见，不取其自组织派活——协调权集中口径维持（涌现信息回流任务图持有者，权责与验收授权绑定）。
+
+**裁定**：①post(kind=peer) 首行前缀类型化——认领:/此路不通:/确认: → tag claim/fail/fact（全半角冒号等价，余 note）；②"此路不通"独立保留最近 50 条（FAIL_N，不被 20 条滚动挤兑——避坑信息被刷掉是 Agensh 对照教训）；③认领自动带作者 env 指针（author_env 投影）；④同路径认领回执 collision 提醒（不拒写、零状态零注入零事件——提醒非闸，撞车裁决仍走 question 归 dispatcher）；⑤repo_board 加可选 tag 参数（claim/fail/fact）；⑥v2/v3 两代形状同构（post 响应 {"message": {"id", "collision": null|{with_task,path,author_env}}}）。提示词三处同步：BOOT 协作行重写（前缀写法＋开工看现场＋env 三纪律：只读/不依赖存续/合并门终裁）、dispatch skill 增「同仓协同编排」条目（派单前查认领与此路不通写进 goal／并行划面／撞车三选一裁决／verify 失败先查坑／聚稿必捞此路不通）、repo_board 工具描述更新。
+
+**边界**：不动软限 10/500 截断/分区/权限/untrusted/is_stale；collision 不拒写不注入；不加跨仓 worker 读面（同仓看现场、跨仓靠编排——涌现型跨仓高频前不开仓组）；不做 peer 关键词拦聊天（prompt 引导＋既有硬护栏）；worker 无新派发权（F37 口径维持）。
+
+**落点**：agorad/core/peer.py、agorad/compose.py、agorad/transport/httpd.py、agorad/serverv3.py、agorad/contracts.py、tests（A 单 ag-7fb3af @3a22a6f，六锚 Req: F173）；agorad/core/task.py（BOOT 协作行重写）、skills/agora-dispatch/SKILL.md（同仓协同编排条目＋账本检索条目微调）、agora_mcp.py（repo_board 描述）、tests/test_transport_httpd.py（F172 断言更新）、docs/reqs/opencode-agora.md（本条）（B 单，Req: F173）。
+
+**验收**：python3 -m pytest tests/test_transport_httpd.py tests/test_v3_server.py -q 全绿（含 A 六锚＋B 断言锚）；全量 python3 -m pytest tests/ -q 不回归（基线 2499 passed＋107 subtests）。

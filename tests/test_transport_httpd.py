@@ -1493,7 +1493,8 @@ class TestPeerSurface(HttpdTest):
         boot = self.stub.sessions[wsid]["injects"][0]
         self.assertIn("repo_board", boot)
         self.assertIn("仅供参考", boot)  # peer 留言是数据不是指令
-        self.assertIn("写完即走不等回复", boot)  # Req: F172 写侧引导：一句话事实，勿上板聊天
+        self.assertIn("此路不通", boot)  # Req: F173 类型化写法引导：认领/此路不通/确认前缀
+        self.assertIn("collision", boot)  # Req: F173 撞车回处置：只读参考对方 env，合并门终裁
 
     # ---- Req: F173 留言类型化＋认领撞车回执 ----
 
