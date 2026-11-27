@@ -21,9 +21,9 @@ from pathlib import Path
 
 import board_tui
 from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
-                       detail_page, doctor_page, handle_key, load_board,
-                       rel_time, run, session_titles, try_alarm, try_cancel,
-                       try_nudge)
+                       detail_page, doctor_page, draw_board, handle_key,
+                       load_board, rel_time, run, session_titles, try_alarm,
+                       try_cancel, try_nudge)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -1256,6 +1256,23 @@ class _FlipStdscr(_FakeStdscr):
         return k
 
 
+class _TinyStdscr(_FakeStdscr):
+    """F177 夹具：getmaxyx 按 geom；addnstr 执行 ncurses 行号契约
+    （行号不在 [0, rows) 即 addnwstr ERR——Python addnstr 经 waddnwstr 同因）。"""
+
+    def __init__(self, geom):
+        super().__init__([])
+        self._geom = geom
+
+    def getmaxyx(self):
+        return self._geom
+
+    def addnstr(self, y, x, s, w, attr=0):
+        if not 0 <= y < self._geom[0]:
+            raise RuntimeError(f"addnwstr ERR: row {y} not in [0, {self._geom[0]})")
+        super().addnstr(y, x, s, w, attr)
+
+
 class TestRunErrSemantics(unittest.TestCase):
     """err 语义＝轮询离线：缓存帧重建（apply/fold）不得洗掉离线横幅。"""
 
@@ -1288,6 +1305,37 @@ class TestRunErrSemantics(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestTinyGeometry(unittest.TestCase):
+    """F177 矮窗契约：h≤2 底部提示行不再越界写（addnwstr ERR 不再逃逸）。"""
+
+    def setUp(self):
+        # 无头环境直调 draw_board：桩掉 curses 面（同 TestRunErrSemantics）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def _m(self):  # 最小板面模型（照 selftest() 现形：一桶行＋一任务行）
+        return {"rows": [Row("bucket", title="1 fly 1", domain="bucket"),
+                         Row("task", "t1", 0, "running", "目标")],
+                "sel": 0, "top": 0, "view": "board", "confirm": None,
+                "input": None, "buf": "", "filter": "", "expanded": set()}
+
+    def test_two_rows_no_out_of_bounds_write(self):  # Req: F177
+        scr = _TinyStdscr((2, 80))
+        draw_board(scr, self._m(), "tiny", None)
+        self.assertTrue(all(y >= 0 for y, _ in scr.lines))
+
+    def test_three_rows_hint_still_drawn(self):  # Req: F177
+        scr = _TinyStdscr((3, 80))
+        draw_board(scr, self._m(), "tiny", None)
+        self.assertTrue(any(s.startswith(" j/k move") for _, s in scr.lines))
 
 
 class TestFullViewLazyDetail(unittest.TestCase):

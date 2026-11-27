@@ -699,14 +699,16 @@ def draw_board(stdscr, m, status="", err=None):
         if m["top"] + i == m["sel"]:
             attr |= curses.A_REVERSE
         stdscr.addnstr(i + nb + 1, 0, text, w - 1, attr)
-    stdscr.addnstr(h - 3, 0,
-                   " j/k move | g/G jump | Enter detail | l tail | d doctor"
-                   " | p/P prompt | ! alarm | x cancel | r refresh | z/Z fold"
-                   " | q quit",
-                   w - 1, curses.A_DIM)
-    stdscr.addnstr(h - 2, 0,
-                   f" 1-5 bucket | 0 proj | / filter[{m['filter']}]",
-                   w - 1, curses.A_DIM)
+    if h >= 3:  # F177 矮窗守卫：行 h-3/h-2 不存在时 addnstr 即 addnwstr ERR
+        stdscr.addnstr(h - 3, 0,
+                       " j/k move | g/G jump | Enter detail | l tail | d doctor"
+                       " | p/P prompt | ! alarm | x cancel | r refresh | z/Z fold"
+                       " | q quit",
+                       w - 1, curses.A_DIM)
+    if h >= 2:
+        stdscr.addnstr(h - 2, 0,
+                       f" 1-5 bucket | 0 proj | / filter[{m['filter']}]",
+                       w - 1, curses.A_DIM)
     line = (f"prompt {m['buf']}▌" if m.get("prompt") and m.get("input") is not None
             else f"/{m['buf']}▌" if m.get("input") is not None else
             (f"cancel {m['confirm']} ? y/n" if m.get("confirm") else None))

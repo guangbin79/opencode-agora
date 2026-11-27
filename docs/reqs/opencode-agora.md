@@ -1103,3 +1103,15 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：agorad/core/app.py（verify_hygiene 注入面字段，Req: F175）、agorad/main.py（装配传递）、agorad/transport/httpd.py（_post 分支＋_verify_precheck，Req: F175）、agorad/compose.py（V3Stack verify_hygiene 装配注入，Req: F175）、agorad/serverv3.py（_message_post 同构分支＋_verify_precheck，Req: F175）、skills/agora-dispatch/SKILL.md（§3 一句）、tests/test_transport_httpd.py＋tests/test_v3_server.py（各两锚：test_verify_dirty_proposal_auto_reject／test_verify_clean_proposal_unchanged，Req: F175）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：python3 -m pytest tests/test_transport_httpd.py tests/test_core_msg.py -q 全绿；grep -rq 'precheck_rejected' agorad/ && grep -rq 'verify_precheck_reject' agorad/ && grep -q '机械预检' skills/agora-dispatch/SKILL.md && grep -rq 'Req: F175' tests/；全量 python3 -m pytest tests/ -q 零失败（基线以任务起点 collect-only 实测为准）。部署注记：本条改 agorad 自身，merged 后须重跑 ./install.sh 并重启服务才生效。
+
+### F177 board_tui 矮窗守卫——终端高度 ≤2 不再 addnwstr ERR 崩溃（2026-11-27，ag-6365e2）
+
+**背景**：用户跑 `agora-board` 直接 `board_tui: addnwstr() returned ERR` 退出。pty 实测：终端高度 ≤2 必崩（80x2、40x2 均实证），80x24 等正常高度不复现；无 tty 是另一症状（nocbreak ERR），不同病。根因：Python curses 的 addnstr 在 ncursesw 下即 waddnwstr，行号不在 [0, rows) 返回 ERR 抛 curses.error；draw_board() 两处底部提示行未按窗口高守卫——h-3 键位提示行在 h≤2 行号为负、h-2 桶/过滤行在 h≤1 为负；异常逃逸 run() 由 main() 捕获打印退出。相邻面已证安全（不动）：draw_page 的 n 已钳 max(0, h-2) 行号恒 ≥0；输入行 h-1 在 h≥1 恒安全；底角宽字符路径经 getch 字节化不可达。
+
+**裁定**：两处提示行按行位存在性守卫——`if h >= 3:` 包住 h-3 键位提示行、`if h >= 2:` 包住 h-2 桶/过滤行。h≥3 渲染零变化；h=2 桶/过滤行落行 0 后写覆盖头行（单行可见）；h≤1 仅头行。
+
+**边界**：不动 draw_page/输入行（已证安全）；不做显示宽度截断或底角宽字符处理（不可达路径）；不动 agorad 服务端；不改键位、渲染语义与 install.sh。
+
+**落点**：board_tui.py（draw_board 两处提示行守卫，Req: F177）、tests/test_board_tui.py（_TinyStdscr 夹具＋TestTinyGeometry 两锚：2x80 无越界写＋3x80 键位提示行仍在，Req: F177）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：先红——修复前 `python3 -m pytest tests/test_board_tui.py -q -k TestTinyGeometry` 必红（RuntimeError: addnwstr ERR: row -1 not in [0, 2)，实证）；后绿——同命令 2 passed；`python3 -m pytest tests/test_board_tui.py -q` 全绿（92 passed＋5 subtests）；全量 `python3 -m pytest tests/ -q` 零回归（2523 passed＋107 subtests，起点基线＋本任务 2 锚）；pty E2E 自检——2x80 修复前 rc=2 报 `board_tui: addnwstr() returned ERR`、修复后 rc=0 输出 `selftest ok rows=7`（3x80/24x80 同 ok）。
