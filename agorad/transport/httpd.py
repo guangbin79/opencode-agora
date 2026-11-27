@@ -385,6 +385,12 @@ class _Handler(BaseHTTPRequestHandler):
         回执，B 册 R2 免 head-of-line）②审计 verify_precheck_reject③提案
         不投递 dispatcher④响应附 precheck_rejected 回执（加键不破形状）。
         GLOBAL_STATE 仅告警不拒（F99 登记闸同口径）；谓词干净零变化。"""
+        if t.get("worker_sid") != sid:
+            # 非本任务 worker（跨链 sid）：照常规投递，链边闸照旧 NotChainEdge
+            # 400 零落库零注入（_noop_archive 同款守卫——预检先于 Router._resolve
+            # 终审，无此守卫则跨链脏提案可触发服务写入）；顺带消灭未派发行
+            # project_dir=None 直入谓词的 realpath(None) TypeError 面
+            return None
         fn = self.app.verify_hygiene
         if fn is None:
             return None

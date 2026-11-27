@@ -1730,6 +1730,26 @@ class TestVerifyPrecheck(HttpdTest):
                             and x["body"] == "python3 -m pytest tests/ -q"
                             for x in r["messages"]))
 
+    def test_cross_chain_dirty_proposal_zero_writes(self):  # Req: F175
+        """评审轮 1 锚：预检先于 Router._resolve 链边终审——跨链 sid 的脏提案
+        必须落 NotChainEdge 400 零落库零注入（守卫镜像 _noop_archive）。"""
+        tid = self.create_task()
+        self.dispatch_task(tid)
+        other = self.create_task()
+        otok = self.dispatch_task(other)  # 他任务 worker 牌（may 矩阵放行 post）
+        st, r = call(self.port, "POST", "/post",
+                     {"task": tid, "kind": "verify",
+                      "body": "cd /tmp && python3 -m pytest -q"}, otok)
+        self.assertEqual(st, 400)
+        self.assertIn("非链边", r["error"])
+        # 零服务写入：无 verify_reject/verify 消息、无 verify_precheck_reject 审计
+        self.assertFalse([x for x in self.app.store.read_messages()
+                          if x["kind"] in ("verify", "verify_reject")
+                          and x["task"] == tid])
+        self.assertFalse([e for e in self.app.store.read_events(tid)
+                          if e["event"] == "verify_precheck_reject"])
+        self.assertEqual(self.app.state.get(tid)["state"], "dispatched")
+
 
 class TestCredForSid(HttpdTest):
     """F25 修正推改拉：/cred_for_sid 插件拉取面——sid 是在飞任务 worker_sid 且牌活

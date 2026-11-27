@@ -1008,6 +1008,24 @@ class TestVerifyPrecheck(_Base):  # Req: F175 提案机械预检（v3 同构）
                          if f"task {tid} verify from" in i[2]
                          and "python3 -m pytest tests/ -q" in i[2]])
 
+    def test_cross_chain_dirty_proposal_zero_writes(self):  # Req: F175
+        """评审轮 1 锚（v2 同名镜像）：预检分支身处链边闸之后——跨链 sid 的
+        脏提案必须 400 零落库零注入（v2 曾缺 worker 守卫，见评审证据）。"""
+        victim = self.mk()
+        _, _ = self.to_running(victim)
+        attacker = self.mk()
+        _, atok = self.to_running(attacker)  # 他任务 worker 牌
+        s, b = self.call("v3/message_post",
+                         {"task": victim, "kind": "verify",
+                          "body": "cd /tmp && python3 -m pytest -q"}, atok)
+        self.assertEqual((s, b["error"]["code"]), (400, "invalid_argument"))
+        # 零服务写入：无 verify_reject/verify 消息、无 verify_precheck_reject 审计
+        self.assertFalse(self._msgs(victim, "verify_reject"))
+        self.assertFalse(self._msgs(victim, "verify"))
+        self.assertFalse([e for e in self.stack.storage.events_for_task(victim)
+                          if e.event == "verify_precheck_reject"])
+        self.assertEqual(self.stack.storage.get_task(victim).state, "running")
+
 
 class TestMcpShell(_ChainBase):  # 断言4
     def setUp(self):
