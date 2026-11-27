@@ -50,6 +50,18 @@ def _pad(s, width):
         w += cw
     return "".join(out) + " " * (width - w)
 
+
+def _flat(lines):
+    """页行拍平（Req: F178）：拆 splitlines 视觉行＋丢空白段＋tab 展开——
+    一次 addnstr＝一视觉行，换行不再驱动 waddnwstr 游标跳行（末格 ERR 崩）。"""
+    out = []
+    for ln in lines or ():
+        for seg in str(ln).splitlines():
+            seg = seg.expandtabs(4).replace("\x00", "")  # NUL：curses wide 编码即 ValueError
+            if seg.strip():
+                out.append(seg)
+    return out
+
 def _bucket(state):
     """桶归属唯一口径：merged+closed→已合并；blocked→阻塞；cancelled→已取消；
     其余（dispatched/running/done/verify_failed/reopened…）→在飞。"""
@@ -719,14 +731,16 @@ def draw_board(stdscr, m, status="", err=None):
 
 def draw_page(stdscr, title, lines, follow=False):
     """全屏页（明细/doctor/会话 tail）：文本流＋底行 h 返回。
-    follow＝尾随渲染（tail -f）：显末尾 h-2 行，新进展恒可见。"""
+    follow＝尾随渲染（tail -f）：显末尾 h-2 行，新进展恒可见。
+    Req: F178 渲染前 _flat 拍平：n 按视觉行计（follow 取末 n／非 follow 取前 n）。"""
     h, w = stdscr.getmaxyx()
     stdscr.erase()
     stdscr.addnstr(0, 0, f" {title}", w - 1, curses.A_REVERSE)
+    vis = _flat(lines)
     n = max(0, h - 2)
-    shown = lines[max(0, len(lines) - n):] if follow else lines[:n]
+    shown = vis[max(0, len(vis) - n):] if follow else vis[:n]
     for i, ln in enumerate(shown):
-        stdscr.addnstr(i + 1, 0, str(ln), w - 1, 0)
+        stdscr.addnstr(i + 1, 0, ln, w - 1, 0)
     stdscr.addnstr(h - 1, 0, " h back | q quit", w - 1, curses.A_DIM)
     stdscr.refresh()
 

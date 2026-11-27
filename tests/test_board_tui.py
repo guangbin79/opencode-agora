@@ -20,10 +20,10 @@ import unittest.mock
 from pathlib import Path
 
 import board_tui
-from board_tui import (Action, Row, _row_text, build_rows, clamp_view,
-                       detail_page, doctor_page, draw_board, handle_key,
-                       load_board, rel_time, run, session_titles, try_alarm,
-                       try_cancel, try_nudge)
+from board_tui import (Action, Row, _flat, _row_text, build_rows, clamp_view,
+                       detail_page, doctor_page, draw_board, draw_page,
+                       handle_key, load_board, rel_time, run, session_titles,
+                       try_alarm, try_cancel, try_nudge)
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1000.0
@@ -1336,6 +1336,56 @@ class TestTinyGeometry(unittest.TestCase):
         scr = _TinyStdscr((3, 80))
         draw_board(scr, self._m(), "tiny", None)
         self.assertTrue(any(s.startswith(" j/k move") for _, s in scr.lines))
+
+
+class _NoCtlStdscr(_FakeStdscr):
+    """F178 契约桩：addnstr 收到含 \n/\r/\t 的正文即抛（一次 addnstr＝一行视觉行）。"""
+
+    def __init__(self):
+        super().__init__([])
+
+    def getmaxyx(self):
+        return 24, 80
+
+    def addnstr(self, y, x, s, w, attr=0):
+        if any(c in s for c in "\n\r\t"):
+            raise RuntimeError(f"control char in addnstr line: {s[:40]!r}")
+        super().addnstr(y, x, s, w, attr)
+
+
+class TestFlatPageLines(unittest.TestCase):
+    """F178 页行拍平纯函数：拆视觉行＋丢空白段＋tab 展开（Req: F178）。"""
+
+    def test_flat_splits_breaks_drops_blanks_expands_tabs(self):  # Req: F178
+        self.assertEqual(_flat(["a\nb", "c\r\nd", "e\rf"]),
+                         ["a", "b", "c", "d", "e", "f"])  # \n/\r\n/\r 全拆
+        self.assertEqual(_flat(["x\n\n \ny"]), ["x", "y"])  # 空白段丢弃
+        self.assertEqual(_flat(["a\tb", "\t中"]), ["a   b", "    中"])  # tab 4 展
+        self.assertEqual(_flat(["a\x00b", "\x00"]), ["ab"])  # NUL 剔除（curses 崩）
+        self.assertEqual(_flat([123, 4.5]), ["123", "4.5"])  # 非 str 容错
+
+
+class TestDrawPageFlat(unittest.TestCase):
+    """F178 契约：draw_page 渲染前拍平——一次 addnstr＝一行视觉行。"""
+
+    def test_killer_tail_line_flattened(self):  # Req: F178
+        scr = _NoCtlStdscr()
+        draw_page(scr, "tail", ["x" * 20 + "\n" + "中" * 40], follow=True)
+        shown = [s for _, s in scr.lines]
+        self.assertIn("x" * 20, shown)      # 拆两视觉行，不整段入桩
+        self.assertIn("中" * 40, shown)
+
+    def test_window_slices_count_visual_lines(self):  # Req: F178
+        page = [f"ln{i}" for i in range(25)] + ["末段\n新行"]  # 27 视觉行
+        scr = _NoCtlStdscr()
+        draw_page(scr, "tail", page, follow=True)
+        shown = [s for _, s in scr.lines]
+        self.assertIn("新行", shown)        # follow＝取末 n 条视觉行
+        self.assertNotIn("ln0", shown)
+        draw_page(scr, "detail", page, follow=False)
+        shown = [s for _, s in scr.lines]
+        self.assertIn("ln0", shown)         # 非 follow＝取前 n 条视觉行
+        self.assertNotIn("新行", shown)
 
 
 class TestFullViewLazyDetail(unittest.TestCase):

@@ -1115,3 +1115,14 @@ board_tui.load_board 先 POST /board {} 拿 forest 再逐任务各发一次 {"ta
 **落点**：board_tui.py（draw_board 两处提示行守卫，Req: F177）、tests/test_board_tui.py（_TinyStdscr 夹具＋TestTinyGeometry 两锚：2x80 无越界写＋3x80 键位提示行仍在，Req: F177）、docs/reqs/opencode-agora.md（本条）。
 
 **验收**：先红——修复前 `python3 -m pytest tests/test_board_tui.py -q -k TestTinyGeometry` 必红（RuntimeError: addnwstr ERR: row -1 not in [0, 2)，实证）；后绿——同命令 2 passed；`python3 -m pytest tests/test_board_tui.py -q` 全绿（92 passed＋5 subtests）；全量 `python3 -m pytest tests/ -q` 零回归（2523 passed＋107 subtests，起点基线＋本任务 2 锚）；pty E2E 自检——2x80 修复前 rc=2 报 `board_tui: addnwstr() returned ERR`、修复后 rc=0 输出 `selftest ok rows=7`（3x80/24x80 同 ok）。
+### F178 board_tui 全屏页拍平——tail 页内嵌换行不再 addnwstr ERR 崩溃（2026-11-27，ag-68cb5c）
+
+**背景**：用户在全屏终端跑 `agora-board` 报 `board_tui: addnwstr() returned ERR` 退出。pty 实测：200x24 与 180x30 全屏均崩、80 列不复现（宽度依赖）。根因：F170 的 tail_session 把消息原文整段当"一行"返回——合成过程消息、worker 长报告内嵌 \n；draw_page 直接 `stdscr.addnstr(row, 0, str(ln), w-1)`，ncursesw 下 addnstr＝waddnwstr，\n 被当游标跳行：末条正文行的后段被推到 h-1 行，写入触末格（col w-1，或宽字符起于 col w-2）返回 ERR 抛 curses.error，逃逸 run() 由 main() 打印退出。80 列时 n=w-1 按字符截断常把 \n 截掉，宽全屏（约 ≥160 列）截断保不住 \n 必崩；tab 同类（游标跳列可绕过底行）。
+
+**裁定**：draw_page 渲染前经纯函数 `_flat` 拍平——页行序列逐条 `str(ln).splitlines()` 拆段（\n/\r/\r\n/\v/\f 行进符全覆盖）、丢弃空白段、段内 tab 以 `expandtabs(4)` 展开＋NUL 剔除（\x00 非 splitlines 边界，CPython curses wide 路径 embedded null character 即抛 ValueError 全屏退出——评审环 B 册真 pty 4 例实证，同面收口）；一次 addnstr＝一视觉行，follow＝取末 n 条视觉行、非 follow＝取前 n 条，其余渲染零变化。
+
+**边界**：不动 tail_session/_part_line/_inline_text 取数与拼行（拍平在 draw_page 单点收口，未来页源天然被覆盖）；不动 draw_board 与提示行（F177）；不做超宽单段截断（无换行单段数学上限不触末格，纯观感不扩）；不动 detail_page/doctor_page 生成；输入行 isprintable 守卫零改动。
+
+**落点**：board_tui.py（_flat 纯函数＋draw_page 拍平，Req: F178）、tests/test_board_tui.py（_NoCtlStdscr 契约桩＋TestFlatPageLines 纯函数锚＋TestDrawPageFlat 契约锚，Req: F178）、docs/reqs/opencode-agora.md（本条）。
+
+**验收**：先红——修复前 `python3 -m pytest tests/test_board_tui.py -q -k "TestFlatPageLines or TestDrawPageFlat"` 必红（收集即 ImportError: cannot import name '_flat'；契约桩直调旧 draw_page 抛 RuntimeError: control char in addnstr line 'xxxx…\n中中…'，实证）；后绿——同锚全 passed；`python3 -m pytest tests/test_board_tui.py -q` 全绿（95 passed＋5 subtests，F177 TestTinyGeometry/F170 既有锚零回归）；全量 `python3 -m pytest tests/ -q` 零回归（2523 passed＋107 subtests＝起点基线，＋本任务 3 锚＝2526）；pty E2E 自检——TIOCSWINSZ(200,24) 真 curses 直调 draw_page 喂实测崩例会话 ses_de465e499ffe4bp0OgyvHPD1Km 真数据（40 行、2 行内嵌换行、最长 951 字符）：修复前 rc=2 报 `addnwstr() returned ERR`、修复后 rc=0；交互流（过滤 ag-6c52fd→j→l 进 tail）rc=0 且 stderr 无 `board_tui:` 错误。
