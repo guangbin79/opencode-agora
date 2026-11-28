@@ -1,0 +1,45 @@
+# dsh worker overlay（Req: F182）——容器内 worker 会话的完整配方。
+# 用法：dsh --profile headless --patch <repo>/dsh-shim/cordis.worker.yml "<任务>"
+# 形态＝F181 探针实证的 patch overlay 源 TS 直载：'./boot.ts' 相对本文件解析，
+# 由 boot 装桥接钩子后源级 import ../agora-plugin/core/*（共享核心零拷贝）。
+# 凭据纪律：GLM token 只经 GLM_API_KEY 进程 env（llm-pi-ai apiKeyEnv），零落盘。
+- id: llm-pi-ai
+  config:
+    providers:
+      glm-gptload:
+        api: openai-completions
+        apiKeyEnv: GLM_API_KEY
+        baseURL: http://127.0.0.1:13579/proxy/zai-glm/api/coding/paas/v4
+        models:
+          - id: glm-5.3
+            name: GLM 5.3 (gpt-load)
+            contextWindow: 200000
+            maxTokens: 32768
+
+- id: agent-default-model
+  config:
+    provider: glm-gptload
+    model: glm-5.3
+
+- insert:
+    # 真 MCP 壳：容器内经 stdio 挂本仓 agora_mcp.py，工具名 mcp__agora__*。
+    # command/args 按容器内挂载路径（run-worker.sh 固定 /work/repo）。
+    - id: agora-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agora
+        transport: stdio
+        command: python3
+        args:
+          - /work/repo/agora_mcp.py
+        env: {}
+        cwd: /work
+        toolCallTimeoutMs: 60000
+        startupTimeoutMs: 30000
+        closeTimeoutMs: 5000
+        expandTemplates: false
+        failOnStartupError: false
+
+- insert:
+    - id: agora-shim
+      name: './boot.ts'

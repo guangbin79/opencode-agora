@@ -1,0 +1,18 @@
+[agora-dsh] shadow mcp__agora__sleep registered
+[agora-dsh] shadow mcp__agora__enforce registered
+[agora-dsh] shadow mcp__agora__wiki_write registered
+[agora-dsh] shadow mcp__agora__wiki_read registered
+[agora-dsh] shadow mcp__agora__repo_board registered
+[agora-dsh] shadow mcp__agora__doctor registered
+[agora-dsh] shadow mcp__agora__board registered
+[agora-dsh] shadow mcp__agora__check_mail registered
+[agora-dsh] shadow mcp__agora__post registered
+[agora-dsh] shadow mcp__agora__task_wait registered
+[agora-dsh] shadow mcp__agora__reverify registered
+[agora-dsh] shadow mcp__agora__task_deliver registered
+[agora-dsh] shadow mcp__agora__task_cancel registered
+[agora-dsh] shadow mcp__agora__task_update registered
+[agora-dsh] shadow mcp__agora__task_dispatch registered
+[agora-dsh] shadow mcp__agora__task_create registered
+[agora-dsh] tool=write sid=session-bd6912a6-a555-4176-bff8-8a4099cce254 cred=cache pull=ok enforce=true
+[agora-dsh] deny tool=write sid=session-bd6912a6-a555-4176-bff8-8a4099cce254 target=/work/foreign-repo/evil.txt hint=被拦：写入目标 /work/foreign-repo/evil.txt 在任务 env /work/task-env 外——请在副本内编辑。

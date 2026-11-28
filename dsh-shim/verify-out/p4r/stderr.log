@@ -1,0 +1,37 @@
+[agora-dsh] shadow mcp__agora__sleep registered
+[agora-dsh] shadow mcp__agora__enforce registered
+[agora-dsh] shadow mcp__agora__wiki_write registered
+[agora-dsh] shadow mcp__agora__wiki_read registered
+[agora-dsh] shadow mcp__agora__repo_board registered
+[agora-dsh] shadow mcp__agora__doctor registered
+[agora-dsh] shadow mcp__agora__board registered
+[agora-dsh] shadow mcp__agora__check_mail registered
+[agora-dsh] shadow mcp__agora__post registered
+[agora-dsh] shadow mcp__agora__task_wait registered
+[agora-dsh] shadow mcp__agora__reverify registered
+[agora-dsh] shadow mcp__agora__task_deliver registered
+[agora-dsh] shadow mcp__agora__task_cancel registered
+[agora-dsh] shadow mcp__agora__task_update registered
+[agora-dsh] shadow mcp__agora__task_dispatch registered
+[agora-dsh] shadow mcp__agora__task_create registered
+[agora-dsh] tool=mcp__agora__check_mail sid=session-3c31da96-23c5-4ac1-bd9a-d81bffc4ad20 cred=cache pull=ok enforce=false
+[agora_mcp] check_mail -> 200
+[agora-dsh] tool=bash sid=session-3c31da96-23c5-4ac1-bd9a-d81bffc4ad20 cred=cache pull=- enforce=true
+[agora-dsh] shadow mcp__agora__task_create registered
+[agora-dsh] shadow mcp__agora__task_dispatch registered
+[agora-dsh] shadow mcp__agora__task_update registered
+[agora-dsh] shadow mcp__agora__task_cancel registered
+[agora-dsh] shadow mcp__agora__task_deliver registered
+[agora-dsh] shadow mcp__agora__reverify registered
+[agora-dsh] shadow mcp__agora__task_wait registered
+[agora-dsh] shadow mcp__agora__post registered
+[agora-dsh] shadow mcp__agora__check_mail registered
+[agora-dsh] shadow mcp__agora__board registered
+[agora-dsh] shadow mcp__agora__doctor registered
+[agora-dsh] shadow mcp__agora__repo_board registered
+[agora-dsh] shadow mcp__agora__wiki_read registered
+[agora-dsh] shadow mcp__agora__wiki_write registered
+[agora-dsh] shadow mcp__agora__enforce registered
+[agora-dsh] shadow mcp__agora__sleep registered
+[agora-dsh] tool=mcp__agora__check_mail sid=session-3c31da96-23c5-4ac1-bd9a-d81bffc4ad20 cred=cache pull=- enforce=false
+[agora_mcp] check_mail -> 200

@@ -1,0 +1,2 @@
+{"kind": "listening", "ts": 1795838959.297218, "port": 39845, "env_dir": "/work/task-env", "enforce": "on", "not_worker": false, "home": "/work/agora-home"}
+mock-agorad on 127.0.0.1:39845 home=/work/agora-home

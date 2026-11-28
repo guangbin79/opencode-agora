@@ -1,0 +1,5 @@
+{"kind": "listening", "ts": 1795838937.8805451, "port": 34767, "env_dir": "/work/task-env", "enforce": "on", "not_worker": false, "home": "/work/agora-home"}
+mock-agorad on 127.0.0.1:34767 home=/work/agora-home
+{"kind": "cred_for_sid", "ts": 1795838944.5506823, "sid": "session-579a8f72-ca93-4744-8741-c7f46e8106b6", "status": 200, "env_dir": "/work/task-env"}
+{"kind": "tool", "ts": 1795838944.5967195, "tool": "check_mail", "x_agora_token": "mock-worker-88905688277d4258", "x_agora_sid": "session-579a8f72-ca93-4744-8741-c7f46e8106b6", "token_ok": true}
+{"kind": "tool", "ts": 1795838945.7587237, "tool": "check_mail", "x_agora_token": "mock-worker-88905688277d4258", "x_agora_sid": "session-579a8f72-ca93-4744-8741-c7f46e8106b6", "token_ok": true}

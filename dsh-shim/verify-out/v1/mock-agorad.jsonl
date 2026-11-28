@@ -1,0 +1,3 @@
+{"kind": "listening", "ts": 1795838906.7331023, "port": 34197, "env_dir": "/work/task-env", "enforce": "on", "not_worker": false, "home": "/work/agora-home"}
+{"kind": "cred_for_sid", "ts": 1795838912.7840939, "sid": "session-bd6912a6-a555-4176-bff8-8a4099cce254", "status": 200, "env_dir": "/work/task-env"}
+{"kind": "gate_deny", "ts": 1795838912.8302286, "sid": "session-bd6912a6-a555-4176-bff8-8a4099cce254", "tool": "write", "target": "/work/foreign-repo/evil.txt", "reason": "\u88ab\u62e6\uff1a\u5199\u5165\u76ee\u6807 /work/foreign-repo/evil.txt \u5728\u4efb\u52a1 env /work/task-env \u5916\u2014\u2014\u8bf7\u5728\u526f\u672c\u5185\u7f16\u8f91\u3002"}
