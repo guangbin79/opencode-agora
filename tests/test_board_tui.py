@@ -2,6 +2,7 @@
 
 curses 壳薄不可测，smoke 走 `--selftest` 一帧渲染（stub agorad 真进程）。
 """
+import fcntl
 import http.server
 import json
 import os
@@ -9,9 +10,11 @@ import pty
 import select
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 import types
@@ -1273,6 +1276,19 @@ class _TinyStdscr(_FakeStdscr):
         super().addnstr(y, x, s, w, attr)
 
 
+class _OneColStdscr(_FakeStdscr):
+    """F188 夹具：1 列窗——n=w-1=0 即 waddnwstr 不限长全串，任何 addnstr 均 ERR。"""
+
+    def __init__(self):
+        super().__init__([])
+
+    def getmaxyx(self):
+        return 24, 1
+
+    def addnstr(self, y, x, s, w, attr=0):
+        raise RuntimeError("addnwstr ERR: write in 1-col window")
+
+
 class TestRunErrSemantics(unittest.TestCase):
     """err 语义＝轮询离线：缓存帧重建（apply/fold）不得洗掉离线横幅。"""
 
@@ -1336,6 +1352,42 @@ class TestTinyGeometry(unittest.TestCase):
         scr = _TinyStdscr((3, 80))
         draw_board(scr, self._m(), "tiny", None)
         self.assertTrue(any(s.startswith(" j/k move") for _, s in scr.lines))
+
+
+class TestOneColGeometry(unittest.TestCase):
+    """F188 单列窗契约：w<2 不写即返——addnwstr ERR 不再逃逸。"""
+
+    def setUp(self):
+        # 无头环境直调 draw_board/draw_page：桩掉 curses 面（同 TestTinyGeometry）
+        self._saved = board_tui.curses
+        board_tui.curses = types.SimpleNamespace(
+            curs_set=lambda n: None, has_colors=lambda: False,
+            color_pair=lambda i: 0, keyname=lambda k: b"KEY_NULL",
+            A_REVERSE=0, A_DIM=0, A_BOLD=0)
+
+    def tearDown(self):
+        board_tui.curses = self._saved
+
+    def _m(self):  # 最小板面模型（照 selftest() 现形：一桶行＋一任务行）
+        return {"rows": [Row("bucket", title="1 fly 1", domain="bucket"),
+                         Row("task", "t1", 0, "running", "目标")],
+                "sel": 0, "top": 0, "view": "board", "confirm": None,
+                "input": None, "buf": "", "filter": "", "expanded": set()}
+
+    def test_board_one_col_writes_nothing(self):  # Req: F188
+        scr = _OneColStdscr()
+        draw_board(scr, self._m(), "one-col", None)
+        self.assertEqual(scr.lines, [])
+
+    def test_page_one_col_writes_nothing(self):  # Req: F188
+        scr = _OneColStdscr()
+        draw_page(scr, "detail", ["行1", "行2"])
+        self.assertEqual(scr.lines, [])
+
+    def test_two_col_board_still_draws(self):  # Req: F188
+        scr = _TinyStdscr((24, 2))
+        draw_board(scr, self._m(), "two-col", None)
+        self.assertTrue(scr.lines)
 
 
 class _NoCtlStdscr(_FakeStdscr):
@@ -1669,6 +1721,47 @@ class TestSmoke(unittest.TestCase):
             self.assertEqual(p.returncode, 0, errs.decode())
             self.assertIn(b"selftest ok", out)
             self.assertIn(b"rows=7", out)  # 5 桶行＋任务行＋升级事件行
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            os.close(mfd)
+            os.close(sfd)
+            shutil.rmtree(home, ignore_errors=True)
+
+
+class TestOneColPty(unittest.TestCase):
+    """F188 pty E2E：1 列窗跑 --selftest 全链不崩（修复前 rc==2）。"""
+
+    def test_selftest_one_col_window_against_stub_agorad(self):  # Req: F188
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _StubBoard)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        home = Path(tempfile.mkdtemp())
+        mfd, sfd = pty.openpty()  # curses 需真 tty：pty 哑端
+        try:
+            (home / ".agora").mkdir(parents=True)
+            (home / ".agora" / "root.token").write_text("tok-smoke\n")
+            (home / ".agora" / "service.json").write_text(
+                json.dumps({"port": srv.server_address[1]}))
+            fcntl.ioctl(mfd, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", 24, 1, 0, 0))  # 1 列窗＝溢出源
+            env = dict(os.environ, AGORA_HOME=str(home), TERM="xterm",
+                       AGORA_BOARD_INTERVAL="1")
+            p = subprocess.Popen(
+                [sys.executable, str(ROOT / "board_tui.py"), "--selftest"],
+                stdin=sfd, stdout=sfd, stderr=subprocess.PIPE, env=env,
+                cwd=str(ROOT))
+            _, errs = p.communicate(timeout=30)
+            out = b""
+            while select.select([mfd], [], [], 1.0)[0]:
+                try:
+                    chunk = os.read(mfd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            self.assertEqual(p.returncode, 0, errs.decode())
+            self.assertIn(b"selftest ok", out)
         finally:
             srv.shutdown()
             srv.server_close()

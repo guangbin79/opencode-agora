@@ -693,6 +693,9 @@ def draw_board(stdscr, m, status="", err=None):
     """一帧板面：头行＋固顶桶行＋滚动行流（选中反白/着色域）＋底行提示＋输入/确认行。"""
     h, w = stdscr.getmaxyx()
     stdscr.erase()
+    if w < 2:  # Req: F188 单列守卫：n=w-1=0＝waddnwstr 不限长全串→1 列窗溢出 ERR
+        stdscr.refresh()
+        return
     head = f" agora board  {status}" + (f"  offline: {err}" if err else "")
     stdscr.addnstr(0, 0, head, w - 1, curses.A_REVERSE)
     rows = m["rows"]
@@ -735,6 +738,9 @@ def draw_page(stdscr, title, lines, follow=False):
     Req: F178 渲染前 _flat 拍平：n 按视觉行计（follow 取末 n／非 follow 取前 n）。"""
     h, w = stdscr.getmaxyx()
     stdscr.erase()
+    if w < 2:  # Req: F188 单列守卫：n=w-1=0＝waddnwstr 不限长全串→1 列窗溢出 ERR
+        stdscr.refresh()
+        return
     stdscr.addnstr(0, 0, f" {title}", w - 1, curses.A_REVERSE)
     vis = _flat(lines)
     n = max(0, h - 2)
