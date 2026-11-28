@@ -11,6 +11,7 @@ transport 只 import agorad.core（R2）——access 件经 App 属性触达（s
 401）→may 粗判（越权 403＋审计行）；归属细判与保险丝归 TaskService。done
 特殊路径＝gate 六拒同步应答（拒收落审计），受理绿→落库→1-worker 串行队列后台跑门体。
 """
+import hashlib
 import json
 import queue
 import sys
@@ -58,7 +59,7 @@ _STRING_FIELDS = {
     "board": ("task", "view"),
     "repo_board": ("repo", "tag"),  # Req: F173 tag 过滤参数（值域归 board 域）
     "wiki_read": ("path",),
-    "wiki_write": ("path", "text"),
+    "wiki_write": ("path", "text", "mode", "expected_hash"),  # Req: F180
     "task_nudge": ("task", "body"),
     "task_alarm": ("task",),
 }
@@ -73,6 +74,10 @@ _GATE_DENY_CTRL = str.maketrans({c: "\\u%04x" % c
                                            0x2028, 0x2029,
                                            *range(0xd800, 0xe000))})
 _GATE_DENY_WINDOW_S = 30.0  # 服务端节流窗（内存态——gt-a18ef6：追加禁 O(调用数) 无界）
+
+
+class _WikiConflict(Exception):
+    """Req: F180 wiki_write CAS 拒写（409 语义）：拒因携带实况哈希。"""
 
 
 def _string_field(value, field: str) -> str:
@@ -170,6 +175,8 @@ class _Handler(BaseHTTPRequestHandler):
         except NotChainEdge as e:
             return self._bad(sid, name, str(e))
         except InvalidTransition as e:
+            return self._json(409, {"error": str(e)})
+        except _WikiConflict as e:  # Req: F180 CAS 拒写＝409 语义错误码
             return self._json(409, {"error": str(e)})
         except FileNotFoundError as e:
             return self._json(404, {"error": str(e)})
@@ -297,15 +304,44 @@ class _Handler(BaseHTTPRequestHandler):
             # Req: F173：tag 过滤透传（非法值 board 域 ValueError→400）
             return app.peer.board(snap, repo, body.get("tag"))
         if name == "wiki_read":
-            return {"text": self._wiki(body["path"]).read_text(
-                encoding="utf-8", errors="replace")}  # 页面可含坏字节：降级 U+FFFD 不 500
+            text = self._wiki(body["path"]).read_text(
+                encoding="utf-8", errors="replace")  # 页面可含坏字节：降级 U+FFFD 不 500
+            # Req: F180 hash＝页文本 sha256（与 CAS 校验同口径）
+            return {"text": text,
+                    "hash": hashlib.sha256(
+                        text.encode("utf-8")).hexdigest()}
         if name == "wiki_write":
             rel = Path(body["path"])
             if rel.parts and rel.parts[0] == "tasks":  # 任务页服务独占刷新
                 raise Rejected("wiki/tasks/ 前缀拒写（服务独占）")
+            mode = body.get("mode", "overwrite")  # Req: F180 缺省＝旧行为
+            if mode not in ("append", "overwrite"):
+                raise ValueError("mode 须为 append/overwrite")
             p = self._wiki(rel)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(body["text"], encoding="utf-8")
+            eh = body.get("expected_hash")
+            if mode == "overwrite" and eh is None:
+                p.write_text(body["text"], encoding="utf-8")
+            else:
+                # Req: F180 append＋CAS 读-拼-写：本栈 HTTP 面单线程串行（§4.8）
+                # ＝请求间互斥；残余面：health 线程后台写 wiki/drafts/（证据页
+                # 自愈）可与 append 竞——已知限制，升级＝跨 access/pages 共享 wiki 锁
+                cur = (p.read_text(encoding="utf-8", errors="replace")
+                       if p.exists() else "")  # 缺页＝空文本（CAS 可建页）
+                if eh is not None:
+                    actual = hashlib.sha256(
+                        cur.encode("utf-8")).hexdigest()
+                    if eh != actual:
+                        raise _WikiConflict(
+                            f"expected_hash 不匹配: 当前 {actual}")
+                if mode == "append":
+                    # shortcut: 坏字节页 append 以 U+FFFD 重写原文，需字节级追加时再升级
+                    if body["text"]:  # 空文本＝零追加：不补 \n 不重写（hash 不轮换）
+                        if cur and not cur.endswith("\n"):
+                            cur += "\n"  # 原文无尾换行先补 \n
+                        p.write_text(cur + body["text"], encoding="utf-8")
+                else:
+                    p.write_text(body["text"], encoding="utf-8")
             return {"ok": True}
         if name == "enforce":  # may() 已滤非 root；开/关审计在 Auth
             on = body["on"]

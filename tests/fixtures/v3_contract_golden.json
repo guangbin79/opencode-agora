@@ -68,7 +68,9 @@
    },
    "wiki_write": {
     "required": ["path", "text"],
-    "enums": {}
+    "enums": {
+     "mode": ["append", "overwrite"]
+    }
    },
    "enforce": {
     "required": ["on"],
@@ -103,7 +105,7 @@
   "task_update": ["task", "verify_cmd"],
   "task_wait": ["task"],
   "wiki_read": ["path"],
-  "wiki_write": ["path", "text"]
+  "wiki_write": ["path", "text", "mode", "expected_hash"]
  },
  "board_full_view": {
   "task_fields": ["state", "title", "worker_sid", "dispatcher_sid", "last_seen", "created", "project_dir", "in_gate", "model", "usage", "delivery", "waiting_on", "review_fail_streak", "gate_resource", "gate_artifact"],

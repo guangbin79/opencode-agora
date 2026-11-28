@@ -26,6 +26,10 @@ PROTOCOL_VERSION = "2024-11-05"
 _VERSION = "0.1.0"
 
 _STR = {"type": "string"}
+_WIKI_MODE = {"type": "string", "enum": ["append", "overwrite"],
+              "description": "缺省 overwrite 整页覆写；append＝服务端存储锁内读-拼-写原子追加"}
+_WIKI_HASH = {"type": "string",
+              "description": "sha256 hex（取 wiki_read 返回 hash）——与实况不匹配即 409 拒写并回实况哈希"}
 _TID = {"type": "string",
         "description": "任务 id（ag-xxxxxx 或历史 task-/gt-xxxxxx，task_create/task_dispatch 返回）"}
 _TOOLS = [
@@ -186,12 +190,16 @@ _TOOLS = [
                                   "按本任务仓分区）"},
           "tag": {"type": "string", "enum": ["claim", "fail", "fact"],
                   "description": "Req: F173 类型过滤（描述文案随 B 单更新）"}}}},
-    {"name": "wiki_read", "description": "读 wiki 页",
+    {"name": "wiki_read", "description": "读 wiki 页（响应含 hash＝页文本 sha256，CAS 基准）",
      "inputSchema": {"type": "object", "properties": {"path": _STR},
                      "required": ["path"]}},
-    {"name": "wiki_write", "description": "写 wiki 页（wiki/tasks/ 前缀服务独占）",
+    {"name": "wiki_write", "description": "写 wiki 页（wiki/tasks/ 前缀服务独占；"
+                                          "mode=append 服务端原子追加，"
+                                          "expected_hash 供 CAS 防覆写）",
      "inputSchema": {"type": "object", "properties": {"path": _STR,
-                                                      "text": _STR},
+                                                      "text": _STR,
+                                                      "mode": _WIKI_MODE,
+                                                      "expected_hash": _WIKI_HASH},
                      "required": ["path", "text"]}},
     {"name": "enforce", "description": "拨强制旗（仅 root；on 须布尔）",
      "inputSchema": {"type": "object", "properties": {

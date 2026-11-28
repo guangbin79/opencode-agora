@@ -189,8 +189,12 @@ CATALOG = {
     "wiki_read": ToolSpec("wiki_read", {"path": _f("string", True)},
                           _ANY, "global", _BASE_ERR + ("not_found",)),
     "wiki_write": ToolSpec("wiki_write", {
-        "path": _f("string", True), "text": _f("string", True)},
-        _ANY, "global", _BASE_ERR),
+        "path": _f("string", True), "text": _f("string", True),
+        # Req: F180 append 面＋CAS：mode 缺省 overwrite（旧行为）；
+        # expected_hash＝wiki_read 返回 hash，不匹配 409 conflict
+        "mode": _f("string", enum=("append", "overwrite")),
+        "expected_hash": _f("string")},
+        _ANY, "global", _BASE_ERR + ("conflict",)),
     "enforce": ToolSpec("enforce", {"on": _f("boolean", True)},
                         ("root",), "global", _BASE_ERR + ("forbidden",)),
     "sleep": ToolSpec("sleep", {"seconds": _f("integer")}, _ANY, "local",
