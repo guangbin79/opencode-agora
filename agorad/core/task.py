@@ -273,10 +273,10 @@ class TaskService:
                 if ((x["goal"], self._repo_key(x["project_dir"]),
                      x["target_branch"], x.get("deliverable"), x.get("model"),
                      x["verify"]["cmd"], bool(x.get("verify_base_exempt")),
-                     x.get("review_cmd"))
+                     x.get("review_cmd"), x.get("harness"))  # Req: F184 同权
                         != (goal, project_dir, target_branch, deliverable,
                             model, verify["cmd"],
-                            bool(verify_base_exempt), review_cmd)):
+                            bool(verify_base_exempt), review_cmd, harness)):
                     self._reject(tid, sid, f"client_key {client_key!r} 已用"
                                            f"（任务 {x_id}）且载荷不同——同键"
                                            "载荷须逐字段一致")

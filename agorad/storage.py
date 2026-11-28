@@ -282,12 +282,13 @@ class Storage:
                     conn.execute(
                         "INSERT OR IGNORE INTO schema_migrations "
                         "VALUES(?,?,?)",
-                        (SCHEMA_VERSION, "v6-timers-clientkey",
-                         epoch_ms(time.time())))
+                        (6, "v6-timers-clientkey",
+                         epoch_ms(time.time())))  # OCR round2 #12：钉 6——
+                    # 原以 SCHEMA_VERSION 盖戳，v7 起新标记撞 PK 被静默丢
                     conn.execute(
                         "INSERT OR IGNORE INTO schema_migrations "
                         "VALUES(?,?,?)",
-                        (SCHEMA_VERSION, "v7-tasks-harness",
+                        (7, "v7-tasks-harness",
                          epoch_ms(time.time())))
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.execute("COMMIT")

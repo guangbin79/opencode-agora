@@ -121,6 +121,7 @@ class Instance:
             threading.Thread(target=self.httpd.serve_forever,
                              kwargs={"poll_interval": 0.02},
                              daemon=True).start()
+            self._serving = True
             self.port = self.httpd.server_address[1]
             # shim lift/拉旗消费面（生产同位）：service.json＋root.token
             self.app.store.write_ephemeral(
@@ -132,6 +133,13 @@ class Instance:
             os.chmod(rt, 0o600)
         except Exception:
             self.stub.stop()
+            if getattr(self, "_serving", False):  # OCR round2 #7：半构造
+                self.httpd.shutdown()  # 回收已起的面（shutdown 前须真在
+            if getattr(self, "httpd", None) is not None:  # serve——否则死等）
+                self.httpd.server_close()
+            dsh = getattr(self, "dsh", None)
+            if dsh is not None:
+                dsh.close()
             raise
         _INSTANCES.append(self)
 
@@ -140,7 +148,7 @@ class Instance:
 
     def row(self, tid):
         st, r = self.call("/board", {"task": tid})
-        assert st == 200, r
+        check(st == 200, f"board 应答 {st}: {r}")  # OCR round2 #8
         return r["task"]
 
     def events(self, tid=None):
@@ -171,11 +179,11 @@ def make_task(inst, repo, goal, verify, **extra):
     body = {"goal": goal, "project_dir": str(repo), "verify_cmd": verify,
             **extra}
     st, r = inst.call("/task_create", body)
-    assert st == 200, r
+    check(st == 200, f"task_create 应答 {st}: {r}")  # OCR round2 #8：-O 免剥
     tid = r["task"]
     inst.last_tid = tid
     st, r = inst.call("/task_dispatch", {"task": tid})
-    assert st == 200, r
+    check(st == 200, f"task_dispatch 应答 {st}: {r}")  # OCR round2 #8
     return tid
 
 
@@ -268,7 +276,8 @@ def scenario_delivery(tmp):
     (anchor / ".review-base").write_text(env_base + "\n", encoding="utf-8")
     st, r = inst.call("/post", {"task": tid, "kind": "done", "body": sha},
                       wtok)
-    assert st == 200 and r.get("result") == "accepted", r
+    check(st == 200 and r.get("result") == "accepted",
+          f"post(done) 应答 {st}: {r}")  # OCR round2 #8
     # 门体→merged/closed（verify 门绿＋managed 交付全链产品码）
     def settled():
         r = inst.row(tid)
@@ -356,10 +365,12 @@ def main():
     if not extract_glm_key():
         print("FAIL GLM key 提取为空（opencode 凭据库不可用）", file=sys.stderr)
         return 3
+    Path("/tmp/opencode").mkdir(parents=True, exist_ok=True)  # OCR round2 #6
     ensure_image()  # 派生镜像（含 git）幂等构建
     tmp = Path(tempfile.mkdtemp(prefix="agora-f184-e2e-",
                                 dir="/tmp/opencode"))
     results, failures = [], []
+    leaked = False
     try:
         for fn in SCENARIOS:
             try:
@@ -394,18 +405,20 @@ def main():
             json.dumps(report, ensure_ascii=False, indent=1) + "\n",
             encoding="utf-8")
         key = os.environ.get("GLM_API_KEY", "")
-        if key and subprocess.run(
-                ["grep", "-rqF", key, str(OUT)],
-                capture_output=True).returncode == 0:
-            print("FAIL GLM key 泄入证据目录——清除后重跑", file=sys.stderr)
-            return 3
-        if failures:
-            print(f"工作区保留待诊断: {tmp}")
-            return 1
-        shutil.rmtree(tmp, ignore_errors=True)
+        if key:  # OCR round2 #9：key 经 stdin 喂 grep（argv 免泄）
+            leaked = subprocess.run(
+                ["grep", "-rqFf", "-", str(OUT)], input=key, text=True,
+                capture_output=True).returncode == 0
+        # 出口判定统一在 finally 外（OCR round2 #10：in-finally return
+        # 吞在飞异常（KeyboardInterrupt 等）＋尾部分支死码）
+    if leaked:
+        print("FAIL GLM key 泄入证据目录——清除后重跑", file=sys.stderr)
+        return 3
     if failures:
+        print(f"工作区保留待诊断: {tmp}")
         print(f"FAILED: {', '.join(failures)}")
         return 1
+    shutil.rmtree(tmp, ignore_errors=True)
     print("ALL PASS: F184 dsh worker delivery e2e")
     return 0
 

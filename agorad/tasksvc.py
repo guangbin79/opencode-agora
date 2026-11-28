@@ -104,9 +104,10 @@ class Gitx(typing.Protocol):
 
 
 class SessionFactory(typing.Protocol):
-    """oc 注入面：会话创建（can_spawn 熔断——异常即拒派）。"""
+    """oc 注入面：会话创建（can_spawn 熔断——异常即拒派）。Req: F184：
+    harness 形参归 HarnessRouter 消费（原生 oc 桩可不收——分流层吸收）。"""
 
-    def create(self, env, boot, title=None, model=None): ...
+    def create(self, env, boot, title=None, model=None, harness=None): ...
 
 
 class Notifier(typing.Protocol):
@@ -275,10 +276,11 @@ class TaskService:
                     continue
                 if ((x.goal, self._repo_key(x.project_dir), x.target_branch,
                      x.deliverable, x.model, x.verify.cmd,
-                     bool(x.verify_base_exempt), x.review_cmd)
+                     bool(x.verify_base_exempt), x.review_cmd,
+                     x.harness or "opencode")  # Req: F184 同权（行侧已归一）
                         != (goal, project_dir, target_branch, deliverable,
                             model, verify.cmd, bool(verify_base_exempt),
-                            review_cmd)):
+                            review_cmd, harness or "opencode")):
                     self._reject(tid, actor_sid, "conflict",
                                  f"client_key {client_key!r} 已用（任务 {x.id}）"
                                  "且载荷不同——同键载荷须逐字段一致")

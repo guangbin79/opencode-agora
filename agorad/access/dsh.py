@@ -46,7 +46,8 @@ import threading
 import time
 import uuid
 
-HARNESSES = ("opencode", "dsh")
+HARNESSES = ("opencode", "dsh")  # 权威值域在 contracts.HARNESSES（本处仅供
+# 文档注记；路由判定用字面 "dsh"——OCR round2 #15：消双源漂移）
 _DEFAULT_IMAGE = "opencode-agora/f182-dsh-worker:1"
 _DEFAULT_MODEL = "glm-gptload/glm-5.3"
 _INIT_TIMEOUT = 180.0   # 握手：profile 装载＋插件树就绪（含冷启 pnpm workspace）
@@ -133,7 +134,11 @@ class Dsh:
                 "GLM key 缺失（进程 env GLM_API_KEY 或 opencode 凭据库）")
         dsh_home = pathlib.Path(env_dir) / ".dsh-worker-home"
         dsh_home.mkdir(parents=True, exist_ok=True)
-        provider, mname = (model or self.model).split("/", 1)
+        route = model or self.model
+        if "/" not in route:  # OCR round2 #13：坏形早拒（契约口径）
+            raise DshUnavailable(
+                f"model 须为 provider/model 形（收到 {route!r}）")
+        provider, mname = route.split("/", 1)
         sid = f"session-{uuid.uuid4()}"
         w = _Worker(sid, env_dir, dsh_home, _now_ms())
         try:  # spawn 纳入契约 try（评审 B 册 S1：docker 缺失→DshUnavailable
@@ -287,19 +292,20 @@ class Dsh:
     def _rpc(self, w, method, params, timeout=_REQ_TIMEOUT):
         if w.proc is None or w.proc.poll() is not None:
             raise DshUnavailable(f"{w.sid}: dsh 进程已退出")
-        with w.lock:
+        with w.lock:  # rid 分配与帧写同锁：并发 _rpc 的 write+flush 原子化
+            # （OCR round2 #11：JSON-RPC 帧常超 PIPE_BUF，无锁串行即交错帧）
             rid = next(w.ids)
             p = _Pending()
             w.pending[rid] = p
-        frame = json.dumps({"jsonrpc": "2.0", "id": rid,
-                            "method": method, "params": params})
-        try:
-            w.proc.stdin.write(frame + "\n")
-            w.proc.stdin.flush()
-        except (BrokenPipeError, OSError) as e:
-            with w.lock:
+            frame = json.dumps({"jsonrpc": "2.0", "id": rid,
+                                "method": method, "params": params})
+            try:
+                w.proc.stdin.write(frame + "\n")
+                w.proc.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
                 w.pending.pop(rid, None)
-            raise DshUnavailable(f"{w.sid}: stdin 断（进程死亡）: {e}") from e
+                raise DshUnavailable(
+                    f"{w.sid}: stdin 断（进程死亡）: {e}") from e
         if not p.event.wait(timeout):
             with w.lock:
                 w.pending.pop(rid, None)
@@ -327,8 +333,11 @@ class Dsh:
                     with w.lock:
                         p = w.pending.pop(rid, None)
                     if p is not None:
-                        if "error" in frame and frame["error"] is not None:
-                            p.error = (frame["error"] or {}).get(
+                        err = frame.get("error")
+                        if err is not None and not isinstance(err, dict):
+                            err = {"message": str(err)}  # OCR round2 #14
+                        if err is not None:
+                            p.error = (err or {}).get(
                                 "message", "unknown error")
                         else:
                             p.result = frame.get("result")

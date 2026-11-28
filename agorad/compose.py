@@ -662,8 +662,9 @@ class V3Stack:
         return thread
 
     def close(self):
-        """收口：队列哨兵→join→持写锁 checkpoint(TRUNCATE)＋关连接
-        （断言「关闭时 DB 连接收敛＋WAL checkpoint」）。幂等。"""
+        """收口：队列哨兵→join→dsh 容器确定性收口→持写锁
+        checkpoint(TRUNCATE)＋关连接（断言「关闭时 DB 连接收敛＋WAL
+        checkpoint」）。幂等。"""
         if self._closed:
             return
         self._closed = True
@@ -671,6 +672,11 @@ class V3Stack:
         self._gate_q.put(None)
         if self._worker is not None:
             self._worker.join(timeout=5)
+        try:  # Req: F184 dsh 容器确定性收口（进程退出 fd 兜底之外，
+            # OCR round2 #4：in-process close/rebuild 路径不留活容器）
+            self.dsh.close()
+        except Exception:
+            pass
         with self.write_lock:
             try:
                 self.storage.checkpoint_truncate()
