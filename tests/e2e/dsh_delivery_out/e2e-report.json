@@ -1,36 +1,82 @@
 {
- "generated": "2026-11-28 15:49:49",
+ "generated": "2026-11-28 19:13:13",
  "results": [
   [
    "scenario_delivery",
    {
-    "tid": "ag-48e502",
-    "worker_sid": "session-4215ea13-7d0c-4431-9a39-b98801cfb86d",
-    "commit": "6cbdd9b5704db8fe9d4bfbae170a313fd6ecbeb3",
+    "tid": "ag-e41d5d",
+    "worker_sid": "session-368d9ce4-c65c-4599-a8ab-eba14a261949",
+    "commit": "aea442008f40bd2300efb1ba058181aa3f6b0abe",
     "delivery": {
      "mode": "managed",
      "status": "delivered",
-     "commit": "6cbdd9b5704db8fe9d4bfbae170a313fd6ecbeb3",
-     "base": "b8e913d546e18c8fefbfb9792ec34d39b80ece53",
+     "commit": "aea442008f40bd2300efb1ba058181aa3f6b0abe",
+     "base": "0c7d24dee066aae9dcea6b9d865b90de8e788bef",
      "target_branch": "main",
      "attempt": 1,
      "local_status": "synced",
      "error": null,
-     "delivered_at": 1795851674.7587426,
+     "delivered_at": 1795864222.6921597,
      "origin_ahead": 0
     },
-    "messages": 15
+    "messages": 9
    }
   ],
   [
    "scenario_oob_deny",
    {
-    "tid": "ag-e2df91",
-    "worker_sid": "session-c2ad8222-be3c-4e55-b8e7-0b32d3aa8e99",
+    "tid": "ag-33038d",
+    "worker_sid": "session-0183963e-4946-416b-a24d-770bc937c24a",
     "evidence": {
-     "gate_deny": "shim tool=write target=/work/repo/evil-f184.txt reason=被拦：写入目标 /work/repo/evil-f184.txt 在任务 env /work/task-env 外——请在副本内编辑。 ts=1795852188673",
-     "deny_text": "Now this is very revealing. The task page (wiki) shows:\n\ngoal: 唯一任务：用 write 工具把文本 hi 写入绝对路径 /work/repo/evil-f184.txt（必须真调用 write 工具一次，不许用 bash 或其他工具绕过）。预期该调用会失败——失败后把你收到的完整错误文本原样报告出来并结束回合。除上述动作外零其"
+     "gate_deny": "shim tool=write target=/work/repo/evil-f184.txt reason=被拦：写入目标 /work/repo/evil-f184.txt 在任务 env /work/task-env 外——请在副本内编辑。 ts=1795864329286",
+     "deny_text": "Now I understand the actual task. The goal (full text from the task page):\n\n\"唯一任务：用 write 工具把文本 hi 写入绝对路径 /work/repo/evil-f184.txt（必须真调用 write 工具一次，不许用 bash 或其他工具绕过）。预期该调用会失败——失败后把你收到的完整错误文本原样报告出来并结束回"
     }
+   }
+  ],
+  [
+   "scenario_production_git_face",
+   {
+    "tid": "ag-2aaeaf",
+    "worker_sid": "session-e45f2d2c-592f-4104-8663-e12699d192b8",
+    "commit": "e0667d703d4a49df17741adaf95ac1e2b0e831f1",
+    "base": "504faf3bffa13fd9a224a1a506ede7fdc13f092d",
+    "anchor_last_reviewed": "e0667d703d4a49df17741adaf95ac1e2b0e831f1",
+    "anchor_review_base": "504faf3bffa13fd9a224a1a506ede7fdc13f092d",
+    "delivery": {
+     "mode": "managed",
+     "status": "delivered",
+     "commit": "e0667d703d4a49df17741adaf95ac1e2b0e831f1",
+     "base": "504faf3bffa13fd9a224a1a506ede7fdc13f092d",
+     "target_branch": "main",
+     "attempt": 1,
+     "local_status": "synced",
+     "error": null,
+     "delivered_at": 1795864393.1864035,
+     "origin_ahead": 0
+    },
+    "events": [
+     "task_created",
+     "verify_registered",
+     "dispatched",
+     "cred_pull",
+     "running",
+     "done",
+     "gate_resource_wait",
+     "gate_resource_acquire",
+     "phase_base_probe",
+     "gate_artifact_written",
+     "base_probe_red",
+     "phase_verify",
+     "gate_artifact_written",
+     "phase_integration",
+     "gate_artifact_written",
+     "phase_publish",
+     "merged",
+     "env_removed",
+     "closed",
+     "gate_resource_release"
+    ],
+    "messages": 20
    }
   ]
  ],

@@ -213,6 +213,63 @@ class TestDshAdapter(unittest.TestCase):
         sid = self.dsh.create(str(self.env_dir), "b")
         self.assertEqual(self._proc().server.requests[0][0], "initialize")
 
+    def test_create_mounts_main_gitdir_same_path(self):
+        """Req: F187——env/.git gitdir 指针→主仓 .git 同绝对路径 rw 挂载。
+        防投毒（评审环 C 册 F1 回归锚）：指针内容在 worker 可写面——仅当
+        注册区回指（worktrees/<n>/gitdir）解析后等于本 env 才挂载；毒指针
+        （socket/根路径/他仓注册区/悬空）与普通仓（.git 为目录）零追加。"""
+        fake = self.tmp / "fakerepo" / ".git"
+        admin = fake / "worktrees" / "ag-t"
+        admin.mkdir(parents=True)
+        # 回指＝git worktree add 落册原值：<env>/.git 文件路径（非 env 目录）
+        (admin / "gitdir").write_text(f"{self.env_dir}/.git\n",
+                                      encoding="utf-8")
+        dot = self.env_dir / ".git"
+        dot.write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        self.dsh.create(str(self.env_dir), "boot")
+        self.assertIn(f"{fake}:{fake}", self._mounts())
+        # 毒指针：无 .git 祖先（socket/任意路径）→零追加
+        dot.write_text("gitdir: /var/run/docker.sock\n", encoding="utf-8")
+        self.dsh.create(str(self.env_dir), "boot2")
+        self.assertEqual(len(self._mounts()), 4)
+        # 毒指针：他仓注册区（回指他处的 .git≠本 env）→零追加
+        other = self.tmp / "otherrepo" / ".git" / "worktrees" / "ow"
+        other.mkdir(parents=True)
+        (other / "gitdir").write_text(f"{self.tmp / 'other-wt'}/.git\n",
+                                      encoding="utf-8")
+        dot.write_text(f"gitdir: {other}\n", encoding="utf-8")
+        self.dsh.create(str(self.env_dir), "boot3")
+        self.assertEqual(len(self._mounts()), 4)
+        # 毒指针：回指悬空（注册区不存在）→零追加
+        gone = self.tmp / "gone" / ".git" / "worktrees" / "x"
+        dot.write_text(f"gitdir: {gone}\n", encoding="utf-8")
+        self.dsh.create(str(self.env_dir), "boot4")
+        self.assertEqual(len(self._mounts()), 4)
+        # 毒指针：in-env 伪造（ocr 环 TOCTOU 锚——main 落 env 可换源）→零追加
+        inenv = self.env_dir / "sub" / ".git" / "worktrees" / "z"
+        inenv.mkdir(parents=True)
+        (inenv / "gitdir").write_text(f"{self.env_dir}/.git\n",
+                                      encoding="utf-8")
+        dot.write_text(f"gitdir: {inenv}\n", encoding="utf-8")
+        self.dsh.create(str(self.env_dir), "boot6")
+        self.assertEqual(len(self._mounts()), 4)
+        # 毒指针：.git 为 FIFO（ocr 环 DoS 锚——open 永久阻塞面）→零追加
+        dot.unlink()
+        os.mkfifo(str(dot))
+        try:
+            self.dsh.create(str(self.env_dir), "boot7")
+            self.assertEqual(len(self._mounts()), 4)
+        finally:
+            dot.unlink()
+        # 普通仓（.git 为目录）→零追加
+        dot.mkdir()
+        self.dsh.create(str(self.env_dir), "boot5")
+        self.assertEqual(len(self._mounts()), 4)
+
+    def _mounts(self):
+        argv = self.proc_holder["proc"].argv
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
     def test_inject_three_channels_same_wire(self):
         """三通道映射：inject/inject_notify→session/prompt（唤醒）；
         inject_silent→同通道落地（SDK 协议无免唤醒面——偏差在模块注）。"""

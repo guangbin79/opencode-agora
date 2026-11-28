@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Req: F184 — dsh worker 容器化全链 e2e（形态对齐 multi_instance_delivery）。
+"""Req: F184/F187 — dsh worker 容器化全链 e2e（形态对齐 multi_instance_delivery）。
 
 链路：隔离 AGORA_HOME 起真 agorad（repo 源 assemble＋httpd；StubOpencode
 扮 opencode 面，Dsh 适配器真装）→ service.json/root.token 落 home（shim
@@ -9,8 +9,14 @@ lift/拉旗消费面）→ task_create(harness=dsh, 最小 verify_cmd)→dispatc
 自动 merge 断言（F102 全链交付栈零 mock：门/交付/锁走产品码）。
 
 失败路径（越界写实证——证明 worker 真在容器里、真被闸着）：第二任务
-指示 write 工具写 env 外绝对路径 /tmp/evil-f184.txt——shim 判定链拒
-（gate_deny 审计落账＋dsh 会话消息含同源拒因）。
+指示 write 工具写 env 外绝对路径 /work/repo/evil-f184.txt——shim 判定链
+拒（gate_deny 审计落账＋dsh 会话消息含同源拒因）。
+
+生产真形态（Req: F187）：第三场景＝完整生产 done 路径零测试侧代行——
+容器 worker 自主 git add/commit（适配器按 env/.git gitdir 指针把主仓
+.git 以同绝对路径 rw 挂载进容器）→写 F111 双件锚→post(kind=done,
+body=容器内产生的 commit sha)→门绿→managed 自动 merge；前两场景（测试
+侧代提交＋越界拒）保留为回归对照。
 
 凭据纪律：GLM key 提取式只进本进程 env（docker -e 透传），禁打印禁
 落盘；收尾 grep 守卫证据目录。证据归档 tests/e2e/dsh_delivery_out/
@@ -40,10 +46,11 @@ from tests.stub_opencode import StubOpencode  # noqa: E402
 OUT = Path(__file__).resolve().parent / "dsh_delivery_out"
 _TIMEOUT = 600  # 场景级超时（模型多回合作业＋门体；失败诊断留档兜底）
 _INSTANCES = []
-# e2e 派生镜像：F182 基础镜像（node24＋python3＋bwrap＋dsh）缺 git——
-# worker 作业需真提交（done 携 40 位 sha）；本任务 build 预算内一层派生
-# （dsh-shim/ 零触碰，部署注记在 docs/reqs F184 条目）。
+# 旧双场景镜像：F182 基础镜像（node24＋python3＋bwrap＋dsh）原缺 git——
+# 测试侧代行场景沿用 F184 派生层（FROM f182＋apt git）作回归对照；生产
+# 真形态场景用 _PROD_IMAGE（F187 把 git 并入 dsh-shim/Dockerfile 基础配方）。
 _E2E_IMAGE = "opencode-agora/f184-e2e-worker:1"
+_PROD_IMAGE = "opencode-agora/f187-dsh-worker:1"
 
 
 def ensure_image():
@@ -64,6 +71,28 @@ def ensure_image():
     shutil.rmtree(d, ignore_errors=True)
     if r.returncode != 0:
         raise AssertionError(f"e2e 镜像构建失败: {r.stderr[-500:]}")
+
+
+def ensure_prod_image():
+    """缺镜像才构建（幂等）：dsh-shim/Dockerfile 直建——生产真形态镜像
+    （F187：git 已并入基础配方；与部署注记同法直建，非派生层）。构建/
+    在盘后以 git 探针验内容（防陈旧 tag 缺 git——评审环 B 册 F3 采纳：
+    快败优于 600s 干等）。"""
+    r = subprocess.run(["docker", "image", "inspect", _PROD_IMAGE],
+                       capture_output=True)
+    if r.returncode != 0:
+        r = subprocess.run(["docker", "build", "-t", _PROD_IMAGE,
+                            str(REPO_ROOT / "dsh-shim")],
+                           capture_output=True, text=True, timeout=1200)
+        if r.returncode != 0:
+            raise AssertionError(f"生产镜像构建失败: {r.stderr[-500:]}")
+    r = subprocess.run(["docker", "run", "--rm", _PROD_IMAGE,
+                        "git", "--version"], capture_output=True, text=True,
+                       timeout=120)
+    if r.returncode != 0 or "git version" not in (r.stdout or ""):
+        raise AssertionError(
+            f"生产镜像 {_PROD_IMAGE} 缺 git 面（陈旧 tag？）——"
+            f"docker rmi {_PROD_IMAGE} 后重跑: {r.stderr[-200:]}")
 
 
 def check(cond, msg):
@@ -105,7 +134,7 @@ def http_call(port, path, body, token):
 class Instance:
     """真 agorad v2 实例：隔离 home＋StubOpencode＋真 Dsh 适配器。"""
 
-    def __init__(self, root, tag):
+    def __init__(self, root, tag, image=_E2E_IMAGE):
         self.tag, self.tmp = tag, root
         self.home = root / f"home-{tag}"
         self.home.mkdir(parents=True)
@@ -113,7 +142,7 @@ class Instance:
         self.stub.start()
         try:
             self.dsh = Dsh(repo_root=str(REPO_ROOT), home=str(self.home),
-                           image=_E2E_IMAGE)
+                           image=image)
             self.app = assemble(self.home, oc_url=self.stub.base_url,
                                 dsh=self.dsh)
             self.token = self.app.auth.issue("main", "root")
@@ -342,7 +371,113 @@ def scenario_oob_deny(tmp):
     return {"tid": tid, "worker_sid": wsid, "evidence": got}
 
 
-SCENARIOS = (scenario_delivery, scenario_oob_deny)
+PROD_GOAL = (
+    "唯一任务：在 /work/task-env（一个 git worktree）内完成一次真实提交"
+    "并申报交付，严格按以下三步。第一步：用 bash 工具执行命令 "
+    "`cd /work/task-env && printf 'F187-PROD\\n' > prod.txt && git add "
+    "prod.txt && git commit -q -m 'F187 production git face'`。第二步："
+    "用 bash 工具执行命令 `cd /work/task-env && mkdir -p .review-loop && "
+    "git rev-parse HEAD > .review-loop/.last-reviewed && git rev-parse "
+    "HEAD~1 > .review-loop/.review-base`（两锚文件内容各自恰一行 40 位 "
+    "sha）。第三步：用 bash 工具执行命令 `cd /work/task-env && git "
+    "rev-parse HEAD` 记下输出的 40 位 sha，然后调用 mcp__agora__post 工具"
+    "发 kind=done、body=该 40 位 sha（task 参数＝BOOT 信封标题行里的 "
+    "ag-xxxxxx）。除上述三步外零其他动作（禁止读 /work/repo 源码、禁止"
+    "探索、禁止分析本系统）。git 身份已由仓配置提供，无需任何 git config "
+    "操作。")
+
+
+def scenario_production_git_face(_tmp):
+    """生产真形态（Req: F187）：容器 worker 自主 git add/commit→F111 双件
+    锚→post(kind=done, body=容器内 commit sha)→门绿→managed 自动 merge
+    ——测试侧零 git 代行。env 侧取证在终态前（managed merge 后 env 回收，
+    repo/交付投影是持久证面）；仓根用非 /tmp 根（shim B3 TMP_ROOT 豁免面
+    会让写闸判定失真；生产 env 在 repo 同级天然满足）；镜像＝本仓
+    dsh-shim/Dockerfile 直建（git 已并入基础配方）。"""
+    root = Path(tempfile.mkdtemp(prefix="agora-f187-e2e-",
+                                 dir=str(Path.home())))
+    try:
+        repo = init_repo(root / "proj")
+        base = git(["rev-parse", "HEAD"], repo).stdout.strip()
+        inst = Instance(root, "C", image=_PROD_IMAGE)
+        tid = make_task(inst, repo, PROD_GOAL, "test -f prod.txt",
+                        harness="dsh")
+        row = inst.row(tid)
+        check(str(row["worker_sid"]).startswith("session-"),
+              f"worker_sid 应为 dsh 会话 id（收到 {row['worker_sid']!r}）")
+        env = Path(row["env_dir"])
+
+        def worker_evidence():
+            """容器 worker 自主产出齐件：env 分支推进＋F111 双件锚落盘。"""
+            try:
+                r = git(["rev-parse", "HEAD"], env, check_rc=False)
+            except OSError:
+                return None
+            head = r.stdout.strip()
+            if not head or head == base:
+                return None
+            lr = env / ".review-loop" / ".last-reviewed"
+            rb = env / ".review-loop" / ".review-base"
+            if not (lr.is_file() and rb.is_file()):
+                return None
+            return head
+        # env 侧取证必须在终态等待前：managed 交付 merge 后 env 即回收
+        # （run3 实证——closed 后 env 已不在盘，repo/target 才是持久证面）
+        head = wait_for(worker_evidence,
+                        what="容器 worker 自主 commit＋F111 双件锚")
+        # 容器内自主提交证据（测试侧零 git 写——唯一写者＝容器 worker）
+        check(git(["rev-parse", f"{head}^"], env).stdout.strip() == base,
+              "交付 commit 的父提交应为任务起点（恰一提交推进）")
+        check((env / "prod.txt").read_text(encoding="utf-8").strip()
+              == "F187-PROD", "worker 作业文件内容恰一行（env 回收前取证）")
+        # F111 双件锚证据（worker 在容器内写）
+        anchor = env / ".review-loop"
+        last_reviewed = (anchor / ".last-reviewed").read_text(
+            encoding="utf-8").strip()
+        review_base = (anchor / ".review-base").read_text(
+            encoding="utf-8").strip()
+        check(last_reviewed == head,
+              ".review-loop/.last-reviewed 应等于分支 HEAD（worker 写）")
+        check(review_base == base,
+              ".review-loop/.review-base 应等于任务起点（worker 写）")
+        # 终态：done→verify 门绿→managed 自动 merge（env 随交付回收）
+        def settled():
+            r = inst.row(tid)
+            return r if r["state"] in ("closed", "blocked") else None
+        row = wait_for(settled, what="生产 done 路径终态"
+                       "（容器 worker 自主 commit→锚→done→门→merge）")
+        d = row["delivery"]
+        check(row["state"] == "closed",
+              f"终态应 closed（收到 {row['state']}；delivery={d}）")
+        check(d["mode"] == "managed" and d["status"] == "delivered"
+              and d["error"] is None, f"交付投影异常: {d}")
+        sha = d["commit"]
+        check(sha == head, "交付 commit 应为容器 worker 自主提交的 commit")
+        # 权威目标 ff 推进＋交付物同源（merge 后以 repo 为证）
+        check(git(["rev-parse", "HEAD"], repo).stdout.strip() == sha,
+              "本地权威目标应恰推进到容器内产生的交付 commit")
+        check((repo / "prod.txt").read_text(encoding="utf-8").strip()
+              == "F187-PROD", "权威目标 prod.txt 内容恰一行")
+        # 通道实证：worker 经 shim 拉牌（容器 worker↔agorad）
+        check(any(e.get("event") == "cred_pull"
+                  and str(e.get("actor", "")) == row["worker_sid"]
+                  for e in inst.events(tid)),
+              "worker 应经 shim 拉牌（cred_pull＝容器 worker↔agorad 通道实证）")
+        events = [e.get("event") for e in inst.events(tid)]
+        result = {"tid": tid, "worker_sid": row["worker_sid"], "commit": sha,
+                  "base": base, "anchor_last_reviewed": last_reviewed,
+                  "anchor_review_base": review_base, "delivery": d,
+                  "events": events,
+                  "messages": len(inst.dsh.messages(row["worker_sid"]))}
+    except Exception:
+        print(f"生产场景工作区保留待诊断: {root}")
+        raise
+    shutil.rmtree(root, ignore_errors=True)  # 成功路径回收（失败留诊断）
+    return result
+
+
+SCENARIOS = (scenario_delivery, scenario_oob_deny,
+             scenario_production_git_face)
 
 
 def extract_glm_key():
@@ -367,6 +502,7 @@ def main():
         return 3
     Path("/tmp/opencode").mkdir(parents=True, exist_ok=True)  # OCR round2 #6
     ensure_image()  # 派生镜像（含 git）幂等构建
+    ensure_prod_image()  # 生产真形态镜像（dsh-shim/Dockerfile 直建，F187）
     tmp = Path(tempfile.mkdtemp(prefix="agora-f184-e2e-",
                                 dir="/tmp/opencode"))
     results, failures = [], []

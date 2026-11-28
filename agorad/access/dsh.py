@@ -29,6 +29,14 @@ dsh-home 每任务独立（``<env>/.dsh-worker-home``，随 env 回收）；
 worker 视角的 env 固定挂载位 /work/task-env（/cred_for_sid 的 env_dir
 按 harness 分流回容器路径，见 httpd/serverv3 接线）。GLM key 只经进程
 env 透传（部署/测试侧供给——agorad 零凭据库接触，禁打印禁落盘）。
+git 面（Req: F187）：任务 env＝linked worktree——spawn 时解析 env/.git
+的 gitdir 指针并把主仓 .git 以同绝对路径 rw 挂载进容器，worker 容器
+内即具完整 git 面（git 普通操作只信 .git 文件指针；注册区 back-pointer
+路径失配无碍 add/commit——moved-worktree 实证）。指针内容不可信（env 是
+worker 可写面）——_gitdir_mount 以注册区回指绑定校验防投毒（毒指针一律
+fail-closed 零挂载）。并发多 worker 同挂主仓 .git＝git 锁机制同宿主并行
+worktree，服务侧 CAS/交付锁兜底（F96/F109）；rw 信任面＝任务页设计裁定
+（oc worker 宿主进程同级能力），破坏性命令风险属既有面注记非本模块防线。
 网络故障/进程死亡→DshUnavailable（OcUnavailable 同角色）；死会话
 inject 返回 False 不抛（oc 契约同款）。
 
@@ -41,6 +49,7 @@ import itertools
 import json
 import os
 import pathlib
+import stat
 import subprocess
 import threading
 import time
@@ -59,6 +68,71 @@ _STDERR_TAIL = 60       # 容器诊断尾舱行数（失败报因用）
 def payload_root():
     """dsh 载荷根（仓/安装 payload 顶层：dsh-shim/＋agora-plugin/ 所在）。"""
     return pathlib.Path(__file__).resolve().parents[2]
+
+
+def _read_gitdir_file(path):
+    """不可信面小文件读（Req: F187；ocr 环 security 修复）——同 inode 打开
+    ＋有界读：O_NONBLOCK 下 FIFO 打开亦不阻塞（阻塞挂死面）；fstat 同一
+    fd（stat 与读之间换源 rename 无法插队——大小守卫不被 TOCTOU 绕过）；
+    os.read 帽 4097（fstat 后文件仍可增长时的兜底上限）；非普通文件或
+    >4K 一律 fail-closed None（设备/FIFO/目录尽拒）。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
+            return None
+        return os.read(fd, 4097).decode("utf-8", errors="replace").strip()
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _gitdir_mount(env_dir):
+    """env/.git gitdir 指针→主仓 .git 绝对路径（Req: F187；防投毒校验）。
+
+    linked worktree 的 .git 文件形如 ``gitdir: <repo>/.git/worktrees/<n>``：
+    回溯 .git 命名祖先＝主仓 .git（worktree 注册区与 objects/refs 同树一
+    并可达），同绝对路径挂进容器即恢复 git 面（git 普通操作只信 .git 文
+    件指针——注册区 back-pointer 失配无碍 add/commit，moved-worktree 实证）。
+    env/.git 位于 worker 可写面（写闸对 env 内写放行、bash 无路径闸）——
+    指针内容与注册区回指均不可信，全链 fail-closed：(a) 两处读皆 stat
+    先行（FIFO/字符设备/巨型文件拒——open 阻塞与无界读即 DoS 面）；
+    (b) NUL 拒（pathlib ValueError 会逃逸 DshUnavailable 契约）；
+    (c) 指针须有 .git 命名祖先目录 A，A 落 env 内（含 dsh-home）＝可换源
+    TOCTOU 拒，A 的 repo 目录与 env 不同级（gitx 落位闸不变量）＝他 env
+    内伪造同拒；(d) 注册区回指文件 ``<指针>/gitdir``（git worktree add
+    落册原值＝``<env>/.git`` 文件路径）解析后等于本 env 的 .git 文件才挂
+    A。任一不满足→None（零追加——worker 失 git 面不越权；复用再 spawn
+    （recover 原址 create）读到的投毒指针照此拒）。相对形/separate-git-dir
+    形（指针直指 .git 本体，无注册区回指）一律不挂——plaza env 恒为
+    linked worktree，不产生该形。已知限制：同级他仓注册区伪造（需攻击
+    者另持同父目录他任务仓 .git 写权）残留——根治＝dispatch 链路下传
+    project_dir 校验，归后续裁定。"""
+    text = _read_gitdir_file(pathlib.Path(env_dir) / ".git")
+    if not text or not text.startswith("gitdir:") or "\x00" in text:
+        return None
+    p = pathlib.Path(text[len("gitdir:"):].strip())
+    if not p.is_absolute():
+        return None
+    main = next((q for q in p.parents if q.name == ".git"), None)
+    if main is None or not main.is_dir():
+        return None
+    env_real = pathlib.Path(env_dir).resolve()
+    main_real = main.resolve()
+    if env_real == main_real or env_real in main_real.parents:
+        return None  # main 落 env（worker 可写面，含 dsh-home）＝可换源 TOCTOU
+    if main.parent.parent != pathlib.Path(env_dir).parent:
+        return None  # repo 与 env 须同级（gitx 落位闸）；他 env 内伪造同拒
+    back = _read_gitdir_file(p / "gitdir")
+    if not back or "\x00" in back:
+        return None
+    if pathlib.Path(back).resolve() != (env_real / ".git").resolve():
+        return None
+    return str(main)
 
 
 class DshUnavailable(Exception):
@@ -259,7 +333,7 @@ class Dsh:
         agora_home = os.path.realpath(agora_home)
         # dsh_bin 形态（复用 run-worker.sh）：写闸归 shim 判定链（F182 V1
         # 实证 danger-full-access 下越界写仍拒）＋headless worker 零交互。
-        return [self._docker_bin(), "run", "-i", "--rm",
+        argv = [self._docker_bin(), "run", "-i", "--rm",
                 "--network=host",
                 "-u", f"{os.getuid()}:{os.getgid()}",
                 "-e", self._glm_key_env,
@@ -271,10 +345,13 @@ class Dsh:
                 "-v", f"{self.repo_root}:/work/repo:ro",
                 "-v", f"{env_dir}:/work/task-env",
                 "-v", f"{agora_home}:/work/agora-home:ro",
-                "-v", f"{dsh_home}:/work/dsh-home",
-                self.image,
-                "dsh", "--profile", "sdk",
-                "--patch", "/work/repo/dsh-shim/cordis.worker.yml"]
+                "-v", f"{dsh_home}:/work/dsh-home"]
+        gitdir = _gitdir_mount(env_dir)
+        if gitdir:  # Req: F187——主仓 .git 同绝对路径 rw 挂载（容器 git 面）
+            argv += ["-v", f"{gitdir}:{gitdir}"]
+        return argv + [self.image,
+                       "dsh", "--profile", "sdk",
+                       "--patch", "/work/repo/dsh-shim/cordis.worker.yml"]
 
     @staticmethod
     def _docker_bin():
