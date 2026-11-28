@@ -7,7 +7,8 @@
    "task_create": {
     "required": ["goal"],
     "enums": {
-     "deliverable": ["out_of_band", "external_branch"]
+     "deliverable": ["out_of_band", "external_branch"],
+     "harness": ["opencode", "dsh"]
     }
    },
    "task_dispatch": {
@@ -98,7 +99,7 @@
   "reverify": ["task"],
   "task_alarm": ["task"],
   "task_cancel": ["task"],
-  "task_create": ["goal", "project_dir", "after", "target_branch", "verify_cmd", "req_id", "model", "title", "deliverable", "client_key"],
+  "task_create": ["goal", "project_dir", "after", "target_branch", "verify_cmd", "req_id", "model", "title", "deliverable", "client_key", "harness"],
   "task_deliver": ["task", "outcome", "commit", "base", "reason"],
   "task_dispatch": ["task"],
   "task_nudge": ["task", "body"],

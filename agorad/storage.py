@@ -30,7 +30,7 @@ from agorad.domain import (Approval, ApprovalState, Artifact, BaseProbe,
                            GateState, MailCursor, Message, Task, Timer,
                            TimerState, VerifySpec, epoch_ms)
 
-SCHEMA_VERSION = 6  # v6＝timers.body/created_by/client_key（Req: F145）；v5＝task_delivery.delivered_at_ms（F144）；v4＝conflict_files_json（F137）；v3＝14 表基线
+SCHEMA_VERSION = 7  # v7＝tasks.harness（Req: F184）；v6＝timers.body/created_by/client_key（Req: F145）；v5＝task_delivery.delivered_at_ms（F144）；v4＝conflict_files_json（F137）；v3＝14 表基线
 BUSY_TIMEOUT_MS = 5000
 
 # 设计 §4 表清单（枚举权威，14 名；任务页计数「15」系笔误）
@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   commit_sha TEXT, rebased_from TEXT,
   verify_pending INTEGER NOT NULL DEFAULT 0,
   verify_base_exempt INTEGER NOT NULL DEFAULT 0, review_cmd TEXT,
+  harness TEXT NOT NULL DEFAULT 'opencode',  -- Req: F184 worker 宿主
   after_json TEXT NOT NULL DEFAULT '[]',
   legacy_extra_json TEXT NOT NULL DEFAULT '{}',
   UNIQUE(root_sid, client_key));
@@ -191,7 +192,7 @@ _TASK_SCALARS = (  # 域标量列（DDL 顺序）；after/legacy_extra 走 JSON 
     "updated_ms", "fail_streak", "cancel_reason", "waiting_on", "client_key",
     "last_seen_ms", "project_dir", "target_branch", "env_dir", "env_base",
     "commit_sha", "rebased_from", "verify_pending", "verify_base_exempt",
-    "review_cmd")
+    "review_cmd", "harness")  # Req: F184 harness 尾列（旧库 ALTER 补列零位移）
 _TASK_COLS = ", ".join([*_TASK_SCALARS, "after_json", "legacy_extra_json"])
 _TASK_UPSERT = ", ".join(
     f"{n}=excluded.{n}" for n in
@@ -266,6 +267,12 @@ class Storage:
                     if "client_key" not in tcols:
                         conn.execute("ALTER TABLE timers "
                                      "ADD COLUMN client_key TEXT")
+                    task_cols = {r[1] for r in conn.execute(
+                        "PRAGMA table_info(tasks)")}
+                    if "harness" not in task_cols:  # v7（Req: F184）
+                        conn.execute("ALTER TABLE tasks ADD COLUMN "
+                                     "harness TEXT NOT NULL "
+                                     "DEFAULT 'opencode'")
                     # v6 索引（Req: F145）：键命名空间按任务＋任务面查询
                     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS "
                                  "idx_timers_task_client_key "
@@ -276,6 +283,11 @@ class Storage:
                         "INSERT OR IGNORE INTO schema_migrations "
                         "VALUES(?,?,?)",
                         (SCHEMA_VERSION, "v6-timers-clientkey",
+                         epoch_ms(time.time())))
+                    conn.execute(
+                        "INSERT OR IGNORE INTO schema_migrations "
+                        "VALUES(?,?,?)",
+                        (SCHEMA_VERSION, "v7-tasks-harness",
                          epoch_ms(time.time())))
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -462,13 +474,13 @@ class Storage:
              "cancel_reason", "waiting_on", "client_key", "last_seen_ms",
              "project_dir", "target_branch", "env_dir", "env_base", "commit",
              "rebased_from", "verify_pending", "verify_base_exempt",
-             "review_cmd"), row[:28]))
+             "review_cmd", "harness"), row[:29]))  # Req: F184 harness 尾列
         for k in ("quick", "verify_pending", "verify_base_exempt"):
             scalars[k] = bool(scalars[k])  # INTEGER→bool（域类型保真；同 in_gate 口径）
         return Task(
             **scalars,
-            after=tuple(json.loads(row[28])),
-            legacy_extra_json=row[29],
+            after=tuple(json.loads(row[29])),
+            legacy_extra_json=row[30],
             verify=VerifySpec(*verify) if verify else VerifySpec(),
             delivery=(DeliveryState(*delivery[:8],
                                     conflict_files=json.loads(delivery[8])

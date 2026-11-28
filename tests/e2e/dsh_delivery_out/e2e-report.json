@@ -1,0 +1,38 @@
+{
+ "generated": "2026-11-28 15:03:27",
+ "results": [
+  [
+   "scenario_delivery",
+   {
+    "tid": "ag-1e7f53",
+    "worker_sid": "session-b3c5187d-8c27-4f6b-b0ad-2fa8259de038",
+    "commit": "4995c114c197c00f3e5eb75b904d368a3007c6ce",
+    "delivery": {
+     "mode": "managed",
+     "status": "delivered",
+     "commit": "4995c114c197c00f3e5eb75b904d368a3007c6ce",
+     "base": "d4110ad0f4013432a9966e40da4fa2c6a8b05314",
+     "target_branch": "main",
+     "attempt": 1,
+     "local_status": "synced",
+     "error": null,
+     "delivered_at": 1795849208.838786,
+     "origin_ahead": 0
+    },
+    "messages": 16
+   }
+  ],
+  [
+   "scenario_oob_deny",
+   {
+    "tid": "ag-0b7498",
+    "worker_sid": "session-b553960b-83b0-44f6-a41f-79b243b81e11",
+    "evidence": {
+     "gate_deny": "shim tool=write target=/work/repo/evil-f184.txt reason=被拦：写入目标 /work/repo/evil-f184.txt 在任务 env /work/task-env 外——请在副本内编辑。 ts=1795849407305",
+     "deny_text": "The post failed with \"缺字段: 'task'\" — missing field 'task'. The post tool requires a task field. Let me check the schema: mcp__agora__post has properties: body, kind, task (description says task id, ki"
+    }
+   }
+  ]
+ ],
+ "failures": []
+}

@@ -112,7 +112,8 @@ class TaskService:
                req_id=None, timeout=None, model=None, quick=False,
                deliverable=None, client_key=None, actor_sid=None,
                verify_base_exempt=None,  # Req: F107
-               review_cmd=None):  # Req: F114 门审命令（派发方/root 登记，门执行）
+               review_cmd=None,  # Req: F114 门审命令（派发方/root 登记，门执行）
+               harness=None):  # Req: F184 worker 宿主（opencode 缺省|dsh；worker 继承）
         sid, role = self._gate(actor_token, "task_create", None, None)
         sid = actor_sid or sid  # ag-f80309：root 牌账本 sid 钉死，归属记对齐调用 sid
         tid = self._new_tid()
@@ -154,6 +155,9 @@ class TaskService:
             if deliverable is not None:  # ag-af96bb②：契约面派发方持有，同 model 口径
                 self._reject(tid, sid, "worker 不得指定 deliverable（review-only"
                                        " 标记）——缺省继承父任务", ev=EV_DENIED)
+            if harness is not None:  # Req: F184：宿主面派发方持有，同 model 口径
+                self._reject(tid, sid, "worker 不得改变 worker 宿主（harness）"
+                                       "——缺省继承父任务", ev=EV_DENIED)
             parent_repo = self._repo_key(parent["project_dir"])
             if project_dir is not None and project_dir != parent_repo:
                 self._reject(tid, sid, f"worker 建单 project_dir 强制继承父任务仓"
@@ -165,6 +169,7 @@ class TaskService:
             deliverable = parent.get("deliverable")  # ag-af96bb②：缺省继承父任务
             verify_base_exempt = parent.get("verify_base_exempt")  # Req: F107 继承
             review_cmd = parent.get("review_cmd")  # Req: F114 继承
+            harness = parent.get("harness")  # Req: F184：缺省继承父任务
         if verify_base_exempt is not None \
                 and not isinstance(verify_base_exempt, bool):
             self._reject(tid, sid, f"verify_base_exempt 须为布尔"
@@ -189,6 +194,9 @@ class TaskService:
             self._reject(tid, sid, f"verify timeout 须为正整数秒（收到 {timeout!r}）")
         if model is not None and not _MODEL_RE.fullmatch(model):  # F55：坏格式 fail-fast（错名由 can_spawn 熔断暴露）
             self._reject(tid, sid, f"model 须为 providerID/modelID 形（收到 {model!r}）")
+        if harness is not None and harness not in ("opencode", "dsh"):  # Req: F184
+            self._reject(tid, sid,
+                         f"harness 须为 opencode/dsh（收到 {harness!r}）")
         if deliverable is not None and deliverable not in ("out_of_band",
                                                            "external_branch"):
             # ag-af96bb② 白名单 fail-fast；Req: F94 扩 external_branch（报因两名全点名）
@@ -298,6 +306,7 @@ class TaskService:
             "quick": bool(quick),  # F65：quick 旗随行（快照/事件自然携带）
             "verify_base_exempt": bool(verify_base_exempt),  # Req: F107 旗 A
             "review_cmd": review_cmd,  # Req: F114 门审命令（None＝协议锚路径）
+            "harness": harness,  # Req: F184 恒在键，None＝opencode 缺省
             "state": "todo", "dispatcher_sid": sid, "worker_sid": None,
             "root_sid": root_sid,
             "chain_depth": depth, "fail_streak": 0, "last_seen": None,
@@ -453,9 +462,17 @@ class TaskService:
             self._reject(tid, sid, "running 不可重派（session_replaced；"
                                    "stalled 可重派；仅 todo/blocked）")
         try:
-            wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
-                                    title=f"{tid}: {t.get('title', tid)}",
-                                    model=t.get("model"))  # F55：boot prompt 逐回合携
+            # Req: F184 harness 分流：仅 dsh 走带 harness 面（opencode 路径
+            # 逐字不动——oc 桩零 churn）；路由归 HarnessRouter（main 装配）。
+            if (t.get("harness") or "opencode") == "dsh":
+                wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
+                                       title=f"{tid}: {t.get('title', tid)}",
+                                       model=t.get("model"),
+                                       harness="dsh")  # F55：boot prompt 逐回合携
+            else:
+                wsid = self._oc.create(env, self._boot(tid, env, title=t.get("title")),
+                                       title=f"{tid}: {t.get('title', tid)}",
+                                       model=t.get("model"))  # F55：boot prompt 逐回合携
         except Exception as e:  # can_spawn 名册：会话创建失败即熔断（不 import access 异常）
             if new_env:  # Req: F71 本轮新建/重建 env 归本轮——失败回收不留孤儿（在盘既有 env 不动）
                 self._reclaim_env(tid, env, sid, "task:dispatch_spawn")  # Req: ag-0e6ca3

@@ -115,6 +115,7 @@ class ToolSpec:
 
 
 DELIVERABLES = ("out_of_band", "external_branch")
+HARNESSES = ("opencode", "dsh")  # Req: F184 worker 宿主值域
 POST_KINDS = ("note", "question", "answer", "done", "verify", "verify_reject",
               "peer")
 
@@ -132,6 +133,7 @@ CATALOG = {
         "verify_pending": _f("boolean"), "verify_base_exempt": _f("boolean"),
         "quick": _f("boolean"), "timeout": _f("integer"),
         "deliverable": _f("string", enum=DELIVERABLES),
+        "harness": _f("string", enum=HARNESSES),  # Req: F184
         "client_key": _f("string")},  # client_key 唯一冲突 409
         _ANY, "global", _BASE_ERR + ("conflict",)),
     "task_dispatch": ToolSpec("task_dispatch", {"task": _f("string", True)},
@@ -244,7 +246,8 @@ _TASK_CREATE_ALL_TOP = ("goal", "title", "execution", "verify", "delivery")
 TASK_CREATE_GROUPS = {
     "execution": {"model": _f("string"), "after": _f("string"),
                   "req_id": _f("string"), "project_dir": _f("string"),
-                  "client_key": _f("string"), "quick": _f("boolean")},
+                  "client_key": _f("string"), "quick": _f("boolean"),
+                  "harness": _f("string", enum=HARNESSES)},  # Req: F184
     "verify": {"cmd": _f("string"), "review_cmd": _f("string"),
                "verify_pending": _f("boolean"),
                "verify_base_exempt": _f("boolean"),
@@ -298,7 +301,8 @@ V2_TASK_CREATE_MAP = {
     "verify_base_exempt": ("verify", "verify_base_exempt"),
     "quick": ("execution", "quick"),
     "deliverable": ("delivery", "deliverable"),
-    "target_branch": ("delivery", "target_branch")}
+    "target_branch": ("delivery", "target_branch"),
+    "harness": ("execution", "harness")}  # Req: F184
 _V2_FLAT_FIELDS = ("goal", "title", *V2_TASK_CREATE_MAP)
 
 

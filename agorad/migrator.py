@@ -65,6 +65,7 @@ BATCHES = ("tasks", "messages", "events", "credentials", "cursors", "files",
 # 防漂移）：known 落 typed；DROP_FIELDS 瞬态剔除；其余→legacy_extra_json。
 _CREATE_KEYS = (
     "title", "goal", "project_dir", "target_branch", "req_id", "model",
+    "harness",  # Req: F184
     "deliverable", "client_key", "delivery", "env_dir", "after", "verify",
     "verify_pending", "waiting_on", "quick", "verify_base_exempt",
     "review_cmd", "state", "dispatcher_sid", "worker_sid", "root_sid",
@@ -230,6 +231,9 @@ def _map_task(tid, row) -> Task:
         extra[key] = value
 
     fields = {"id": tid, "state": row["state"]}
+    # Req: F184：harness 落 typed 列并 coerce None→缺省（列 NOT NULL——
+    # 评审环 B 册 W1/S2：不映射＝静默丢值致 dsh 指派迁移后漂移 oc）。
+    fields["harness"] = row.get("harness") or "opencode"
     for src, dst in (("title", "title"), ("goal", "goal"), ("req_id", "req_id"),
                      ("model", "model"), ("deliverable", "deliverable"),
                      ("client_key", "client_key"),

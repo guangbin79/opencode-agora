@@ -160,10 +160,12 @@ class TaskService:
             model, deliverable = parent.model, parent.deliverable
             verify_base_exempt, review_cmd = (parent.verify_base_exempt,
                                               parent.review_cmd)
+            harness = parent.harness  # Req: F184 缺省继承父任务
         else:
             target_branch, model = dl["target_branch"], ex["model"]
             deliverable, review_cmd = dl["deliverable"], vf["review_cmd"]
             verify_base_exempt = vf["verify_base_exempt"]
+            harness = ex.get("harness")  # Req: F184（值域归 contracts enum）
         quick = bool(ex["quick"])
         verify_cmd, verify_pending, timeout = (vf["cmd"],
                                                bool(vf["verify_pending"]),
@@ -296,6 +298,7 @@ class TaskService:
         task = Task(id=tid, state="todo", title=head, goal=goal,
                     req_id=ex["req_id"], model=model, quick=quick,
                     deliverable=deliverable, chain_depth=depth,
+                    harness=harness or "opencode",  # Req: F184
                     root_sid=root_sid, dispatcher_sid=actor_sid,
                     created_ms=now, updated_ms=now,
                     after=((after,) if after else ()), client_key=client_key,
@@ -407,8 +410,14 @@ class TaskService:
         boot = (f"[agora] {tid}: {t.title}\nenv: {env}\n"
                 f"page: wiki/tasks/{tid}.md\ngoal: {t.goal}")
         try:
-            wsid = self._oc.create(env, boot, title=f"{tid}: {t.title}",
-                                   model=t.model)
+            # Req: F184 harness 分流：仅 dsh 走带 harness 面（opencode 路径
+            # 逐字不动——oc 注入桩零 churn）；路由归 HarnessRouter（compose）。
+            if (t.harness or "opencode") == "dsh":
+                wsid = self._oc.create(env, boot, title=f"{tid}: {t.title}",
+                                       model=t.model, harness="dsh")
+            else:
+                wsid = self._oc.create(env, boot, title=f"{tid}: {t.title}",
+                                       model=t.model)
         except Exception as e:  # can_spawn 熔断：本轮新建 env 归本轮回收
             if new_env:
                 self._reclaim_env(tid, env, actor_sid, "tasksvc:dispatch_spawn")  # Req: ag-0e6ca3
@@ -1083,6 +1092,8 @@ class TaskService:
                  "worker 不得改变后代合并/push 策略——缺省继承父任务"),
                 ("model", ex["model"], "worker 不得改变 worker 模型面——缺省"
                  "继承父任务"),
+                ("harness", ex.get("harness"), "worker 不得改变 worker 宿主"
+                 "（harness）——缺省继承父任务"),  # Req: F184
                 ("deliverable", dl["deliverable"], "worker 不得指定 "
                  "deliverable（review-only 标记）——缺省继承父任务"))
         for label, value, why in faces:

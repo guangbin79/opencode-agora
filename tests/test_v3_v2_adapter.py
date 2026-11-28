@@ -98,7 +98,7 @@ class TestRequestDirection(unittest.TestCase):
         flat = {"goal": "migrate", "title": "T", "project_dir": "/repo",
                 "verify_cmd": "pytest -q", "review_cmd": "ocr review",
                 "verify_pending": False, "verify_base_exempt": True,
-                "quick": False, "timeout": 300,
+                "quick": False, "timeout": 300, "harness": "dsh",
                 "deliverable": "external_branch",
                 "target_branch": "v3-runtime", "model": "glm-5.3",
                 "after": "ag-1", "req_id": "F141", "client_key": "k1"}
@@ -108,7 +108,8 @@ class TestRequestDirection(unittest.TestCase):
             "goal": "migrate", "title": "T",
             "execution": {"model": "glm-5.3", "after": "ag-1",
                           "req_id": "F141", "project_dir": "/repo",
-                          "client_key": "k1", "quick": False},
+                          "client_key": "k1", "quick": False,
+                          "harness": "dsh"},
             "verify": {"cmd": "pytest -q", "review_cmd": "ocr review",
                        "verify_pending": False, "verify_base_exempt": True,
                        "timeout": 300},
@@ -169,7 +170,7 @@ class TestTaskCreateDefaults(unittest.TestCase):
         self.assertEqual(spec["execution"],
                          {"model": None, "after": None, "req_id": None,
                           "project_dir": "/r", "client_key": None,
-                          "quick": None})
+                          "quick": None, "harness": None})
         self.assertEqual(spec["verify"],
                          {"cmd": None, "review_cmd": None,
                           "verify_pending": None, "verify_base_exempt": None,

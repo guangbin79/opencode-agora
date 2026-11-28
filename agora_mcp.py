@@ -71,6 +71,13 @@ _TOOLS = [
                           "description": "交付契约：out_of_band＝零提交 review-only"
                                          "（done body=交付物引用）；external_branch＝"
                                          "外部开发分支交付（建单钉死 target_branch）"},
+          "harness": {"type": "string",
+                      "enum": ["opencode", "dsh"],  # Req: F184
+                      "description": "worker 宿主（F184）：opencode 缺省＝本机 oc 会话；"
+                                     "dsh＝容器化 DeepSeek Harness worker（docker+"
+                                     "AGORA_DSH_IMAGE 部署注记见 docs/reqs）。仅 "
+                                     "dispatcher/root；worker 子任务缺省继承、"
+                                     "显式传拒"},
          "timeout": {"type": "integer",
                      "description": "任务级 verify 预算（正整数秒；缺省＝服务"
                                     " AGORA_VERIFY_TIMEOUT；写权限与 verify_cmd 同权"

@@ -1288,7 +1288,7 @@ class TestSchemaUpgrade(unittest.TestCase):  # 评审环 R1 B1：v3→v4 补列�
             self.assertIn("conflict_files_json", cols)
             self.assertIn("delivered_at_ms", cols)  # Req: F144 v5 迁移
             self.assertEqual(st.open_reader().execute(
-                "PRAGMA user_version").fetchone()[0], 6)  # Req: F145 v6
+                "PRAGMA user_version").fetchone()[0], 7)  # Req: F145 v6/F184 v7
             with st.uow():
                 st.upsert_task(domain.Task(
                     id="ag-u1", state="done",

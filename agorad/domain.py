@@ -142,6 +142,7 @@ class Task:
     goal: str = ""
     req_id: str | None = None
     model: str | None = None
+    harness: str = "opencode"  # Req: F184 worker 宿主（opencode|dsh）
     quick: bool = False
     deliverable: str | None = None
     chain_depth: int = 1

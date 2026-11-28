@@ -39,12 +39,12 @@ class TestEntities(unittest.TestCase):
     def test_task_field_set(self):
         # 类目注释见 agorad/domain.py Task（§3：身份/归属/生命周期/依赖/幂等/活动）
         self.assertEqual(field_names(domain.Task), {
-            "id", "state", "title", "goal", "req_id", "model", "quick",
-            "deliverable", "chain_depth", "root_sid", "dispatcher_sid",
-            "worker_sid", "created_ms", "updated_ms", "fail_streak",
-            "cancel_reason", "after", "waiting_on", "client_key",
-            "last_seen_ms", "project_dir", "target_branch", "env_dir",
-            "env_base", "commit", "rebased_from", "verify",
+            "id", "state", "title", "goal", "req_id", "model", "harness",
+            "quick", "deliverable", "chain_depth", "root_sid",
+            "dispatcher_sid", "worker_sid", "created_ms", "updated_ms",
+            "fail_streak", "cancel_reason", "after", "waiting_on",
+            "client_key", "last_seen_ms", "project_dir", "target_branch",
+            "env_dir", "env_base", "commit", "rebased_from", "verify",
             "verify_pending", "verify_base_exempt", "review_cmd",
             "delivery", "gate", "probe", "legacy_extra_json"})
 

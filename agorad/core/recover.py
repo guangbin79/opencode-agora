@@ -58,8 +58,14 @@ class Recover:
             return None  # 身份已易主：让位他车道（CAS，与失败区分）
         try:
             self._gitx.head(t["env_dir"])  # 环境在册探针：worktree 已失不盲注
-            wsid = self._oc.create(t["env_dir"], self._boot(tid, t),
-                                   model=t.get("model"))  # F55：重建 boot 逐回合携
+            # Req: F184 harness 分流（dsh 重建走 dsh 面；oc 形参零 churn）
+            if (t.get("harness") or "opencode") == "dsh":
+                wsid = self._oc.create(t["env_dir"], self._boot(tid, t),
+                                       model=t.get("model"),
+                                       harness="dsh")  # F55：重建 boot 逐回合携
+            else:
+                wsid = self._oc.create(t["env_dir"], self._boot(tid, t),
+                                       model=t.get("model"))  # F55：重建 boot 逐回合携
         except Exception:
             return False
         old_wsid = t.get("worker_sid")

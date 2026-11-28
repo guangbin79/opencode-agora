@@ -20,6 +20,7 @@ if __package__ in (None, ""):  # 脚本直启（lift/T4 拉起形态）：补包
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agorad.access import anchors
+from agorad.access.dsh import Dsh, HarnessRouter  # Req: F184
 from agorad.access.gate_resources import GateResources
 from agorad.access.gitx import Gitx
 from agorad.access.oc import Oc, discover
@@ -298,12 +299,16 @@ def assemble(home, oc_url=None, oc_password=None, *, oc=None, gitx=None, read_an
              quick_max_files=3, quick_max_lines=30, clean_ignore_env="",
              gate_max_concurrent=1, gate_artifact_keep=50,
              verify_infra_grace=1800.0,  # Req: F130
-             verify_profiles=None):
+             verify_profiles=None, dsh=None):  # Req: F184 dsh 适配器（缺省真装）
     """App 唯一装配点：真 oc/gitx 缺省；假件注入即整栈可测（R2）。"""
     store = store if store is not None else Store(Path(home))
     state = State(store)
     auth = Auth(store)
     oc = oc if oc is not None else Oc(oc_url, oc_password)
+    # Req: F184 harness 分流面：dispatch（task create）/health/messaging 经
+    # 本面按 harness/sid 路由到 dsh 适配器或原生 oc（app.oc 消费面不变）。
+    dsh = dsh if dsh is not None else Dsh(home=home)
+    oc = HarnessRouter(oc, dsh)
     spawns = SpawnTracker()  # P0-1（ag-9c4cbb）：门运行期 spawn 登记簿——Gitx/Gate 同域
     gitx = gitx if gitx is not None else Gitx(instance_id=instance_identity(home),
                                               spawn_tracker=spawns)

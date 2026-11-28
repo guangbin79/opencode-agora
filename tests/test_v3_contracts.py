@@ -192,7 +192,7 @@ class TestTaskCreateNested(unittest.TestCase):
             "goal": "g", "title": None,
             "execution": {"model": None, "after": None, "req_id": None,
                           "project_dir": None, "client_key": None,
-                          "quick": None},
+                          "quick": None, "harness": None},  # Req: F184
             "verify": {"cmd": None, "review_cmd": None,
                        "verify_pending": None, "verify_base_exempt": None,
                        "timeout": None},
@@ -267,6 +267,8 @@ class TestV2ToNested(unittest.TestCase):
                    "timeout": 300},
         "delivery": {"deliverable": "external_branch", "target_branch":
                      "v3-runtime"}}
+    FLAT["harness"] = "dsh"  # Req: F184 扁平面直通（v2 httpd 面）
+    NESTED["execution"]["harness"] = "dsh"
 
     def test_conversion(self):
         self.assertEqual(contracts.task_create_v2_to_nested(self.FLAT),

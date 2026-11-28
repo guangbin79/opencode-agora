@@ -40,6 +40,7 @@ import threading
 import time
 
 from agorad.access import anchors
+from agorad.access.dsh import Dsh, HarnessRouter  # Req: F184
 from agorad.authsvc import ROOT_SID, AuthService
 from agorad.contracts import ContractError
 from agorad.core.peer import TAGS as _PEER_TAGS, claim_path, parse_tag  # Req: F173
@@ -430,7 +431,12 @@ class Recover:
                     f"env: {t.env_dir}\n"
                     "contract: 会话曾死亡已重建——先 check_mail 补拉断点上下文，"
                     "继续任务页目标；结论经 post(done) 回填")
-            wsid = self._oc.create(t.env_dir, boot, model=t.model)
+            # Req: F184 harness 分流（dsh 重建走 dsh 面；oc 形参零 churn）
+            if (t.harness or "opencode") == "dsh":
+                wsid = self._oc.create(t.env_dir, boot, model=t.model,
+                                       harness="dsh")
+            else:
+                wsid = self._oc.create(t.env_dir, boot, model=t.model)
         except Exception:
             return False
         old = t.worker_sid
@@ -503,7 +509,8 @@ class V3Stack:
                  clock=None, injector=None, exporter=None, emailer=None,
                  verify_timeout=300, verify_ceiling=None, quick_max_files=3,
                  quick_max_lines=30, lock_wait_s=300.0, enforce=True,
-                 backend="sqlite", verify_hygiene=None):
+                 backend="sqlite", verify_hygiene=None,
+                 dsh=None):  # Req: F184 dsh 适配器（缺省真装；测试可注桩）
         self.home = str(home)
         self.oc, self.gitx, self.runner = oc, gitx, runner
         self.clock = clock or (lambda: epoch_ms(time.time()))
@@ -515,15 +522,21 @@ class V3Stack:
         self.storage = _select_storage(self.home, backend, injector)
         repo = SerialRepo(self.storage, self.write_lock)
         self.repo = repo
+        # Req: F184 harness 分流面：dispatch（tasksvc create）/health
+        # （session/alive）/messaging（inject×3）经本面按 harness/sid 路由；
+        # self.oc 保持原生 oc（doctor models/oc_version 面照旧）。
+        self.dsh = dsh if dsh is not None else Dsh(home=self.home)
+        face = HarnessRouter(oc, self.dsh)
         exporter = (exporter if exporter is not None
                     else MessageFileExporter(self.home))
         self.messaging = MessagingService(
-            repo, oc, home=self.home, clock=self.clock, injector=injector,
+            repo, face, home=self.home, clock=self.clock, injector=injector,
             exporter=exporter)
-        self.auth = AuthService(repo, home=self.home, clock=self.clock, oc=oc)
+        self.auth = AuthService(repo, home=self.home, clock=self.clock,
+                                oc=face)
         self.timers = TimerService(repo, self.messaging, clock=self.clock,
                                    injector=injector)
-        self.tasks = TaskService(repo, gitx, oc, messaging=self.messaging,
+        self.tasks = TaskService(repo, gitx, face, messaging=self.messaging,
                                  home=self.home, clock=self.clock,
                                  timers=self.timers)
         self.verify_profiles = load_verify_profiles(self.home)
@@ -539,9 +552,9 @@ class V3Stack:
             quick_max_files=quick_max_files, quick_max_lines=quick_max_lines,
             lock_wait_s=lock_wait_s, timers=self.timers,  # Req: F145 终态钩
             roster_path=str(pathlib.Path(home) / ".agora" / "ignore.roster"))
-        self.recover = Recover(repo, oc, gitx, self.auth, self.messaging,
+        self.recover = Recover(repo, face, gitx, self.auth, self.messaging,
                                home=self.home, clock=self.clock)
-        self.health = HealthService(repo, oc, self.messaging, clock=self.clock,
+        self.health = HealthService(repo, face, self.messaging, clock=self.clock,
                                     tasks=self.tasks, emailer=emailer,
                                     gitx=gitx, recover=self.recover)
         self.peer = PeerBoard(repo, self.home, clock=self.clock,

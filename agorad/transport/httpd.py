@@ -48,7 +48,7 @@ _DENY_HINT = {"worker": "worker 面：post/check_mail/repo_board/wiki_read/wiki_
 _STRING_FIELDS = {
     "task_create": ("goal", "project_dir", "after", "target_branch",
                     "verify_cmd", "req_id", "model", "title", "deliverable",
-                    "client_key"),  # Req: F95
+                    "client_key", "harness"),  # Req: F95/F184
     "task_dispatch": ("task",),
     "task_update": ("task", "verify_cmd"),
     "task_cancel": ("task",),
@@ -201,6 +201,7 @@ class _Handler(BaseHTTPRequestHandler):
             be = body.get("verify_base_exempt")  # Req: F107 base-red 豁免旗（缺 None＝不设）
             dl = body.get("deliverable")  # ag-af96bb②：review-only 交付契约（值白名单归 task 域）
             ck = body.get("client_key")  # Req: F95 幂等建单键（域校验归 task 域）
+            hs = body.get("harness")  # Req: F184 worker 宿主（值域归 task 域）
             if not isinstance(vp, bool):  # "false" 字符串得 True——豁免旗语义反转拒收
                 raise ValueError("verify_pending 须为布尔")
             if not isinstance(qk, bool):  # 同豁免旗口径
@@ -221,6 +222,7 @@ class _Handler(BaseHTTPRequestHandler):
                                             quick=qk, deliverable=dl,
                                             client_key=ck,  # Req: F95
                                             verify_base_exempt=be,  # Req: F107
+                                            harness=hs,  # Req: F184
                                             actor_sid=sid)}  # ag-f80309：归属记真实调用 sid
         if name == "task_dispatch":
             # 公共响应不带 worker 牌：凭据只经文件指针注入/拉取面（F43/F85）
@@ -556,7 +558,9 @@ class _Handler(BaseHTTPRequestHandler):
         否则 404；无牌调用放行（server 仅绑 127.0.0.1＝回环单用户 plaza 信任
         模型，与既有 localhost 面同口径）；每请求一行审计，防噪归插件侧节流。
         ag-af96bb①：携有效 root 牌改走签发/拉取面（每窗口独立派发牌）。
-        """
+        Req: F184：dsh 任务 env_dir 回 worker 视角容器挂载位
+        /work/task-env（shim 判定链比对的路径域——主机路径容器内不可见，
+        照发＝写闸恒拒）。"""
         root = self.app.auth.identify(self.headers.get("X-Agora-Token", ""))
         if root is not None and root[1] == "root":  # ag-af96bb① 先于 worker 拉取面
             return self._cred_issue(root[0], str(body.get("sid") or ""))
@@ -570,9 +574,12 @@ class _Handler(BaseHTTPRequestHandler):
                                      "task": hit[0] if tok else None})
         if not tok:
             return self._json(404, {"error": "no cred for sid"})
+        env_dir = ("/work/task-env"
+                   if (hit[1].get("harness") or "opencode") == "dsh"
+                   else hit[1]["env_dir"])  # Req: F184
         # F27 等价性注释：此处返回 token 的信任边界与直读 $AGORA_HOME/tokens 凭据文件
         # 等价（单用户回环模型，本端点仅 127.0.0.1 可达）——未新增攻击面，勿过度加固。
-        return self._json(200, {"tid": hit[0], "env_dir": hit[1]["env_dir"],
+        return self._json(200, {"tid": hit[0], "env_dir": env_dir,
                                 "token": tok})
 
     def _cred_issue(self, root_sid, asker):
@@ -600,8 +607,12 @@ class _Handler(BaseHTTPRequestHandler):
             ident = self.app.auth.identify(tok)  # 门线程 revoke 竞窗（snapshot/审计窗）防 None
             if ident is None:  # 牌已废：与 worker 拉取面同 404 出口
                 return self._json(404, {"error": "no cred for sid"})
+            env_dir = (("/work/task-env"
+                        if (hit and (hit[1].get("harness") or "opencode")
+                        == "dsh") else hit[1]["env_dir"] if hit else None)
+            )  # Req: F184 dsh 任务回容器挂载位
             return self._json(200, {"tid": hit[0] if hit else None,
-                                    "env_dir": hit[1]["env_dir"] if hit else None,
+                                    "env_dir": env_dir,
                                     "token": tok, "role": ident[1]})
         poisoned = found is not None  # 走到签发且原持 root＝会话 sid 污染换牌
         tok = self.app.auth.issue(asker, "dispatcher")

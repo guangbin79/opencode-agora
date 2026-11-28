@@ -35,6 +35,7 @@ TOKEN_MODE = 0o600  # 同 store.write_ephemeral 凭据文件口径
 # 字段映射的 v2 侧权威清单；测试另以真 TaskService.create 交叉锚定防漂移）。
 CREATE_KEYS = (
     "title", "goal", "project_dir", "target_branch", "req_id", "model",
+    "harness",  # Req: F184
     "deliverable", "client_key", "delivery", "env_dir", "after", "verify",
     "verify_pending", "waiting_on", "quick", "verify_base_exempt",
     "review_cmd", "state", "dispatcher_sid", "worker_sid", "root_sid",
@@ -214,6 +215,7 @@ def full_field_row(tid="gt-full", **over):
                    "timeout": 300, "timeout_source": "task"},
         "verify_pending": False, "waiting_on": None, "quick": False,
         "verify_base_exempt": False, "review_cmd": None,
+        "harness": "dsh",  # Req: F184
         "state": "running", "dispatcher_sid": "disp", "worker_sid": "w",
         "root_sid": "root", "chain_depth": 2, "fail_streak": 0,
         "last_seen": 1780000100.0, "created": 1780000000.0,

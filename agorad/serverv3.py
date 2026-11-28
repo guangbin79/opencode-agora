@@ -68,7 +68,10 @@ _GATE_DENY_WINDOW_S = 30.0  # 服务端节流窗（内存态——gt-a18ef6：�
 _GATE_DENY_LOCK = threading.Lock()  # ThreadingHTTPServer 并发下节流内存态互斥
 
 _TOOL_DESC = {
-    "task_create": "登记任务（todo）（dispatcher/root；worker 建嵌套子任务）",
+    "task_create": "登记任务（todo）（dispatcher/root；worker 建嵌套子任务）"
+                   "——execution.harness 选 worker 宿主（opencode 缺省/"
+                   "dsh 容器 worker，仅 dispatcher/root，worker 子任务"
+                   "缺省继承显式传拒）",  # Req: F184
     "task_dispatch": "派发任务（todo/blocked→dispatched；签 worker 牌＋建 env）",
     "task_update": "登记 verify 命令（仅 dispatcher/root；worker 永拒）",
     "task_cancel": "中止任务（级联下级）",
@@ -623,7 +626,8 @@ class _V3Handler(BaseHTTPRequestHandler):
         """F25 推改拉面（v2 httpd 平移）：sid＝在飞任务 worker 且牌活→
         {tid, env_dir, token}；携有效 root 牌改走签发/拉取面（每窗口独立
         派发牌，幂等回旧牌不重签防铸牌膨胀）；否则 404。回环单用户信任
-        模型（v2 F27 等价性注释同口径）。"""
+        模型（v2 F27 等价性注释同口径）。Req: F184：dsh 任务 env_dir 回
+        worker 视角容器挂载位 /work/task-env（shim 判定链比对的路径域）。"""
         stack = self.stack
         stack.auth.reload()  # 拉取面前先对账（本请求无 identify 先行）
         root = stack.auth.identify(self.headers.get("X-Agora-Token", ""))
@@ -635,7 +639,10 @@ class _V3Handler(BaseHTTPRequestHandler):
         self._audit(asker or "?", "cred_pull", hit[0] if tok else None, None)
         if not tok:
             return self._json(404, {"error": "no cred for sid"})
-        return self._json(200, {"tid": hit[0], "env_dir": hit[1].env_dir,
+        env_dir = ("/work/task-env"
+                   if (hit[1].harness or "opencode") == "dsh"
+                   else hit[1].env_dir)  # Req: F184
+        return self._json(200, {"tid": hit[0], "env_dir": env_dir,
                                 "token": tok})
 
     def _cred_issue(self, root_sid, asker):
@@ -650,8 +657,11 @@ class _V3Handler(BaseHTTPRequestHandler):
             ident = stack.auth.identify(tok)  # revoke 竞窗防 None
             if ident is None:
                 return self._json(404, {"error": "no cred for sid"})
+            env_dir = (("/work/task-env"
+                        if (hit and (hit[1].harness or "opencode") == "dsh")
+                        else hit[1].env_dir) if hit else None)  # Req: F184
             return self._json(200, {"tid": hit[0] if hit else None,
-                                    "env_dir": hit[1].env_dir if hit else None,
+                                    "env_dir": env_dir,
                                     "token": tok, "role": ident[1]})
         new_tok, _ = stack.auth.issue(asker, "dispatcher")
         self._audit(root_sid, "cred_issue", None, f"dispatcher:{asker}")

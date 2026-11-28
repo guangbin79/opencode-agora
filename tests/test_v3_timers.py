@@ -864,7 +864,7 @@ class TestIndexesAndSchema(_SvcBase):  # 断言10
         cols = {r[1] for r in reader.execute("PRAGMA table_info(timers)")}
         self.assertTrue({"body", "created_by", "client_key"} <= cols)
         self.assertEqual(
-            reader.execute("PRAGMA user_version").fetchone()[0], 6)
+            reader.execute("PRAGMA user_version").fetchone()[0], 7)
         self.seed_task()
         self.create(after=5, body="正文", key="k")
         tm = self.storage.timers_all()[0]
